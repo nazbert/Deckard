@@ -339,6 +339,29 @@ class MediaPlayerThread(threading.Thread):
 
                 gl.deck_manager.connect_new_decks()
 
+
+@lru_cache(maxsize=64)
+def _decode_page_media_cached(path: str, mtime: float, is_svg_media: bool) -> Image.Image:
+    # Keyed on (path, mtime) so re-visiting a page doesn't re-decode/re-rasterize
+    # media from disk every time. GIFs/videos aren't cached here since they animate.
+    if is_svg_media:
+        return svg_to_pil(path, 192)
+    with Image.open(path) as im:
+        return im.copy()
+
+
+def get_page_media_image(path: str, is_svg_media: bool) -> Image.Image:
+    # Returns a fresh copy each time, since callers may mutate/close it.
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        if is_svg_media:
+            return svg_to_pil(path, 192)
+        with Image.open(path) as im:
+            return im.copy()
+    return _decode_page_media_cached(path, mtime, is_svg_media).copy()
+
+
 class DeckController:
     def __init__(self, deck_manager: "DeckManager", deck: StreamDeck.StreamDeck):
         self.deck_manager: DeckManager = deck_manager
@@ -377,6 +400,8 @@ class DeckController:
 
         self.ui_image_changes_while_hidden: dict = {}
 
+        self._last_gc_time: float = 0.0
+
         self.active_page: Page = None
 
         self.inputs = {}
@@ -404,8 +429,9 @@ class DeckController:
 
         deck_settings = self.get_deck_settings()
 
-        self.brightness = 75
-        brightness = deck_settings.get("brightness", {}).get("value", self.brightness)
+        # None so the first set_brightness() call always writes to the device
+        self.brightness = None
+        brightness = deck_settings.get("brightness", {}).get("value", 75)
         self.set_brightness(brightness)
 
         # self.rotation = 270
@@ -737,13 +763,9 @@ class DeckController:
 
         log.info(f"Loading page {page.get_name()} on deck {self.deck.get_serial_number()}")
 
-        # Stop queued tasks
+        # Stop queued tasks. Also waits out any in-flight media tick, so we don't
+        # need a second wait here anymore.
         self.clear_media_player_tasks()
-
-        old_tick = self.media_player.media_ticks
-        old_time = time.time()
-        while self.media_player.media_ticks <= old_tick and time.time() - old_time <= 0.5:
-            time.sleep(0.05)
 
         # Update ui
         GLib.idle_add(self.update_ui_on_page_change) #TODO: Use new signal manager instead
@@ -770,6 +792,17 @@ class DeckController:
         notify_active_page_changed(self.serial_number(), page.get_name())
 
         log.info(f"Loaded page {page.get_name()} on deck {self.deck.get_serial_number()}")
+        self.maybe_collect_garbage()
+
+    # Minimum seconds between post-load garbage collections, so rapid page
+    # switching doesn't trigger a full GC pause on every single switch.
+    GC_MIN_INTERVAL = 10.0
+
+    def maybe_collect_garbage(self):
+        now = time.time()
+        if now - self._last_gc_time < self.GC_MIN_INTERVAL:
+            return
+        self._last_gc_time = now
         gc.collect()
 
     def reload_page(self):
@@ -781,6 +814,10 @@ class DeckController:
     def set_brightness(self, value):
         value = min(100, max(0, value))
         if not self.get_alive(): return
+        if value == self.brightness:
+            # Skip the write if brightness didn't change - the device can stall
+            # noticeably on this while it's busy with an image-write burst.
+            return
         self.deck.set_brightness(int(value))
         self.brightness = value
 
@@ -903,8 +940,13 @@ class DeckController:
         self.media_player.tasks.clear()
         self.media_player.image_tasks.clear()
 
-        # Wait until tick is over
-        while self.media_player.media_ticks <= ticks:
+        # Wake it up instead of waiting for its idle cycle to come around on its own
+        self.media_player._wake_event.set()
+
+        # Wait for the tick to be over so no stale task is still running, bounded
+        # so this can't hang if the media thread is ever stalled
+        deadline = time.time() + 0.5
+        while self.media_player.media_ticks <= ticks and time.time() < deadline:
             time.sleep(1/60)
 
     def clear_media_player_tasks_via_task(self):
@@ -1813,6 +1855,10 @@ class ControllerInput:
 
         self.enable_states: bool = True
 
+        # Set during page load to avoid rendering on every action update - the
+        # final state gets rendered once via update_all_inputs
+        self._suppress_render: bool = False
+
         self.states: dict[int, ControllerInputState] = {
             0: self.ControllerStateClass(self, 0),
         }
@@ -2057,6 +2103,8 @@ class ControllerKey(ControllerInput):
         return y * cols + x
 
     def update(self, force: bool = False):
+        if self._suppress_render:
+            return
         image = self.get_current_image()
 
         # Quick hash check - skip expensive conversion if image unchanged
@@ -2287,7 +2335,13 @@ class ControllerKey(ControllerInput):
             layout = ImageLayout()
             state.layout_manager.set_action_layout(layout, update=False)
 
-            state.own_actions_update() # Why not threaded? Because this would mean that some image changing calls might get executed after the next lines which blocks custom assets
+            # Actions often set_media()/set_label() with update=True, which would
+            # otherwise render before the page's own labels/media are even applied
+            self._suppress_render = True
+            try:
+                state.own_actions_update() # Why not threaded? Because this would mean that some image changing calls might get executed after the next lines which blocks custom assets
+            finally:
+                self._suppress_render = False
 
             ## Load labels
             if load_labels:
@@ -2312,17 +2366,15 @@ class ControllerKey(ControllerInput):
                 path = state_dict.get("media", {}).get("path", None)
                 if path not in ["", None]:
                     if is_image(path):
-                        with Image.open(path) as image:
-                            state.set_image(InputImage(
-                                controller_input=self,
-                                image=image.copy()
-                            ), update=False)
-                            
-                    elif is_svg(path):
-                        img = svg_to_pil(path, 192)
                         state.set_image(InputImage(
                             controller_input=self,
-                            image=img
+                            image=get_page_media_image(path, is_svg_media=False)
+                        ), update=False)
+
+                    elif is_svg(path):
+                        state.set_image(InputImage(
+                            controller_input=self,
+                            image=get_page_media_image(path, is_svg_media=True)
                         ), update=False)
 
                     elif is_video(path):
@@ -2621,14 +2673,13 @@ class ControllerDial(ControllerInput):
                 if is_image(path):
                     image = InputImage(
                         controller_input=self,
-                        image=Image.open(path),
+                        image=get_page_media_image(path, is_svg_media=False),
                     )
                     state.set_image(image, update=False)
                 elif is_svg(path):
-                    img = svg_to_pil(path, 192)
                     state.set_image(InputImage(
                         controller_input=self,
-                        image=img
+                        image=get_page_media_image(path, is_svg_media=True)
                     ), update=False)
 
                 elif is_video(path):

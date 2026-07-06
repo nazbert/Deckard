@@ -13,7 +13,7 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import Python modules
-import os, json
+import os, json, copy
 from loguru import logger as log
 from functools import lru_cache
 
@@ -53,10 +53,16 @@ class SettingsManager:
 
         gl.settings_manager.invalidate_all_caches()
 
+    @lru_cache
+    def _load_deck_settings_cached(self, deck_serial_number: str) -> dict:
+        path = os.path.join(gl.DATA_PATH, "settings", "decks", f"{deck_serial_number}.json")
+        return self.load_settings_from_file(path)
+
     def get_deck_settings(self, deck_serial_number: str) -> dict:
         """
         Retrieves the deck settings for a given deck serial number.
-        This is just a wrapper around load_settings_from_file()
+        Cached (invalidated on save) and deep-copied per call, so callers can
+        still freely mutate the result without touching the cache.
 
         Args:
             deck_serial_number (str): The serial number of the deck.
@@ -64,12 +70,7 @@ class SettingsManager:
         Returns:
             dict: The deck settings loaded from the file.
         """
-        path = os.path.join(gl.DATA_PATH, "settings", "decks", f"{deck_serial_number}.json")
-        settings =  self.load_settings_from_file(path)
-        if settings == None:
-            settings = {}
-            self.save_settings_to_file(path, settings)
-        return settings
+        return copy.deepcopy(self._load_deck_settings_cached(deck_serial_number))
     
     def save_deck_settings(self, deck_serial_number: str, settings: dict) -> None:
         """
