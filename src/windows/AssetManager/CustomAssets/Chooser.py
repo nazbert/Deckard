@@ -50,7 +50,16 @@ class CustomAssetChooser(ChooserPage):
     def build(self):
         self.build_finished = False
         self.asset_chooser = CustomAssetChooserFlowBox(self)
-        GLib.idle_add(self.scrolled_box.prepend, self.asset_chooser)
+        # Append to main_box (like the Wallpaper / SD+ Bar / Icon choosers do),
+        # NOT into ChooserPage's outer ScrolledWindow: a ScrolledWindow sizes
+        # its child to natural height (never stretches it), which collapses a
+        # nested grid, and the flow box brings its own ScrolledWindow +
+        # pagination. As a direct main_box child its own scroller fills the
+        # available height. The default scrolled_window must also be REMOVED
+        # (as the sibling choosers do) -- an empty vexpand=True child competes
+        # for the page's height and squeezes the grid.
+        GLib.idle_add(self.main_box.remove, self.scrolled_window)
+        GLib.idle_add(self.main_box.append, self.asset_chooser)
 
         self.browse_files_button = Gtk.Button(label=gl.lm.get("asset-chooser.custom.browse-files"), margin_top=15)
         self.browse_files_button.connect("clicked", self.on_browse_files_clicked)
