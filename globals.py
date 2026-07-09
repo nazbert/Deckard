@@ -4,6 +4,8 @@ import os
 from typing import TYPE_CHECKING
 import argparse
 import sys
+import threading
+from collections import deque
 from loguru import logger as log
 
 from src.backend.DeckManagement.HelperMethods import find_fallback_font
@@ -134,7 +136,10 @@ loggers: dict[str, "Logger"] = {}
 
 app_version: str = "1.5.0-beta.14"  # In breaking.feature.fix-state format
 exact_app_version_check: bool = False
-logs: list[str] = []
+# Bounded ring buffer of recent log records (shown in the About dialog).
+# logs_lock guards appends/reads against concurrent iteration.
+logs: "deque[str]" = deque(maxlen=10000)
+logs_lock = threading.Lock()
 
 release_notes: str = """
 <p>Features:</p>

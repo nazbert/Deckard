@@ -77,7 +77,7 @@ class IconPreview(AssetPreview):
 
         self.main_box.append(self.picture)
 
-        self.label = Gtk.Label(label=self.name, xalign=Gtk.Align.CENTER, hexpand=False, ellipsize=Pango.EllipsizeMode.END,
+        self.label = Gtk.Label(label=self.name, xalign=0.5, hexpand=False, ellipsize=Pango.EllipsizeMode.END,
                                max_width_chars=20,
                                margin_start=20, margin_end=20)
         self.main_box.append(self.label)
@@ -110,7 +110,7 @@ class ColorPreview(AssetPreview):
 
         self.main_box.append(self.color_button)
 
-        self.label = Gtk.Label(label=self.name, xalign=Gtk.Align.CENTER, hexpand=False, ellipsize=Pango.EllipsizeMode.END,
+        self.label = Gtk.Label(label=self.name, xalign=0.5, hexpand=False, ellipsize=Pango.EllipsizeMode.END,
                                max_width_chars=20,
                                margin_start=20, margin_end=20)
         self.main_box.append(self.label)

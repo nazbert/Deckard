@@ -135,6 +135,7 @@ class PageSelector(Gtk.Box):
     def on_click_open_page_manager(self, button):
         if gl.page_manager_window is not None:
             gl.page_manager_window.present()
+            return
         gl.page_manager_window = PageManager(main_win=gl.app.main_win)
         gl.page_manager_window.present()
 

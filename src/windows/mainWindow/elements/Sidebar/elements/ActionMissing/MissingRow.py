@@ -61,7 +61,7 @@ class MissingRow(Adw.PreferencesRow):
         self.spinner = Gtk.Spinner(spinning=False, margin_bottom=5, visible=False)
         self.center_box.append(self.spinner)
 
-        self.label = Gtk.Label(label=self.install_label, xalign=Gtk.Align.CENTER, vexpand=True, valign=Gtk.Align.CENTER)
+        self.label = Gtk.Label(label=self.install_label, xalign=0.5, vexpand=True, valign=Gtk.Align.CENTER)
         self.center_box.append(self.label)
 
         self.button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, width_request=50)

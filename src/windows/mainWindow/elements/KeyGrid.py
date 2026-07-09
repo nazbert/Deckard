@@ -289,7 +289,9 @@ class KeyButton(Gtk.Frame):
 
     def set_image(self, image):
         self.pixbuf = image2pixbuf(image.convert("RGBA"), force_transparency=True)
-        GLib.idle_add(self.show_pixbuf, self.pixbuf, priority=GLib.PRIORITY_HIGH)
+        # Default idle priority: high-priority pixbuf updates every frame can
+        # starve the main loop's layout/draw.
+        GLib.idle_add(self.show_pixbuf, self.pixbuf)
         # image.close()
         # image = None
         # del image
@@ -312,13 +314,20 @@ class KeyButton(Gtk.Frame):
         if child.deck_controller != self.key_grid.deck_controller:
             return
         # Update icon selector on the top of the right are
-        GLib.idle_add(sidebar.key_editor.icon_selector.set_pixbuf_and_del, pixbuf, priority=GLib.PRIORITY_HIGH)
+        GLib.idle_add(sidebar.key_editor.icon_selector.set_pixbuf_and_del, pixbuf)
         # Update icon selector in margin editor
         # GLib.idle_add(sidebar.key_editor.image_editor.image_group.expander.margin_row.icon_selector.image.set_from_pixbuf, pixbuf)
 
     def show_pixbuf(self, pixbuf):
         self.pixbuf = pixbuf
-        self.image.set_from_pixbuf(self.pixbuf)
+        # Skip if the button was unmapped between queuing and running this
+        # callback: painting a disposed widget crashes GTK.
+        try:
+            if not self.get_mapped():
+                return
+            self.image.set_from_pixbuf(self.pixbuf)
+        except Exception as e:
+            log.debug(f"Key mirror paint skipped: {e}")
 
     def on_click(self, gesture, n_press, x, y):
         if gesture.get_current_button() == 1 and n_press == 1:

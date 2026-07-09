@@ -342,6 +342,13 @@ class MediaPlayerThread(threading.Thread):
 class DeckController:
     def __init__(self, deck_manager: "DeckManager", deck: StreamDeck.StreamDeck):
         self.deck_manager: DeckManager = deck_manager
+
+        # Per-instance memo for stable deck properties (lru_cache on an instance
+        # method would pin every self on the class and never evict).
+        self._serial_number: str = None
+        self._key_image_size: tuple[int] = None
+        self._touchscreen_image_size: tuple[int] = None
+
         # Open the deck - why store it as self.deck? So that self.get_alive() returns True in get_deck_settings
         self.deck = deck
         self.deck.open(self.deck_manager.beta_resume_mode)
@@ -440,9 +447,10 @@ class DeckController:
                 return i
         return None
 
-    @lru_cache(maxsize=None)
     def serial_number(self) -> str:
-        return self.deck.get_serial_number()
+        if self._serial_number is None:
+            self._serial_number = self.deck.get_serial_number()
+        return self._serial_number
     
     def is_visual(self) -> bool:
         return self.deck.is_visual()
@@ -496,22 +504,28 @@ class DeckController:
     def generate_alpha_key(self) -> Image.Image:
         return Image.new("RGBA", self.get_key_image_size(), (0, 0, 0, 0))
     
-    @lru_cache(maxsize=None)
     def get_key_image_size(self) -> tuple[int]:
+        if self._key_image_size is not None:
+            return self._key_image_size
         if not self.get_alive(): return
         size = self.deck.key_image_format()["size"]
         if size is None:
-            return (72, 72)
-        size = max(size[0], 72), max(size[1], 72)
+            size = (72, 72)
+        else:
+            size = max(size[0], 72), max(size[1], 72)
+        self._key_image_size = size
         return size
-    
-    @lru_cache(maxsize=None)
+
     def get_touchscreen_image_size(self) -> tuple[int]:
+        if self._touchscreen_image_size is not None:
+            return self._touchscreen_image_size
         if not self.get_alive(): return
         size = self.deck.touchscreen_image_format()["size"]
         if size is None:
-            return (800, 100)
-        size = max(size[0], 800), max(size[1], 100)
+            size = (800, 100)
+        else:
+            size = max(size[0], 800), max(size[1], 100)
+        self._touchscreen_image_size = size
         return size
 
     # ------------ #

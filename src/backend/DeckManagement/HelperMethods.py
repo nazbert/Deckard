@@ -13,7 +13,7 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 from datetime import datetime
-from functools import lru_cache
+from functools import lru_cache, wraps
 import hashlib
 from io import BytesIO
 import multiprocessing
@@ -251,6 +251,24 @@ def add_default_keys(d: dict, keys: list):
         if key not in current_level:
             current_level[key] = {}
         current_level = current_level[key]
+
+
+def instance_cache(func):
+    """Per-instance method memoization: results live in the instance __dict__
+    (freed with the instance), keyed by the positional args, which must be
+    hashable. Not thread-safe (no lock around the check-then-set)."""
+    attr = f"_instance_cache_{func.__name__}"
+
+    @wraps(func)
+    def wrapper(self, *args):
+        cache = self.__dict__.get(attr)
+        if cache is None:
+            cache = self.__dict__[attr] = {}
+        if args not in cache:
+            cache[args] = func(self, *args)
+        return cache[args]
+
+    return wrapper
 
 
 @lru_cache()

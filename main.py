@@ -17,6 +17,14 @@ import setproctitle
 
 setproctitle.setproctitle("StreamController")
 
+# Dump all-thread tracebacks on a fatal signal, or on demand via SIGQUIT.
+import faulthandler, signal
+try:
+    faulthandler.enable()
+    faulthandler.register(signal.SIGQUIT)
+except (AttributeError, ValueError, OSError):
+    pass
+
 # "install" patches
 from src.patcher.patcher import Patcher
 patcher = Patcher()
@@ -81,7 +89,8 @@ main_path = os.path.abspath(os.path.dirname(__file__))
 gl.MAIN_PATH = main_path
 
 def write_logs(record):
-    gl.logs.append(record)
+    with gl.logs_lock:
+        gl.logs.append(record)
 
 @log.catch
 def config_logger():

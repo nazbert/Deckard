@@ -137,7 +137,9 @@ class HeaderBar(Gtk.HeaderBar):
             license=None,
         )
 
-        self.about.set_debug_info("".join(gl.logs))
+        with gl.logs_lock:
+            logs_snapshot = list(gl.logs)
+        self.about.set_debug_info("".join(logs_snapshot))
         self.about.set_debug_info_filename(os.path.join(gl.DATA_PATH, "logs/logs.log"))
 
         self.about.set_release_notes(gl.release_notes)  

@@ -33,6 +33,15 @@ class SignalManager:
         self.connected_signals.setdefault(signal, [])
         self.connected_signals[signal].append(callback)
 
+    def disconnect_signal(self, signal: Signal, callback: callable) -> None:
+        # Verify signal
+        if not issubclass(signal, Signal):
+            raise TypeError("signal_name must be of type Signal")
+
+        callbacks = self.connected_signals.get(signal)
+        if callbacks and callback in callbacks:
+            callbacks.remove(callback)
+
     def trigger_signal(self, signal: Signal, *args, **kwargs) -> None:
         # Verify signal
         if not issubclass(signal, Signal):

@@ -180,7 +180,9 @@ class HeaderHamburgerMenuButton(Gtk.MenuButton):
             [f"{name} https://ko-fi.com/core447" for name in sorted(set(supporter_names))],
         )
 
-        self.about.set_debug_info("".join(gl.logs))
+        with gl.logs_lock:
+            logs_snapshot = list(gl.logs)
+        self.about.set_debug_info("".join(logs_snapshot))
         self.about.set_debug_info_filename(os.path.join(gl.DATA_PATH, "StreamController.log"))
 
         self.about.set_release_notes(gl.release_notes)  

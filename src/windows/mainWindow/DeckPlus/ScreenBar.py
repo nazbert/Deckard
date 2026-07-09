@@ -266,7 +266,9 @@ class ScreenBarImage(Gtk.Picture):
 
         pixbuf = image2pixbuf(thumbnail.convert("RGBA"), force_transparency=True)
         self.latest_task_id = self.get_new_task_id()
-        GLib.idle_add(self.set_pixbuf_and_del, pixbuf, self.latest_task_id, priority=GLib.PRIORITY_HIGH)
+        # Default idle priority: high-priority pixbuf updates every frame can
+        # starve the main loop's layout/draw.
+        GLib.idle_add(self.set_pixbuf_and_del, pixbuf, self.latest_task_id)
 
         thumbnail.close()
         del thumbnail
@@ -288,5 +290,11 @@ class ScreenBarImage(Gtk.Picture):
             if task_id != self.latest_task_id:
                 log.debug("Screenbar: Abort task")
                 return
-        self.set_pixbuf(pixbuf)
-        del pixbuf
+        # Skip if the widget was unmapped between queuing and running this
+        # callback: painting a disposed widget crashes GTK.
+        try:
+            if not self.get_mapped():
+                return
+            self.set_pixbuf(pixbuf)
+        except Exception as e:
+            log.debug(f"Screenbar mirror paint skipped: {e}")

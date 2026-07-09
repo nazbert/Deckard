@@ -223,6 +223,10 @@ class App(Adw.Application):
         for child in multiprocessing.active_children():
             child.terminate()
 
+        # Terminate plugin/action backend subprocesses (plain subprocess.Popen
+        # children, not multiprocessing, so not covered by the loop above).
+        gl.plugin_manager.terminate_all_backends()
+
         gl.tray_icon.stop()
 
         # Close all decks

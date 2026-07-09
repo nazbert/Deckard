@@ -157,8 +157,10 @@ class PageSelector(Adw.NavigationPage):
 
         return self.calc_ratio(page_name, search) > 50
     
+    @staticmethod
     @lru_cache(maxsize=1000)
-    def calc_ratio(self, str1, str2) -> int:
+    def calc_ratio(str1, str2) -> int:
+        # staticmethod so the cache keys only on the strings, not on self.
         return fuzz.ratio(str1.lower(), str2.lower())
 
         

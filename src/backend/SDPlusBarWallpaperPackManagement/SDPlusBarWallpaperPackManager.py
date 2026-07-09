@@ -14,7 +14,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
 # Import Python modules
-from functools import lru_cache
 import json
 import os
 import shutil
@@ -53,7 +52,6 @@ class SDPlusBarWallpaperPackManager:
 
         return wallpapers
     
-    @lru_cache
     def get_wallpaper_attribution(self, attribution:dict, wallpaper_name: str) -> dict:
         if wallpaper_name in attribution:
             # Use specific

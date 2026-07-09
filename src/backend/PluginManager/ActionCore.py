@@ -66,7 +66,11 @@ class ActionCore(rpyc.Service):
         self.backend_connection: Connection = None
         self.backend: netref = None
         self.server: ThreadedServer = None
-        
+        self.backend_process: subprocess.Popen = None
+
+        # (signal, callback) pairs registered by this action, disconnected on teardown.
+        self._connected_signals: list[tuple] = []
+
         self.deck_controller = deck_controller
         self.page = page
         self.state = state
@@ -351,6 +355,8 @@ class ActionCore(rpyc.Service):
     def connect(self, signal: Signal = None, callback: callable = None) -> None:
         # Connect
         gl.signal_manager.connect_signal(signal = signal, callback = callback)
+        # Track so we can disconnect on teardown (see clean_up)
+        self._connected_signals.append((signal, callback))
 
     def get_own_key(self) -> "ControllerKey":
         return self.deck_controller.keys[self.key_index]
@@ -522,12 +528,10 @@ class ActionCore(rpyc.Service):
         self.server = ThreadedServer(self, hostname="localhost", port=0, protocol_config={"allow_public_attrs": True})
         threading.Thread(target=self.server.start, name="server_start", daemon=True).start()
 
-    def on_disconnect(self):
-        if self.server is not None:
-            self.server.close()
-        if self.backend_connection is not None:
-            self.backend_connection.close()
-        self.backend = None
+    def on_disconnect(self, conn=None):
+        # rpyc disconnect hook: a dropped connection with the process still
+        # alive would orphan the backend, so run the full teardown here too.
+        self._release_backend_resources()
     
     def launch_backend(self, backend_path: str, venv_path: str = None, open_in_terminal: bool = False):
         self.start_server()
@@ -553,7 +557,8 @@ class ActionCore(rpyc.Service):
             command += f"python3 {backend_path} --port={port}"
 
         log.info(f"Launching backend: {command}")
-        subprocess.Popen(command, shell=True, start_new_session=open_in_terminal)
+        self.backend_process = subprocess.Popen(command, shell=True, start_new_session=True)
+        gl.plugin_manager.backend_processes.append(self.backend_process)
 
         self.wait_for_backend()
 
@@ -578,9 +583,74 @@ class ActionCore(rpyc.Service):
         return True
     
     def on_removed_from_cache(self) -> None:
-        #TODO: Fully implement
-        pass
+        self.clean_up()
 
     def on_remove(self) -> None:
-        #TODO: Fully implement
-        pass
+        self.clean_up()
+
+    def clean_up(self) -> None:
+        """Framework teardown when this action is dropped (page reload or removal).
+        Idempotent. Runs on the GTK main thread, so the backend teardown is
+        offloaded to a worker thread: closing an rpyc server/connection can block
+        on an in-flight call that needs the main loop, which would deadlock the UI."""
+        # Disconnect signal callbacks synchronously so the SignalManager stops
+        # retaining this action.
+        for signal, callback in self._connected_signals:
+            try:
+                gl.signal_manager.disconnect_signal(signal, callback)
+            except Exception as e:
+                log.error(f"Failed to disconnect signal {signal}: {e}")
+        self._connected_signals.clear()
+
+        self._release_backend_resources()
+
+    def _release_backend_resources(self) -> None:
+        """Detach and tear down the rpyc server/connection and the backend
+        process. Idempotent; safe against concurrent calls from clean_up and
+        the rpyc on_disconnect hook (close/terminate tolerate a lost race)."""
+        if self.backend_connection is None and self.server is None and self.backend_process is None:
+            return
+
+        # Snapshot and detach the backend resources, then close them off-thread.
+        server, connection, process = self.server, self.backend_connection, self.backend_process
+        self.server = None
+        self.backend_connection = None
+        self.backend_process = None
+        self.backend = None
+
+        # Drop from the global registries synchronously (cheap list removals).
+        if connection is not None:
+            try:
+                gl.plugin_manager.backends.remove(connection)
+            except ValueError:
+                pass
+        if process is not None:
+            try:
+                gl.plugin_manager.backend_processes.remove(process)
+            except ValueError:
+                pass
+
+        threading.Thread(
+            target=self._teardown_backend_resources,
+            args=(server, connection, process),
+            name="action_backend_teardown",
+            daemon=True,
+        ).start()
+
+    @staticmethod
+    def _teardown_backend_resources(server, connection, process) -> None:
+        # Runs on a worker thread (see clean_up). Each close()/terminate() is
+        # best-effort; a hung backend must not take the app down with it.
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception as e:
+                log.error(f"Failed to close backend connection: {e}")
+        if server is not None:
+            try:
+                server.close()
+            except Exception as e:
+                log.error(f"Failed to close backend server: {e}")
+        if process is not None:
+            from src.backend.PluginManager.PluginManager import terminate_backend_process
+            terminate_backend_process(process)
