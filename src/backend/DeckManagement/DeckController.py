@@ -937,10 +937,24 @@ class DeckController:
         start = time.time()
         if not self.get_alive(): return
         if self.background.video is not None:
-            log.debug("Skipping update_all_inputs because there is a background video -- we will only update the dials (if exists) so as not to effect the video.")
+            log.debug("Skipping update_all_inputs (device keys) because there is a background video -- the per-frame video loop already paints the keys on the deck; a full key update() here would double-write and disturb that video. Dials + the in-app previews are still synced below.")
 
             for i in self.inputs[Input.Dial]:
                 i.update()
+            # UI-only mirror. The in-app KeyGrid is NOT the video device, so
+            # pushing the current composite to it can't disturb the deck video
+            # (this is a widget update, never a device write). Keys whose
+            # per-frame render the video loop skips (opaque keys, alpha ==
+            # 255) are otherwise never repainted in the app after a
+            # transition, and the previews diverge from the deck. Bypasses
+            # update()'s device-oriented dedup on purpose: the device and UI
+            # can be out of sync (device painted, UI missed), and only
+            # re-pushing the UI reconciles them.
+            for i in self.inputs[Input.Key]:
+                try:
+                    i.set_ui_key_image(i.get_current_image())
+                except Exception:
+                    log.exception(f"In-app preview sync failed for {i.identifier}")
             return
         for t in self.inputs:
             for i in self.inputs[t]:
@@ -1287,11 +1301,11 @@ class DeckController:
     def _load_input_if_current(self, controller_input: "ControllerInput", page: Page, update: bool = True, gen=None):
         # A slower in-flight page load must not paint the previous page's images
         # onto the current page's keys; skip if a newer load superseded this one.
+        # config_gen is NOT stamped here: load_page stamps all inputs under
+        # _page_gen_lock, and a second stamp on this pool could interleave with
+        # a newer load's stamp and regress an input to an older generation.
         if not self._page_is_current(gen):
             return
-        # Tag the input with the generation of the content being loaded, so a
-        # stale paint of it is dropped at the present boundary.
-        controller_input.config_gen = gen if gen is not None else self._page_load_generation
         self.load_input(controller_input, page, update)
 
     def load_input_from_identifier(self, identifier: str, page: Page, update: bool = True):
@@ -1373,6 +1387,21 @@ class DeckController:
                 self.active_page = page
                 self._page_load_generation += 1
                 gen = self._page_load_generation
+
+                # Stamp every input with the new generation SYNCHRONOUSLY,
+                # under the same lock as the bump. Paints are triggered from
+                # threads outside the load pool (the action pool via on_ready
+                # -> update, the tick loop, update_all_inputs) and read
+                # controller_input.config_gen directly (update(), ~3312); any
+                # window between the bump and the stamp lets such a paint
+                # carry the previous generation and be dropped at the present
+                # boundary as stale -- blanking the newly loaded page's own
+                # keys. Stale cross-page content is still caught by the
+                # separate page-identity check. This must stay the ONLY stamp
+                # on the load path (see _load_input_if_current).
+                for input_type in self.inputs:
+                    for controller_input in self.inputs[input_type]:
+                        controller_input.config_gen = gen
 
             if page is None:
                 # Clear deck
