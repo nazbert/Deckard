@@ -922,28 +922,31 @@ class StoreBackend:
         return True
 
     def uninstall_plugin(self, plugin_id:str, remove_from_pages:bool = False, remove_files:bool = True) -> bool:
-        ## 1. Remove all action objects in all pages
-        for deck_controller in gl.deck_manager.deck_controller:
-            # Track all keys controlled by this plugin
-            if deck_controller.active_page is None:
-                continue
-            #keys = deck_controller.active_page.get_keys_with_plugin(plugin_id=plugin_id)
-
-            deck_controller.active_page.remove_plugin_action_objects(plugin_id=plugin_id)
-            if remove_from_pages:
-                deck_controller.active_page.remove_plugin_actions_from_json(plugin_id=plugin_id)
-
-            #TODO: figure out
-            # Clear all keys in this page which were controlled by this plugin
-            #for key in keys:
-            #    key_index = deck_controller.coords_to_index(key.split("x"))
-            #    deck_controller.load_key(key_index, deck_controller.active_page)
+        ## 1. Remove all action objects in every cached page of every
+        ## controller -- not just each controller's currently active page.
+        ## A page that was previously visited and is still sitting in the
+        ## page cache (`gl.page_manager.pages`) would otherwise keep dead
+        ## plugin action objects alive with no teardown.
+        for controller, controller_pages in list(gl.page_manager.pages.items()):
+            for page_entry in list(controller_pages.values()):
+                page = page_entry.get("page")
+                if page is None:
+                    continue
+                page.remove_plugin_action_objects(plugin_id=plugin_id)
+                if remove_from_pages:
+                    page.remove_plugin_actions_from_json(plugin_id=plugin_id)
 
         ## 2. Inform plugin base
         plugins = gl.plugin_manager.get_plugins()
         plugin = gl.plugin_manager.get_plugin_by_id(plugin_id)
         if plugin is None:
             return
+        # Capture the actual import folder now, before on_uninstall()/rmtree
+        # below can remove the directory or rewrite plugin.PATH through the
+        # symlink-resolution branch -- the sys.modules purge below needs the
+        # real "plugins.<folder>" prefix, which may differ from plugin_id
+        # (the manifest id) when the folder was renamed (bug 7).
+        plugin_folder = os.path.basename(os.path.normpath(plugin.PATH))
         if remove_files:
             plugin.on_uninstall()
             
@@ -968,7 +971,7 @@ class StoreBackend:
         GLib.idle_add(gl.app.main_win.sidebar.page_selector.update)
 
 
-        base_module = f"plugins.{plugin_id}"
+        base_module = f"plugins.{plugin_folder}"
         for module in sys.modules.copy():
             if module.startswith(base_module):
                 del sys.modules[module]

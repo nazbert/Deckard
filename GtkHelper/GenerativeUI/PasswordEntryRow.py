@@ -87,10 +87,16 @@ class PasswordEntryRow(GenerativeUI[str]):
     def get_password(self) -> str:
         """
         Retrieves the current password entered in the password entry field.
+        Falls back to the settings-backed value layer (already base64-
+        decoded by this class's get_value() override) if the widget hasn't
+        been built yet -- reading the password is a value query and must
+        not force a build.
 
         Returns:
             str: The current password entered in the widget.
         """
+        if self._widget is None:
+            return self.get_value()
         return self.widget.get_text()
 
     def _value_changed(self, entry_row: Adw.EntryRow):

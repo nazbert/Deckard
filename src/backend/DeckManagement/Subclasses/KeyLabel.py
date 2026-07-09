@@ -13,43 +13,14 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 from src.backend.DeckManagement.Subclasses.SingleKeyAsset import SingleKeyAsset
+from src.backend.DeckManagement import font_resolver
 from PIL import Image, ImageFont
 from dataclasses import dataclass
-import matplotlib.font_manager
 from functools import lru_cache
 from fontTools.ttLib import TTFont
-import subprocess
-import os
 
 import globals as gl
 
-# Add symbol fonts to matplotlib at startup
-_symbol_fonts_added = False
-def _ensure_symbol_fonts():
-    global _symbol_fonts_added
-    if _symbol_fonts_added:
-        return
-    
-    # Common symbol font names - use fc-match to find actual paths
-    symbol_font_names = ["Webdings", "Wingdings"]
-    
-    for font_name in symbol_font_names:
-        try:
-            result = subprocess.run(
-                ["fc-match", "-f", "%{file}", font_name],
-                capture_output=True, text=True, timeout=2
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                font_path = result.stdout.strip()
-                if os.path.exists(font_path):
-                    try:
-                        matplotlib.font_manager.fontManager.addfont(font_path)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-    
-    _symbol_fonts_added = True
 
 @lru_cache(maxsize=128)
 def _is_symbol_font(font_path: str) -> bool:
@@ -75,17 +46,10 @@ def _load_font(font_path: str, font_size: int, encoding: str) -> ImageFont.FreeT
     return ImageFont.truetype(font_path, font_size, encoding=encoding)
 
 
-@lru_cache(maxsize=256)
 def _find_font_path(font_name: str, font_weight, style) -> str:
-    # Memoized on the font attributes that select the file (size doesn't).
-    _ensure_symbol_fonts()
-    return matplotlib.font_manager.findfont(
-        matplotlib.font_manager.FontProperties(
-            family=font_name,
-            weight=font_weight,
-            style=style
-        )
-    )
+    # font_resolver.resolve() is itself lru_cache'd on these same attributes
+    # (size doesn't affect which file is picked, so it isn't part of the key).
+    return font_resolver.resolve(font_name, font_weight, style)
 
 
 from typing import TYPE_CHECKING

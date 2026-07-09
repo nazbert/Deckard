@@ -27,7 +27,6 @@ from loguru import logger as log
 # Import own modules
 from src.windows.AssetManager.ChooserPage import ChooserPage
 from src.windows.AssetManager.CustomAssets.FlowBox import CustomAssetChooserFlowBox
-from src.windows.AssetManager.CustomAssets.AssetPreview import AssetPreview
 
 # Import globals
 import globals as gl
@@ -50,7 +49,7 @@ class CustomAssetChooser(ChooserPage):
     @log.catch
     def build(self):
         self.build_finished = False
-        self.asset_chooser = CustomAssetChooserFlowBox(self, orientation=Gtk.Orientation.HORIZONTAL, hexpand=True)
+        self.asset_chooser = CustomAssetChooserFlowBox(self)
         GLib.idle_add(self.scrolled_box.prepend, self.asset_chooser)
 
         self.browse_files_button = Gtk.Button(label=gl.lm.get("asset-chooser.custom.browse-files"), margin_top=15)
@@ -74,8 +73,10 @@ class CustomAssetChooser(ChooserPage):
         return True
     
     def add_asset(self, asset: dict) -> None:
-        preview = AssetPreview(self.asset_chooser, asset, width_request=100, height_request=100)
-        GLib.idle_add(self.asset_chooser.flow_box.append, preview)
+        # asset_chooser.items is the same live list object as gl.asset_manager_backend, so the
+        # new asset is already visible to it -- just re-render the recycler. This may run off
+        # the main thread (called from add_custom_media_set_by_ui's worker thread), so marshal.
+        GLib.idle_add(self.asset_chooser.refresh)
     
     def add_files(self, files: list) -> None:
         gl.asset_manager.set_cursor_from_name("wait")
@@ -101,7 +102,7 @@ class CustomAssetChooser(ChooserPage):
         gl.settings_manager.save_settings_to_file(os.path.join(gl.DATA_PATH, "settings", "ui", "AssetManager.json"), settings)
 
         # Update ui
-        self.asset_chooser.flow_box.invalidate_filter()
+        self.asset_chooser.refresh()
 
     def on_image_toggled(self, button):
         settings = gl.settings_manager.load_settings_from_file(os.path.join(gl.DATA_PATH, "settings", "ui", "AssetManager.json"))
@@ -109,7 +110,7 @@ class CustomAssetChooser(ChooserPage):
         gl.settings_manager.save_settings_to_file(os.path.join(gl.DATA_PATH, "settings", "ui", "AssetManager.json"), settings)
 
         # Update ui
-        self.asset_chooser.flow_box.invalidate_filter()
+        self.asset_chooser.refresh()
 
     def load_defaults(self):
         settings = gl.settings_manager.load_settings_from_file(os.path.join(gl.DATA_PATH, "settings", "ui", "AssetManager.json"))
@@ -117,7 +118,7 @@ class CustomAssetChooser(ChooserPage):
         self.image_button.set_active(settings.get("image-toggle", True))
 
     def on_search_changed(self, entry):
-        self.asset_chooser.flow_box.invalidate_sort()
+        self.asset_chooser.refresh()
 
     def on_browse_files_clicked(self, button):
         ChooseFileDialog(self) #TODO: Change to Xdp Portal call

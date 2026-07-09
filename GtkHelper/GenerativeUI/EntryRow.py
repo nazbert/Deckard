@@ -86,11 +86,15 @@ class EntryRow(GenerativeUI[str]):
 
     def get_text(self) -> str:
         """
-        Retrieves the current text from the entry row widget.
+        Retrieves the current text from the entry row widget. Falls back to
+        the settings-backed value layer if the widget hasn't been built yet
+        -- reading the text is a value query and must not force a build.
 
         Returns:
             str: The current text in the entry row.
         """
+        if self._widget is None:
+            return self.get_value()
         return self.widget.get_text()
 
     def _text_reset(self, text):

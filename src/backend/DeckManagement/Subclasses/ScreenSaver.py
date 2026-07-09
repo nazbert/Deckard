@@ -14,7 +14,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import python modules
 import time
-import threading
 from loguru import logger as log
 from copy import copy
 
@@ -22,6 +21,7 @@ from copy import copy
 from typing import TYPE_CHECKING
 
 from src.backend.DeckManagement.InputIdentifier import Input
+from src.backend import timer_wheel
 if TYPE_CHECKING:
     from src.backend.DeckManagement.DeckController import DeckController, ControllerKey, Background
 
@@ -47,21 +47,32 @@ class ScreenSaver:
         self.brightness: int = 25
         self.fps: int = 30
         self.loop: bool = True
-        self.timer: threading.Timer = None
+        # timer_wheel.TimerHandle | None -- non-None only while actually
+        # armed (enabled and not showing); see set_time/set_enable.
+        self.timer: "timer_wheel.TimerHandle" = None
+        # True once set_time() has run at least once. DeckController's
+        # config load calls set_enable() BEFORE set_time() (P1's own
+        # apply_config order), so set_enable(True) at that point must be a
+        # no-op rather than arming a timer against the not-yet-loaded
+        # time_delay default -- set_time() is what actually arms it.
+        self._timer_initialized: bool = False
+
+    def _arm_timer(self) -> None:
+        # *60 to go from minutes (how it is stored) to seconds (how the
+        # timer needs it).
+        self.timer = timer_wheel.schedule(self.time_delay * 60, self.on_timer_end, name="ScreenSaverTimer")
 
     def set_time(self, time_delay: int) -> None:
         time_delay = max(1, time_delay) # Min 1 minute - too small values leading to instant load if the screensaver lead to errors
         if time_delay != self.time_delay:
             log.info(f"Setting screen saver time delay to {time_delay} minutes")
         self.time_delay = time_delay
-        if self.timer:
+        self._timer_initialized = True
+        if self.timer is not None:
             self.timer.cancel()
-        # *60 to go from minuts (how it is stored) to seconds (how the timer needs it)
-        self.timer = threading.Timer(time_delay*60, self.on_timer_end)
-        self.timer.setDaemon(True)
-        self.timer.setName("ScreenSaverTimer")
+            self.timer = None
         if self.enable and not self.showing:
-            self.timer.start()
+            self._arm_timer()
 
     def set_media_path(self, media_path: str) -> None:
         self.media_path = media_path
@@ -72,23 +83,21 @@ class ScreenSaver:
     def set_enable(self, enable: bool) -> None:
         self.enable = enable
 
-        if not self.timer:
+        if not self._timer_initialized:
             return
-        
+
         # Hide if showing
         if self.showing and not enable:
             self.hide()
-        
+
         # Stop timer if enable == False
         if enable:
-            # A threading.Timer can't be restarted once fired/cancelled, so recreate it.
-            if not self.timer.is_alive() and not self.showing:
-                self.timer = threading.Timer(self.time_delay * 60, self.on_timer_end)
-                self.timer.setDaemon(True)
-                self.timer.setName("ScreenSaverTimer")
-                self.timer.start()
+            if self.timer is None and not self.showing:
+                self._arm_timer()
         else:
-            self.timer.cancel()
+            if self.timer is not None:
+                self.timer.cancel()
+                self.timer = None
 
     def on_timer_end(self) -> None:
         self.show()
@@ -116,6 +125,11 @@ class ScreenSaver:
              update_all_inputs() already did here before this refactor.
           3. show() has no phase 3: unlike hide(), it never calls load_page.
         """
+        if getattr(self.deck_controller, "_closing", False):
+            # The deck is tearing down (plan P1.3): a straggling timer fire
+            # racing close() must not resurrect the screensaver's transient
+            # inputs/background on a controller that's mid-sweep.
+            return
         log.info("Showing screen saver")
 
         # Phase 1 -- outside any lock.
@@ -187,6 +201,46 @@ class ScreenSaver:
                 key.down_start_time = None
                 key.press_state = False
 
+            # Capture the just-stashed input set for the release below,
+            # still inside the lock so it can't be reassigned by a
+            # coalesced concurrent show() first.
+            stashed_inputs = self.original_inputs
+
+        # mem-plan P2.6: the previous page's input set -- and whatever media
+        # it was holding (key/dial videos, GIFs, images) -- sits pinned in
+        # self.original_inputs for the screensaver's entire duration and is
+        # then discarded uncleaned by hide() (`original_inputs.clear()`,
+        # never a close/close_resources). That's the design doc's bug 8:
+        # 50-150MB of stashed media memory idle behind the screensaver.
+        # Release it now instead of waiting for hide().
+        #
+        # Deliberately NOT self.original_background: it aliases
+        # self.deck_controller.background (the very same object, mutated in
+        # place by apply_prebuilt()/set_video()/set_image() above) -- it is
+        # the screensaver's OWN live background now, not a stashed copy of
+        # the old one. Closing it here would close what's currently on
+        # screen.
+        #
+        # Routed through the media player's CONTROL queue (a
+        # ReleaseStashedInputsMsg), not closed inline and not a generic
+        # add_task(): the lock above only guarantees `deck_controller.inputs`
+        # itself was swapped to a fresh dict -- a tick begun just before
+        # that swap can still be mid-render against the OLD input objects
+        # (get_current_image()/get_raw_image() reading key_image/key_video),
+        # so this must be serialized behind the writer, not run inline.
+        # Control messages (unlike add_task's MediaPlayerTask) have no
+        # active-page affinity check, so a hide()-triggered load_page()
+        # landing before this drains can't cause it to be silently dropped
+        # -- see ReleaseStashedInputsMsg's docstring in DeckController.py.
+        if stashed_inputs:
+            # Local import: DeckController imports ScreenSaver at module
+            # level (for self.screen_saver = ScreenSaver(self)), so a
+            # top-level import here would be circular.
+            from src.backend.DeckManagement.DeckController import ReleaseStashedInputsMsg
+            self.deck_controller.media_player.submit_control(
+                ReleaseStashedInputsMsg(stashed_inputs)
+            )
+
     def hide(self):
         """Serialized hide transition (docs/presenter-migration-plan.md §4 M3).
 
@@ -202,6 +256,11 @@ class ScreenSaver:
         returned as a closure and must only ever be invoked after the `with`
         block below has exited.
         """
+        if getattr(self.deck_controller, "_closing", False):
+            # The deck is tearing down (plan P1.3): hide()'s phase 3 calls
+            # load_page(), which would resurrect a controller mid-close --
+            # this is the exact bug the _closing gate exists to prevent.
+            return
         log.info("Hiding screen saver")
 
         follow_up = None
@@ -238,6 +297,12 @@ class ScreenSaver:
         self.set_time(time_delay)
 
     def on_key_change(self):
+        if getattr(self.deck_controller, "_closing", False):
+            # The deck is tearing down (plan P1.3): a straggling input event
+            # (already in flight when step 3 stopped the reader thread) must
+            # not re-arm the screensaver timer or trigger hide()'s
+            # load_page().
+            return
         self.last_key_change_time = time.time()
         if self.showing:
             self.hide()

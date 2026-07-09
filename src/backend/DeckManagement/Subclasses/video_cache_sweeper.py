@@ -8,6 +8,7 @@ writer temp files.
 """
 import hashlib
 import os
+import re
 import shutil
 import time
 
@@ -21,6 +22,50 @@ VID_CACHE = os.path.join(gl.DATA_PATH, "cache", "videos")
 # A .tmp.mp4 younger than this may be a build in progress; older ones are
 # leftovers from a crash.
 TMP_MAX_AGE_S = 24 * 60 * 60
+
+# Top-level directory names the deleted key_video_cache.py's JPEG-per-frame
+# format wrote into: VID_CACHE/single_key/<stem>/<size>/<frame>.jpg and
+# VID_CACHE/key: <n>/<stem>/<size>/<n>/<frame>.jpg (key_video_cache.py:
+# write_cache, now removed). No code can read this format anymore.
+_LEGACY_KEY_DIR_RE = re.compile(r"^key: \d+$")
+
+
+def _is_legacy_key_video_dir(name: str) -> bool:
+    return name == "single_key" or bool(_LEGACY_KEY_DIR_RE.match(name))
+
+
+def _sweep_legacy_key_video_dirs() -> None:
+    """One-shot migration cleanup (docs/memory-footprint-impl-plan.md P2.2):
+    every entry under the two legacy top-level directories above is
+    unconditionally dead now that key_video_cache.py is gone -- unlike
+    `sweep_stale_video_caches` below, this bypasses the referenced-hash
+    check entirely, since a still-referenced video's old JPEG frames are
+    exactly as unreachable as an unreferenced one's (nothing will ever
+    decode them again either way). Idempotent: once removed, `os.listdir`
+    simply stops finding them on every later startup."""
+    if not os.path.isdir(VID_CACHE):
+        return
+    freed = 0
+    removed = 0
+    for name in os.listdir(VID_CACHE):
+        if not _is_legacy_key_video_dir(name):
+            continue
+        path = os.path.join(VID_CACHE, name)
+        if not os.path.isdir(path):
+            continue
+        try:
+            size = sum(
+                os.path.getsize(os.path.join(root, fname))
+                for root, _, files in os.walk(path) for fname in files
+            )
+            shutil.rmtree(path)
+        except OSError:
+            log.opt(exception=True).warning(f"Could not remove legacy key-video cache dir {path}")
+            continue
+        freed += size
+        removed += 1
+    if removed:
+        log.success(f"Removed {removed} legacy key-video cache directories ({freed / 1e6:.1f} MB)")
 
 
 def _collect_json_paths() -> list[str]:
@@ -52,7 +97,7 @@ def _walk_for_video_paths(node, found: set) -> None:
 
 
 def _md5_of_file(path: str) -> str:
-    # Same hashing as BackgroundVideoCache/VideoFrameCache so keys match.
+    # Same hashing as BackgroundVideoCache/KeyVideoCache so keys match.
     md5 = hashlib.md5()
     with open(path, "rb") as f:
         while block := f.read(2 ** 16):
@@ -84,11 +129,18 @@ def sweep_stale_video_caches(startup_delay: float = 0.0) -> None:
     if not os.path.isdir(VID_CACHE):
         return
 
+    _sweep_legacy_key_video_dirs()
+
     referenced = collect_referenced_video_hashes()
     freed = 0
     removed = 0
 
     for layout in os.listdir(VID_CACHE):
+        if _is_legacy_key_video_dir(layout):
+            # Already handled unconditionally above; skip so a leftover
+            # entry from a failed rmtree there doesn't fall into the
+            # referenced-hash check below.
+            continue
         layout_dir = os.path.join(VID_CACHE, layout)
         if not os.path.isdir(layout_dir):
             continue
@@ -98,7 +150,10 @@ def sweep_stale_video_caches(startup_delay: float = 0.0) -> None:
 
             try:
                 if os.path.isdir(entry_path):
-                    # single_key/<md5>/ frame directories
+                    # Defensive: no current cache format nests a directory
+                    # inside a layout dir (the legacy single_key/key: <n>
+                    # directories that used to are handled unconditionally
+                    # above, before this loop ever sees them).
                     if entry_hash in referenced:
                         continue
                     size = sum(

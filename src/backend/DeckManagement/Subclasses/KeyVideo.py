@@ -15,7 +15,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 import time
 
 from src.backend.DeckManagement.Subclasses.SingleKeyAsset import SingleKeyAsset
-from src.backend.DeckManagement.Subclasses.key_video_cache import VideoFrameCache
+from src.backend.DeckManagement.Subclasses import mp4_tile_cache
 from PIL import Image
 
 from typing import TYPE_CHECKING
@@ -31,10 +31,16 @@ class InputVideo(SingleKeyAsset):
         self.fps = fps
         self.loop = loop
 
-        self.video_cache = VideoFrameCache(
+        # Shared-file registry (docs/memory-footprint-impl-plan.md P2.1/P2.2):
+        # this instance owns its own reader (VideoCapture + decode state),
+        # but the underlying cache mp4 -- and its detached builder thread --
+        # are shared with any other key/dial showing the same
+        # (source, tile size, saturation). release() (see close()) detaches
+        # this reader; it does not necessarily tear down the shared file.
+        self.video_cache = mp4_tile_cache.acquire(
             video_path,
-            size=self.controller_input.get_image_size(),
-            saturation=self.deck_controller.get_display_saturation(),
+            self.controller_input.get_image_size(),
+            self.deck_controller.get_display_saturation(),
         )
 
         self.active_frame: int = -1
@@ -83,3 +89,14 @@ class InputVideo(SingleKeyAsset):
 
     def get_raw_image(self) -> Image.Image:
         return self.get_next_frame()
+
+    def close(self) -> None:
+        """Real close() (design doc bug 18/19): SingleKeyAsset's default is a
+        no-op, so before this fix nothing ever released video_cache's
+        VideoCapture -- ControllerKeyState/ControllerDialState.close_resources()
+        called this and silently leaked. Detaches this reader from the
+        shared tile-cache registry; idempotent (a second call finds
+        video_cache already None)."""
+        if self.video_cache is not None:
+            mp4_tile_cache.release(self.video_cache)
+            self.video_cache = None

@@ -81,11 +81,15 @@ class SwitchRow(GenerativeUI[bool]):
 
     def get_active(self) -> bool:
         """
-        Retrieves the current state of the switch.
+        Retrieves the current state of the switch. Falls back to the
+        settings-backed value layer if the widget hasn't been built yet --
+        reading the state is a value query and must not force a build.
 
         Returns:
             bool: The current state of the switch (True for on, False for off).
         """
+        if self._widget is None:
+            return self.get_value()
         return self.widget.get_active()
 
     def _value_changed(self, switch, _):

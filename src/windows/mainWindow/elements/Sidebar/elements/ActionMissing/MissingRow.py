@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 import gi
 
 from src.backend.DeckManagement.InputIdentifier import InputIdentifier
+from src.backend.PluginManager.ActionCore import ActionCore
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
@@ -122,8 +123,14 @@ class MissingRow(Adw.PreferencesRow):
         controller = gl.app.main_win.leftArea.deck_stack.get_visible_child().deck_controller
         page = controller.active_page
 
-        # Remove from action objects
-        del page.action_objects[self.identifier.input_type][self.identifier.json_identifier]
+        # Remove only the addressed action entry. Deleting the whole
+        # action_objects[type][key] subtree (as before) would drop every
+        # other state's/index's action on this input too (design-doc bug 29).
+        state_dict = page.action_objects.get(self.identifier.input_type, {}).get(self.identifier.json_identifier, {}).get(self.state, {})
+        action = state_dict.pop(self.index, None)
+        # Framework-owned teardown: notify then unconditionally clean_up()
+        # on exactly what was removed (D1). No-op for None/non-ActionCore.
+        ActionCore.teardown(action)
 
         # Remove from page json
         page.dict[self.identifier.input_type][self.identifier.json_identifier]["states"][str(self.state)]["actions"].pop(self.index)

@@ -108,14 +108,25 @@ class ScreenBar(Gtk.Frame):
         self.load_from_changes()
 
     def load_from_changes(self) -> None:
-        # Applt changes made before creation of self
+        # Apply changes accumulated before creation of self, or while the
+        # window was hidden (mem plan P5.4): the entry is a dirty MARKER, not
+        # a stashed PIL image -- recomposite the current frame and push it
+        # through the same set-image path a live update would use.
         if not hasattr(self.deck_controller, "ui_image_changes_while_hidden"):
             return
         tasks = self.deck_controller.ui_image_changes_while_hidden
 
         if self.identifier in tasks:
-            self.image.set_image(tasks[self.identifier])
-            tasks.pop(self.identifier)
+            controller_input = self.deck_controller.get_input(self.identifier)
+            if controller_input is not None:
+                try:
+                    self.image.set_image(controller_input.get_current_image())
+                except Exception:
+                    log.exception(f"Failed to recomposite {self.identifier} on map")
+            try:
+                tasks.pop(self.identifier)
+            except KeyError:
+                pass
 
     def on_click(self, gesture, n_press, x, y):
         # print(f"Click: {self.parse_xy(x, y)}")

@@ -64,6 +64,35 @@ class BetterDeck():
         with self._lock:
             self.deck.close()
 
+    def stop_read_thread(self, timeout: float = 1.0) -> None:
+        """Stops the library's reader thread on the *wrapped* device
+        (plan docs/memory-footprint-impl-plan.md P1.3 step 3).
+
+        BetterDeck has no `__getattr__` passthrough, so a caller writing
+        `self.deck.run_read_thread = False` on a BetterDeck instance (as
+        DeckController.delete() used to) sets a dead attribute on the
+        wrapper -- the library's actual reader thread polls the *wrapped*
+        StreamDeck object's own `run_read_thread` flag
+        (StreamDeck.py:_read_with_resume_from_suspend), so that write was a
+        silent no-op. Left unfixed, the reader's resume-from-suspend loop
+        can keep re-opening the device for up to 10s after our close()
+        thinks it's done (StreamDeck.py:209-262).
+
+        No-ops gracefully when the wrapped object has no read thread of its
+        own (FakeDeck, RemoteDeck): both lack `run_read_thread`/`read_thread`
+        entirely, so the hasattr guard below skips straight through.
+        """
+        device = self.deck
+        if not hasattr(device, "run_read_thread"):
+            return
+        device.run_read_thread = False
+        read_thread = getattr(device, "read_thread", None)
+        if read_thread is not None and read_thread is not threading.current_thread():
+            try:
+                read_thread.join(timeout)
+            except RuntimeError:
+                pass
+
     def is_open(self):
         """
         Indicates if the StreamDeck device is currently open and ready for use.

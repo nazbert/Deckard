@@ -61,6 +61,8 @@ class AssetManager(Gtk.ApplicationWindow):
 
     def on_close(self, *args, **kwargs):
         gl.asset_manager = None
+        if gl.app is not None and getattr(gl.app, "asset_manager", None) is self:
+            gl.app.asset_manager = None
 
     def build(self):
         self.main_stack = Gtk.Stack(transition_duration=200, transition_type=Gtk.StackTransitionType.SLIDE_LEFT_RIGHT, hexpand=True, vexpand=True)

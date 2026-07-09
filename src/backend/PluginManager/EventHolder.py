@@ -1,5 +1,7 @@
-import asyncio
 from loguru import logger as log
+
+from src.backend.PluginManager import event_dispatch
+from src.Signals.weak_callbacks import CallbackRegistry
 
 class EventHolder:
     """
@@ -13,38 +15,34 @@ class EventHolder:
 
         self.plugin_base = plugin_base
         self.event_id = event_id or f"{self.plugin_base.get_plugin_id()}::{event_id_suffix}"
-        self.observers: list = []
+        # CallbackRegistry (src/Signals/weak_callbacks.py): bound-method
+        # observers are held weakly, so an action/plugin that forgets to
+        # remove_listener() on teardown no longer keeps growing this list
+        # forever (docs/memory-footprint-plan.md bug 3/27 -- this was the
+        # dominant steady-state growth mechanism for event-using plugins
+        # like AudioControl).
+        self.observers = CallbackRegistry()
 
     def add_listener(self, callback: callable):
-        if callback not in self.observers:
-            self.observers.append(callback)
-        else:
+        if not self.observers.add(callback):
             log.warning(f"Callback {callback.__name__} is already subscribed to: {self.event_id}")
 
     def remove_listener(self, callback: callable):
-        if callback in self.observers:
-            self.observers.remove(callback)
+        self.observers.remove(callback)
 
     def trigger_event(self, *args, **kwargs):
-        # FIX: This can throw an error, if this happens apply the fix from Observer.py
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(self._run_event(self.event_id, *args, **kwargs))
-        finally:
-            loop.close()
-
-
-    async def _run_event(self, *args, **kwargs):
-        coroutines = [self._ensure_coroutine(observer, *args, **kwargs) for observer in self.observers]
-        await asyncio.gather(*coroutines)
-
-    async def _ensure_coroutine(self, callback: callable, *args, **kwargs):
-        if asyncio.iscoroutinefunction(callback):
-            return await callback(*args, **kwargs)
-        else:
-            try:
-                return await asyncio.to_thread(callback, *args, **kwargs)
-            except Exception as e:
-                log.error(f"Callback {callback.__name__} in {self.event_id} could not be called")
-                return await asyncio.sleep(0)
+        # Dispatch on the shared background thread instead of spinning up a
+        # new asyncio event loop (+ default executor) on every call --
+        # this is the hottest callback path in the app (AudioControl's
+        # PulseEvent fires per PulseAudio event, bursts of tens/sec) and the
+        # old per-call loop churned an epoll fd every time (bug 27). See
+        # event_dispatch.py for why returning before observers finish is
+        # safe for this call site.
+        #
+        # NOTE: the old implementation called
+        # `self._run_event(self.event_id, *args, **kwargs)`, which silently
+        # prepended `self.event_id` as the observers' first positional
+        # argument (AudioControl's on_pulse_device_change reads it as
+        # `args[0]` and the real pulsectl event as `args[1]`). Preserve that
+        # contract here.
+        event_dispatch.dispatch(self.observers.snapshot(), (self.event_id, *args), kwargs, label=self.event_id)

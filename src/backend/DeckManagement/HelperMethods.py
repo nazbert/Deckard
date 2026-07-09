@@ -19,12 +19,9 @@ from io import BytesIO
 import multiprocessing
 import os
 import subprocess
-import matplotlib.font_manager
 import sys
 import math
 import json
-import requests
-import cairosvg
 import re
 from urllib.parse import urlparse
 from PIL import Image
@@ -32,6 +29,8 @@ from PIL import Image
 import gi
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, Pango
+
+from src.backend.DeckManagement import font_resolver
 
 # Import globals
 from autostart import is_flatpak
@@ -95,12 +94,11 @@ def recursive_hasattr(obj, attr_string):
 
 
 def font_path_from_name(font_name: str):
-    return matplotlib.font_manager.findfont(matplotlib.font_manager.FontProperties(family=font_name))
+    return font_resolver.resolve(font_name, 400, "normal")
 
 
 def font_name_from_path(font_path: str):
-    font_properties = matplotlib.font_manager.FontProperties(fname=font_path)
-    return font_properties.get_family()[0]
+    return font_resolver.font_name_from_path(font_path)
 
 
 def get_last_dir(path: str) -> str:
@@ -211,6 +209,8 @@ def download_file(url: str, path: str = "", file_name: str = None) -> str:
         path (str): The path of the downloaded file.
     """
 
+    import requests
+
     if file_name is None:
         file_name = get_file_name_from_url(url)
 
@@ -269,37 +269,6 @@ def instance_cache(func):
         return cache[args]
 
     return wrapper
-
-
-@lru_cache()
-def find_fallback_font(fallback="DejaVu Sans"):
-    """
-    TODO: Improve speed - maybe be writing the last one into a file and just checking if it still exists
-    """
-    # Find system fonts
-    font_paths = matplotlib.font_manager.findSystemFonts(
-        fontpaths=None, fontext='ttf')
-
-    # Extract font names
-    font_names = []
-    for font in font_paths:
-        try:
-            font_name = matplotlib.font_manager.FontProperties(
-                fname=font).get_name()
-            font_names.append(font_name)
-            if font_name == fallback:
-                break
-        except:
-            pass
-
-    # Check for fallback font
-    if fallback in font_names:
-        return fallback
-    else:
-        if len(font_names) > 0:
-            return font_names[0]
-        else:
-            return
 
 
 def color_values_to_gdk(color_values: tuple[int, int, int, int]) -> Gdk.RGBA:
@@ -401,16 +370,18 @@ def svg_string_to_pil(svg_string, width: int = 96, height: int = 96):
     Returns:
         PIL.Image: The converted image
     """
+    import cairosvg
+
     # Convert SVG string to PNG using cairosvg
     png_data = cairosvg.svg2png(
         bytestring=svg_string.encode('utf-8'),
         output_width=width,
         output_height=height
     )
-    
+
     # Create PIL Image from PNG data
     img = Image.open(BytesIO(png_data))
-    
+
     return img
 
 
@@ -426,12 +397,14 @@ def svg_to_pil(svg_path: str, width: int = 96, height: int = 96):
     Returns:
         PIL.Image: The converted image
     """
+    import cairosvg
+
     # Read SVG file
 
     if os.path.exists(svg_path):
         with open(svg_path, 'rb') as f:
             svg_data = f.read()
-        
+
         # Convert SVG to PNG using cairosvg
         png_data = cairosvg.svg2png(
             bytestring=svg_data,

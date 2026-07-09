@@ -101,11 +101,15 @@ class ExpanderRow(GenerativeUI[bool]):
 
     def get_enable_expansion(self) -> bool:
         """
-        Retrieves the current expansion state of the expander.
+        Retrieves the current expansion state of the expander. Falls back to
+        the settings-backed value layer if the widget hasn't been built yet
+        -- reading the state is a value query and must not force a build.
 
         Returns:
             bool: The current state of the expander's enabled expansion.
         """
+        if self._widget is None:
+            return self.get_value()
         return self.widget.get_enable_expansion()
 
     @on_main

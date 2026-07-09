@@ -117,11 +117,15 @@ class ScaleRow(GenerativeUI[float]):
 
     def get_number(self) -> float:
         """
-        Retrieves the current value of the scale.
+        Retrieves the current value of the scale. Falls back to the
+        settings-backed value layer if the widget hasn't been built yet --
+        reading the value is a value query and must not force a build.
 
         Returns:
             float: The current value of the scale.
         """
+        if self._widget is None:
+            return self.get_value()
         return self.widget.scale.get_value()
 
     def _value_changed(self, scale):
@@ -246,7 +250,9 @@ class ScaleRow(GenerativeUI[float]):
         Returns:
             int: The number of digits for the scale value.
         """
-        return self._widget.digits
+        # `digits` is widget-construction config, not a settings value --
+        # there's no value-layer equivalent, so this legitimately builds.
+        return self.widget.digits
 
     @digits.setter
     @on_main
@@ -257,4 +263,4 @@ class ScaleRow(GenerativeUI[float]):
         Args:
             digits (int): The number of digits for the scale value.
         """
-        self._widget.digits = digits
+        self.widget.digits = digits

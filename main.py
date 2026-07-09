@@ -12,6 +12,25 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
+import os
+import sys
+
+# Cap glibc's per-thread arena multiplication before any allocation-heavy
+# import runs (docs/memory-footprint-plan.md §4 D5). Re-exec (rather than
+# just setting os.environ) because glibc reads these at libc init, not on
+# demand -- setting them mid-process here would be too late for the arenas
+# already carved out by this interpreter's own startup. SC_REEXEC guards
+# against a loop; the MALLOC_ARENA_MAX check lets a packaged launcher
+# (flatpak/launch.sh) set the vars itself and skip this re-exec entirely.
+# sys.orig_argv (not sys.argv) preserves interpreter flags like -X/-O.
+# Must run before quit_running()/make_api_calls() in main() -- execve
+# replaces this process outright, so there is no double DBus send.
+if "MALLOC_ARENA_MAX" not in os.environ and "SC_REEXEC" not in os.environ:
+    os.environ["MALLOC_ARENA_MAX"] = "2"
+    os.environ["MALLOC_TRIM_THRESHOLD_"] = "131072"
+    os.environ["SC_REEXEC"] = "1"
+    os.execve(sys.executable, sys.orig_argv, os.environ)
+
 # Import Python modules
 import setproctitle
 
@@ -40,6 +59,15 @@ import threading
 import usb.core
 import usb.util
 from StreamDeck.DeviceManager import DeviceManager
+
+# Cap OpenCV's global parallel_for_ pool before the first cv2 call anywhere
+# in the app -- the pool is created lazily and sized to nproc by default,
+# which is where the 32 same-second "background_0"-named threads come from
+# on a 32-core box (docs/memory-footprint-plan.md §2). cvtColor is the only
+# parallel_for_ user in this app; PIL does all resizing and
+# VideoWriter/VideoCapture threading is FFmpeg-side, unaffected by this knob.
+import cv2
+cv2.setNumThreads(2)
 
 # Import globals first to get IS_MAC
 import globals as gl
@@ -583,6 +611,10 @@ def main():
 
     from src.backend.DeckManagement.Subclasses.video_cache_sweeper import sweep_stale_video_caches
     threading.Thread(target=sweep_stale_video_caches, args=(15,), name="video_cache_sweep", daemon=True).start()
+
+    # Diagnostic only -- no-ops unless SC_MEM_TELEMETRY=1 (docs/memory-footprint-plan.md Phase 0).
+    from src.backend.mem_telemetry import start_if_enabled as start_mem_telemetry
+    start_mem_telemetry()
 
     load()
 

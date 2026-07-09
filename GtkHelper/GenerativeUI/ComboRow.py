@@ -90,10 +90,22 @@ class ComboRow(GenerativeUI[BaseComboRowItem]):
         if trigger_callback and self.on_change:
             old_value = self.get_item(old_value)
 
-            self.on_change(self.widget, item, old_value)
+            # Raw widget reference (may be None) -- see base class's
+            # _handle_value_changed for why this must not force a build.
+            self.on_change(self._widget, item, old_value)
+
+    def reset_value(self):
+        """Resets the selection to its default. An unbuilt row has no item
+        list to resolve old/new BaseComboRowItem values against, so it just
+        persists the default and skips the on_change callback -- it must
+        not force a build just to reset a setting."""
+        if self._widget is None:
+            self.set_value(self._default_value)
+            return
+        self._reset_value_on_widget()
 
     @GenerativeUI.signal_manager
-    def reset_value(self):
+    def _reset_value_on_widget(self):
         selected_item = self.widget.set_selected_item(self._default_value)
         self._handle_value_changed(selected_item)
 

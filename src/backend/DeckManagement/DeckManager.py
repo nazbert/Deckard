@@ -166,10 +166,12 @@ class DeckManager:
             for controller in self.fake_deck_controller[-(old_n_fake_decks - n_fake_decks):]:
                 # Remove controller from fake_decks
                 self.fake_deck_controller.remove(controller)
-                # Remove controller from main list
-                self.deck_controller.remove(controller)
-                # Remove deck page on stack
-                gl.app.main_win.leftArea.deck_stack.remove_page(controller)
+                # Route through remove_controller (plan P1.3, design doc bug
+                # 4): this used to just pop the two lists and detach the
+                # stack page directly, never tearing the controller down at
+                # all -- its media/tick threads and action executor ran
+                # forever after "removing" a fake deck.
+                self.remove_controller(controller)
 
             # Update header deck switcher if there are no more decks
             if len(self.deck_controller) == 0 and False:
@@ -215,14 +217,33 @@ class DeckManager:
 
     def remove_controller(self, deck_controller: DeckController) -> None:
         # Idempotent: several threads may call this for the same controller;
-        # only the first removal proceeds to delete().
+        # only the first removal proceeds to close().
         with self._controllers_lock:
             if deck_controller not in self.deck_controller:
                 return
             self.deck_controller.remove(deck_controller)
+
+        # UI detach first, as one early idle (plan P1.3): this method runs
+        # from the USB monitor thread (or the Flatpak disconnect poll
+        # thread), and DeckStack.remove_page does pure GTK work -- calling
+        # it directly here was already a latent off-main-thread GTK bug.
+        # Queuing it ahead of the slow close() below also means a fast
+        # unplug/replug can't race a late detach against a fresh add_page
+        # idle and leave two stack children registered for one serial.
         if recursive_hasattr(gl, "app.main_win.leftArea.deck_stack"):
-            gl.app.main_win.leftArea.deck_stack.remove_page(deck_controller)
-        deck_controller.delete()
+            GLib.idle_add(gl.app.main_win.leftArea.deck_stack.remove_page, deck_controller)
+
+        # The teardown sweep runs plugin hooks (step 6) and can block on a
+        # wedged callback; it must never run on the USB monitor thread
+        # (would stall future connect/disconnect events) or the shared
+        # GtkHelper background pool (quit's shutdown_background_pool() would
+        # cancel it mid-close) -- see DeckController.close()'s docstring.
+        threading.Thread(
+            target=deck_controller.close,
+            args=(True,),
+            name=f"DeckClose-{getattr(deck_controller, '_serial_number', None) or 'unknown'}",
+            daemon=True,
+        ).start()
 
     def get_controller_for_deck(self, deck: StreamDeck) -> DeckController | None:
         for controller in self.deck_controller:

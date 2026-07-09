@@ -83,20 +83,49 @@ class KeyGrid(Gtk.Grid):
         self.attach(l, 0, 0, 1, 1)
 
     def load_from_changes(self):
-        # Applt changes made before creation of self
+        # Apply changes accumulated before creation of self, or while the
+        # window was hidden (mem plan P5.4): entries are dirty MARKERS, not
+        # stashed PIL images -- recomposite the current frame for each dirty
+        # identifier and push it through the same set-image path a live
+        # update would use.
         if not hasattr(self.deck_controller, "ui_image_changes_while_hidden"):
             return
         tasks = self.deck_controller.ui_image_changes_while_hidden
-        for identifier, image in list(tasks.items()):
-            if not isinstance(identifier, Input.Key):
-                continue
-            x, y = identifier.coords
-            self.buttons[x][y].set_image(image)
+        for identifier in list(tasks.keys()):
+            if isinstance(identifier, Input.Key):
+                x, y = identifier.coords
+                self._push_current_image(identifier, self.buttons[x][y])
+                try:
+                    tasks.pop(identifier)
+                except KeyError:
+                    pass
+            elif isinstance(identifier, Input.Touchscreen):
+                # design-doc bug 48: this entry is normally consumed by
+                # ScreenBar.load_from_changes (it owns the widget that
+                # displays it) -- but if that widget's own map handler
+                # hasn't run yet, or was never reachable, fall back to
+                # consuming it here too rather than leaking it forever.
+                # tasks.pop() is try/except-guarded exactly like the Key
+                # case above, so whichever widget gets there first wins and
+                # the other is a no-op.
+                if recursive_hasattr(self, "deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar.image"):
+                    screenbar = self.deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar
+                    self._push_current_image(identifier, screenbar.image)
+                    try:
+                        tasks.pop(identifier)
+                    except KeyError:
+                        pass
 
-            try:
-                tasks.pop(identifier)
-            except KeyError:
-                pass
+    def _push_current_image(self, identifier, widget) -> None:
+        controller_input = self.deck_controller.get_input(identifier)
+        if controller_input is None:
+            return
+        try:
+            image = controller_input.get_current_image()
+        except Exception:
+            log.exception(f"Failed to recomposite {identifier} on map")
+            return
+        widget.set_image(image)
         
     def select_key(self, x: int, y: int):
         self.buttons[x][y].on_focus_in()
@@ -509,6 +538,7 @@ class KeyButtonContextMenu(Gtk.PopoverMenu):
     def __init__(self, key_button:KeyButton, **kwargs):
         super().__init__(**kwargs)
         self.key_button = key_button
+        self._unparenting = False
         self.build()
 
         self.connect("closed", self.on_close)
@@ -541,9 +571,22 @@ class KeyButtonContextMenu(Gtk.PopoverMenu):
         self.set_menu_model(self.main_menu)
 
     def on_close(self, *args, **kwargs):
-        return
-        gl.app.main_win.remove_accel_actions()
-    
+        # Unparent on idle rather than inline: we're inside the "closed"
+        # signal emission, and unparenting the popover mid-emission can
+        # dispose the emitter out from under GTK. Deferring to idle also
+        # lets repeated fast right-clicks each schedule their own unparent
+        # without racing each other (guarded so we only queue one per menu).
+        if self._unparenting:
+            return
+        self._unparenting = True
+
+        def _do_unparent():
+            if self.get_parent() is not None:
+                self.unparent()
+            return GLib.SOURCE_REMOVE
+
+        GLib.idle_add(_do_unparent)
+
     def on_open(self, *args, **kwargs):
         return
         gl.app.main_win.add_accel_actions()

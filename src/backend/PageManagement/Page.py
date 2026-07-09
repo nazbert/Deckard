@@ -31,8 +31,6 @@ from loguru import logger as log
 from copy import copy
 import shutil
 
-from numpy import isin
-
 # Import globals
 from src.backend.PluginManager.EventAssigner import EventAssigner
 from src.backend.DeckManagement.ImageHelpers import crop_key_image_from_deck_sized_image
@@ -193,7 +191,10 @@ class Page:
 
         for old_action in old_actions:
             if old_action not in new_actions:
-                old_action.on_removed_from_cache()
+                # Framework-owned teardown: notify then unconditionally
+                # clean_up(), so a plugin overriding the hook without
+                # super() can't leak the dropped action (D1).
+                ActionCore.teardown(old_action)
 
         self.action_objects = new_action_objects
 
@@ -354,19 +355,25 @@ class Page:
         plugin_obj = gl.plugin_manager.get_plugin_by_id(plugin_id)
         if plugin_obj is None:
             return False
+
+        # Collect first, then delete + tear down. `del action` on the local
+        # variable used to be the only "cleanup" here -- it doesn't do
+        # anything to the actual object, which is why plugin uninstall never
+        # called clean_up() (design-doc bug 7).
+        to_remove: list[tuple] = []
         for type in list(self.action_objects.keys()):
             for key in list(self.action_objects[type].keys()):
                 for state in list(self.action_objects[type][key].keys()):
                     for index in list(self.action_objects[type][key][state].keys()):
-                        if not isinstance(self.action_objects[type][key][state][index], ActionCore):
+                        action = self.action_objects[type][key][state][index]
+                        if not isinstance(action, ActionCore):
                             continue
-                        if self.action_objects[type][key][state][index].plugin_base == plugin_obj:
-                            # Remove object
-                            action = self.action_objects[type][key][state][index]
-                            del action
+                        if action.plugin_base == plugin_obj:
+                            to_remove.append((type, key, state, index, action))
 
-                            # Remove action from action_objects
-                            del self.action_objects[type][key][state][index]
+        for type, key, state, index, action in to_remove:
+            del self.action_objects[type][key][state][index]
+            ActionCore.teardown(action)
 
         return True
     
@@ -405,12 +412,22 @@ class Page:
 
     def remove_plugin_actions_from_json(self, plugin_id: str):
         for type in Input.KeyTypes:
-            for key in self.dict[type]:
+            # A page json doesn't necessarily have every input type present
+            # (e.g. no "touchscreens" section on a non-Plus deck) -- bug 38.
+            for key in self.dict.get(type, {}):
                 for state in self.dict[type][key].get("states", {}):
-                    for i, action in enumerate(self.dict[type][key]["states"][state]["actions"]):
-                        # Check if the action is from the plugin by using the plugin id before the action name
-                        if action.id.split("::")[0] == plugin_id:
-                            del self.dict[type][key]["states"][state]["actions"][i]
+                    actions = self.dict[type][key]["states"][state].get("actions", [])
+                    # Collect indices first: deleting from `actions` while
+                    # enumerate() is still walking it skips the entry right
+                    # after each deletion (bug 38).
+                    to_remove = [
+                        i for i, action in enumerate(actions)
+                        # Actions are plain dicts here (raw json), not
+                        # ActionCore objects -- `action.id` doesn't exist.
+                        if action.get("id", "").split("::")[0] == plugin_id
+                    ]
+                    for i in reversed(to_remove):
+                        del actions[i]
 
         self.save()
 
@@ -619,14 +636,10 @@ class Page:
                     state_dict = self.action_objects[input_type][input_identifier][state]
                     for action in list(state_dict.values()):
                         # Notify before detaching: plugin cleanup code may
-                        # still need action.page.
-                        if isinstance(action, ActionCore):
-                            try:
-                                action.on_removed_from_cache()
-                            except Exception:
-                                log.opt(exception=True).error(
-                                    f"on_removed_from_cache failed for {getattr(action, 'action_id', action)}"
-                                )
+                        # still need action.page. clean_up() is unconditional
+                        # regardless of what the hook does (D1) -- teardown()
+                        # is a no-op for non-ActionCore placeholders.
+                        ActionCore.teardown(action)
                         if hasattr(action, "page"):
                             action.page = None
                     state_dict.clear()

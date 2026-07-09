@@ -1,29 +1,37 @@
 """
 Unit-tier scenario (docs/presenter-migration-plan.md §4 M4, §7 "KeyVideo
-during cache build"): InputVideo.get_next_frame() must advance sequentially
-(+1, loop-wrapped) while its VideoFrameCache is still being decoded, and
-only switch to wall-clock picking once the cache reports complete.
+during cache build"; ported to the tile-cache registry by
+docs/memory-footprint-impl-plan.md P2.1/P2.2): InputVideo.get_next_frame()
+must advance sequentially (+1, loop-wrapped) while its cache is still being
+decoded, and only switch to wall-clock picking once the cache reports
+complete.
 
 This is the C-F8 regression the plan calls out: picking frames by wall-clock
 BEFORE the cache is complete would jump the requested frame index around
-under slow/simulated ticks, and VideoFrameCache.get_frame() decodes+disk-
-writes every intermediate frame to reach an out-of-order index under its
-lock (key_video_cache.py get_frame(): "Decode frames until the nth frame") --
-i.e. each jumped frame silently decodes every frame in between. A stub cache
-that counts get_frame calls per index makes that amplification directly
-observable: sequential advance must call get_frame exactly once per
-InputVideo.get_next_frame() call, in monotonic +1 steps.
+under slow/simulated ticks, and a still-decoding cache has to walk every
+intermediate frame to reach an out-of-order index (the old
+key_video_cache.py's VideoFrameCache.get_frame() did this by decoding+
+disk-writing each one; mp4_tile_cache.Mp4FrameCache._decode_source_frame()
+does it by re-seeking the source capture and decoding forward -- same
+amplification risk, different mechanism) -- i.e. each jumped frame silently
+decodes every frame in between. A stub cache that counts get_frame calls per
+index makes that amplification directly observable: sequential advance must
+call get_frame exactly once per InputVideo.get_next_frame() call, in
+monotonic +1 steps.
 
-Drives InputVideo directly via __new__ (skips __init__, which opens a real
-video file with cv2) with a stub VideoFrameCache-like object -- this is a
-pure arithmetic/call-count test, independent of cv2/disk decoding.
+Drives InputVideo directly via __new__ (skips __init__, which acquires a
+real KeyVideoCache reader from the registry, opening cv2 captures) with a
+stub cache object exposing exactly the surface InputVideo reads
+(n_frames, is_cache_complete(), get_frame(n)) -- this is a pure
+arithmetic/call-count test, independent of cv2/disk decoding or the
+registry.
 """
 import fixtures
 from src.backend.DeckManagement.Subclasses.KeyVideo import InputVideo
 
 
-class StubVideoFrameCache:
-    """Mimics key_video_cache.VideoFrameCache's public surface used by
+class StubKeyVideoCache:
+    """Mimics mp4_tile_cache.KeyVideoCache's public surface used by
     InputVideo: n_frames, is_cache_complete(), get_frame(n). Counts how many
     times each frame index is decoded so amplification is directly
     assertable."""
@@ -38,7 +46,7 @@ class StubVideoFrameCache:
         return self._complete
 
     def get_frame(self, n: int):
-        n = min(n, self.n_frames - 1)  # VideoFrameCache.get_frame does the same clamp
+        n = min(n, self.n_frames - 1)  # KeyVideoCache.get_frame does the same clamp
         self.decode_counts[n] = self.decode_counts.get(n, 0) + 1
         self.call_log.append(n)
         return n  # the "frame" is just its own index -- enough to assert on
@@ -51,7 +59,7 @@ def make_video(n_frames: int, fps: float = 10.0, loop: bool = True) -> InputVide
     v.active_frame = -1
     v._play_start = None
     v._last_frame_tick = None
-    v.video_cache = StubVideoFrameCache(n_frames)
+    v.video_cache = StubKeyVideoCache(n_frames)
     return v
 
 

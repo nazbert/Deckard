@@ -16,8 +16,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 from copy import copy
 import os
 import cv2
-import imageio
-import cairosvg
 from PIL import Image, ImageSequence
 
 import os, psutil
@@ -49,9 +47,9 @@ class MediaManager:
             cached = False
 
         if cached:
-            img = Image.open(thumbnail_path)
-            img.thumbnail((250, 250), resample=Image.Resampling.LANCZOS)
-            return img
+            with Image.open(thumbnail_path) as img:
+                img.thumbnail((250, 250), resample=Image.Resampling.LANCZOS)
+                return img.copy()
         else:
             thumbnail = self.generate_thumbnail(file_path)
             thumbnail.thumbnail((250, 250), resample=Image.Resampling.LANCZOS)
@@ -70,7 +68,7 @@ class MediaManager:
             return thumbnail
 
     def generate_video_thumbnail(self, video_path: str) -> Image.Image:
-        cap = cv2.VideoCapture(video_path)
+        cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG, [cv2.CAP_PROP_N_THREADS, 1])
         cap.set(cv2.CAP_PROP_POS_FRAMES, 1)
         ret, frame = cap.read()
         cap.release()

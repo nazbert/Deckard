@@ -25,7 +25,6 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from copy import copy
 from dataclasses import dataclass
-from queue import Queue
 from threading import Thread, Timer
 
 import psutil
@@ -51,6 +50,8 @@ from src.backend.DeckManagement.Subclasses.SingleKeyAsset import SingleKeyAsset
 from src.backend.DeckManagement.Subclasses.background_video_cache import BackgroundVideoCache
 from src.backend.DeckManagement.Subclasses.encoded_image_cache import EncodedImageCache
 from src.backend.DeckManagement.Subclasses.media_pipeline_profiler import media_prof
+from src.backend.mem_telemetry import page_switches
+from src.backend import timer_wheel
 from src.backend.PageManagement.Page import ActionOutdated, Page, NoActionHolderFound
 from src.api import notify_active_page_changed
 
@@ -96,6 +97,36 @@ def encode_native_key(deck, image: "Image.Image", quality: int = 90) -> bytes:
             # measured ~4% average desaturation plus chroma smear on busy
             # 120px tiles. Force 4:4:4: keeps q90's encode speed, costs
             # ~17% bytes (noise at current USB headroom).
+            save_kwargs["subsampling"] = 0
+        image.save(buf, fmt["format"], **save_kwargs)
+        return buf.getvalue()
+
+
+def encode_native_touchscreen(deck, image: "Image.Image", quality: int = 90) -> bytes:
+    """PILHelper.to_native_touchscreen_format with tunable JPEG quality (the
+    library hardcodes q100) and without mutating the caller's image in place
+    (the library's `_to_native_format` calls `image.thumbnail()` in place when
+    resizing, which corrupts the caller's copy). The touchscreen strip is the
+    largest single USB write on the deck, so a smaller JPEG here buys back
+    time under the device write mutex -- dial-latency margin. The caller
+    (`ControllerTouchScreen.update`) reuses the same image object afterward
+    for the UI mirror, so any resize here must operate on a copy."""
+    fmt = deck.touchscreen_image_format()
+    if image.size != fmt["size"]:
+        image = image.copy()
+        image.thumbnail(fmt["size"])
+    if fmt["rotation"]:
+        image = image.rotate(fmt["rotation"])
+    if fmt["flip"][0]:
+        image = image.transpose(Image.FLIP_LEFT_RIGHT)
+    if fmt["flip"][1]:
+        image = image.transpose(Image.FLIP_TOP_BOTTOM)
+    with io.BytesIO() as buf:
+        save_kwargs = {"quality": quality}
+        if fmt["format"] == "JPEG":
+            # Same 4:4:4 rationale as encode_native_key: below q95 Pillow
+            # switches to 4:2:0 chroma subsampling, visibly desaturating the
+            # strip's icons/text.
             save_kwargs["subsampling"] = 0
         image.save(buf, fmt["format"], **save_kwargs)
         return buf.getvalue()
@@ -203,6 +234,24 @@ class ClearAndCloseMsg:
     writes blanks, best-effort closes the device, and stops the media
     thread's loop (plan §2.1/§2.4)."""
     pass
+
+
+@dataclass
+class ReleaseStashedInputsMsg:
+    """Control message (mem-plan P2.6): closes every stashed input's media
+    resources, then empties the dict in place. Used by ScreenSaver.show()
+    to release the previous page's input set (design doc bug 8) shortly
+    after swapping it out, instead of leaving it pinned for the whole
+    screensaver duration.
+
+    A control message rather than a generic add_task() (MediaPlayerTask):
+    add_task's tasks are dropped unrun if `task.page is not active_page` by
+    the time the batch executes (perform_media_player_tasks) -- correct for
+    stale renders, but wrong here, since a hide()-triggered load_page()
+    changing active_page before this drains must not cause the release to
+    be silently skipped. Control messages have no such page affinity and
+    always execute, FIFO, like ClearMsg/SetBrightnessMsg."""
+    stashed_inputs: dict
 
 
 class MediaPlayerThread(threading.Thread):
@@ -378,7 +427,15 @@ class MediaPlayerThread(threading.Thread):
 
     def submit_control(self, msg) -> None:
         """Non-blocking: append + wake. Safe from any thread (deque append
-        is GIL-atomic; no lock needed) -- plan §2.1."""
+        is GIL-atomic; no lock needed) -- plan §2.1.
+
+        Rejects once the writer is stopped/closing (design doc bug 12): the
+        loop is gone by then, so nothing would ever drain a message appended
+        after this point -- without this guard, control_q would grow
+        unbounded for the rest of the process's life if a late plugin/API
+        callback keeps calling e.g. set_brightness() on a torn-down deck."""
+        if self._stop:
+            return
         self.control_q.append(msg)
         self._wake_event.set()
 
@@ -397,6 +454,8 @@ class MediaPlayerThread(threading.Thread):
             elif isinstance(msg, ClearAndCloseMsg):
                 self._exec_clear_and_close()
                 return False
+            elif isinstance(msg, ReleaseStashedInputsMsg):
+                self._exec_release_stashed_inputs(msg)
             else:
                 log.error(f"Unknown control message: {msg!r}")
         return True
@@ -412,6 +471,21 @@ class MediaPlayerThread(threading.Thread):
         except Exception as e:
             log.error(f"Failed to set brightness: {e}")
             self.deck_controller._on_write_result(False)
+
+    def _exec_release_stashed_inputs(self, msg: "ReleaseStashedInputsMsg") -> None:
+        """mem-plan P2.6: runs on the media player thread, serialized with
+        every render/write it does -- see ReleaseStashedInputsMsg's
+        docstring for why this is a control message and not add_task()."""
+        stashed_inputs = msg.stashed_inputs
+        for inputs in list(stashed_inputs.values()):
+            for controller_input in list(inputs):
+                try:
+                    controller_input.close_resources()
+                except Exception:
+                    log.opt(exception=True).warning(
+                        "Failed to close a stashed screensaver input (ReleaseStashedInputsMsg)"
+                    )
+        stashed_inputs.clear()
 
     def check_resume_gap(self, now: float = None) -> bool:
         """Detects a wall-clock gap >=5s between media-loop iterations -- the
@@ -456,6 +530,13 @@ class MediaPlayerThread(threading.Thread):
             log.error(f"Failed to write blank frames for Clear: {e}")
 
     def _exec_clear_and_close(self) -> None:
+        # Set before doing any of the work below (not just relying on the
+        # external stop() call that follows submitting this message): the
+        # window between this terminal message landing and stop() actually
+        # being called is exactly when a late submit_control() would
+        # otherwise still be accepted into a queue nothing will ever drain
+        # again (design doc bug 12).
+        self._stop = True
         self.image_tasks.clear()
         self.touchscreen_task = None
         self.deck_controller._reset_dedup_hashes()
@@ -692,10 +773,22 @@ class DeckController:
         # factor is the default 1.0 (no-op requirement).
         self.display_saturation: float = self._read_display_saturation()
 
-        # Tasks
-        self.media_player_tasks: Queue[MediaPlayerTask] = Queue()
-
+        # identifier -> True while the main window is hidden/unmapped (mem
+        # plan P5.4): a dirty marker, NOT a stashed PIL image -- the device
+        # composite already happens every tick regardless of window
+        # visibility, so retaining a full copy purely to replay to the UI
+        # later just holds a big object alive for no benefit. On map,
+        # KeyGrid.load_from_changes/ScreenBar.load_from_changes recomposite
+        # the current frame for each dirty identifier via
+        # ControllerInput.get_current_image() and push it through the same
+        # set-image path a live update would.
         self.ui_image_changes_while_hidden: dict = {}
+
+        # Set once by close() and never cleared (plan P1.3): gates re-entrant
+        # producer paths (ScreenSaver.show/hide/on_key_change, load_page)
+        # that would otherwise resurrect a controller mid-teardown, and makes
+        # close() itself idempotent against a second call.
+        self._closing: bool = False
 
         self.active_page: Page = None
 
@@ -755,8 +848,26 @@ class DeckController:
             thread_name_prefix="action_cb",
         )
 
+        # Persistent per-deck loader pool for load_all_inputs (plan P1.5):
+        # sized so every input can load concurrently -- a fixed small pool
+        # would serialize an XL's 32 inputs several-deep *on the media-player
+        # thread* (load_all_inputs runs there via media_player.add_task), so
+        # its deadline waits would block the sole writer. Replaced wholesale
+        # (see load_all_inputs) on deadline expiry with stuck tasks, instead
+        # of being torn down and rebuilt on every single page switch like the
+        # throwaway executor this replaces.
+        self.load_executor = ThreadPoolExecutor(
+            max_workers=max(8, total_inputs),
+            thread_name_prefix=f"load_{self.serial_number()}",
+        )
+
         self.keep_actions_ticking = True
         self.TICK_DELAY = 1
+        # Lets close() interrupt tick_actions' sleep immediately instead of
+        # waiting out up to a full TICK_DELAY before the loop notices
+        # keep_actions_ticking went False (plan P1.3 step 4 needs a prompt,
+        # bounded join -- see tick_actions).
+        self._tick_stop_event = threading.Event()
         self.tick_thread = Thread(target=self.tick_actions, name="tick_actions")
         self.tick_thread.start()
 
@@ -967,7 +1078,11 @@ class DeckController:
 
         api_page_path = None
         if self.serial_number() in gl.api_page_requests:
-            api_page_path = gl.api_page_requests[self.serial_number()]
+            # Pop, don't just read (design doc bug 13): a `--change-page`
+            # request is one-shot -- left in place, it silently re-applied
+            # itself on every future load_default_page() call for this
+            # serial (every unplug/replug, every "no page found" fallback).
+            api_page_path = gl.api_page_requests.pop(self.serial_number())
             api_page_path = gl.page_manager.find_matching_page_path(api_page_path)
 
         if api_page_path is None:
@@ -1130,28 +1245,43 @@ class DeckController:
         if not self._page_is_current(gen):
             return
         start = time.time()
-        executor = ThreadPoolExecutor()
-        try:
-            pending = []
-            for t in self.inputs:
-                for controller_input in self.inputs[t]:
-                    future = executor.submit(self._load_input_if_current, controller_input, page, update, gen)
-                    pending.append((controller_input, future))
-            deadline = time.monotonic() + self.LOAD_INPUTS_TIMEOUT
-            stuck = []
-            for controller_input, future in pending:
+        # Persistent per-deck pool (plan P1.5), not a throwaway ThreadPoolExecutor()
+        # per call: this runs on the media-player thread (via
+        # media_player.add_task), so constructing/tearing down a pool here on
+        # every single page switch was pure churn on the sole writer's path.
+        executor = self.load_executor
+        pending = []
+        for t in self.inputs:
+            for controller_input in self.inputs[t]:
                 try:
-                    future.result(timeout=max(0.0, deadline - time.monotonic()))
-                except FutureTimeoutError:
-                    stuck.append(str(controller_input.identifier))
-            if stuck:
-                log.warning(
-                    f"Loading inputs [{', '.join(stuck)}] did not finish within "
-                    f"{self.LOAD_INPUTS_TIMEOUT}s; continuing without them (a plugin "
-                    f"callback is likely blocked). They will still paint if they return.")
-        finally:
-            # No wait: a stuck load must not block this thread here either.
-            executor.shutdown(wait=False)
+                    future = executor.submit(self._load_input_if_current, controller_input, page, update, gen)
+                except RuntimeError:
+                    # Pool already shut down (deck closing concurrently).
+                    continue
+                pending.append((controller_input, future))
+        deadline = time.monotonic() + self.LOAD_INPUTS_TIMEOUT
+        stuck = []
+        for controller_input, future in pending:
+            try:
+                future.result(timeout=max(0.0, deadline - time.monotonic()))
+            except FutureTimeoutError:
+                stuck.append(str(controller_input.identifier))
+        if stuck:
+            log.warning(
+                f"Loading inputs [{', '.join(stuck)}] did not finish within "
+                f"{self.LOAD_INPUTS_TIMEOUT}s; continuing without them (a plugin "
+                f"callback is likely blocked). Replacing this deck's loader pool "
+                f"so the stuck task(s) leak their pool's thread(s) once, instead "
+                f"of wedging every future page load behind them (plan P1.5).")
+            old_executor = executor
+            total_inputs = sum(len(inputs) for inputs in self.inputs.values())
+            self.load_executor = ThreadPoolExecutor(
+                max_workers=max(8, total_inputs),
+                thread_name_prefix=f"load_{self.serial_number()}",
+            )
+            # No wait: the stuck task(s) may never return; cancel what we can
+            # and abandon the rest to this one pool's leaked thread(s).
+            old_executor.shutdown(wait=False, cancel_futures=True)
         log.info(f"Loading all inputs took {time.time() - start} seconds")
 
     def _load_input_if_current(self, controller_input: "ControllerInput", page: Page, update: bool = True, gen=None):
@@ -1192,6 +1322,13 @@ class DeckController:
                 log.error(f"{e} -> This is okay if you just activated your first deck.")
 
     def close_image_ressources(self):
+        """Releases every input's media (key/dial images+videos) plus the
+        background image/video. Called from close() step 7 (plan P1.3).
+
+        Was dead code with zero callers until this fix, and broken besides
+        (design doc bug 19): ControllerInput had no close_resources() at all
+        (AttributeError below) and BackgroundImage had no close() (same
+        below) -- both are added alongside this comment."""
         for t in self.inputs:
             for i in self.inputs[t]:
                 i.close_resources()
@@ -1206,6 +1343,11 @@ class DeckController:
     @log.catch
     def load_page(self, page: Page, load_brightness: bool = True, load_screensaver: bool = True, load_background: bool = True, load_inputs: bool = True, allow_reload: bool = True):
         if not self.get_alive(): return
+        if self._closing:
+            # A straggling caller (screensaver follow-up, plugin hook, DBus
+            # request) raced close() -- don't resurrect the deck mid-
+            # teardown (plan P1.3).
+            return
 
         start = time.time()
 
@@ -1216,6 +1358,11 @@ class DeckController:
             if not allow_reload:
                 if self.active_page is page:
                     return
+
+            # Cheap monotonic counter read by mem_telemetry's idle/trim gate
+            # (docs/memory-footprint-plan.md Phase 0) -- bump once we know
+            # this call is an actual switch, not the no-op reload above.
+            page_switches.bump()
 
             old_path = self.active_page.json_path if self.active_page is not None else None
 
@@ -1321,7 +1468,11 @@ class DeckController:
 
 
     def tick_actions(self) -> None:
-        time.sleep(self.TICK_DELAY)
+        # Event-based wait (mirrors MediaPlayerThread's _wake_event): close()
+        # sets _tick_stop_event alongside keep_actions_ticking=False so its
+        # bounded join actually returns promptly instead of waiting out
+        # whatever fraction of TICK_DELAY this loop happened to be sleeping.
+        self._tick_stop_event.wait(self.TICK_DELAY)
         while self.keep_actions_ticking:
             start = time.time()
             self.mark_page_ready_to_clear(False)
@@ -1338,7 +1489,7 @@ class DeckController:
 
             end = time.time()
             wait = max(0.1, self.TICK_DELAY - (end - start))
-            time.sleep(wait)
+            self._tick_stop_event.wait(wait)
 
     # -------------- #
     # Helper methods #
@@ -1396,7 +1547,7 @@ class DeckController:
         key/dial icons) re-enhances immediately. A currently-playing
         background/key *video* keeps showing its already-baked cache until
         the reload constructs a fresh cache object under the new factor's
-        cache filename (see BackgroundVideoCache/VideoFrameCache) -- video
+        cache filename (see BackgroundVideoCache/KeyVideoCache) -- video
         content upgrades to the new factor on its first playthrough after
         that, not instantaneously."""
         value = round(float(value), 2)
@@ -1486,25 +1637,194 @@ class DeckController:
             self.media_player.image_tasks.clear()
             self.media_player.touchscreen_task = None
 
-    def delete(self):
-        if hasattr(self, "active_page"):
-            if self.active_page is not None:
-                self.active_page.action_objects = {}
+    def close(self, remove_media: bool, app_quit: bool = False) -> None:
+        """One deterministic teardown sweep (docs/memory-footprint-impl-plan.md
+        P1.3; design doc §3.3 item 1 / bug appendix A.1-A.3). Every unplug/
+        replug (DeckManager.remove_controller), fake-deck removal, and
+        app-quit path funnels through here -- delete() is a thin alias kept
+        for existing callers.
 
-        if hasattr(self, "media_player"):
-            # If close_all() already drove this controller through
-            # ClearAndCloseMsg, the loop has already exited and `running` is
-            # already False -- stop()'s poll returns immediately (plan §2.4).
-            self.media_player.stop()
+        Idempotent: a second call (from any thread) is a no-op, guarded by
+        `_closing`.
 
+        Threading contract: when `app_quit` is False this is expected to run
+        off the main thread -- a wedged plugin teardown hook (step 6) must
+        not freeze the UI. DeckManager.remove_controller dispatches it on a
+        dedicated daemon thread (not the shared GtkHelper pool, which quit's
+        shutdown_background_pool() would cancel mid-close). `app_quit=True`
+        is the one case that's expected to run synchronously on main: it
+        skips step 6 entirely (no plugin hooks to block on), and on_quit's
+        6s force-quit timer is the backstop for everything else here.
+
+        `remove_media` gates step 7's resource sweep (background/input media
+        + caches); the rest of the sequence (device/thread/registration
+        teardown) always runs.
+        """
+        if self._closing:
+            return
+        self._closing = True
+
+        if not app_quit and threading.current_thread() is threading.main_thread():
+            # Soft guard, not a hard failure: the test harness's teardown()
+            # helper calls delete()/close() from what is, in that process,
+            # the "main thread" (no GTK main loop actually runs there), and
+            # that must keep working. In the real app this path should never
+            # be hit -- DeckManager.remove_controller always dispatches onto
+            # a dedicated thread -- so a warning here is a real signal.
+            log.warning(
+                f"DeckController.close() for "
+                f"{getattr(self, '_serial_number', None) or '<unknown>'} called "
+                "from the main thread with app_quit=False -- a wedged plugin "
+                "teardown hook (step 6) would freeze the UI. Callers should "
+                "dispatch this on its own thread."
+            )
+
+        # Step 2: defuse the screensaver directly. NEVER set_enable(False)/
+        # hide() here: hide() takes _load_page_lock and runs a full
+        # load_page() (ScreenSaver.py), which would resurrect the deck
+        # mid-close -- deterministically, whenever the screensaver happens
+        # to be showing at unplug.
+        screen_saver = getattr(self, "screen_saver", None)
+        if screen_saver is not None:
+            if screen_saver.timer:
+                screen_saver.timer.cancel()
+            screen_saver.enable = False
+            screen_saver.showing = False
+
+        # Step 3: stop the library's read thread before anything else so a
+        # stray input callback can't fire into the teardown below, and so
+        # the resume-from-suspend loop can't reopen the device behind us.
+        if getattr(self, "deck", None) is not None:
+            try:
+                self.deck.stop_read_thread()
+            except Exception:
+                log.opt(exception=True).warning("Failed to stop the deck's read thread during close()")
+
+        # Step 4: stop AND join the tick thread before any action teardown:
+        # its body iterates every input's active state unguarded, and a
+        # concurrent clear_action_objects() mid-iteration could kill the
+        # loop or recomposite an input being swept out from under it.
         self.keep_actions_ticking = False
-        self.deck.run_read_thread = False
+        tick_stop_event = getattr(self, "_tick_stop_event", None)
+        if tick_stop_event is not None:
+            tick_stop_event.set()
+        tick_thread = getattr(self, "tick_thread", None)
+        if tick_thread is not None and tick_thread is not threading.current_thread():
+            tick_thread.join(2.0)
 
-        if getattr(self, "action_executor", None) is not None:
+        # Step 5: terminal clear+close through the sole writer, bounded.
+        # If close_all() already drove this controller through
+        # ClearAndCloseMsg (the app-quit path), the loop already exited and
+        # this is a fast no-op: submit_control rejects post-stop (bug 12)
+        # and stop()'s poll on an already-dead thread returns immediately.
+        media_player = getattr(self, "media_player", None)
+        if media_player is not None:
+            try:
+                media_player.submit_control(ClearAndCloseMsg())
+            except Exception:
+                log.opt(exception=True).warning("Failed to submit ClearAndClose during close()")
+            media_player.stop(timeout=2.0)
+
+        # Step 6: action teardown -- skipped at app-quit. on_quit runs
+        # synchronously on main against a 6s force-quit deadline; hooks that
+        # run_on_main here would block it. Device hygiene (steps 1-5, 7-9)
+        # is what matters at quit, not plugin notification.
+        if not app_quit:
+            self._teardown_actions()
+
+        # Step 7: resource sweep. The writer is stopped, so nothing races a
+        # paint touching these caches/objects concurrently.
+        if remove_media:
+            try:
+                self.close_image_ressources()
+            except Exception:
+                log.opt(exception=True).warning("Failed to close image resources during close()")
+            encode_memo = getattr(self, "encode_memo", None)
+            if encode_memo is not None:
+                encode_memo.clear()
+            if media_player is not None:
+                media_player.image_tasks.clear()
+                media_player.tasks.clear()
+                media_player.touchscreen_task = None
+                media_player.control_q.clear()
+        # Fallback close: normally the writer already closed the device in
+        # step 5's ClearAndCloseMsg -- this only matters if that writer was
+        # wedged and never got to process it.
+        if getattr(self, "deck", None) is not None:
+            try:
+                self.deck.close()
+            except Exception:
+                pass
+
+        # Step 8: deregistration. The dead controller's active_page was
+        # otherwise permanently unevictable (design doc bug 1) and kept
+        # distorting clear_old_cached_pages()'s budget for every other live
+        # controller.
+        if gl.page_manager is not None:
+            gl.page_manager.discard_controller(self)
+        self.active_page = None
+
+        # Step 9: shut down the per-deck thread pools. The object graph here
+        # is cyclic (actions <-> pages <-> controller), so an explicit
+        # collect actually reclaims it now instead of waiting on the next
+        # generational GC pass.
+        action_executor = getattr(self, "action_executor", None)
+        if action_executor is not None:
             # Don't wait: a misbehaving plugin callback could block a worker
             # forever; the app's force_quit timer is the backstop.
-            self.action_executor.shutdown(wait=False, cancel_futures=True)
+            action_executor.shutdown(wait=False, cancel_futures=True)
             self.action_executor = None
+        load_executor = getattr(self, "load_executor", None)
+        if load_executor is not None:
+            load_executor.shutdown(wait=False, cancel_futures=True)
+            self.load_executor = None
+        gc.collect()
+
+    def _teardown_actions(self) -> None:
+        """Step 6 of close(): tears down every action this controller ever
+        cached a page for -- not just active_page, matching D1's "framework
+        calls clean_up() at every drop site" -- plus the screensaver's
+        stashed input set/background if the deck is closed mid-screensaver
+        (design doc §3.3 item 8): that's where the real page's 50-150MB of
+        media actually lives then, not active_page. Never called under
+        _load_page_lock, never from app_quit (see close()'s docstring)."""
+        cached_pages = gl.page_manager.pages_for_controller(self) if gl.page_manager is not None else []
+        for page in cached_pages:
+            try:
+                page.clear_action_objects()
+            except Exception:
+                log.opt(exception=True).warning(f"Failed to clear action objects for {page} during close()")
+
+        screen_saver = getattr(self, "screen_saver", None)
+        if screen_saver is None:
+            return
+
+        original_inputs = screen_saver.original_inputs
+        if original_inputs:
+            for inputs in list(original_inputs.values()):
+                for controller_input in list(inputs):
+                    try:
+                        controller_input.close_resources()
+                    except Exception:
+                        log.opt(exception=True).warning("Failed to close a stashed screensaver input during close()")
+            original_inputs.clear()
+
+        original_background = screen_saver.original_background
+        if original_background is not None:
+            try:
+                if getattr(original_background, "video", None) is not None:
+                    original_background.video.close()
+                if getattr(original_background, "image", None) is not None:
+                    original_background.image.close()
+            except Exception:
+                log.opt(exception=True).warning("Failed to close the stashed screensaver background during close()")
+            screen_saver.original_background = None
+
+    def delete(self) -> None:
+        """Thin alias for close() (plan P1.3), kept for existing callers
+        (the harness's teardown() helper, and any code that predates the
+        close() sweep)."""
+        self.close(remove_media=True, app_quit=False)
 
     def get_alive(self) -> bool:
         try:
@@ -1537,6 +1857,14 @@ class Background:
         self.video = None
         self._touchscreen_slice = None
         self._video_strip = None
+        # mem-plan P2.5: a content change orphans the whole encode memo --
+        # every entry was keyed against the OLD background's composited
+        # pixels/hashes, none of which can ever hit again. Left uncleared,
+        # a full (32MB) memo from the previous background would simply sit
+        # there dead until LRU eviction happened to churn through it.
+        encode_memo = getattr(self.deck_controller, "encode_memo", None)
+        if encode_memo is not None:
+            encode_memo.clear()
         gc.collect()
 
         self.update_tiles()
@@ -1550,6 +1878,11 @@ class Background:
         self.video = video
         self._touchscreen_slice = None
         self._video_strip = None
+        # mem-plan P2.5: see set_image()'s comment -- same reasoning applies
+        # to a video-to-video (or image-to-video) content change.
+        encode_memo = getattr(self.deck_controller, "encode_memo", None)
+        if encode_memo is not None:
+            encode_memo.clear()
         gc.collect()
 
         self.update_tiles()
@@ -1629,7 +1962,7 @@ class Background:
         if not os.path.isfile(path):
             return ("noop", None)
         with Image.open(path) as image:
-            return ("image", BackgroundImage(self.deck_controller, image.copy()))
+            return ("image", BackgroundImage(self.deck_controller, image.copy(), path=path))
 
     def apply_prebuilt(self, kind: str, payload, fps: int = 30, loop: bool = True, update: bool = True) -> None:
         """Phase-2 counterpart to prebuild_from_path(): performs the actual
@@ -1699,8 +2032,17 @@ class Background:
                 log.opt(exception=True).error("Failed to update background tiles; keeping previous")
 
 class BackgroundImage:
-    def __init__(self, deck_controller: DeckController, image: Image) -> None:
+    def __init__(self, deck_controller: DeckController, image: Image, path: str = None) -> None:
         self.deck_controller = deck_controller
+        # mem-plan P2.4: source-resolution RGBA used to be retained for the
+        # whole page lifetime (design doc §3.2 -- "33MB for 4K"). `path` is
+        # the source file `image` was decoded from, if any (None for
+        # non-file-backed callers, e.g. the test harness) -- kept so a later
+        # extend-to-touchscreen toggle that needs more canvas height than
+        # the fitted copy retains can re-decode from source (see
+        # _ensure_fits_canvas(), called from create_full_deck_sized_image()).
+        self.path = path
+
         # Saturation is baked into the source image once, here, at load time.
         # create_full_deck_sized_image()/get_tiles()/get_touchscreen_image()
         # all derive from self.image, so the key tiles and the touchscreen
@@ -1708,14 +2050,92 @@ class BackgroundImage:
         # per-frame cost, no double-enhancement. Factor 1.0 (the default)
         # skips the ImageEnhance call and any mode conversion entirely, so
         # the stored image is byte-identical to today's behavior.
-        saturation = deck_controller.get_display_saturation()
+        image = self._prepare_image(image)
+        self.image = self._fit_to_canvas(image, self._extend_effective())
+
+    def _extend_effective(self) -> bool:
+        # extend_to_touchscreen lives on Background (self.deck_controller.
+        # background), not on DeckController itself -- mirrors Background.
+        # _extend_effective's own condition (deck.is_touch()), minus its
+        # "self.image is not None" check, which is about whether Background
+        # currently has an image background at all, not about sizing one.
+        background = getattr(self.deck_controller, "background", None)
+        extend = bool(getattr(background, "extend_to_touchscreen", False)) if background is not None else False
+        deck = getattr(self.deck_controller, "deck", None)
+        return extend and deck is not None and deck.is_touch()
+
+    def _prepare_image(self, image: Image.Image) -> Image.Image:
+        saturation = self.deck_controller.get_display_saturation()
         if abs(saturation - 1.0) > 0.001:
             if image.mode not in ("RGB", "RGBA"):
                 image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
             image = ImageEnhance.Color(image).enhance(saturation)
-        self.image = image
+        return image
+
+    def _canvas_size(self, extend_touchscreen: bool) -> "tuple[int, int] | None":
+        """The full-deck canvas size create_full_deck_sized_image() targets,
+        including the touchscreen strip when extend is on. None when the
+        deck geometry isn't available (minimal test stubs exercising only
+        the saturation step) -- fitting/re-decoding is then skipped, same
+        as today's unconditional retention."""
+        deck = getattr(self.deck_controller, "deck", None)
+        if deck is None:
+            return None
+        key_rows, key_cols = deck.key_layout()
+        key_width, key_height = self.deck_controller.get_key_image_size()
+        spacing_x, spacing_y = self.deck_controller.key_spacing
+
+        canvas_width = key_width * key_cols + spacing_x * (key_cols - 1)
+        canvas_height = key_height * key_rows + spacing_y * (key_rows - 1)
+
+        if extend_touchscreen and deck.is_touch():
+            canvas_height += spacing_y + self._get_touchscreen_canvas_height(canvas_width)
+
+        return (canvas_width, canvas_height)
+
+    def _fit_to_canvas(self, image: Image.Image, extend_touchscreen: bool) -> Image.Image:
+        canvas = self._canvas_size(extend_touchscreen)
+        if canvas is None:
+            return image
+        budget = (canvas[0] * 2, canvas[1] * 2)
+        if image.width > budget[0] or image.height > budget[1]:
+            image.thumbnail(budget, Image.Resampling.LANCZOS)
+        return image
+
+    def _ensure_fits_canvas(self, extend_touchscreen: bool) -> None:
+        """Re-decodes from `path` if the CURRENT canvas (which may have
+        grown since __init__ -- the touchscreen-extend setting can be
+        toggled at runtime without a fresh page/media load) needs more
+        resolution than the retained image has."""
+        if not self.path or self.image is None:
+            return
+        canvas = self._canvas_size(extend_touchscreen)
+        if canvas is None:
+            return
+        if canvas[0] <= self.image.width and canvas[1] <= self.image.height:
+            return
+        try:
+            with Image.open(self.path) as fresh:
+                fresh = fresh.copy()
+        except (OSError, FileNotFoundError):
+            return
+        fresh = self._prepare_image(fresh)
+        old_image = self.image
+        self.image = self._fit_to_canvas(fresh, extend_touchscreen)
+        if old_image is not None:
+            old_image.close()
+
+    def close(self) -> None:
+        """Releases the retained source-resolution PIL image (design doc
+        bug 19: close_image_ressources()/DeckController.close() call this;
+        BackgroundImage previously had no close() at all, an AttributeError
+        waiting to happen the first time anything actually called it)."""
+        if self.image is not None:
+            self.image.close()
+            self.image = None
 
     def create_full_deck_sized_image(self, extend_touchscreen: bool = False) -> Image:
+        self._ensure_fits_canvas(extend_touchscreen)
         key_rows, key_cols = self.deck_controller.deck.key_layout()
         key_width, key_height = self.deck_controller.get_key_image_size()
         spacing_x, spacing_y = self.deck_controller.key_spacing
@@ -1857,20 +2277,44 @@ class KeyGIF(SingleKeyAsset):
         self._play_start: float = None
         self._last_frame_tick: float = None
 
-        self.gif = Image.open(self.gif_path)
         self.frames = []
         self.frame_delays = []
 
-        # Extract frames and their delays
-        for frame in ImageSequence.Iterator(self.gif):
-            self.frames.append(frame.convert("RGBA"))
-            # Get frame delay from GIF metadata (in milliseconds)
-            # Default to 100ms (10fps) if no delay specified
-            delay = self.gif.info.get('duration', 100)
-            # Some GIFs use delay in centiseconds, convert to milliseconds
-            if delay < 50:
-                delay *= 10
-            self.frame_delays.append(delay)
+        # mem-plan P2.3: cap retained frame size at 2x the key tile instead of
+        # keeping every frame at source resolution -- a 500px/200-frame GIF is
+        # ~200MB at source res vs ~46MB fitted. Composited size is decided per
+        # tick by add_image_to_background/get_composed_layout (UI max is 200%,
+        # ImageEditor.py), so 2x tile is the largest a frame is ever displayed
+        # at; ImageOps.contain preserves aspect ratio and RGBA alpha (cv2's gif
+        # demuxer drops alpha, which is why this stays a PIL frame list instead
+        # of routing through Mp4FrameCache -- opaque-GIF routing there is a
+        # deferred follow-up, not built here).
+        tile_w, tile_h = self.deck_controller.get_key_image_size()
+        fit_size = (max(1, tile_w * 2), max(1, tile_h * 2))
+
+        # Extract frames and their delays. The source file is only needed for
+        # the duration of this loop -- close it immediately after so the app
+        # doesn't hold a dangling fd + full-res frame cache alive underneath
+        # the fitted copies we keep.
+        gif = Image.open(self.gif_path)
+        try:
+            for frame in ImageSequence.Iterator(gif):
+                fitted = frame.convert("RGBA")
+                # Shrink-only: contain() would also UPSCALE a small GIF to the
+                # 2x budget (a 50px/200-frame GIF would go ~2MB -> ~46MB); a
+                # source already within budget composites fine as-is.
+                if fitted.width > fit_size[0] or fitted.height > fit_size[1]:
+                    fitted = ImageOps.contain(fitted, fit_size)
+                self.frames.append(fitted)
+                # Get frame delay from GIF metadata (in milliseconds)
+                # Default to 100ms (10fps) if no delay specified
+                delay = gif.info.get('duration', 100)
+                # Some GIFs use delay in centiseconds, convert to milliseconds
+                if delay < 50:
+                    delay *= 10
+                self.frame_delays.append(delay)
+        finally:
+            gif.close()
 
         # Cumulative delay timeline in seconds: _cum_delays[i] is the
         # wall-clock time at which frame i's display window ENDS. Picking a
@@ -1924,10 +2368,8 @@ class KeyGIF(SingleKeyAsset):
         return self.get_next_frame()
     
     def close(self) -> None:
-        self.gif = None
         self.frames = None
         self.frame_delays = None
-        del self.gif
         del self.frames
         del self.frame_delays
 
@@ -2416,7 +2858,7 @@ class ControllerInputState:
         self.deck_controller = controller_input.deck_controller
         self.state = state
         self._overlay: Image.Image = None
-        self.hide_overlay_timer: Timer = None
+        self.hide_overlay_timer: "timer_wheel.TimerHandle" = None
 
         # True while this state's on_tick is still running; the next tick is
         # dropped, not queued (see own_actions_tick_threaded).
@@ -2456,15 +2898,15 @@ class ControllerInputState:
             self.stop_overlay_timer()
             self._overlay = image
             self.update()
-            self.hide_overlay_timer = Timer(duration, self.hide_error)
-            self.hide_overlay_timer.daemon = True
-            self.hide_overlay_timer.start()
+            self.hide_overlay_timer = timer_wheel.schedule(duration, self.hide_error, name="OverlayHideTimer")
         else:
             self._overlay = image
             self.update()
 
     def hide_overlay(self):
-        self._overlay = False
+        # Must be None, not False: the tile-passthrough fast path in
+        # ControllerKey.get_current_image tests `state._overlay is None`.
+        self._overlay = None
         self.update()
 
     def show_error(self, duration: int = -1):
@@ -2605,7 +3047,7 @@ class ControllerInput:
         self.deck_controller = deck_controller
         self.state = 0
         self.hide_error_timer: Timer = None
-        self.hold_start_timer: Timer = None
+        self.hold_start_timer: "timer_wheel.TimerHandle" = None
         self.ControllerStateClass = state_class
         self.identifier: InputIdentifier = identifier
         self.media_ticks: int = 0
@@ -2636,10 +3078,7 @@ class ControllerInput:
     def start_hold_timer(self):
         self.stop_hold_timer()
 
-        self.hold_start_timer = threading.Timer(self.deck_controller.hold_time, self.on_hold_timer_end)
-        self.hold_start_timer.setDaemon(True)
-        self.hold_start_timer.setName("HoldTimer")
-        self.hold_start_timer.start()
+        self.hold_start_timer = timer_wheel.schedule(self.deck_controller.hold_time, self.on_hold_timer_end, name="HoldTimer")
 
     def stop_hold_timer(self):
         if self.hold_start_timer is None:
@@ -2808,6 +3247,14 @@ class ControllerInput:
         active_state.clear()
         if update:
             self.update()
+
+    def close_resources(self) -> None:
+        """Framework teardown hook (plan P1.3 step 7/design doc bug 19):
+        releases every state's media resources. Unlike clear(), this is for
+        the input's own end of life (deck close, screensaver-stash sweep),
+        not a fresh page load -- it never triggers a repaint."""
+        for state in self.states.values():
+            state.close_resources()
 
     def has_unavailable_action(self) -> bool:
         for action in self.get_active_state().get_own_actions():
@@ -3171,7 +3618,8 @@ class ControllerKey(ControllerInput):
                         with Image.open(path) as image:
                             state.set_image(InputImage(
                                 controller_input=self,
-                                image=image.copy()
+                                image=image.copy(),
+                                path=path,
                             ), update=False)
                             
                     elif is_svg(path):
@@ -3241,8 +3689,9 @@ class ControllerKey(ControllerInput):
         x, y = ControllerKey.Index_To_Coords(self.deck_controller.deck, self.index)
 
         if self.deck_controller.get_own_key_grid() is None or not gl.app.main_win.get_mapped():
-            # Save to use later
-            self.deck_controller.ui_image_changes_while_hidden[self.identifier] = image # The ui key coords are in reverse order
+            # Mark dirty only (P5.4) -- KeyGrid.load_from_changes
+            # recomposites a fresh image on map instead of replaying `image`.
+            self.deck_controller.ui_image_changes_while_hidden[self.identifier] = True
         else:
             try:
                 GLib.idle_add(self.deck_controller.get_own_key_grid().buttons[x][y].set_image, image)
@@ -3295,7 +3744,7 @@ class ControllerTouchScreen(ControllerInput):
         else:
             device_image = image
 
-        native_image = PILHelper.to_native_touchscreen_format(self.deck_controller.deck, device_image)
+        native_image = encode_native_touchscreen(self.deck_controller.deck, device_image)
         self._last_enqueued_hash = img_hash
         self.deck_controller.media_player.add_touchscreen_task(native_image, page=page, config_gen=config_gen, controller_touchscreen=self, img_hash=img_hash)
 
@@ -3349,7 +3798,9 @@ class ControllerTouchScreen(ControllerInput):
             screenbar = self.deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar
             GLib.idle_add(screenbar.image.set_image, image)
         else:
-            self.deck_controller.ui_image_changes_while_hidden[self.identifier] = image
+            # Mark dirty only (P5.4) -- ScreenBar.load_from_changes
+            # recomposites a fresh image on map instead of replaying `image`.
+            self.deck_controller.ui_image_changes_while_hidden[self.identifier] = True
 
     def _flush_pending_ui_image(self) -> bool:
         # Runs on the GTK main loop; pushes the last throttled frame so the preview
@@ -3364,8 +3815,9 @@ class ControllerTouchScreen(ControllerInput):
             screenbar = self.deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar
             screenbar.image.set_image(image)
         else:
-            # Window unmapped mid-throttle: keep the frame for the remap restore.
-            self.deck_controller.ui_image_changes_while_hidden[self.identifier] = image
+            # Window unmapped mid-throttle: mark dirty (P5.4) instead of
+            # keeping this frame -- the remap restore recomposites fresh.
+            self.deck_controller.ui_image_changes_while_hidden[self.identifier] = True
         return False
 
     def get_current_image(self) -> Image.Image:
@@ -3529,6 +3981,7 @@ class ControllerDial(ControllerInput):
                     image = InputImage(
                         controller_input=self,
                         image=Image.open(path),
+                        path=path,
                     )
                     state.set_image(image, update=False)
                 elif is_svg(path):
@@ -3714,8 +4167,17 @@ class ControllerTouchScreenState(ControllerInputState):
         self.set_current_image(self.controller_touch.generate_empty_image())
 
     def close_resources(self) -> None:
-        self.current_image.close()
-        del self.current_image
+        # current_image is only ever set via set_current_image(); a
+        # touchscreen state closed before its first render (e.g. a
+        # screensaver-stash sweep of a page that never painted, or a fresh
+        # ControllerDialState-style state right after create_n_states())
+        # never gets one, and dereferencing it unconditionally raised
+        # AttributeError (design doc bug 20). getattr + None-guard makes
+        # this safe to call any number of times.
+        current_image = getattr(self, "current_image", None)
+        if current_image is not None:
+            current_image.close()
+        self.current_image = None
 
 class ControllerDialState(ControllerInputState):
     def __init__(self, dial: "ControllerDial", state: int):
@@ -3742,6 +4204,18 @@ class ControllerDialState(ControllerInputState):
             self.video.close()
 
         self.video = video
+
+    def close_resources(self) -> None:
+        # The base class default is a no-op `pass` -- without this override
+        # (missing until this fix), a dial's InputImage/InputVideo were never
+        # released by ControllerInput.close_resources(), unlike its key
+        # sibling (ControllerKeyState.close_resources already does this).
+        if self.image is not None:
+            self.image.close()
+            self.image = None
+        if self.video is not None:
+            self.video.close()
+            self.video = None
 
 
     def get_rendered_touch_image(self) -> Image.Image:
@@ -3794,6 +4268,12 @@ class ControllerKeyState(ControllerInputState):
     def set_image(self, key_image: "InputImage", update: bool = True) -> None:
         if self.key_image is not None:
             self.key_image.close()
+        if self.key_video is not None:
+            # Design doc bug 18: dropping key_video here without closing it
+            # leaked its tile-cache registry attachment/VideoCapture on every
+            # image<-video switch (InputVideo.close() is now real -- see
+            # KeyVideo.py).
+            self.key_video.close()
 
         self.key_image = key_image
         self.key_video = None
@@ -3802,12 +4282,20 @@ class ControllerKeyState(ControllerInputState):
             self.update()
 
     def set_video(self, key_video: "InputVideo") -> None:
+        if self.key_video is not None:
+            # Design doc bug 18: the previous video was never closed before
+            # being overwritten (InputVideo.close() is now real).
+            self.key_video.close()
         self.key_video = key_video
         if self.key_image is not None:
             self.key_image.close()
         self.key_image = None
 
     def clear(self):
+        if self.key_video is not None:
+            # Design doc bug 18: clear() dropped key_video without closing
+            # it (InputVideo.close() is now real).
+            self.key_video.close()
         self.key_image = None
         self.key_video = None
         self.label_manager.clear_labels()

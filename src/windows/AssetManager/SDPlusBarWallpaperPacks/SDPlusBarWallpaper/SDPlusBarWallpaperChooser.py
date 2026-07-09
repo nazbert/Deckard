@@ -76,8 +76,10 @@ class SDPlusBarWallpaperChooserPage(ChooserPage):
 
     def on_child_activated(self, flow_box, child):
         self.asset_manager.callback_func(child.wallpaper.path, *self.asset_manager.callback_args, **self.asset_manager.callback_kwargs)
-        self.asset_manager.close()
-        self.asset_manager.destroy()
+        # Hide (not close()+destroy()) so the window survives for reuse (P4.2): close() falls
+        # through to GTK4's default close-request handling, which destroys the window on the
+        # next main-loop iteration even without an explicit destroy() call (verified empirically).
+        self.asset_manager.hide()
 
     def preview_factory(self, preview: SDPlusBarWallpaperPreview, wallpaper):
         preview.set_wallpaper(wallpaper)

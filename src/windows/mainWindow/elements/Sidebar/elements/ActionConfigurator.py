@@ -13,7 +13,6 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import gtk modules
-from cv2 import exp
 import gi
 
 from GtkHelper.GtkHelper import BackButton, BetterPreferencesGroup
@@ -294,9 +293,9 @@ class RemoveButton(Gtk.Button):
         if load:
             page.reload_similar_pages(identifier=self.action.input_ident, reload_self=True)
 
-        # Destroy the actual action
-        if hasattr(self.action, "on_remove"):
-            self.action.on_remove()
+        # Destroy the actual action: notify then unconditionally clean_up(),
+        # regardless of whether the action overrides the hook (D1).
+        ActionCore.teardown(self.action, hook_name="on_remove")
         del self.action
 
 

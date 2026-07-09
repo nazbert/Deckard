@@ -125,6 +125,17 @@ class DeckStack(Gtk.Stack):
                 self.remove(page.get_child())
                 break
 
+        # Purge the controller's cached attributes regardless of whether it
+        # was ever visible (plan P1.3/design doc bug 2): left in place, these
+        # kept the dead controller reachable (deck_attributes is keyed by the
+        # controller object itself) and grew one stale entry per unplug/
+        # replug forever.
+        attr = self.deck_attributes.pop(deck_controller, None)
+        if attr is not None:
+            deck_number, _deck_type = attr
+            if deck_number in self.deck_numbers:
+                self.deck_numbers.remove(deck_number)
+
         if not was_visible:
             return
         

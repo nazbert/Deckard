@@ -19,7 +19,6 @@ import gi
 from src.backend.DeckManagement.InputIdentifier import Input, InputIdentifier
 from src.backend.DeckManagement.DeckController import ControllerKey, DeckController
 from src.windows.mainWindow.elements.PageSelector import PageSelector
-from src.windows.mainWindow.elements.Sidebar.elements.DialEditor import DialEditor
 from src.windows.mainWindow.elements.Sidebar.elements.StateSwitcher import StateSwitcher
 from src.windows.mainWindow.elements.Sidebar.elements.ScreenEditor import ScreenEditor
 
@@ -79,9 +78,6 @@ class Sidebar(Adw.NavigationPage):
 
         self.key_editor = KeyEditor(self)
         self.configurator_stack.add_named(self.key_editor, "key_editor")
-
-        self.dial_editor = DialEditor(self)
-        self.configurator_stack.add_named(self.dial_editor, "dial_editor")
 
         self.screen_editor = ScreenEditor(self)
         self.configurator_stack.add_named(self.screen_editor, "screen_editor")
