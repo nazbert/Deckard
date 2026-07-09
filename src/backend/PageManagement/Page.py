@@ -616,14 +616,20 @@ class Page:
         for input_type in self.action_objects:
             for input_identifier in self.action_objects[input_type]:
                 for state in self.action_objects[input_type][input_identifier]:
-                    for i, action in enumerate(list(self.action_objects[input_type][input_identifier][state].values())):
-                        self.action_objects[input_type][input_identifier][state][i].page = None
-                        self.action_objects[input_type][input_identifier][state][i] = None
-                        if isinstance(self.action_objects[input_type][input_identifier][state][i], ActionCore):
-                            if hasattr(self.action_objects[input_type][input_identifier][state][i], "on_removed_from_cache"):
-                                self.action_objects[input_type][input_identifier][state][i].on_removed_from_cache()
-                        self.action_objects[input_type][input_identifier][state][i] = None
-                        del self.action_objects[input_type][input_identifier][state][i]
+                    state_dict = self.action_objects[input_type][input_identifier][state]
+                    for action in list(state_dict.values()):
+                        # Notify before detaching: plugin cleanup code may
+                        # still need action.page.
+                        if isinstance(action, ActionCore):
+                            try:
+                                action.on_removed_from_cache()
+                            except Exception:
+                                log.opt(exception=True).error(
+                                    f"on_removed_from_cache failed for {getattr(action, 'action_id', action)}"
+                                )
+                        if hasattr(action, "page"):
+                            action.page = None
+                    state_dict.clear()
             self.action_objects[input_type] = {}
 
     def get_name(self):

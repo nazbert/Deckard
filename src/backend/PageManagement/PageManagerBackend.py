@@ -77,7 +77,7 @@ class PageManagerBackend:
 
         if not page:
             page_object = self.load_page(path, deck_controller)
-            #self.clear_old_cached_pages()
+            self.clear_old_cached_pages()
         else:
             page["page_number"] = self.page_number
             page_object = page["page"]
@@ -115,34 +115,30 @@ class PageManagerBackend:
         return page_names
 
     def clear_old_cached_pages(self):
-        pages = sum(len(controller) for controller in self.pages.values())
+        total = sum(len(controller_pages) for controller_pages in self.pages.values())
+        excess = total - self.max_pages
+        if excess <= 0:
+            return
 
-        for i in range(pages - self.max_pages):
-            lowest_page = min(
-                page_data["page_number"]
-                for controller_pages in self.pages.values()
-                for page_data in controller_pages.values()
-            )
+        # Oldest first by page_number; the active page of each controller and
+        # pages mid-tick (ready_to_clear False) are never evicted.
+        evictable = []
+        for controller, controller_pages in self.pages.items():
+            if controller.active_page is None:
+                continue
+            for path, page_data in controller_pages.items():
+                page_obj = page_data["page"]
+                if page_obj is controller.active_page:
+                    continue
+                if not page_obj.ready_to_clear:
+                    continue
+                evictable.append((page_data["page_number"], controller_pages, path, page_obj))
 
-            for controller, controller_pages in self.pages.items():
-                for path, page_data in controller_pages.items():
-                    if controller.active_page is None:
-                        continue
-
-                    page_obj = page_data["page"]
-
-                    if not page_obj.ready_to_clear:
-                        continue
-
-                    if page_obj is controller.active_page:
-                        continue
-
-                    if page_data["page_number"] != lowest_page:
-                        continue
-
-                    page_obj.clear_action_objects()
-                    del controller_pages[path]
-                    break
+        evictable.sort(key=lambda entry: entry[0])
+        for _, controller_pages, path, page_obj in evictable[:excess]:
+            log.info(f"Evicting cached page {path}")
+            page_obj.clear_action_objects()
+            del controller_pages[path]
 
     def get_default_page(self, deck_serial_number: str):
         page_settings = self.settings_manager.load_settings_from_file(self.PAGE_SETTINGS_PATH)
