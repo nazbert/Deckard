@@ -207,12 +207,16 @@ class App(Adw.Application):
         timer.setDaemon(True)
         timer.start()
 
+        # Must run BEFORE the delete() loop (plan §2.4): close_all() submits
+        # the terminal ClearAndClose control message and bounds a join on
+        # each media thread. delete()'s media_player.stop() would otherwise
+        # race a writer that never got the chance to clear+close the device.
+        # It also must run before the slow joins below: a deck still open
+        # when force_quit fires fails the next startup with TransportError(-1).
+        gl.deck_manager.close_all()
+
         for ctrl in gl.deck_manager.deck_controller:
             ctrl.delete()
-
-        # Must run before the slow joins below: a deck still open when
-        # force_quit fires fails the next startup with TransportError(-1).
-        gl.deck_manager.close_all()
 
         gl.deck_manager.stop_usb_monitoring()
 

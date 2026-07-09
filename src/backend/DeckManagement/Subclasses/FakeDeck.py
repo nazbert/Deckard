@@ -18,17 +18,22 @@ import uuid
 import globals as gl
 
 class FakeDeck:
-    def __init__(self, serial_number = None, deck_type = None):
+    def __init__(self, serial_number = None, deck_type = None, key_layout: list[int] = None):
         self.serial_number = serial_number
         self._deck_type = deck_type
 
         self.is_fake = True
 
-        self._key_layout = gl.settings_manager.get_deck_settings(self.serial_number).get("key-layout", [3, 5])
-        self._key_layout = [2, 4]
+        default_layout = key_layout if key_layout is not None else [2, 4]
+        self._key_layout = gl.settings_manager.get_deck_settings(self.serial_number).get("key-layout", default_layout)
 
         self._is_touch = True
         self._dial_count = 4
+
+        # Stable per-instance identity: real decks return the same physical
+        # id() across calls; a fresh uuid per call broke callers that compare
+        # ids to de-dup already-loaded decks (DeckManager.connect_new_decks).
+        self._id = str(uuid.uuid4())
 
     def deck_type(self):
         return self._deck_type
@@ -57,7 +62,7 @@ class FakeDeck:
     def key_image_format(self):
         return {'size': (72, 72), 'format': 'JPEG', 'flip': (True, True), 'rotation': 0}
     def id(self):
-        return str(uuid.uuid4())
+        return self._id
     def connected(self):
         return True
     def __enter__(self):
@@ -85,11 +90,11 @@ class FakeDeck:
         return True
     
     def is_touch(self) -> bool:
-        return self.is_touch
-    
+        return self._is_touch
+
     def dial_count(self) -> int:
         return self._dial_count
-    
+
     def touchscreen_image_format(self) -> dict:
         return{
             "size": (800, 100),
@@ -97,6 +102,33 @@ class FakeDeck:
             "flip": (False, False),
             "rotation": 0
         }
-    
+
     def set_touchscreen_image(self, *args, **kwargs):
         return
+
+    def set_key_color(self, *args, **kwargs):
+        return
+
+    def screen_image_format(self) -> dict:
+        return {'size': (0, 0), 'format': 'JPEG', 'flip': (False, False), 'rotation': 0}
+
+    def set_screen_image(self, *args, **kwargs):
+        return
+
+    def touch_key_count(self) -> int:
+        return 0
+
+    def get_firmware_version(self):
+        return "fake-1.0"
+
+    def vendor_id(self):
+        return 0
+
+    def product_id(self):
+        return 0
+
+    def set_poll_frequency(self, hz):
+        return
+
+    def dial_states(self):
+        return [False] * self._dial_count

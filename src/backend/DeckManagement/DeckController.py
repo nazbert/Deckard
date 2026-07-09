@@ -12,7 +12,10 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
+import bisect
+import collections
 import gc
+import itertools
 import os
 import statistics
 import threading
@@ -59,7 +62,7 @@ from gi.repository import GLib
 from src.Signals import Signals
 
 # Import typing
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, cast
 
 from src.windows.mainWindow.elements.KeyGrid import KeyButton, KeyGrid
 from src.backend.PluginManager.ActionCore import ActionCore
@@ -107,8 +110,9 @@ class MediaPlayerSetTouchscreenImageTask:
     page: Page
     native_image: bytes
     config_gen: int = None  # generation of the content rendered; dropped at present if stale
-
-    n_failed_in_row: ClassVar[dict] = {}
+    submit_seq: int = None  # writer's monotonic submit-seq stamp; None for pre-M1 construction
+    controller_touchscreen: "ControllerTouchScreen" = None  # stamped once this paint is presented
+    img_hash: int = None  # hash of the presented image, recorded in run()
 
     def run(self):
         if not self.deck_controller.deck.is_touch():
@@ -116,27 +120,21 @@ class MediaPlayerSetTouchscreenImageTask:
         try:
             touchscreen_size = self.deck_controller.get_touchscreen_image_size()
             self.deck_controller.deck.set_touchscreen_image(self.native_image, x_pos=0, y_pos=0, width=touchscreen_size[0], height=touchscreen_size[1]) # Maybe avoid to always merge the dial images before applying it
+            # Record the presented image's hash here, not at render time: a paint
+            # dropped at the present boundary must not advance the hash, or the
+            # correcting render would hash-skip and the touchscreen would bleed
+            # forever (mirrors MediaPlayerSetImageTask, plan §3).
+            if self.controller_touchscreen is not None:
+                self.controller_touchscreen._last_img_hash = self.img_hash
             self.native_image = None
             del self.native_image
-            MediaPlayerSetTouchscreenImageTask.n_failed_in_row[self.deck_controller.serial_number()] = 0
+            self.deck_controller._on_write_result(True)
         except StreamDeck.TransportError as e:
             log.error(f"Failed to set deck touchscreen image. Error: {e}")
-
-            # Under beta-resume, transport errors are transient (suspend/resume);
-            # swallow them instead of counting toward removal.
-            beta_resume = gl.settings_manager.get_app_settings().get("system", {}).get("beta-resume-mode", True)
-            if beta_resume:
-                return
-
-            serial = self.deck_controller.serial_number()
-            count = MediaPlayerSetTouchscreenImageTask.n_failed_in_row.get(serial, 0) + 1
-            MediaPlayerSetTouchscreenImageTask.n_failed_in_row[serial] = count
-            if count > 5:
-                log.debug(f"Failed to set touchscreen image for 5 times in a row for deck {serial}. Removing controller")
-                self.deck_controller.deck.close()
-                self.deck_controller.media_player.running = False # Set stop flag - otherwise remove_controller will wait until this task is done, which it never will because it waits
-                gl.deck_manager.remove_controller(self.deck_controller)
-                gl.deck_manager.connect_new_decks()
+            # Graduated error policy (plan §9.1/§4 M2): always attempt and
+            # swallow -- controller removal comes solely from USB disconnect
+            # events, not from a write-failure count.
+            self.deck_controller._on_write_result(False)
 
 @dataclass
 class MediaPlayerSetImageTask:
@@ -147,8 +145,7 @@ class MediaPlayerSetImageTask:
     config_gen: int = None  # generation of the content rendered; dropped at present if stale
     controller_key: "ControllerKey" = None  # stamped once this paint is presented
     img_hash: int = None  # hash of the presented image, recorded in run()
-
-    n_failed_in_row: ClassVar[dict] = {}
+    submit_seq: int = None  # writer's monotonic submit-seq stamp; None for pre-M1 construction
 
     def run(self):
         try:
@@ -164,53 +161,96 @@ class MediaPlayerSetImageTask:
                 self.controller_key._last_img_hash = self.img_hash
             self.native_image = None
             del self.native_image
-            MediaPlayerSetImageTask.n_failed_in_row[self.deck_controller.serial_number()] = 0
+            self.deck_controller._on_write_result(True)
         except StreamDeck.TransportError as e:
             log.error(f"Failed to set deck key image. Error: {e}")
+            # Graduated error policy (plan §9.1/§4 M2): always attempt and
+            # swallow -- controller removal comes solely from USB disconnect
+            # events, not from a write-failure count.
+            self.deck_controller._on_write_result(False)
 
-            beta_resume = gl.settings_manager.get_app_settings().get("system", {}).get("beta-resume-mode", True)
-            if beta_resume:
-                return
 
-            serial = self.deck_controller.serial_number()
-            count = MediaPlayerSetImageTask.n_failed_in_row.get(serial, 0) + 1
-            MediaPlayerSetImageTask.n_failed_in_row[serial] = count
-            if count > 5:
-                log.debug(f"Failed to set key_image for 5 times in a row for deck {serial}. Removing controller")
-                
-                
-                self.deck_controller.deck.close()
-                self.deck_controller.media_player.running = False # Set stop flag - otherwise remove_controller will wait until this task is done, which it never will because it waits
-                gl.deck_manager.remove_controller(self.deck_controller)
+@dataclass
+class SetBrightnessMsg:
+    """Control message: set device brightness. Executed on the media thread
+    (the sole writer) via MediaPlayerThread.control_q -- see
+    docs/presenter-migration-plan.md §2.1."""
+    value: float
 
-                gl.deck_manager.connect_new_decks()
+
+@dataclass
+class ClearMsg:
+    """Control message: blank the deck. `seq` is the submitting thread's
+    monotonic submit-sequence counter value *at submission time*
+    (MediaPlayerThread.next_submit_seq()) -- executing this wipes only
+    image/touchscreen tasks stamped with a lower submit_seq, so frames
+    submitted after this Clear was requested survive and paint afterward
+    (plan §2.1, preserves the caller's clear-then-paint order)."""
+    seq: int
+
+
+@dataclass
+class ClearAndCloseMsg:
+    """Control message: terminal. Wipes pending image/touchscreen tasks,
+    writes blanks, best-effort closes the device, and stops the media
+    thread's loop (plan §2.1/§2.4)."""
+    pass
 
 
 class MediaPlayerThread(threading.Thread):
+    # An image batch at or above this size is a bulk repaint (video frame /
+    # full-page paint) and gets inter-write yields; below it is interactive
+    # (press feedback, plugin set_media) and writes immediately.
+    BULK_BATCH_THRESHOLD = 4
+
     def __init__(self, deck_controller: "DeckController"):
         super().__init__(name="MediaPlayerThread", daemon=True)
         self.deck_controller: DeckController = deck_controller
         self.FPS = 30 # Max refresh rate of the internal displays
 
         # Cap how often a background video repaints the device. The Stream Deck
-        # transport serializes all reads and writes on one mutex; a full-rate
-        # video write flood starves the 20Hz HID read poll, so dial encoder
-        # events arrive coalesced and lag badly. Holding writes at/below the
-        # read-poll rate keeps the reader responsive. 0 disables the cap. The
-        # smoothness cost on a *background* video is negligible.
-        self._video_write_hz = float(os.environ.get("STREAMCONTROLLER_VIDEO_WRITE_HZ", 15))
+        # transport serializes all reads and writes on one mutex; a back-to-back
+        # write flood can out-race the 20Hz HID read poll for it (the lock is
+        # unfair), so dial encoder events arrive coalesced and lag badly. The
+        # inter-write yield below guarantees the reader a mutex slot inside
+        # bulk batches, which is what makes 30Hz safe (hardware-verified:
+        # dials stay clean; previously capped at 15). 0 disables the cap.
+        self._video_write_hz = float(os.environ.get("STREAMCONTROLLER_VIDEO_WRITE_HZ", 30))
         self._last_video_write = 0.0
+
+        # Inter-write yield inside bulk batches (seconds); see the comment in
+        # perform_media_player_tasks. This pacing is the mechanism that keeps
+        # the HID reader responsive at the 30Hz default above.
+        self._inter_write_yield = float(os.environ.get("STREAMCONTROLLER_WRITE_YIELD_MS", 1.5)) / 1000.0
 
         self.running = False
         self.media_ticks = 0
 
-        self.pause = False
         self._stop = False
 
         self.tasks: list[MediaPlayerTask] = []
         self.image_tasks = {}
         self.touchscreen_task = None
         self._wake_event = threading.Event()
+
+        # Control queue (plan §2.1): append/popleft are GIL-atomic, so no
+        # extra lock is needed. Drained fully, first, every wake -- before
+        # any animation tick or task work -- so control ops (brightness,
+        # clear) never wait behind ticker/task work.
+        self.control_q: collections.deque = collections.deque()
+        # Per-writer monotonic stamp counter: image/touchscreen tasks are
+        # stamped with next(self._submit_seq) at submission (add_image_task/
+        # add_touchscreen_task), and a Clear captures the counter at its own
+        # submission (next_submit_seq()) so it can tell which already-queued
+        # frames predate it (plan §2.1/§2.2).
+        self._submit_seq = itertools.count()
+
+        # Wall-clock gap detection (plan §4 M2): a gap much larger than the
+        # loop's own wait interval means the process was suspended (system
+        # sleep) and just resumed -- DetectResumeThread's proven technique,
+        # relocated into this loop instead of a separate thread. See
+        # check_resume_gap().
+        self._last_iter_ts: float = time.time()
 
         self.fps: list[float] = []
         self.old_warning_state = False
@@ -224,52 +264,66 @@ class MediaPlayerThread(threading.Thread):
         while True:
             start = time.time()
 
-            # self.check_connection()
+            self.check_resume_gap(start)
+            self.deck_controller._run_pending_repaint()
+
+            # 1. Drain the control queue fully, first, every wake (plan
+            # §2.2) -- before any animation tick or task work, and before
+            # honoring a pending stop. Order matters: stop()'s caller
+            # (close_all()) submits a terminal ClearAndCloseMsg and then
+            # immediately calls stop() -- if _stop were checked before this
+            # drain (or at the bottom of the loop, after a wake that raced
+            # stop()'s flag-set against this iteration's work), the just-
+            # submitted terminal message could be stranded unprocessed. Every
+            # iteration drains first, unconditionally, THEN looks at _stop.
+            if not self.drain_control_queue():
+                break
+            if self._stop:
+                break
 
             # Read by the FPS throttle below even when paused.
             has_bg_video = False
 
-            if not self.pause:
-                bg_strip_dirty = False
-                video_repaint = False
+            bg_strip_dirty = False
+            video_repaint = False
 
-                if self.deck_controller.background.video is not None:
-                    if self.deck_controller.background.video.page is self.deck_controller.active_page:
-                        has_bg_video = True
-                        # Rate-limit the video's device writes so the flood
-                        # doesn't starve the HID read thread (see _video_write_hz).
-                        min_gap = 1.0 / self._video_write_hz if self._video_write_hz > 0 else 0
-                        if start - self._last_video_write >= min_gap:
-                            video_repaint = True
-                            self._last_video_write = start
-                        # Background video: guard the tick divider against fps<=0/None
-                        # (would ZeroDivisionError) and >FPS; 0/None plays at loop FPS.
-                        video_fps = self.deck_controller.background.video.fps or self.FPS
-                        video_each_nth_frame = max(1, self.FPS // min(self.FPS, video_fps))
-                        if video_repaint and self.media_ticks % video_each_nth_frame == 0:
-                            self.deck_controller.background.update_tiles()
-                            # A video extended onto the strip needs the shared
-                            # touchscreen re-composited for the new frame.
-                            bg_strip_dirty = self.deck_controller.background.get_touchscreen_image() is not None
+            if self.deck_controller.background.video is not None:
+                if self.deck_controller.background.video.page is self.deck_controller.active_page:
+                    has_bg_video = True
+                    # Rate-limit the video's device writes so the flood
+                    # doesn't starve the HID read thread (see _video_write_hz).
+                    min_gap = 1.0 / self._video_write_hz if self._video_write_hz > 0 else 0
+                    if start - self._last_video_write >= min_gap:
+                        video_repaint = True
+                        self._last_video_write = start
+                    # Background video: guard the tick divider against fps<=0/None
+                    # (would ZeroDivisionError) and >FPS; 0/None plays at loop FPS.
+                    video_fps = self.deck_controller.background.video.fps or self.FPS
+                    video_each_nth_frame = max(1, self.FPS // min(self.FPS, video_fps))
+                    if video_repaint and self.media_ticks % video_each_nth_frame == 0:
+                        self.deck_controller.background.update_tiles()
+                        # A video extended onto the strip needs the shared
+                        # touchscreen re-composited for the new frame.
+                        bg_strip_dirty = self.deck_controller.background.get_touchscreen_image() is not None
 
-                # Only iterate keys if there is animated content to update
-                if video_repaint or self._needs_key_ticks():
-                    #TODO: generalize
-                    for key in self.deck_controller.inputs[Input.Key]:
-                        cast("ControllerKey", key).on_media_player_tick()
+            # Only iterate keys if there is animated content to update
+            if video_repaint or self._needs_key_ticks():
+                #TODO: generalize
+                for key in self.deck_controller.inputs[Input.Key]:
+                    cast("ControllerKey", key).on_media_player_tick()
 
-                    # Dials share one touchscreen; render it at most once per
-                    # frame instead of once per dial.
-                    dials = self.deck_controller.inputs[Input.Dial]
-                    touchscreen_dirty = False
-                    for dial in dials:
-                        if cast("ControllerDial", dial).on_media_player_tick():
-                            touchscreen_dirty = True
-                    if (touchscreen_dirty or bg_strip_dirty) and dials:
-                        cast("ControllerDial", dials[0]).get_touch_screen().update()
+                # Dials share one touchscreen; render it at most once per
+                # frame instead of once per dial.
+                dials = self.deck_controller.inputs[Input.Dial]
+                touchscreen_dirty = False
+                for dial in dials:
+                    if cast("ControllerDial", dial).on_media_player_tick():
+                        touchscreen_dirty = True
+                if (touchscreen_dirty or bg_strip_dirty) and dials:
+                    cast("ControllerDial", dials[0]).get_touch_screen().update()
 
-                # Perform media player tasks
-                self.perform_media_player_tasks()
+            # Perform media player tasks
+            self.perform_media_player_tasks()
 
             self.media_ticks += 1
 
@@ -289,16 +343,116 @@ class MediaPlayerThread(threading.Thread):
             self.append_fps(1 / (end - start))
             self.update_low_fps_warning()
             wait = max(0, 1/target_fps - (end - start))
-            if target_fps < self.FPS:
-                self._wake_event.wait(wait)
-                self._wake_event.clear()
-            else:
-                time.sleep(wait)
+            # Event-based wait in both paths (plan §2.2 point 4): a submitted
+            # control op or an interactive paint wakes the loop immediately
+            # instead of waiting out a full active-FPS tick.
+            self._wake_event.wait(wait)
+            self._wake_event.clear()
 
-            if self._stop:
-                break
+            # No _stop check here (it moved to the top, right after the
+            # control-queue drain -- see the comment there): the loop always
+            # goes around once more and drains before honoring a stop.
 
         self.running = False
+
+    def next_submit_seq(self) -> int:
+        """Allocates the next value from the writer's monotonic submit-seq
+        counter. Used internally by add_image_task/add_touchscreen_task to
+        stamp tasks, and externally (DeckController.clear()) to capture the
+        counter at a Clear's submission time (plan §2.1)."""
+        return next(self._submit_seq)
+
+    def submit_control(self, msg) -> None:
+        """Non-blocking: append + wake. Safe from any thread (deque append
+        is GIL-atomic; no lock needed) -- plan §2.1."""
+        self.control_q.append(msg)
+        self._wake_event.set()
+
+    def drain_control_queue(self) -> bool:
+        """Executes every pending control message, FIFO. Returns False if a
+        terminal message (ClearAndCloseMsg) was processed -- the caller must
+        then stop the loop. Split out from run() so unit-tier scenarios can
+        drive the control queue without spinning the thread (the M0 harness's
+        stub controller never starts the thread -- see tests/fixtures.py)."""
+        while self.control_q:
+            msg = self.control_q.popleft()
+            if isinstance(msg, SetBrightnessMsg):
+                self._exec_set_brightness(msg)
+            elif isinstance(msg, ClearMsg):
+                self._exec_clear(msg)
+            elif isinstance(msg, ClearAndCloseMsg):
+                self._exec_clear_and_close()
+                return False
+            else:
+                log.error(f"Unknown control message: {msg!r}")
+        return True
+
+    def _exec_set_brightness(self, msg: "SetBrightnessMsg") -> None:
+        # Direct device write, not DeckController.set_brightness() (which
+        # would just re-submit and loop forever). Graduated error policy
+        # (plan §9.1/§4 M2): always attempt and swallow, reported to the
+        # unified per-controller handler like the task classes.
+        try:
+            self.deck_controller.deck.set_brightness(int(msg.value))
+            self.deck_controller._on_write_result(True)
+        except Exception as e:
+            log.error(f"Failed to set brightness: {e}")
+            self.deck_controller._on_write_result(False)
+
+    def check_resume_gap(self, now: float = None) -> bool:
+        """Detects a wall-clock gap >=5s between media-loop iterations -- the
+        signature of a process suspend/resume cycle (plan §4 M2; the
+        technique is DetectResumeThread's, relocated into this loop instead
+        of a separate thread). Split out from run() so unit-tier scenarios
+        can drive it without spinning the thread (mirrors
+        drain_control_queue's rationale). Returns whether a gap was
+        detected -- NOT whether a repaint actually fired, since
+        _schedule_full_repaint() applies its own rate limit."""
+        if now is None:
+            now = time.time()
+        gap = now - self._last_iter_ts
+        self._last_iter_ts = now
+        if gap >= 5.0:
+            log.info(f"Media loop observed a {gap:.1f}s gap since its last iteration "
+                      f"(likely a suspend/resume); scheduling a full repaint.")
+            self.deck_controller._schedule_full_repaint()
+            return True
+        return False
+
+    def _exec_clear(self, msg: "ClearMsg") -> None:
+        # Wipe only slots whose frame predates this Clear -- frames submitted
+        # after this Clear survive and paint afterward, which is what makes
+        # the queued Clear order-preserving against the caller's
+        # clear-then-paint sequence (plan §2.1).
+        for key in list(self.image_tasks.keys()):
+            task = self.image_tasks.get(key)
+            if task is not None and task.submit_seq is not None and task.submit_seq < msg.seq:
+                del self.image_tasks[key]
+        if (self.touchscreen_task is not None and self.touchscreen_task.submit_seq is not None
+                and self.touchscreen_task.submit_seq < msg.seq):
+            self.touchscreen_task = None
+        # Reset dedup state on every current input BEFORE writing the blanks
+        # (plan §3): otherwise an identical repaint after this Clear would
+        # still match the pre-clear cached hash and get wrongly skipped,
+        # leaving the device stuck on blank.
+        self.deck_controller._reset_dedup_hashes()
+        try:
+            self.deck_controller._write_blank_frames()
+        except Exception as e:
+            log.error(f"Failed to write blank frames for Clear: {e}")
+
+    def _exec_clear_and_close(self) -> None:
+        self.image_tasks.clear()
+        self.touchscreen_task = None
+        self.deck_controller._reset_dedup_hashes()
+        try:
+            self.deck_controller._write_blank_frames()
+        except Exception as e:
+            log.error(f"Failed to write blank frames during ClearAndClose: {e}")
+        try:
+            self.deck_controller.deck.close()
+        except Exception as e:
+            log.error(f"Failed to close deck during ClearAndClose: {e}")
 
     def _needs_key_ticks(self) -> bool:
         # True if any input has animated content that advances on the media tick:
@@ -371,12 +525,15 @@ class MediaPlayerThread(threading.Thread):
         ))
         self._wake_event.set()
 
-    def add_touchscreen_task(self, native_image: bytes, page=None, config_gen=None):
+    def add_touchscreen_task(self, native_image: bytes, page=None, config_gen=None, controller_touchscreen=None, img_hash=None):
         self.touchscreen_task = MediaPlayerSetTouchscreenImageTask(
             deck_controller=self.deck_controller,
             page=page if page is not None else self.deck_controller.active_page,
             native_image=native_image,
-            config_gen=config_gen
+            config_gen=config_gen,
+            submit_seq=self.next_submit_seq(),
+            controller_touchscreen=controller_touchscreen,
+            img_hash=img_hash
         )
         self._wake_event.set()
 
@@ -388,7 +545,8 @@ class MediaPlayerThread(threading.Thread):
             native_image=native_image,
             config_gen=config_gen,
             controller_key=controller_key,
-            img_hash=img_hash
+            img_hash=img_hash,
+            submit_seq=self.next_submit_seq()
         )
         self._wake_event.set()
 
@@ -433,28 +591,27 @@ class MediaPlayerThread(threading.Thread):
             if task.page is active_page:
                 task.run()
 
+        # Bulk-batch write pacing (plan §9.2 experiment): a video-frame
+        # repaint lands as a burst of back-to-back writes, and the transport
+        # serializes reads and writes on one mutex -- the writer releasing
+        # and immediately re-acquiring can repeatedly out-race the waiting
+        # 20Hz HID read poll (the dial-starvation mechanism). A small forced
+        # yield between BULK writes guarantees the reader a mutex slot,
+        # which is what makes raising STREAMCONTROLLER_VIDEO_WRITE_HZ safe.
+        # Interactive paints (small batches) stay unpaced: no added latency.
+        bulk = len(image_batch) >= self.BULK_BATCH_THRESHOLD
+        wrote_any = False
         for task in image_batch:
             if _is_current(task):
+                if bulk and wrote_any and self._inter_write_yield > 0:
+                    time.sleep(self._inter_write_yield)
                 task.run()
+                wrote_any = True
 
         if touch_task is not None and _is_current(touch_task):
+            if bulk and wrote_any and self._inter_write_yield > 0:
+                time.sleep(self._inter_write_yield)
             touch_task.run()
-    def check_connection(self):
-        try:
-            self.deck_controller.deck.get_firmware_version()
-        except StreamDeck.TransportError as e:
-            log.error(f"Seams like the deck is not connected. Error: {e}")
-            serial = self.deck_controller.serial_number()
-            count = MediaPlayerSetImageTask.n_failed_in_row.get(serial, 0) + 1
-            MediaPlayerSetImageTask.n_failed_in_row[serial] = count
-            if count > 5:
-                log.debug(f"Failed to contact the deck 5 times in a row: {serial}. Removing controller")
-
-                self.deck_controller.deck.close()
-                self.deck_controller.media_player.running = False # Stop flag so remove_controller's stop() doesn't wait on this in-flight task
-                gl.deck_manager.remove_controller(self.deck_controller)
-
-                gl.deck_manager.connect_new_decks()
 
 class DeckController:
     def __init__(self, deck_manager: "DeckManager", deck: StreamDeck.StreamDeck):
@@ -468,14 +625,19 @@ class DeckController:
 
         # Open the deck - why store it as self.deck? So that self.get_alive() returns True in get_deck_settings
         self.deck = deck
-        self.deck.open(self.deck_manager.beta_resume_mode)
+        # Resume-from-suspend handle reopen is the library's only mode now
+        # (plan §9.1, decided 2026-07-04) -- always on.
+        self.deck.open(True)
 
         rotation = self.get_deck_settings().get("rotation", 0)
         self.deck: BetterDeck = BetterDeck(deck, rotation)
 
         try:
-            # Clear the deck
-            self.clear()
+            # Clear the deck. Must be the direct/synchronous body, not the
+            # queue-routed clear(): media_player doesn't exist yet, and this
+            # is a liveness probe -- its exception must abort construction
+            # here rather than get lost in an async queue (plan §2.3).
+            self._clear_direct()
         except Exception as e:
             log.error(f"Failed to clear deck, maybe it's already connected to another instance? Skipping... Error: {e}")
             # Release the handle and raise: the caller must not register a
@@ -533,9 +695,24 @@ class DeckController:
         self.deck.set_dial_callback(self.dial_event_callback)
         self.deck.set_touchscreen_callback(self.touchscreen_event_callback)
 
+        # Unified write-error/resume-repaint state (plan §4 M2). Touched only
+        # from the media thread (_on_write_result from the task classes'
+        # run() and _exec_set_brightness; _run_pending_repaint from the run
+        # loop) -- no lock needed, single writer. MUST be initialized before
+        # the media thread starts: its very first iteration dereferences
+        # _full_repaint_pending, and the loop has no exception guard -- an
+        # AttributeError here kills the sole writer silently.
+        self._had_write_failure: bool = False
+        self._full_repaint_pending: bool = False
+        self._last_full_repaint_ts: float = 0.0
+
         # Start media player thread
         self.media_player = MediaPlayerThread(deck_controller=self)
         self.media_player.start()
+        # Register the sole expected device writer for the owner-assertion
+        # tooling (STREAMCONTROLLER_ASSERT_DEVICE_OWNER; BetterDeck.py). A
+        # no-op unless that env var is set -- harness/dev tooling only.
+        self.deck.set_expected_writer(self.media_player)
 
         # Encoded key images keyed by (composite hash, rotation): repeated
         # frames (looping background video) skip conversion + JPEG encode.
@@ -641,6 +818,64 @@ class DeckController:
             except Exception:
                 log.warning("Background not ready before update_all_inputs; painting anyway")
         self.update_all_inputs(gen=gen)
+
+    def _reset_dedup_hashes(self) -> None:
+        """Nulls `_last_img_hash`/`_last_enqueued_hash` on every current key
+        and the touchscreen (if present) -- shared by Clear (dedup-coherence
+        fix) and full-repaint scheduling (resume-repaint fix), plan §3/§4
+        M2. Without this, a repaint of visually-identical content would
+        still match the stale cached hash and get wrongly skipped."""
+        for key in self.inputs.get(Input.Key, []):
+            key._last_img_hash = None
+            key._last_enqueued_hash = None
+        for touchscreen in self.inputs.get(Input.Touchscreen, []):
+            touchscreen._last_img_hash = None
+            touchscreen._last_enqueued_hash = None
+
+    def _schedule_full_repaint(self) -> None:
+        """Arms a pending full repaint -- fired by the media loop via
+        _run_pending_repaint() when the 2s rate window allows. Deferred (not
+        dropped) on rate-limit, and re-armed by every write FAILURE: a
+        repaint attempted while the library's read thread is still reopening
+        the handle after a suspend fails wholesale, and on a fully static
+        page no later write would ever re-trigger it -- the pending flag
+        makes the loop retry every 2s until a repaint's writes stick
+        (plan §4 M2)."""
+        self._full_repaint_pending = True
+
+    def _run_pending_repaint(self) -> bool:
+        """Media-loop hook: fires an armed repaint if >=2s since the last
+        one. Nulls all dedup hashes then update_all_inputs() -- safe on the
+        media thread: it only enqueues via add_image_task/
+        add_touchscreen_task, the same calls on_media_player_tick already
+        makes from this thread. Returns whether a repaint fired."""
+        if not self._full_repaint_pending:
+            return False
+        now = time.time()
+        if now - self._last_full_repaint_ts < 2.0:
+            return False
+        self._full_repaint_pending = False
+        self._last_full_repaint_ts = now
+        self._reset_dedup_hashes()
+        self.update_all_inputs()
+        return True
+
+    def _on_write_result(self, success: bool) -> None:
+        """Unified write-error handler (plan §4 M2, §9.1): called by both
+        image/touchscreen task run() paths and _exec_set_brightness after
+        every device write attempt. The graduated error policy is just
+        attempt-and-swallow (removal comes solely from USB disconnect
+        events) -- the remaining job is recovery: every failure arms the
+        pending repaint (content written into that failure window may be
+        lost on the device), and the loop's 2s cadence retries until a
+        repaint lands cleanly. Media-thread-only, no lock needed (see
+        __init__)."""
+        if success:
+            if self._had_write_failure:
+                self._had_write_failure = False
+        else:
+            self._had_write_failure = True
+            self._full_repaint_pending = True
 
     def event_callback(self, ident: InputIdentifier, *args, **kwargs):
         if not self.allow_interaction:
@@ -1025,8 +1260,13 @@ class DeckController:
     def set_brightness(self, value):
         value = min(100, max(0, value))
         if not self.get_alive(): return
-        self.deck.set_brightness(int(value))
+        # Routed through the media thread's control queue (plan §2.1) so the
+        # device write happens on the sole writer, not the calling (GTK/
+        # Timer/switch) thread. self.brightness is the last-commanded value,
+        # not a hardware-confirmed one -- same caveat as before this change
+        # (the old direct write had no error handling around it either).
         self.brightness = value
+        self.media_player.submit_control(SetBrightnessMsg(value))
 
     def set_rotation(self, value):
         self.deck.set_rotation(value)
@@ -1115,7 +1355,11 @@ class DeckController:
         self.own_deck_stack_child = deck_stack_child
         return deck_stack_child
     
-    def clear(self):
+    def _write_blank_frames(self) -> None:
+        """Writes blank key images (+ touchscreen) directly to the device.
+        Shared body for _clear_direct() and the media thread's Clear/
+        ClearAndClose control-message handling -- this is the "existing
+        clear body logic" the control messages reuse (plan §2.1)."""
         if not self.is_visual():
             return
         alpha_image = self.generate_alpha_key()
@@ -1129,6 +1373,26 @@ class DeckController:
             native_image = PILHelper.to_native_touchscreen_format(self.deck, empty)
 
             self.deck.set_touchscreen_image(native_image, x_pos=0, y_pos=0, width=touchscreen_size[0], height=touchscreen_size[1])
+
+    def _clear_direct(self) -> None:
+        """Synchronous, direct clear -- ONLY for the bootstrap liveness probe
+        in __init__: at that point media_player doesn't exist yet, and the
+        probe's exception must abort construction synchronously rather than
+        get lost in an async queue. Not owner-assertion safe by design: the
+        assertion is registered after the media thread starts, strictly
+        after this runs (plan §2.3). Do not call this from anywhere else."""
+        self._write_blank_frames()
+
+    def clear(self) -> None:
+        """Gen-agnostic async clear: submits a seq-stamped ClearMsg to the
+        media thread's control queue instead of writing directly (plan
+        §2.1). The seq stamp orders this against in-flight/future frame
+        submissions: tasks already queued with a lower submit_seq are wiped,
+        tasks submitted after this call (even same tick) survive and paint
+        afterward -- preserving the caller's clear-then-paint order as
+        blank-then-content on the device."""
+        seq = self.media_player.next_submit_seq()
+        self.media_player.submit_control(ClearMsg(seq=seq))
 
     def get_own_key_grid(self) -> KeyGrid:
         # Why not just lru_cache this? Because this would also cache the None that gets returned while the ui is still loading
@@ -1159,6 +1423,9 @@ class DeckController:
                 self.active_page.action_objects = {}
 
         if hasattr(self, "media_player"):
+            # If close_all() already drove this controller through
+            # ClearAndCloseMsg, the loop has already exited and `running` is
+            # already False -- stop()'s poll returns immediately (plan §2.4).
             self.media_player.stop()
 
         self.keep_actions_ticking = False
@@ -1251,36 +1518,87 @@ class Background:
             self._touchscreen_slice = self.image.get_touchscreen_image()
         return self._touchscreen_slice
 
-    def set_from_path(self, path: str, fps: int = 30, loop: bool = True, update: bool = True, allow_keep: bool = True) -> None:
+    def prebuild_from_path(self, path: str, fps: int = 30, loop: bool = True, allow_keep: bool = True):
+        """Phase-1 (lock-free) media resolution (plan §4 M3): constructs the
+        new background object (if any) WITHOUT touching self.video/self.image
+        or the deck. Building a BackgroundVideo hashes the whole source file
+        and opens a capture -- can take seconds -- so this exists to let a
+        caller (the screensaver transition) do that work before acquiring
+        any lock. apply_prebuilt() is the phase-2 (under _background_load_lock)
+        counterpart that actually performs the swap.
+
+        Returns a (kind, payload) tuple:
+          * ("blank", None)  -- path is empty/None: clear to no background.
+          * ("noop", None)   -- non-video path that doesn't exist: leave
+                                 whatever is currently showing alone (mirrors
+                                 set_from_path's historical no-op here).
+          * ("keep", None)   -- an equivalent video is already loaded
+                                 (allow_keep); apply_prebuilt just refreshes
+                                 its page/fps/loop, no rebuild.
+          * ("video"|"image", obj) -- a freshly constructed object to swap in.
+        """
         if path == "":
             path = None
         if path is None:
-            self.image = None
-            # self.video = None
-            self.set_video(None, update=False)
-            self._touchscreen_slice = None
-            self.update_tiles()
-            if update:
-                self.deck_controller.update_all_inputs()
-        elif is_video(path):
+            return ("blank", None)
+        if is_video(path):
             extend = self.extend_to_touchscreen and self.deck_controller.deck.is_touch()
             if allow_keep:
                 # The extend mode is baked into the video's canvas geometry and
                 # cache, so a mode change forces a rebuild even for the same path.
                 if (self.video is not None and self.video.video_path == path
                         and self.video.extend_touchscreen == extend):
-                    self.video.page = self.deck_controller.active_page
-                    self.video.fps = fps
-                    self.video.loop = loop
-                    return
-            self.set_video(BackgroundVideo(self.deck_controller, path, loop=loop, fps=fps, extend_touchscreen=extend), update=update)
-        else:
-            if path is None:
-                return
-            if not os.path.isfile(path):
-                return
-            with Image.open(path) as image:
-                self.set_image(BackgroundImage(self.deck_controller, image.copy()), update=update)
+                    # Carry the path so apply_prebuilt can re-verify: this
+                    # verdict is made lock-free, and a racing load_background
+                    # may swap self.video before phase 2 applies it.
+                    return ("keep", path)
+            return ("video", BackgroundVideo(self.deck_controller, path, loop=loop, fps=fps, extend_touchscreen=extend))
+        if not os.path.isfile(path):
+            return ("noop", None)
+        with Image.open(path) as image:
+            return ("image", BackgroundImage(self.deck_controller, image.copy()))
+
+    def apply_prebuilt(self, kind: str, payload, fps: int = 30, loop: bool = True, update: bool = True) -> None:
+        """Phase-2 counterpart to prebuild_from_path(): performs the actual
+        swap. Callers that need the lock-free/locked split (the screensaver
+        transition, plan §4 M3) call this under _background_load_lock with a
+        generation re-check already done; no file I/O happens here, only
+        object assignment + the same update_all_inputs() fan-out set_video/
+        set_image already trigger."""
+        if kind == "noop":
+            return
+        if kind == "keep":
+            # Re-verify the lock-free keep verdict against the video that is
+            # current NOW: a load_background racing the prebuild may have
+            # swapped in a different file, and refreshing fps/loop on that
+            # one would be wrong. A mismatch degrades to a no-op (rare,
+            # self-heals on the next transition) rather than corrupting the
+            # unrelated video's playback settings.
+            if self.video is not None and self.video.video_path == payload:
+                self.video.page = self.deck_controller.active_page
+                self.video.fps = fps
+                self.video.loop = loop
+            else:
+                log.warning("Stale 'keep' background verdict (video swapped mid-transition); leaving current background untouched")
+            return
+        if kind == "video":
+            self.set_video(payload, update=update)
+        elif kind == "image":
+            self.set_image(payload, update=update)
+        else:  # "blank"
+            self.set_video(None, update=False)
+            self._touchscreen_slice = None
+            self.update_tiles()
+            if update:
+                self.deck_controller.update_all_inputs()
+
+    def set_from_path(self, path: str, fps: int = 30, loop: bool = True, update: bool = True, allow_keep: bool = True) -> None:
+        """Synchronous convenience wrapper (prebuild + apply in one call) for
+        callers that don't need the lock-free/locked split -- load_background
+        (already under _background_load_lock itself) and ScreenSaver's
+        setters that act while already showing (plan §4 M3)."""
+        kind, payload = self.prebuild_from_path(path, fps=fps, loop=loop, allow_keep=allow_keep)
+        self.apply_prebuilt(kind, payload, fps=fps, loop=loop, update=update)
 
     def update_tiles(self) -> None:
         # Old tiles are reclaimed by refcounting once unreferenced; closing them
@@ -1447,11 +1765,17 @@ class KeyGIF(SingleKeyAsset):
         self.loop = loop
 
         self.active_frame: int = -1
+        # Wall-clock timeline state (presenter-migration-plan.md §4 M4):
+        # mirrors BackgroundVideo/InputVideo's wall-clock picking, but keyed
+        # against a cumulative-delay timeline instead of a fixed fps, since
+        # GIF frame durations are per-frame and often irregular.
+        self._play_start: float = None
+        self._last_frame_tick: float = None
 
         self.gif = Image.open(self.gif_path)
         self.frames = []
         self.frame_delays = []
-        
+
         # Extract frames and their delays
         for frame in ImageSequence.Iterator(self.gif):
             self.frames.append(frame.convert("RGBA"))
@@ -1463,17 +1787,48 @@ class KeyGIF(SingleKeyAsset):
                 delay *= 10
             self.frame_delays.append(delay)
 
-    def get_next_frame(self) -> Image.Image:
-        self.active_frame += 1
+        # Cumulative delay timeline in seconds: _cum_delays[i] is the
+        # wall-clock time at which frame i's display window ENDS. Picking a
+        # frame for elapsed time t is then a single bisect (see
+        # get_next_frame) instead of a per-tick increment-and-compare loop.
+        self._cum_delays: list[float] = list(
+            itertools.accumulate(d / 1000.0 for d in self.frame_delays)
+        )
+        self._total_delay: float = self._cum_delays[-1] if self._cum_delays else 0.0
 
-        if self.active_frame >= len(self.frames):
-            if self.loop:
-                self.active_frame = 0
-            else:
-                self.active_frame = len(self.frames) - 1
+    def get_next_frame(self, now: float = None) -> Image.Image:
+        n = len(self.frames)
+        if n == 0:
+            return None
+        if n == 1 or self._total_delay <= 0:
+            # Single-frame GIF, or no usable timing info: nothing to pick.
+            self.active_frame = 0
+            return self.frames[0]
+
+        if now is None:
+            now = time.time()
+
+        if self._play_start is None:
+            self._play_start = now
+        elif self._last_frame_tick is not None and now - self._last_frame_tick > 1.0:
+            # Ticks stopped while the page/key was away (screensaver, page
+            # switch, suspend): shift the timebase across the gap so playback
+            # resumes near where it left off instead of fast-forwarding
+            # through the whole gap (mirrors BackgroundVideo's gap clamp).
+            frame_period = self._cum_delays[0] if self._cum_delays else self._total_delay / n
+            self._play_start += (now - self._last_frame_tick) - frame_period
+        self._last_frame_tick = now
+
+        elapsed = now - self._play_start
+        t = elapsed % self._total_delay if self.loop else min(elapsed, self._total_delay)
+
+        frame = bisect.bisect_right(self._cum_delays, t)
+        if frame >= n:
+            frame = n - 1  # guard the end: float-edge / non-loop clamp landing on t == total
+        self.active_frame = frame
 
         return self.frames[self.active_frame]
-    
+
     def get_frame_delay(self) -> float:
         """Get delay for current frame in seconds"""
         if self.active_frame < 0 or self.active_frame >= len(self.frame_delays):
@@ -2392,9 +2747,6 @@ class ControllerKey(ControllerInput):
         self.press_state: bool = self.deck_controller.deck.key_states()[self.index]
 
         self.down_start_time: float = None
-         
-        # GIF timing tracking
-        self.last_gif_update_time: float = 0
 
     def on_hold_timer_end(self):
         state = self.get_active_state()
@@ -2477,26 +2829,19 @@ class ControllerKey(ControllerInput):
 
     def on_media_player_tick(self) -> None:
         self.media_ticks += 1
-        current_time = time.time()
 
         state = self.get_active_state()
         needs_update = False
-        
+
         # Check if we need to update based on content type
         if state.key_video is not None:
-            if isinstance(state.key_video, KeyGIF):
-                # Use GIF frame delay timing
-                if self.last_gif_update_time == 0:
-                    self.last_gif_update_time = current_time
-                    needs_update = True
-                else:
-                    frame_delay = state.key_video.get_frame_delay()
-                    if current_time - self.last_gif_update_time >= frame_delay:
-                        self.last_gif_update_time = current_time
-                        needs_update = True
-            else:
-                # For non-GIF videos, use the original FPS-based logic
-                needs_update = True
+            # Both InputVideo and KeyGIF now pick their current frame from
+            # their own wall-clock timeline (presenter-migration-plan.md §4
+            # M4); the tick just asks for whatever frame is current -- it no
+            # longer needs to pre-compute whether the GIF's frame delay has
+            # elapsed. This also matches how non-GIF videos were already
+            # handled here (unconditional needs_update).
+            needs_update = True
         elif state.label_manager.get_has_scroll_labels():
             needs_update = True
         elif self.deck_controller.background.video is not None:
@@ -2844,6 +3189,18 @@ class ControllerTouchScreen(ControllerInput):
         config_gen = self.config_gen
         image = self.get_current_image()
 
+        # Quick hash check - skip expensive encode+enqueue only if the image matches
+        # BOTH the last presented hash (_last_img_hash, set in the task's run())
+        # and the last enqueued hash: either alone can be stale (dropped paint /
+        # in-flight revert) and would wrongly skip the correcting repaint. Mirrors
+        # ControllerKey.update's dual-hash guard (plan §3) -- saves redundant
+        # 800x100 JPEG writes on unchanged composites.
+        img_hash = hash(image.tobytes())
+        if (img_hash == getattr(self, '_last_img_hash', None)
+                and img_hash == getattr(self, '_last_enqueued_hash', None)):
+            image.close()
+            return
+
         # Finish device work with `image` before handing it to the UI mirror, so
         # the media thread isn't reading it while GTK copies it.
         # Touchscreen only supports JPEG, so composite RGBA onto black.
@@ -2854,7 +3211,8 @@ class ControllerTouchScreen(ControllerInput):
             device_image = image
 
         native_image = PILHelper.to_native_touchscreen_format(self.deck_controller.deck, device_image)
-        self.deck_controller.media_player.add_touchscreen_task(native_image, page=page, config_gen=config_gen)
+        self._last_enqueued_hash = img_hash
+        self.deck_controller.media_player.add_touchscreen_task(native_image, page=page, config_gen=config_gen, controller_touchscreen=self, img_hash=img_hash)
 
         self.set_ui_image(image)
 
@@ -3347,11 +3705,7 @@ class ControllerKeyState(ControllerInputState):
         if self.key_video is not None:
             self.key_video.close()
             self.key_video = None
-            
-        # Reset GIF timing
-        if isinstance(self.controller_input, ControllerKey):
-            self.controller_input.last_gif_update_time = 0
-    
+
     def set_image(self, key_image: "InputImage", update: bool = True) -> None:
         if self.key_image is not None:
             self.key_image.close()
@@ -3367,10 +3721,6 @@ class ControllerKeyState(ControllerInputState):
         if self.key_image is not None:
             self.key_image.close()
         self.key_image = None
-        
-        # Reset GIF timing for new video
-        if isinstance(self.controller_input, ControllerKey):
-            self.controller_input.last_gif_update_time = 0
 
     def clear(self):
         self.key_image = None

@@ -580,6 +580,10 @@ def main():
     
     create_cache_folder()
     threading.Thread(target=update_assets, name="update_assets").start()
+
+    from src.backend.DeckManagement.Subclasses.video_cache_sweeper import sweep_stale_video_caches
+    threading.Thread(target=sweep_stale_video_caches, args=(15,), name="video_cache_sweep", daemon=True).start()
+
     load()
 
 if __name__ == "__main__":

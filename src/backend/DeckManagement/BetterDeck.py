@@ -1,5 +1,8 @@
+import os
 import threading
+import traceback
 
+from loguru import logger as log
 from StreamDeck.Devices import StreamDeck
 
 class BetterDeck():
@@ -9,6 +12,37 @@ class BetterDeck():
         # Serializes device I/O: hidapi is not thread-safe and the deck is
         # written from several threads. Reentrant for nested wrapped calls.
         self._lock = threading.RLock()
+
+        # Owner-assertion tooling (single-writer migration, M0): detects any
+        # thread other than the registered writer performing a device write.
+        # LOG-ONLY, never raises -- this is a harness/dev detector, not a
+        # shipping invariant (BetterDeck's RLock remains the real defense).
+        # Env checked once here so the hot path is a single attribute test
+        # when unset.
+        self._assert_owner: bool = bool(os.environ.get("STREAMCONTROLLER_ASSERT_DEVICE_OWNER"))
+        self._expected_writer: threading.Thread | None = None
+        self.owner_violations: list[tuple[str, str, str]] = []
+
+    def set_expected_writer(self, thread: threading.Thread | None) -> None:
+        """Registers the thread that is expected to perform all device writes.
+
+        Not wired into DeckController yet (that lands in M1); calling this is
+        purely opt-in instrumentation for the harness/dev tooling.
+        """
+        self._expected_writer = thread
+
+    def _check_owner(self, method_name: str) -> None:
+        if not self._assert_owner or self._expected_writer is None:
+            return
+        current = threading.current_thread()
+        if current is self._expected_writer:
+            return
+        stack_summary = "".join(traceback.format_stack(limit=8))
+        self.owner_violations.append((method_name, current.name, stack_summary))
+        log.warning(
+            f"Device owner violation: {method_name}() called from thread "
+            f"'{current.name}', expected '{self._expected_writer.name}'"
+        )
 
 
     def open(self):
@@ -357,6 +391,7 @@ class BetterDeck():
         Resets the StreamDeck, clearing all button images and showing the
         standby image.
         """
+        self._check_owner("reset")
         with self._lock:
             self.deck.reset()
 
@@ -368,6 +403,7 @@ class BetterDeck():
         :param int/float percent: brightness percent, from [0-100] as an `int`,
                                   or normalized to [0.0-1.0] as a `float`.
         """
+        self._check_owner("set_brightness")
         with self._lock:
             self.deck.set_brightness(percent)
 
@@ -405,6 +441,7 @@ class BetterDeck():
                                  If `None`, the key will be cleared to a black
                                  color.
         """
+        self._check_owner("set_key_image")
         physical_key = self.get_physical_index(key)
         with self._lock:
             self.deck.set_key_image(physical_key, image)
@@ -426,6 +463,7 @@ class BetterDeck():
         :param int height: height of the image
 
         """
+        self._check_owner("set_touchscreen_image")
         with self._lock:
             self.deck.set_touchscreen_image(image, x_pos, y_pos, width, height)
 
@@ -440,6 +478,7 @@ class BetterDeck():
         :param int b: Blue value
 
         """
+        self._check_owner("set_key_color")
         physical_key = self.get_physical_index(key)
         with self._lock:
             self.deck.set_key_color(physical_key, r, g, b)
@@ -454,6 +493,7 @@ class BetterDeck():
         :param enumerable image: Raw data of the image to set on the button.
                                  If `None`, the screen will be cleared.
         """
+        self._check_owner("set_screen_image")
         with self._lock:
             self.deck.set_screen_image(image)
 
