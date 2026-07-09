@@ -18,7 +18,7 @@ import os
 import sys
 import threading
 import time
-from PIL import Image, ImageOps
+from PIL import Image, ImageEnhance, ImageOps
 import cv2
 from loguru import logger as log
 import globals as gl
@@ -26,7 +26,7 @@ import globals as gl
 VID_CACHE = os.path.join(gl.DATA_PATH, "cache", "videos")
 
 class VideoFrameCache:
-    def __init__(self, video_path, size: tuple[int, int]):
+    def __init__(self, video_path, size: tuple[int, int], saturation: float = 1.0):
         self.lock = threading.Lock()
 
         self.video_path = video_path
@@ -37,7 +37,22 @@ class VideoFrameCache:
         self.last_decoded_frame = None
         self.last_frame_index = -1
 
+        # Baked into each frame once, at decode time (see get_frame) -- a
+        # frame decoded once is then served from the in-memory/on-disk cache
+        # for every subsequent request, so this is a one-time-per-frame cost,
+        # not a per-render one. Folded into the cache directory name (same
+        # two-decimal fixed encoding as BackgroundVideoCache) so a factor
+        # change can't serve stale-saturation frames from an old cache; the
+        # default factor keeps the plain "<md5>" stem so existing caches
+        # stay valid.
+        self.saturation = saturation
+        self._sat_suffix = (
+            "" if abs(self.saturation - 1.0) <= 0.001
+            else f".sat{int(round(self.saturation * 100))}"
+        )
+
         self.video_md5 = self.get_video_hash()
+        self.video_stem = f"{self.video_md5}{self._sat_suffix}"
 
         self.load_cache()
 
@@ -87,6 +102,13 @@ class VideoFrameCache:
             # Fill a 72x72 square completely with the image, keeping the aspect ratio
             pil_image = ImageOps.fit(pil_image, self.size, Image.Resampling.LANCZOS)
 
+            # One-time per decoded frame (see class docstring note in
+            # __init__); mode is always "RGB" here (frame_rgb came from a
+            # 3-channel BGR->RGB conversion), so no mode check is needed.
+            # Skipped entirely at the default factor.
+            if self._sat_suffix:
+                pil_image = ImageEnhance.Color(pil_image).enhance(self.saturation)
+
             self.last_decoded_frame = pil_image
             if self.do_caching:
                 self.cache[self.last_frame_index] = pil_image
@@ -117,9 +139,9 @@ class VideoFrameCache:
         """
         with self.lock:
             if key_index is None:
-                path = os.path.join(VID_CACHE, "single_key", self.video_md5, f"{self.size[0]}x{self.size[1]}", f"{frame_index}.jpg")
+                path = os.path.join(VID_CACHE, "single_key", self.video_stem, f"{self.size[0]}x{self.size[1]}", f"{frame_index}.jpg")
             else:
-                path = os.path.join(VID_CACHE, f"key: {key_index}", self.video_md5, f"{self.size[0]}x{self.size[1]}", f"{key_index}", f"{frame_index}.jpg")
+                path = os.path.join(VID_CACHE, f"key: {key_index}", self.video_stem, f"{self.size[0]}x{self.size[1]}", f"{key_index}", f"{frame_index}.jpg")
 
             if os.path.isfile(path):
                 return
@@ -132,7 +154,7 @@ class VideoFrameCache:
         with self.lock:
             start = time.time()
             if key_index is None:
-                path = os.path.join(VID_CACHE, "single_key", self.video_md5, f"{self.size[0]}x{self.size[1]}")
+                path = os.path.join(VID_CACHE, "single_key", self.video_stem, f"{self.size[0]}x{self.size[1]}")
                 if not os.path.exists(path):
                     return
                 for file in os.listdir(path):
@@ -142,7 +164,7 @@ class VideoFrameCache:
                         self.cache[int(file.split(".")[0])] = img.copy()
 
             else:
-                path = os.path.join(VID_CACHE, f"key: {key_index}", self.video_md5, f"{self.size[0]}x{self.size[1]}", f"{key_index}")
+                path = os.path.join(VID_CACHE, f"key: {key_index}", self.video_stem, f"{self.size[0]}x{self.size[1]}", f"{key_index}")
                 if not os.path.exists(path):
                     return
                 for file in os.listdir(path):

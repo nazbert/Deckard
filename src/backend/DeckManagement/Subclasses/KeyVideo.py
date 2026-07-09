@@ -31,7 +31,11 @@ class InputVideo(SingleKeyAsset):
         self.fps = fps
         self.loop = loop
 
-        self.video_cache = VideoFrameCache(video_path, size=self.controller_input.get_image_size())
+        self.video_cache = VideoFrameCache(
+            video_path,
+            size=self.controller_input.get_image_size(),
+            saturation=self.deck_controller.get_display_saturation(),
+        )
 
         self.active_frame: int = -1
         # Wall-clock picking state (mirrors BackgroundVideo.get_next_tiles,

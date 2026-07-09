@@ -4,7 +4,7 @@ import threading
 
 import cv2
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageEnhance, ImageOps
 from loguru import logger as log
 
 import globals as gl
@@ -39,6 +39,22 @@ class BackgroundVideoCache:
         self.video_path = video_path
         self.video_md5 = self.get_video_hash()
 
+        # Baked into the canvas at build time (_canvas_from_source_bgr), once
+        # per source frame -- never per playback frame, since playback after
+        # the cache completes just decodes already-saturated pixels back out
+        # of the cache file. Read once here so the whole instance (filename,
+        # build path) is consistent for its lifetime; a later factor change
+        # is picked up by constructing a new instance (see Background.
+        # prebuild_from_path's "keep" check).
+        self.saturation = deck_controller.get_display_saturation()
+        # Two-decimal fixed encoding (e.g. 1.30 -> "sat130"); empty at the
+        # default factor so today's plain "{md5}.mp4" caches stay valid and
+        # no suffix/enhance work happens at 1.0.
+        self._sat_suffix = (
+            "" if abs(self.saturation - 1.0) <= 0.001
+            else f".sat{int(round(self.saturation * 100))}"
+        )
+
         self.key_layout = self.deck_controller.deck.key_layout()
         self.key_count = self.deck_controller.deck.key_count()
         self.key_size = self.deck_controller.deck.key_image_format()['size']
@@ -58,11 +74,15 @@ class BackgroundVideoCache:
 
         cache_dir = os.path.join(VID_CACHE, self.key_layout_str)
         os.makedirs(cache_dir, exist_ok=True)
-        self.cache_path = os.path.join(cache_dir, f"{self.video_md5}.mp4")
+        # entry.split(".")[0] (video_cache_sweeper.py) still resolves this to
+        # video_md5 with the suffix present, since the suffix is appended
+        # after the first dot-delimited component -- verified, sweeper needs
+        # no changes.
+        self.cache_path = os.path.join(cache_dir, f"{self.video_md5}{self._sat_suffix}.mp4")
         self._legacy_cache_path = os.path.join(cache_dir, f"{self.video_md5}.cache")
         # Unique per instance: two decks building the same video concurrently
         # must not write the same temp file (os.replace makes last-wins safe).
-        self._writer_tmp_path = os.path.join(cache_dir, f"{self.video_md5}.{os.getpid()}-{id(self):x}.tmp.mp4")
+        self._writer_tmp_path = os.path.join(cache_dir, f"{self.video_md5}{self._sat_suffix}.{os.getpid()}-{id(self):x}.tmp.mp4")
 
         self._complete = False
         self._cache_cap: cv2.VideoCapture = None
@@ -278,9 +298,20 @@ class BackgroundVideoCache:
         return (canvas_width, canvas_height)
 
     def _canvas_from_source_bgr(self, frame: np.ndarray) -> np.ndarray:
-        """Fit a source frame (BGR) to the deck canvas, preserving aspect ratio."""
+        """Fit a source frame (BGR) to the deck canvas, preserving aspect ratio.
+
+        Called once per *source* frame while the cache is being built (never
+        again once _complete -- playback then decodes already-saturated
+        pixels straight out of the cache file), so baking the saturation
+        boost in here is a one-time cost, not a per-render-frame one.
+        """
         pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         canvas = ImageOps.fit(pil_image, self._canvas_size(), Image.Resampling.HAMMING)
+        # canvas is always mode "RGB" here (pil_image came from a 3-channel
+        # BGR->RGB conversion), so no mode check/conversion is needed before
+        # ImageEnhance.Color. Skipped entirely at the default factor.
+        if self._sat_suffix:
+            canvas = ImageEnhance.Color(canvas).enhance(self.saturation)
         return cv2.cvtColor(np.asarray(canvas), cv2.COLOR_RGB2BGR)
 
     def _entries_from_bgr(self, frame: np.ndarray) -> list[Image.Image]:

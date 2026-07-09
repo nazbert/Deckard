@@ -29,7 +29,7 @@ from queue import Queue
 from threading import Thread, Timer
 
 import psutil
-from PIL import Image, ImageDraw, ImageFont, ImageSequence
+from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageSequence
 from StreamDeck.Devices import StreamDeck
 from StreamDeck.Devices.StreamDeck import DialEventType, TouchscreenEventType
 from StreamDeck.Devices.StreamDeckPlus import StreamDeckPlus
@@ -89,7 +89,15 @@ def encode_native_key(deck, image: "Image.Image", quality: int = 90) -> bytes:
     if fmt["flip"][1]:
         image = image.transpose(Image.FLIP_TOP_BOTTOM)
     with io.BytesIO() as buf:
-        image.save(buf, fmt["format"], quality=quality)
+        save_kwargs = {"quality": quality}
+        if fmt["format"] == "JPEG":
+            # Below quality 95 Pillow silently switches to 4:2:0 chroma
+            # subsampling, which halves color resolution both axes -- a
+            # measured ~4% average desaturation plus chroma smear on busy
+            # 120px tiles. Force 4:4:4: keeps q90's encode speed, costs
+            # ~17% bytes (noise at current USB headroom).
+            save_kwargs["subsampling"] = 0
+        image.save(buf, fmt["format"], **save_kwargs)
         return buf.getvalue()
 
 
@@ -202,6 +210,9 @@ class MediaPlayerThread(threading.Thread):
     # full-page paint) and gets inter-write yields; below it is interactive
     # (press feedback, plugin set_media) and writes immediately.
     BULK_BATCH_THRESHOLD = 4
+    # Within a bulk batch, yield after every N writes (see the comment at
+    # the batch loop in perform_media_player_tasks).
+    YIELD_STRIDE = 3
 
     def __init__(self, deck_controller: "DeckController"):
         super().__init__(name="MediaPlayerThread", daemon=True)
@@ -213,9 +224,12 @@ class MediaPlayerThread(threading.Thread):
         # write flood can out-race the 20Hz HID read poll for it (the lock is
         # unfair), so dial encoder events arrive coalesced and lag badly. The
         # inter-write yield below guarantees the reader a mutex slot inside
-        # bulk batches, which is what makes 30Hz safe (hardware-verified:
-        # dials stay clean; previously capped at 15). 0 disables the cap.
-        self._video_write_hz = float(os.environ.get("STREAMCONTROLLER_VIDEO_WRITE_HZ", 30))
+        # bulk batches. 20 is the measured sweet spot: 30 was validated on
+        # dedup-friendly content (mostly-static tiles, ~80 writes/s) but a
+        # high-entropy video defeats tile dedup entirely (~270 candidate
+        # writes/s) and drags the media loop to ~19fps; 20 sustains 26+ loop
+        # fps on that same worst case. 0 disables the cap.
+        self._video_write_hz = float(os.environ.get("STREAMCONTROLLER_VIDEO_WRITE_HZ", 20))
         self._last_video_write = 0.0
 
         # Inter-write yield inside bulk batches (seconds); see the comment in
@@ -599,17 +613,23 @@ class MediaPlayerThread(threading.Thread):
         # yield between BULK writes guarantees the reader a mutex slot,
         # which is what makes raising STREAMCONTROLLER_VIDEO_WRITE_HZ safe.
         # Interactive paints (small batches) stay unpaced: no added latency.
+        # Yield every YIELD_STRIDE-th bulk write, not every write: the HID
+        # read poll runs at 20Hz, so it needs ONE mutex window per ~50ms --
+        # a slot every few writes (~3ms of holds) is ample, and per-write
+        # yields cost ~12ms per video frame on high-entropy content where
+        # dedup can't skip anything (measured: loop 19fps on a busy video).
         bulk = len(image_batch) >= self.BULK_BATCH_THRESHOLD
-        wrote_any = False
+        writes_since_yield = 0
         for task in image_batch:
             if _is_current(task):
-                if bulk and wrote_any and self._inter_write_yield > 0:
+                if bulk and writes_since_yield >= self.YIELD_STRIDE and self._inter_write_yield > 0:
                     time.sleep(self._inter_write_yield)
+                    writes_since_yield = 0
                 task.run()
-                wrote_any = True
+                writes_since_yield += 1
 
         if touch_task is not None and _is_current(touch_task):
-            if bulk and wrote_any and self._inter_write_yield > 0:
+            if bulk and writes_since_yield >= self.YIELD_STRIDE and self._inter_write_yield > 0:
                 time.sleep(self._inter_write_yield)
             touch_task.run()
 
@@ -662,6 +682,15 @@ class DeckController:
         if isinstance(self.deck, StreamDeckPlus) or (isinstance(self.deck, FakeDeck) and self.deck.key_layout() == [2, 4]):
             log.error("Deck recognized as StreamDeckPlus")
             self.key_spacing = (52, 36)
+
+        # Per-deck saturation boost (PIL ImageEnhance.Color factor, UI range
+        # 1.0-1.5). Cached here -- read once at boot and refreshed by
+        # set_display_saturation() -- so every per-frame/per-build call site
+        # (background video cache, key video cache, static media) can do a
+        # cheap attribute read instead of a settings-dict lookup, and can
+        # skip all enhancement work with a single float comparison when the
+        # factor is the default 1.0 (no-op requirement).
+        self.display_saturation: float = self._read_display_saturation()
 
         # Tasks
         self.media_player_tasks: Queue[MediaPlayerTask] = Queue()
@@ -1339,6 +1368,46 @@ class DeckController:
         if not self.get_alive():
             return {}
         return gl.settings_manager.get_deck_settings(self.deck.get_serial_number())
+
+    # --- display saturation ----------------------------------------------
+    # DEFAULT_DISPLAY_SATURATION (1.0) is a strict no-op: every application
+    # site below compares against it before doing any ImageEnhance work or
+    # touching a cache filename, so the on-disk/behavioral footprint at the
+    # default is byte-identical to a build without this feature.
+    DEFAULT_DISPLAY_SATURATION = 1.0
+
+    def _read_display_saturation(self) -> float:
+        try:
+            value = float(
+                self.get_deck_settings().get("display", {}).get(
+                    "saturation", self.DEFAULT_DISPLAY_SATURATION
+                )
+            )
+        except (TypeError, ValueError):
+            value = self.DEFAULT_DISPLAY_SATURATION
+        return value
+
+    def get_display_saturation(self) -> float:
+        return self.display_saturation
+
+    def set_display_saturation(self, value: float) -> None:
+        """Persist the saturation factor to deck settings, refresh the cached
+        value, and reload the active page so static media (background image,
+        key/dial icons) re-enhances immediately. A currently-playing
+        background/key *video* keeps showing its already-baked cache until
+        the reload constructs a fresh cache object under the new factor's
+        cache filename (see BackgroundVideoCache/VideoFrameCache) -- video
+        content upgrades to the new factor on its first playthrough after
+        that, not instantaneously."""
+        value = round(float(value), 2)
+        deck_settings = self.get_deck_settings()
+        deck_settings.setdefault("display", {})["saturation"] = value
+        gl.settings_manager.save_deck_settings(self.deck.get_serial_number(), deck_settings)
+
+        self.display_saturation = value
+
+        if self.active_page is not None:
+            self.load_page(self.active_page, allow_reload=True)
     
     def get_own_deck_stack_child(self) -> "DeckStackChild":
         # Why not just lru_cache this? Because this would also cache the None that gets returned while the ui is still loading
@@ -1544,10 +1613,14 @@ class Background:
         if is_video(path):
             extend = self.extend_to_touchscreen and self.deck_controller.deck.is_touch()
             if allow_keep:
-                # The extend mode is baked into the video's canvas geometry and
-                # cache, so a mode change forces a rebuild even for the same path.
+                # The extend mode and the saturation factor are both baked into
+                # the video's canvas geometry/pixels and its cache file, so a
+                # change to either forces a rebuild even for the same path
+                # (otherwise a saturation change on an already-playing video
+                # background would silently keep showing the old factor).
                 if (self.video is not None and self.video.video_path == path
-                        and self.video.extend_touchscreen == extend):
+                        and self.video.extend_touchscreen == extend
+                        and abs(self.video.saturation - self.deck_controller.get_display_saturation()) <= 0.001):
                     # Carry the path so apply_prebuilt can re-verify: this
                     # verdict is made lock-free, and a racing load_background
                     # may swap self.video before phase 2 applies it.
@@ -1628,6 +1701,18 @@ class Background:
 class BackgroundImage:
     def __init__(self, deck_controller: DeckController, image: Image) -> None:
         self.deck_controller = deck_controller
+        # Saturation is baked into the source image once, here, at load time.
+        # create_full_deck_sized_image()/get_tiles()/get_touchscreen_image()
+        # all derive from self.image, so the key tiles and the touchscreen
+        # strip slice inherit the same single enhancement pass -- no
+        # per-frame cost, no double-enhancement. Factor 1.0 (the default)
+        # skips the ImageEnhance call and any mode conversion entirely, so
+        # the stored image is byte-identical to today's behavior.
+        saturation = deck_controller.get_display_saturation()
+        if abs(saturation - 1.0) > 0.001:
+            if image.mode not in ("RGB", "RGBA"):
+                image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+            image = ImageEnhance.Color(image).enhance(saturation)
         self.image = image
 
     def create_full_deck_sized_image(self, extend_touchscreen: bool = False) -> Image:
