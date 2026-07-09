@@ -23,13 +23,19 @@ if TYPE_CHECKING:
     from src.backend.DeckManagement.DeckController import ControllerInput
 
 class InputVideo(SingleKeyAsset):
-    def __init__(self, controller_input: "ControllerInput", video_path: str, fps: int = 30, loop: bool = True):
+    def __init__(self, controller_input: "ControllerInput", video_path: str, fps: int = 30, loop: bool = True,
+                 natural_speed: bool = False):
         super().__init__(
             controller_input=controller_input,
         )
         self.video_path = video_path
         self.fps = fps
         self.loop = loop
+        # natural_speed: play at the SOURCE's fps regardless of `fps` -- the
+        # setting then only caps how often the owner re-renders (the
+        # touchscreen background uses this). Off: `fps` IS the playback rate
+        # (key/dial media semantics -- their fps setting changes speed).
+        self.natural_speed = natural_speed
 
         # Shared-file registry (docs/memory-footprint-impl-plan.md P2.1/P2.2):
         # this instance owns its own reader (VideoCapture + decode state),
@@ -63,17 +69,31 @@ class InputVideo(SingleKeyAsset):
             # Cache built -> any frame is a free lookup. Pick it by wall-clock
             # so a slow media loop drops frames (stays real-time) instead of
             # playing the video in slow-motion.
+            playback_fps = float(self.fps or 30)
+            if self.natural_speed:
+                playback_fps = float(self.video_cache.get_source_fps() or playback_fps)
             if self._play_start is None:
                 # Seed the timebase from the current position, not zero: the
                 # cache can complete mid-play (sequential decode), and a zero
                 # base would replay a non-looping video / jump a looping one.
-                self._play_start = now - (self.active_frame + 1) / float(self.fps or 30)
+                self._play_start = now - (self.active_frame + 1) / playback_fps
             elif self._last_frame_tick is not None and now - self._last_frame_tick > 1.0:
                 # Ticks stop while the page is away; shift the timebase across
                 # the gap so playback resumes in place instead of fast-forwarding.
-                self._play_start += (now - self._last_frame_tick) - 1.0 / float(self.fps or 30)
+                self._play_start += (now - self._last_frame_tick) - 1.0 / playback_fps
             self._last_frame_tick = now
-            frame = int((now - self._play_start) * (self.fps or 30))
+            elapsed = now - self._play_start
+            if self.natural_speed:
+                # `fps` is the owner's render cap: quantize the timebase so
+                # the picked frame advances at most `fps` times per second.
+                # The quantization must live HERE, in the picker -- composites
+                # can be re-triggered at any rate by OTHER animated content
+                # (deck background video, dials), which per-owner tick gates
+                # never see. Within a cap window the pick is identical, so
+                # the owner's hash dedup drops the redundant device write.
+                cap = max(1.0, float(self.fps or 30))
+                elapsed = int(elapsed * cap) / cap
+            frame = int(elapsed * playback_fps)
             n_frames = self.video_cache.n_frames
             self.active_frame = frame % n_frames if self.loop else min(frame, n_frames - 1)
         else:
@@ -86,6 +106,18 @@ class InputVideo(SingleKeyAsset):
                 self.active_frame = 0
 
         return self.video_cache.get_frame(self.active_frame)
+
+    def set_playback(self, fps: int, loop: bool) -> None:
+        """Applies new fps/loop to an already-playing video, preserving the
+        current position: without natural_speed, wall-clock picking computes
+        frame = elapsed * fps, so changing fps without rebasing the start
+        time would jump the playback position by the whole elapsed factor.
+        With natural_speed the timebase runs on the source's fps and `fps`
+        is only the owner's render cap -- no rebase needed."""
+        if not self.natural_speed and (self.fps or 30) != (fps or 30) and self._play_start is not None:
+            self._play_start = time.time() - (self.active_frame + 1) / float(fps or 30)
+        self.fps = fps
+        self.loop = loop
 
     def get_raw_image(self) -> Image.Image:
         return self.get_next_frame()

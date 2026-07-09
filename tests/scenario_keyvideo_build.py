@@ -45,6 +45,9 @@ class StubKeyVideoCache:
     def is_cache_complete(self) -> bool:
         return self._complete
 
+    def get_source_fps(self) -> float:
+        return getattr(self, "source_fps", None)
+
     def get_frame(self, n: int):
         n = min(n, self.n_frames - 1)  # KeyVideoCache.get_frame does the same clamp
         self.decode_counts[n] = self.decode_counts.get(n, 0) + 1
@@ -56,6 +59,7 @@ def make_video(n_frames: int, fps: float = 10.0, loop: bool = True) -> InputVide
     v = InputVideo.__new__(InputVideo)
     v.fps = fps
     v.loop = loop
+    v.natural_speed = False  # key/dial semantics: fps IS the playback rate
     v.active_frame = -1
     v._play_start = None
     v._last_frame_tick = None
@@ -151,6 +155,36 @@ def main() -> None:
         f"gap clamp did not shift _play_start as expected: "
         f"{v._play_start} != {expected_play_start}"
     )
+
+    # --- natural_speed: playback runs at the SOURCE's fps; `fps` is only a
+    # render cap that quantizes the pick, so composites re-triggered by other
+    # animated content within a cap window return the SAME frame. ---
+    vn = make_video(n_frames=100, fps=5.0, loop=True)  # cap=5
+    vn.natural_speed = True
+    vn.video_cache.source_fps = 20.0  # native speed, 4x the cap
+    vn.video_cache._complete = True
+
+    tn = T0 + 40000.0
+    vn.get_next_frame(now=tn)
+    base = vn._play_start
+    # Position advances at the SOURCE fps: after 1s it must be ~20 frames on,
+    # not 5 (fps-as-speed would give 5).
+    f_1s = vn.get_next_frame(now=tn + 1.0)
+    assert f_1s == int(int((tn + 1.0 - base) * 5.0) / 5.0 * 20.0) % 100, (
+        f"natural-speed pick mismatch: got {f_1s}"
+    )
+    assert f_1s >= 15, (
+        f"natural_speed must advance at source fps (~20 frames/s), got {f_1s} after 1s"
+    )
+    # Within one cap window (0.2s at cap=5) the pick must NOT advance...
+    f_a = vn.get_next_frame(now=tn + 2.00)
+    f_b = vn.get_next_frame(now=tn + 2.19)
+    assert f_a == f_b, (
+        f"picks within one 1/cap window must be identical (render cap), got {f_a} then {f_b}"
+    )
+    # ...and the next window advances by source_fps/cap frames (4).
+    f_c = vn.get_next_frame(now=tn + 2.21)
+    assert f_c != f_a, "the next cap window must advance the pick"
 
     print("PASS: scenario_keyvideo_build")
 

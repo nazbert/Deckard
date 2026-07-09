@@ -375,15 +375,20 @@ class MediaPlayerThread(threading.Thread):
                 for key in self.deck_controller.inputs[Input.Key]:
                     cast("ControllerKey", key).on_media_player_tick()
 
-                # Dials share one touchscreen; render it at most once per
-                # frame instead of once per dial.
+                # Dials and any per-touchscreen background video share one
+                # touchscreen; render it at most once per frame instead of
+                # once per dial.
                 dials = self.deck_controller.inputs[Input.Dial]
+                touchscreens = self.deck_controller.inputs[Input.Touchscreen]
                 touchscreen_dirty = False
                 for dial in dials:
                     if cast("ControllerDial", dial).on_media_player_tick():
                         touchscreen_dirty = True
-                if (touchscreen_dirty or bg_strip_dirty) and dials:
-                    cast("ControllerDial", dials[0]).get_touch_screen().update()
+                for touchscreen in touchscreens:
+                    if cast("ControllerTouchScreen", touchscreen).on_media_player_tick():
+                        touchscreen_dirty = True
+                if (touchscreen_dirty or bg_strip_dirty) and touchscreens:
+                    cast("ControllerTouchScreen", touchscreens[0]).update()
 
             # Perform media player tasks
             self.perform_media_player_tasks()
@@ -562,6 +567,12 @@ class MediaPlayerThread(threading.Thread):
             for dial in self.deck_controller.inputs.get(Input.Dial, []):
                 state = dial.get_active_state()
                 if state.video is not None or state.label_manager.get_has_scroll_labels():
+                    needs = True
+                    break
+        if not needs:
+            for touchscreen in self.deck_controller.inputs.get(Input.Touchscreen, []):
+                state = touchscreen.get_active_state()
+                if state is not None and state.background_video is not None:
                     needs = True
                     break
         self._cached_needs_ticks = needs
@@ -2295,19 +2306,23 @@ class BackgroundVideo(BackgroundVideoCache):
         if self.is_cache_complete():
             # Cache built -> any frame is a free lookup. Pick it by wall-clock so a
             # slow media loop drops frames (stays real-time) instead of playing the
-            # video in slow-motion.
+            # video in slow-motion. Playback runs at the SOURCE's fps -- the
+            # page's fps setting only limits how often the media loop renders
+            # a new frame (the tick divider in MediaPlayerThread.run), it must
+            # not change playback speed.
+            playback_fps = float(self.get_source_fps() or self.fps or 30)
             now = time.time()
             if self._play_start is None:
                 # Seed the timebase from the current position, not zero: the cache
                 # completes mid-play (sequential decode or async disk load), and a
                 # zero base would replay a non-looping video / jump a looping one.
-                self._play_start = now - (self.active_frame + 1) / float(self.fps or 30)
+                self._play_start = now - (self.active_frame + 1) / playback_fps
             elif self._last_frame_tick is not None and now - self._last_frame_tick > 1.0:
                 # Ticks stop while the page is away; shift the timebase across the
                 # gap so playback resumes in place instead of fast-forwarding.
-                self._play_start += (now - self._last_frame_tick) - 1.0 / float(self.fps or 30)
+                self._play_start += (now - self._last_frame_tick) - 1.0 / playback_fps
             self._last_frame_tick = now
-            frame = int((now - self._play_start) * (self.fps or 30))
+            frame = int((now - self._play_start) * playback_fps)
             self.active_frame = frame % self.n_frames if self.loop else min(frame, self.n_frames - 1)
         else:
             # Still decoding into the cache: advance sequentially so every frame is
@@ -3704,6 +3719,11 @@ class ControllerKey(ControllerInput):
                                 video_path=path,
                                 loop = state_dict.get("media", {}).get("loop", True),
                                 fps = state_dict.get("media", {}).get("fps", 30),
+                                # User-assigned media plays at the source's
+                                # speed; the dict fps (sidebar FPS row) is a
+                                # render cap. Plugin media via set_media keeps
+                                # fps-as-playback-rate -- an explicit API arg.
+                                natural_speed=True,
                             )) # Videos always update
 
                 layout = ImageLayout(
@@ -3813,7 +3833,31 @@ class ControllerTouchScreen(ControllerInput):
 
     def generate_empty_image(self) -> Image.Image:
         return Image.new("RGBA", self.get_screen_dimensions(), (0, 0, 0, 0))
-    
+
+    def get_image_size(self) -> tuple[int, int]:
+        # InputVideo sizes its frame cache from this (KeyVideo.py) -- for the
+        # touchscreen that is the full strip.
+        return self.get_screen_dimensions()
+
+    def on_media_player_tick(self) -> bool:
+        # A per-touchscreen background video advances on the media tick like
+        # dial content does; the caller re-composites the shared touchscreen
+        # once per frame. The screensaver owns the strip while it is showing.
+        if self.deck_controller.screen_saver.showing:
+            return False
+        state = self.get_active_state()
+        if state is None or state.background_video is None:
+            return False
+        # The configured fps is a RENDER cap: playback position is wall-clock
+        # at the source's native fps (InputVideo natural_speed), so skipping
+        # ticks here drops frames without slowing the video down.
+        cap_fps = min(self.deck_controller.media_player.FPS, max(1, state.background_video.fps or 30))
+        now = time.time()
+        if now - state._last_background_video_render < 1.0 / cap_fps:
+            return False
+        state._last_background_video_render = now
+        return True
+
     def get_dial_image_area(self, identifier: Input.Dial) -> tuple[int, int, int, int]:
         width, height = self.get_screen_dimensions()
 
@@ -4067,6 +4111,11 @@ class ControllerDial(ControllerInput):
                             video_path=path,
                             loop = state_dict.get("media", {}).get("loop", True),
                             fps = state_dict.get("media", {}).get("fps", 30),
+                            # User-assigned media plays at the source's speed;
+                            # the dict fps (sidebar FPS row) is a render cap.
+                            # Plugin media via set_media keeps
+                            # fps-as-playback-rate -- an explicit API arg.
+                            natural_speed=True,
                         )) # Videos always update
 
             layout = ImageLayout(
@@ -4112,14 +4161,112 @@ class ControllerTouchScreenState(ControllerInputState):
 
         self.controller_touch = controller_touch
 
+        # (key, fitted-image-or-None) for _get_fitted_background_image.
+        self._fitted_background_cache = (None, None)
+
+        # Playback state for a VIDEO configured as this touchscreen's
+        # background: an InputVideo over a strip-sized shared frame cache,
+        # advanced by the media tick (see ControllerTouchScreen.
+        # on_media_player_tick). Managed by _get_background_video_frame;
+        # get_current_image releases it when the background stops being a
+        # video. The lock covers create/release -- composites can run on the
+        # media thread and on load/UI threads concurrently.
+        self.background_video: "InputVideo" = None
+        self._background_video_failed: str = None
+        self._background_video_lock = threading.Lock()
+        # Timestamp gate for the fps render cap in on_media_player_tick.
+        self._last_background_video_render: float = 0.0
+
     def set_current_image(self, image: Image.Image):
         self.current_image = image
 
         self.update()
 
+    def _get_fitted_background_image(self, path: str, size: tuple[int, int]) -> Image.Image:
+        # Decode + fit once per (path, mtime, size) and cache: this runs on
+        # every composite (30/s while a background video plays), and a failed
+        # decode must not log per frame. Videos take the playback path in
+        # _get_background_video_frame instead.
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return None
+
+        key = (path, mtime, size)
+        cached_key, cached_image = self._fitted_background_cache
+        if cached_key == key:
+            # Callers paste dial images onto the returned image in place --
+            # hand out a copy so the cache stays pristine.
+            return cached_image.copy() if cached_image is not None else None
+
+        image = None
+        try:
+            with Image.open(path) as img:
+                image = img.copy()
+        except Exception as e:
+            log.error(f"Error loading touchscreen background image {path}: {e}")
+
+        fitted = None
+        if image is not None:
+            fitted = ImageOps.fit(image, size, Image.Resampling.LANCZOS).convert("RGBA")
+
+        # Failures are cached too: a bad file logs once, not every frame.
+        self._fitted_background_cache = (key, fitted)
+        return fitted.copy() if fitted is not None else None
+
+    def _get_background_video_frame(self, path: str, fps: int = 30, loop: bool = True) -> Image.Image:
+        # The InputVideo owns a strip-sized shared frame cache
+        # (mp4_tile_cache); frame picking is wall-clock, gap-clamped, and --
+        # natural_speed -- runs at the SOURCE's fps, so neither composite
+        # rate nor the fps setting changes playback speed. fps/loop come from
+        # the page's background settings (sidebar background editor): loop
+        # wraps playback, fps only caps the strip's re-render rate (see
+        # ControllerTouchScreen.on_media_player_tick).
+        with self._background_video_lock:
+            if path == self._background_video_failed:
+                return None
+
+            video = self.background_video
+            if video is None or video.video_path != path:
+                if video is not None:
+                    video.close()
+                video = InputVideo(
+                    controller_input=self.controller_touch,
+                    video_path=path,
+                    fps=fps,
+                    loop=loop,
+                    natural_speed=True,
+                )
+                self.background_video = video
+            else:
+                video.set_playback(fps=fps, loop=loop)
+
+            frame = video.get_next_frame()
+            if frame is None:
+                # n_frames is known from construction (the reader opens its
+                # source eagerly), so <=0 is a deterministically bad file:
+                # fail it once instead of retrying (and logging) per frame.
+                # A transient miss on a healthy file just retries next tick.
+                if video.video_cache is None or video.video_cache.n_frames <= 0:
+                    log.error(f"Could not decode touchscreen background video {path}")
+                    video.close()
+                    self.background_video = None
+                    self._background_video_failed = path
+                return None
+
+            # convert() copies -- dial images get pasted onto the returned
+            # composite in place, and the cache's payload must stay pristine.
+            return frame.convert("RGBA")
+
+    def _release_background_video(self) -> None:
+        with self._background_video_lock:
+            if self.background_video is not None:
+                self.background_video.close()
+                self.background_video = None
+
     def get_current_image(self) -> Image.Image:
         screen_width, screen_height = self.controller_touch.get_screen_dimensions()
-        
+
         # Start with background image if set
         background: Image.Image = None
         active_page = self.controller_touch.deck_controller.active_page
@@ -4128,14 +4275,25 @@ class ControllerTouchScreenState(ControllerInputState):
             state=self.state
         )
         
+        has_video_background = bool(
+            background_image_path
+            and os.path.isfile(background_image_path)
+            and is_video(background_image_path)
+        )
+        if not has_video_background:
+            # The background stopped being a video (cleared or swapped to an
+            # image): detach its frame cache so the tick predicate goes quiet.
+            self._release_background_video()
+
         if background_image_path and os.path.isfile(background_image_path):
-            try:
-                with Image.open(background_image_path) as img:
-                    # Resize to exact touchscreen dimensions (KISS - exact dimensions)
-                    background = ImageOps.fit(img, (screen_width, screen_height), Image.Resampling.LANCZOS).convert("RGBA")
-            except Exception as e:
-                log.error(f"Error loading background image: {e}")
-                background = None
+            if has_video_background:
+                background = self._get_background_video_frame(
+                    background_image_path,
+                    fps=active_page.get_background_fps(identifier=self.controller_touch.identifier, state=self.state),
+                    loop=active_page.get_background_loop(identifier=self.controller_touch.identifier, state=self.state),
+                )
+            else:
+                background = self._get_fitted_background_image(background_image_path, (screen_width, screen_height))
 
         # Deck background extended onto the strip is the bottom-most layer; an
         # explicit per-touchscreen background image takes precedence over it.
@@ -4239,6 +4397,9 @@ class ControllerTouchScreenState(ControllerInputState):
         if current_image is not None:
             current_image.close()
         self.current_image = None
+        # Detach the background video's shared-cache reader like
+        # ControllerKeyState/ControllerDialState release their videos.
+        self._release_background_video()
 
 class ControllerDialState(ControllerInputState):
     def __init__(self, dial: "ControllerDial", state: int):

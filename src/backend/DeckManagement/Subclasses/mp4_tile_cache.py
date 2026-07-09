@@ -144,9 +144,23 @@ class Mp4FrameCache:
         self.last_frame_index = -1  # source decode position while building/reading
 
         self.n_frames = 0
+        self._source_fps: float = None
 
         if not self._open_existing_cache():
             self._open_source()
+
+    def get_source_fps(self) -> float:
+        """Native fps of the source video; None if unknown. The cache mp4 is
+        written at the source's fps, so whichever capture is open (source or
+        cache) can answer."""
+        if self._source_fps is None:
+            with self.lock:
+                cap = self._cache_cap if self._cache_cap is not None else self.cap
+                if cap is not None:
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    if fps and fps > 0:
+                        self._source_fps = float(fps)
+        return self._source_fps
 
     # --- overridable hooks -------------------------------------------------
 

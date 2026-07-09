@@ -983,6 +983,24 @@ class Page:
         if update:
             self.update_input(identifier, state)
 
+    def get_media_fps(self, identifier: InputIdentifier, state: int) -> int:
+        value = self._get_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "media", "fps"])
+        return 30 if value is None else int(value)
+
+    def set_media_fps(self, identifier: InputIdentifier, state: int, fps: int, update: bool = True) -> None:
+        # Live-apply to any playing video so the change doesn't wait for a
+        # page reload. GIF media (KeyGIF) has its own timeline and no
+        # set_playback -- only InputVideo-style media takes the cap.
+        for input_state in self.get_controller_input_states(identifier, state):
+            video = getattr(input_state, "key_video", None) or getattr(input_state, "video", None)
+            if video is not None and hasattr(video, "set_playback"):
+                video.set_playback(fps=fps, loop=video.loop)
+
+        self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "media", "fps"], fps)
+
+        if update:
+            self.update_input(identifier, state)
+
     def get_background_color(self, identifier: InputIdentifier, state: int) -> list[int]:
         return self._get_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "background", "color"])
 
@@ -997,6 +1015,24 @@ class Page:
 
     def set_background_image(self, identifier: InputIdentifier, state: int, path: str, update: bool = True) -> None:
         self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "background", "image"], path)
+        if update:
+            self.update_input(identifier, state)
+
+    def get_background_loop(self, identifier: InputIdentifier, state: int) -> bool:
+        value = self._get_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "background", "loop"])
+        return True if value is None else bool(value)
+
+    def set_background_loop(self, identifier: InputIdentifier, state: int, loop: bool, update: bool = True) -> None:
+        self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "background", "loop"], loop)
+        if update:
+            self.update_input(identifier, state)
+
+    def get_background_fps(self, identifier: InputIdentifier, state: int) -> int:
+        value = self._get_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "background", "fps"])
+        return 30 if value is None else int(value)
+
+    def set_background_fps(self, identifier: InputIdentifier, state: int, fps: int, update: bool = True) -> None:
+        self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "background", "fps"], fps)
         if update:
             self.update_input(identifier, state)
 
