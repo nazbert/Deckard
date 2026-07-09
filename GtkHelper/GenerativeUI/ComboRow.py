@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.backend.PluginManager.ActionCore import ActionCore
 
-from GtkHelper.GtkHelper import better_disconnect
+from GtkHelper.GtkHelper import better_disconnect, on_main
 
 
 class ComboRow(GenerativeUI[BaseComboRowItem]):
@@ -48,19 +48,19 @@ class ComboRow(GenerativeUI[BaseComboRowItem]):
             can_reset (bool, optional): Whether resetting is allowed. Defaults to True.
             auto_add (bool, optional): Whether to automatically add this UI element to the action. Defaults to True.
         """
-        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change)
+        def build():
+            self._widget: Combo = Combo(
+                title=self.get_translation(title, title),
+                subtitle=self.get_translation(subtitle, subtitle),
+                items=items,
+                enable_search=enable_search,
+                default_selection=self._default_value
+            )
+            self._handle_reset_button_creation()
+            self.connect_signals()
+        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change, build=build)
 
-        self._widget: Combo = Combo(
-            title=self.get_translation(title, title),
-            subtitle=self.get_translation(subtitle, subtitle),
-            items=items,
-            enable_search=enable_search,
-            default_selection=self._default_value
-        )
-
-        self._handle_reset_button_creation()
-        self.connect_signals()
-
+    @on_main
     def set_sensitive(self, sensitive: bool):
         self.widget.set_sensitive(sensitive)
 
@@ -119,13 +119,12 @@ class ComboRow(GenerativeUI[BaseComboRowItem]):
 
     # Widget Wrappers
 
+    @on_main
     def set_selected_item(self, item: BaseComboRowItem | str = "", update_setting: bool = False):
         """Sets the selected item and optionally updates the stored value."""
         selected_item = self.widget.set_selected_item(item)
-
         if update_setting:
             self.set_value(selected_item)
-
         return selected_item
 
     @GenerativeUI.signal_manager

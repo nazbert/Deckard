@@ -5,7 +5,7 @@ from gi.repository import Gtk, Adw
 
 from typing import TYPE_CHECKING
 
-from GtkHelper.GtkHelper import better_disconnect
+from GtkHelper.GtkHelper import better_disconnect, on_main
 
 if TYPE_CHECKING:
     from src.backend.PluginManager.ActionCore import ActionCore
@@ -67,25 +67,23 @@ class ScaleRow(GenerativeUI[float]):
             can_reset (bool, optional): Whether the scale value can be reset. Defaults to True.
             auto_add (bool, optional): Whether to automatically add the scale row to the UI. Defaults to True.
         """
-        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change)
-
-        self._widget: Scale = Scale(
-            title=self.get_translation(title, title),
-            subtitle=self.get_translation(subtitle, subtitle),
-            value=self._default_value,
-            min=min,
-            max=max,
-            add_text_entry=add_text_entry,
-            step=step,
-            digits=digits,
-            draw_value=draw_value,
-            round_digits=round_digits,
-            text_entry_max_length=text_entry_max_length,
-        )
-
-        self._handle_reset_button_creation()
-
-        self.connect_signals()
+        def build():
+            self._widget: Scale = Scale(
+                title=self.get_translation(title, title),
+                subtitle=self.get_translation(subtitle, subtitle),
+                value=self._default_value,
+                min=min,
+                max=max,
+                add_text_entry=add_text_entry,
+                step=step,
+                digits=digits,
+                draw_value=draw_value,
+                round_digits=round_digits,
+                text_entry_max_length=text_entry_max_length,
+            )
+            self._handle_reset_button_creation()
+            self.connect_signals()
+        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change, build=build)
 
     def connect_signals(self):
         """
@@ -147,6 +145,7 @@ class ScaleRow(GenerativeUI[float]):
         """
         self.widget.scale.set_value(value)
 
+    @on_main
     def set_min(self, min: float):
         """
         Sets the minimum value for the scale.
@@ -156,6 +155,7 @@ class ScaleRow(GenerativeUI[float]):
         """
         self.widget.set_min(min)
 
+    @on_main
     def set_max(self, max: float):
         """
         Sets the maximum value for the scale.
@@ -165,6 +165,7 @@ class ScaleRow(GenerativeUI[float]):
         """
         self.widget.set_max(max)
 
+    @on_main
     def set_step(self, step: float):
         """
         Sets the step size for adjusting the scale value.
@@ -185,6 +186,7 @@ class ScaleRow(GenerativeUI[float]):
         return self.widget.min
 
     @min.setter
+    @on_main
     def min(self, value: float):
         """
         Sets the minimum value for the scale.
@@ -205,6 +207,7 @@ class ScaleRow(GenerativeUI[float]):
         return self.widget.max
 
     @max.setter
+    @on_main
     def max(self, value: float):
         """
         Sets the maximum value for the scale.
@@ -225,6 +228,7 @@ class ScaleRow(GenerativeUI[float]):
         return self.widget.step
 
     @step.setter
+    @on_main
     def step(self, value: float):
         """
         Sets the step size for adjusting the scale value.
@@ -245,6 +249,7 @@ class ScaleRow(GenerativeUI[float]):
         return self._widget.digits
 
     @digits.setter
+    @on_main
     def digits(self, digits: int):
         """
         Sets the number of digits to display for the scale value.

@@ -495,6 +495,14 @@ class ActionCore(rpyc.Service):
     def add_generative_ui_object(self, generative_ui_object: GenerativeUI):
         self.generative_ui_objects.append(generative_ui_object)
 
+    def remove_generative_ui_object(self, generative_ui_object: GenerativeUI):
+        """Unregister a GenerativeUI element (e.g. a dynamically-rebuilt config
+        row) so it stops being retained for the action's lifetime."""
+        try:
+            self.generative_ui_objects.remove(generative_ui_object)
+        except ValueError:
+            pass
+
     def get_generative_ui(self):
         return self.generative_ui_objects
 

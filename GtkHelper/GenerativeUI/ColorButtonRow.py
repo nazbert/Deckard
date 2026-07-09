@@ -46,16 +46,16 @@ class ColorButtonRow(GenerativeUI[tuple[int, int, int, int]]):
             can_reset (bool, optional): Whether the UI element can be reset. Defaults to True.
             auto_add (bool, optional): Whether the UI element is automatically added to the action. Defaults to True.
         """
-        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change)
+        def build():
+            self._widget: ColorDialog = ColorDialog(
+                title=self.get_translation(title),
+                subtitle=self.get_translation(subtitle),
+                default_color=self._default_value
+            )
 
-        self._widget: ColorDialog = ColorDialog(
-            title=self.get_translation(title),
-            subtitle=self.get_translation(subtitle),
-            default_color=self._default_value
-        )
-
-        self._handle_reset_button_creation()
-        self.connect_signals()
+            self._handle_reset_button_creation()
+            self.connect_signals()
+        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change, build=build)
 
     def connect_signals(self):
         """

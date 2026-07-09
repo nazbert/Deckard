@@ -44,15 +44,15 @@ class PasswordEntryRow(GenerativeUI[str]):
             can_reset (bool, optional): Whether the password can be reset. Defaults to True.
             auto_add (bool, optional): Whether to automatically add this entry to the UI. Defaults to True.
         """
-        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change)
+        def build():
+            self._widget: Adw.PasswordEntryRow = Adw.PasswordEntryRow(
+                title=self.get_translation(title, title),
+                text=self._default_value
+            )
 
-        self._widget: Adw.PasswordEntryRow = Adw.PasswordEntryRow(
-            title=self.get_translation(title, title),
-            text=self._default_value
-        )
-
-        self._handle_reset_button_creation()
-        self.connect_signals()
+            self._handle_reset_button_creation()
+            self.connect_signals()
+        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change, build=build)
 
     def connect_signals(self):
         """

@@ -36,7 +36,8 @@ class GenerativeUI[T](ABC):
     _complex_var_name: bool
 
     def __init__(self, action_core: "ActionCore", var_name: str, default_value: T, can_reset: bool = True,
-                 auto_add: bool = True, complex_var_name: bool = False, on_change: Callable[[Gtk.Widget, T, T], None] = None):
+                 auto_add: bool = True, complex_var_name: bool = False, on_change: Callable[[Gtk.Widget, T, T], None] = None,
+                 build: Callable[[], None] = None):
         """
         Initializes the UI element.
 
@@ -57,6 +58,12 @@ class GenerativeUI[T](ABC):
         self._complex_var_name = complex_var_name
         self._widget: Gtk.Widget = None
 
+        if build is not None:
+            from GtkHelper.GtkHelper import run_on_main
+            run_on_main(build)
+
+        # Register only after the widget exists: load_initial_generative_ui may
+        # run from a queued idle and must never see a half-built element.
         self._action_core.add_generative_ui_object(self)
 
     @abstractmethod
@@ -87,6 +94,12 @@ class GenerativeUI[T](ABC):
     @property
     def widget(self):
         """Returns the GTK widget representing the UI element."""
+        # Back-reference so a container can recover the owning GenerativeUI object.
+        if self._widget is not None:
+            try:
+                self._widget._generative_ui_owner = self
+            except Exception:
+                pass
         return self._widget
 
     @property
@@ -118,11 +131,16 @@ class GenerativeUI[T](ABC):
 
         @functools.wraps(func)
         def wrapper(self, *args, **kwargs):
-            self.disconnect_signals()
-            try:
-                return func(self, *args, **kwargs)
-            finally:
-                self.connect_signals()
+            from GtkHelper.GtkHelper import run_on_main
+
+            def _run():
+                self.disconnect_signals()
+                try:
+                    return func(self, *args, **kwargs)
+                finally:
+                    self.connect_signals()
+
+            return run_on_main(_run)
 
         return wrapper
 
@@ -242,8 +260,30 @@ class GenerativeUI[T](ABC):
 
     def unparent(self):
         """Removes the UI element from its parent widget if it has one."""
-        if self.widget and self.widget.get_parent():
-            self.widget.unparent()
+        from GtkHelper.GtkHelper import run_on_main
+
+        def _do():
+            if self.widget and self.widget.get_parent():
+                self.widget.unparent()
+        run_on_main(_do)
+
+    def destroy(self):
+        """Disconnect signals, unparent the widget, and unregister from the
+        action. Idempotent. Never run_dispose() the widget: disposing a live
+        Adw composite (ComboRow/ExpanderRow) trips Gtk-CRITICALs."""
+        from GtkHelper.GtkHelper import run_on_main
+
+        def _do():
+            try:
+                self.disconnect_signals()
+            except Exception:
+                pass
+            self._action_core.remove_generative_ui_object(self)
+            widget = self._widget
+            if widget is not None and widget.get_parent() is not None:
+                widget.unparent()
+            self._widget = None
+        run_on_main(_do)
 
     def _create_reset_button(self):
         """Creates a reset button for the UI element."""

@@ -27,20 +27,20 @@ class ToggleRow(GenerativeUI[bool]):
                  auto_add: bool = True,
                  complex_var_name: bool = False
                  ):
-        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change)
+        def build():
+            self._widget: Toggle = Toggle(
+                toggles = toggles,
+                active_toggle = self._default_value,
+                title=self.get_translation(title),
+                subtitle=self.get_translation(subtitle),
+                can_shrink=can_shrink,
+                homogeneous=homogeneous,
+                active=active
+            )
 
-        self._widget: Toggle = Toggle(
-            toggles = toggles,
-            active_toggle = self._default_value,
-            title=self.get_translation(title),
-            subtitle=self.get_translation(subtitle),
-            can_shrink=can_shrink,
-            homogeneous=homogeneous,
-            active=active
-        )
-
-        self._handle_reset_button_creation()
-        self.connect_signals()
+            self._handle_reset_button_creation()
+            self.connect_signals()
+        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change, build=build)
 
     def _handle_value_changed(self, new_value, update_settings: bool = True, trigger_callback: bool = True):
         old_value = self.get_value()
