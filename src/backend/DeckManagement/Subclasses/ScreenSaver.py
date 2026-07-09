@@ -281,7 +281,15 @@ class ScreenSaver:
             self.deck_controller.clear()
             self.showing = False
 
-            active_page = self.deck_controller.active_page
+            # A page change requested while the screensaver was showing sits in
+            # the controller's pending slot (switching immediately would freeze
+            # the screensaver video -- see load_page's guard): load it now,
+            # falling back to whatever page is active. Consumed here under
+            # _load_page_lock but loaded by follow_up after release (phase 3):
+            # a page change landing in that gap is overwritten by this older
+            # load -- the same window the plain active_page reload always had.
+            pending = self.deck_controller.take_pending_screensaver_page()
+            active_page = pending if pending is not None else self.deck_controller.active_page
             time_delay = self.time_delay
             follow_up = lambda: self._hide_followup(active_page, time_delay)
 

@@ -801,6 +801,9 @@ class DeckController:
         # future or strand its queued work. RLock: a ChangePage handler may
         # nest a load_page.
         self._load_page_lock = threading.RLock()
+        # Page recorded by load_page's screensaver guard, consumed by
+        # ScreenSaver.hide() via take_pending_screensaver_page().
+        self._screensaver_pending_page: "Page" = None
         # Serializes background loads on the pool; a superseded load must not
         # overwrite a newer page's background.
         self._background_load_lock = threading.Lock()
@@ -1308,6 +1311,13 @@ class DeckController:
             return
         self.load_input(controller_input, page, update)
 
+    def take_pending_screensaver_page(self) -> "Page":
+        """Pops the page recorded by load_page's screensaver guard; None when
+        no page change arrived while the screensaver was showing."""
+        pending = self._screensaver_pending_page
+        self._screensaver_pending_page = None
+        return pending
+
     def load_input_from_identifier(self, identifier: str, page: Page, update: bool = True):
         controller_input = self.get_input(identifier)
         if controller_input is not None:
@@ -1372,6 +1382,28 @@ class DeckController:
             if not allow_reload:
                 if self.active_page is page:
                     return
+
+            # A page change requested while the screensaver owns the deck must
+            # NOT load or paint the new page now: that would replace the
+            # screensaver on the device and leak the page's icons onto the deck
+            # AND into the app previews. Record it as PENDING and return; hide()
+            # loads it when the screensaver is dismissed.
+            #
+            # Deliberately DON'T touch active_page here: the media player gates
+            # the screensaver's own background-video animation on
+            # `background.video.page is active_page` (see MediaPlayerThread.run
+            # ~360), so changing active_page mid-screensaver freezes the
+            # screensaver video (it resumes only when active_page is switched
+            # back to the screensaver's page). Leaving active_page on the
+            # screensaver's page keeps that gate open and the video playing.
+            if self.screen_saver.showing:
+                if page is not None:
+                    self._screensaver_pending_page = page
+                # A clear request (page=None) is dropped, not deferred: the
+                # pending slot has no "clear" representation (None means "no
+                # pending"), and letting it through would clear the deck out
+                # from under the showing screensaver.
+                return
 
             # Cheap monotonic counter read by mem_telemetry's idle/trim gate
             # (docs/memory-footprint-plan.md Phase 0) -- bump once we know
