@@ -41,6 +41,24 @@
   <url type="bugtracker">https://github.com/StreamController/StreamController/issues</url>
   <url type="contribute">https://github.com/StreamController/StreamController</url>
   <releases>
+    <release version="1.5.0-beta.15" date="2026-07-09">
+      <description translatable="no">
+        <p>Features:</p>
+          <li>Add uninstall button to plugin settings page</li>
+        <ul>
+        </ul>
+        <p>Improvements:</p>
+        <ul>
+            <li>Improved page switch speed</li>
+            <li>Reduce idle CPU usage</li>
+            <li>Improve Hyprland active window detection</li>
+            <li>Switch to new GNOME runtime</li>
+        </ul>
+        <p>Fixes:</p>
+        <ul>
+        </ul>
+      </description>
+    </release>
     <release version="1.5.0-beta.14" date="2026-05-21">
       <description translatable="no">
         <p>Features:</p>
