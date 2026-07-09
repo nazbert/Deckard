@@ -66,8 +66,18 @@ class StoreBackend:
     SDPLUSWALLPAPERS_FILE = "SDPlusBarWallpapers.json"
 
 
+    # Cap concurrent GitHub fetches: enough to overlap the catalog's ~150
+    # small requests (the fetch itself is what dominates store load time),
+    # few enough not to present as a scrape burst to raw.githubusercontent.
+    MAX_CONCURRENT_REQUESTS = 10
+
     def __init__(self):
         self.store_cache = StoreCache()
+
+        # threading (not asyncio) semaphore: StoreBackend methods run under a
+        # fresh asyncio.run() per store page load thread, and an
+        # asyncio.Semaphore cannot be shared across event loops.
+        self._fetch_limiter = threading.Semaphore(self.MAX_CONCURRENT_REQUESTS)
 
         self.official_store_branch_cache: str = None
 
@@ -123,13 +133,27 @@ class StoreBackend:
         return v
 
     async def request_from_url(self, url: str) -> requests.Response:
+        # The blocking fetch (connection AND body read) runs in a worker
+        # thread: process_store_data gathers dozens of prepare_* coroutines,
+        # and a blocking requests.get() on the event loop would serialize
+        # every one of them behind each request's latency.
+        def _fetch() -> requests.Response | None:
+            with self._fetch_limiter:
+                req = requests.get(url, stream=True, timeout=30)
+                try:
+                    if req.status_code == 200:
+                        req.content  # read the body while still in the worker thread
+                        return req
+                    log.error(f"Request to {url} failed with status code {req.status_code}")
+                    return None
+                finally:
+                    req.close()  # content stays cached on the Response
+
         try:
-            req = requests.get(url, stream=True, timeout=30)
-            if req.status_code == 200:
-                return req
-            log.error(f"Request to {url} failed with status code {req.status_code}")
-            req.close()  # release the streamed connection back to the pool
-            return NoConnectionError()
+            req = await asyncio.to_thread(_fetch)
+            if req is None:
+                return NoConnectionError()
+            return req
         except requests.exceptions.RequestException as e:
             log.error(e)
             return NoConnectionError()
@@ -189,6 +213,18 @@ class StoreBackend:
         answer = await self.request_from_url(url)
 
         if isinstance(answer, NoConnectionError):
+            # Fetch failed (offline, or raw.githubusercontent rate-limiting
+            # us with 429s): fall back to the cached copy, even when the
+            # caller forced a refetch -- a slightly stale catalog beats an
+            # empty/errored store page. Bounded by the entry's FETCHED age;
+            # its "date" field is a last-use clock that every read renews,
+            # so it cannot bound staleness (see StoreCache).
+            if self.store_cache.is_cached(url=repo_url, branch=branch_name, path=file_path):
+                fetched = self.store_cache.get_fetched_date(url=repo_url, branch=branch_name, path=file_path)
+                if fetched is not None and time.time() - fetched <= StoreCache.DAYS_TO_KEEP * 24 * 60 * 60:
+                    log.warning(f"Serving cached copy of {file_path} from {repo_url} after failed fetch")
+                    with self.store_cache.open_cache_file(url=repo_url, branch=branch_name, path=file_path, mode=f"r{byte_suffix}") as f:
+                        return f.read()
             return answer
         
         if answer is None:
@@ -263,7 +299,13 @@ class StoreBackend:
                 }
                 prepare_tasks.append(process_func(asset, include_images, False))
 
-        results = await asyncio.gather(*prepare_tasks)
+        # return_exceptions: one misbehaving store entry must not raise out of
+        # the gather and blank the whole page (the page's @log.catch load()
+        # would swallow it and leave the spinner up forever).
+        results = await asyncio.gather(*prepare_tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                log.error(f"Store item preparation failed: {result!r}")
         results = [result for result in results if isinstance(result, data_class)]
 
         return results
@@ -344,8 +386,10 @@ class StoreBackend:
         thumbnail_path = manifest.get("thumbnail")
         if include_image:
             image = await self.get_web_image(url, thumbnail_path, commit or branch)
-            if isinstance(manifest, NoConnectionError):
-                return image
+            if isinstance(image, NoConnectionError):
+                # A missing/rate-limited thumbnail must not drop the plugin --
+                # list it without an image.
+                image = None
         
         attribution = await self.get_attribution(url, commit or branch)
         if isinstance(attribution, NoConnectionError):

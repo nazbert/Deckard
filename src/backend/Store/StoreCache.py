@@ -7,6 +7,14 @@ from loguru import logger as log
 import globals as gl
 
 class StoreCache:
+    # Entries carry two clocks: "date" is LAST USE (refreshed on every open,
+    # drives remove_old_cache_files eviction of unused entries) and "fetched"
+    # is CONTENT AGE (set only when the file is written, drives the
+    # stale-fallback bound in StoreBackend.get_remote_file). Bounding
+    # staleness on "date" would be circular: serving the stale copy would
+    # keep renewing it.
+    DAYS_TO_KEEP = 3
+
     def __init__(self):
         self.CACHE_PATH = os.path.join(gl.DATA_PATH, "Store" , "cache")
 
@@ -38,7 +46,6 @@ class StoreCache:
                 json.dump(files.copy(), f, indent=4)
 
     def remove_old_cache_files(self):
-        DAYS_TO_KEEP = 3
         for string in self.files.copy():
             path = self.files[string].get("path")
             if not os.path.exists(path):
@@ -48,7 +55,7 @@ class StoreCache:
                 os.remove(path)
                 self.files.pop(string)
 
-            if time.time() - date > DAYS_TO_KEEP * 24 * 60 * 60:
+            if time.time() - date > self.DAYS_TO_KEEP * 24 * 60 * 60:
                 os.remove(path)
                 self.files.pop(string)
 
@@ -118,10 +125,19 @@ class StoreCache:
         cache_path = self.get_cache_path(url, path, branch, data_type)
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
 
-        self.files[self.generate_cache_string(url, path, branch, data_type)] = {
-            "path": cache_path,
-            "date": time.time()
-        }
+        entry = self.files.get(self.generate_cache_string(url, path, branch, data_type), {})
+        entry["path"] = cache_path
+        entry["date"] = time.time()  # last use (eviction clock)
+        if any(flag in mode for flag in ("w", "a", "x", "+")):
+            entry["fetched"] = time.time()  # content age (staleness clock)
+        self.files[self.generate_cache_string(url, path, branch, data_type)] = entry
         self.set_files(self.files)
-        
+
         return open(cache_path, mode)
+
+    def get_fetched_date(self, url: str, path: str, branch: str = "main", data_type: str = "text") -> float:
+        """When the cached content was last WRITTEN (falls back to the
+        last-use date for entries predating the "fetched" field); None if
+        unknown."""
+        entry = self.files.get(self.generate_cache_string(url, path, branch, data_type), {})
+        return entry.get("fetched", entry.get("date"))
