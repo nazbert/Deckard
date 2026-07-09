@@ -29,7 +29,6 @@ import os
 import uuid
 import shutil
 from packaging import version
-import urllib.request
 import threading
 
 # Import GLib
@@ -51,7 +50,9 @@ from src.windows.Store.StoreData import PluginData, IconData, SDPlusBarWallpaper
 
 
 class NoConnectionError:
-    pass
+    # Falsy so callers can treat any error result as a failed operation.
+    def __bool__(self) -> bool:
+        return False
 
 class StoreBackend:
     STORE_REPO_URL = "https://github.com/StreamController/StreamController-Store" #"https://github.com/StreamController/StreamController-Store"
@@ -123,12 +124,13 @@ class StoreBackend:
 
     async def request_from_url(self, url: str) -> requests.Response:
         try:
-            req = requests.get(url, stream=True)
+            req = requests.get(url, stream=True, timeout=30)
             if req.status_code == 200:
                 return req
             log.error(f"Request to {url} failed with status code {req.status_code}")
+            req.close()  # release the streamed connection back to the pool
             return NoConnectionError()
-        except requests.exceptions.ConnectionError as e:
+        except requests.exceptions.RequestException as e:
             log.error(e)
             return NoConnectionError()
     
@@ -207,7 +209,7 @@ class StoreBackend:
         
     async def get_last_commit(self, repo_url: str, branch_name: str = "main") -> str:
         url = f"https://api.github.com/repos/{self.get_user_name(repo_url)}/{self.get_repo_name(repo_url)}/commits?sha={branch_name}&per_page=1"
-        response = requests.get(url)
+        response = requests.get(url, timeout=30)
 
         if response.status_code != 200:
             return
@@ -765,44 +767,61 @@ class StoreBackend:
         sha = commit_sha
         if commit_sha is None and branch_name is not None:
             # Used to write the version
-            sha = self.get_last_commit(repo_url, branch_name)
+            sha = await self.get_last_commit(repo_url, branch_name)
         zip_url = f"https://github.com/{username}/{projectname}/archive/{sha}.zip"
-        
+
+        zip_path = os.path.join(gl.DATA_PATH, "cache", f"{projectname}-{sha}.zip")
+
         # Download
         try:
             # Create cache dir
             os.makedirs(os.path.join(gl.DATA_PATH, "cache"), exist_ok=True)
-            urllib.request.urlretrieve(zip_url, os.path.join(gl.DATA_PATH, "cache", f"{projectname}-{sha}.zip"))
-        except TypeError as e:
+            with requests.get(zip_url, stream=True, timeout=30) as r:
+                r.raise_for_status()
+                with open(zip_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+        except Exception as e:
             log.error(e)
+            # Don't leave a partial/zero-byte archive behind for the next run.
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
             return NoConnectionError()
         
         ## Extract
-        if os.path.exists(os.path.join(gl.DATA_PATH, "cache", f"{projectname}-{sha}")):
-            shutil.rmtree(os.path.join(gl.DATA_PATH, "cache", f"{projectname}-{sha}"))
-        shutil.unpack_archive(os.path.join(gl.DATA_PATH, "cache", f"{projectname}-{sha}.zip"), os.path.join(gl.DATA_PATH, "cache"))
+        extracted_folder = None
+        try:
+            # Resolve the folder name from the zip listing (github urls aren't
+            # case-sensitive, so it may not match projectname) BEFORE unpacking,
+            # so the finally-cleanup also covers a mid-extraction failure.
+            extracted_folder_name = self.get_main_folder_of_zip(zip_path)
+            extracted_folder = os.path.join(gl.DATA_PATH, "cache", extracted_folder_name)
+            if os.path.exists(extracted_folder):
+                shutil.rmtree(extracted_folder)
+            shutil.unpack_archive(zip_path, os.path.join(gl.DATA_PATH, "cache"))
 
+            # Reset destination folder
+            if os.path.isdir(directory):
+                shutil.rmtree(directory)
+            if os.path.isfile(directory):
+                os.remove(directory)
+            os.makedirs(directory, exist_ok=True)
 
-        ## Why - because github is not case sensitive for the urls, so the casing of the zip file might be different than the one of the contained folder
-        extracted_folder_name = self.get_main_folder_of_zip(os.path.join(gl.DATA_PATH, "cache", f"{projectname}-{sha}.zip"))
-        
-        extracted_folder = os.path.join(gl.DATA_PATH, "cache", extracted_folder_name)
-
-        # Remove destination folder
-        if os.path.isdir(directory):
-            shutil.rmtree(directory)
-        if os.path.isfile(directory): # No idea how this could happen - but just in case
-            os.remove(directory)
-
-        # Create empty destination folder
-        os.makedirs(directory, exist_ok=True)
-
-        for name in os.listdir(extracted_folder):
-            shutil.move(os.path.join(extracted_folder, name), directory)
-
-
-        os.remove(os.path.join(gl.DATA_PATH, "cache", f"{projectname}-{sha}.zip"))
-        shutil.rmtree(extracted_folder)
+            for name in os.listdir(extracted_folder):
+                shutil.move(os.path.join(extracted_folder, name), directory)
+        except Exception as e:
+            log.error(f"Failed to extract {projectname}: {e}")
+            return NoConnectionError()
+        finally:
+            # Best-effort: never leave the archive or extracted temp folder behind,
+            # and never let cleanup replace the try-block's outcome.
+            try:
+                if os.path.exists(zip_path):
+                    os.remove(zip_path)
+            except OSError:
+                pass
+            if extracted_folder is not None and os.path.isdir(extracted_folder):
+                shutil.rmtree(extracted_folder, ignore_errors=True)
         
         ## Write version
         path = os.path.join(directory, "VERSION")
@@ -862,6 +881,13 @@ class StoreBackend:
 
         response = await self.download_repo(repo_url=url, directory=local_path, commit_sha=plugin_data.commit_sha, branch_name=plugin_data.branch)
 
+        # Bail before running install scripts or reloading plugins over a
+        # missing or partial tree.
+        if response == 404:
+            return 404
+        if isinstance(response, NoConnectionError):
+            return response
+
         # Run install script if present. Make sure to use python binary used to run this process to not break venv dependency installations
         if os.path.isfile(os.path.join(local_path, "__install__.py")):
             subprocess.run(f"{sys.executable} {os.path.join(local_path, '__install__.py')}", shell=True, start_new_session=True)
@@ -870,9 +896,6 @@ class StoreBackend:
         if os.path.isfile(os.path.join(local_path, "requirements.txt")):
             subprocess.run(f"{sys.executable} -m pip install -r {os.path.join(local_path, 'requirements.txt')}", shell=True, start_new_session=True)
 
-        if response == 404:
-            return 404
-        
         # Update plugin manager
         gl.plugin_manager.load_plugins()
         gl.plugin_manager.init_plugins()
@@ -896,7 +919,8 @@ class StoreBackend:
         gl.signal_manager.trigger_signal(Signals.PluginInstall, plugin_data.plugin_id)
 
         log.success(f"Plugin {plugin_data.plugin_id} installed successfully under: {local_path} with sha: {plugin_data.commit_sha}")
-        
+        return True
+
     def uninstall_plugin(self, plugin_id:str, remove_from_pages:bool = False, remove_files:bool = True) -> bool:
         ## 1. Remove all action objects in all pages
         for deck_controller in gl.deck_manager.deck_controller:
