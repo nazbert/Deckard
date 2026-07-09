@@ -68,6 +68,26 @@ def _is_symbol_font(font_path: str) -> bool:
         return False
 
 
+@lru_cache(maxsize=64)
+def _load_font(font_path: str, font_size: int, encoding: str) -> ImageFont.FreeTypeFont:
+    # ImageFont.truetype re-reads the file and re-parses the FreeType face on
+    # every call; labels render every frame, so cache the face object.
+    return ImageFont.truetype(font_path, font_size, encoding=encoding)
+
+
+@lru_cache(maxsize=256)
+def _find_font_path(font_name: str, font_weight, style) -> str:
+    # Memoized on the font attributes that select the file (size doesn't).
+    _ensure_symbol_fonts()
+    return matplotlib.font_manager.findfont(
+        matplotlib.font_manager.FontProperties(
+            family=font_name,
+            weight=font_weight,
+            style=style
+        )
+    )
+
+
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.backend.DeckManagement.DeckController import ControllerKey
@@ -90,17 +110,7 @@ class KeyLabel:
         if self.font_name in ["", None]:
             font_name = gl.fallback_font
 
-        # Ensure symbol fonts are available to matplotlib
-        _ensure_symbol_fonts()
-
-        return matplotlib.font_manager.findfont(
-            matplotlib.font_manager.FontProperties(
-                family=font_name,
-                weight=self.font_weight,
-                size=self.font_size,
-                style=self.style
-            )
-        )
+        return _find_font_path(font_name, self.font_weight, self.style)
 
     def clear_values(self):
         self.text = None
@@ -116,4 +126,4 @@ class KeyLabel:
     def get_font(self) -> ImageFont.FreeTypeFont:
         font_path = self.get_font_path()
         encoding = "symb" if _is_symbol_font(font_path) else "unic"
-        return ImageFont.truetype(font_path, self.font_size, encoding=encoding)
+        return _load_font(font_path, self.font_size, encoding)

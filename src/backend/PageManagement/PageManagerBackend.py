@@ -640,7 +640,7 @@ class PageManagerBackend:
         page_settings = self.get_page_settings(path)
         return page_settings.get("background", {})
 
-    def set_background_settings(self, path: str, overwrite: bool = False, show: bool = False, fps: int = 30, loop: bool = False, media_path: str = ""):
+    def set_background_settings(self, path: str, overwrite: bool = False, show: bool = False, fps: int = 30, loop: bool = False, media_path: str = "", extend_to_touchscreen: bool = False):
         settings = self.get_page_settings(path)
 
         settings["background"] = {
@@ -648,12 +648,13 @@ class PageManagerBackend:
             "show": show,
             "fps": fps,
             "loop": loop,
-            "media-path": media_path
+            "media-path": media_path,
+            "extend-to-touchscreen": extend_to_touchscreen
         }
 
         self.set_page_settings(path, settings)
 
-    def overwrite_background_settings(self, path: str, overwrite: bool = None, show: bool = None, fps: int = None, loop: bool = None, media_path: str = None):
+    def overwrite_background_settings(self, path: str, overwrite: bool = None, show: bool = None, fps: int = None, loop: bool = None, media_path: str = None, extend_to_touchscreen: bool = None):
         settings = self.get_page_settings(path)
         background_settings = settings.get("background", {})
 
@@ -667,6 +668,8 @@ class PageManagerBackend:
             background_settings["loop"] = loop
         if media_path is not None:
             background_settings["media-path"] = media_path
+        if extend_to_touchscreen is not None:
+            background_settings["extend-to-touchscreen"] = extend_to_touchscreen
 
         settings["background"] = background_settings
         self.set_page_settings(path, settings)

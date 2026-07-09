@@ -592,8 +592,25 @@ class Page:
                 action.on_ready_called = True
                 action.load_event_overrides()
                 action.load_initial_generative_ui()
-                action.on_ready()
-                action.on_update()
+                # Plugin callbacks can block indefinitely; run them on the
+                # deck's action pool, never on the caller's (often GTK) thread.
+                self._submit_ready_callbacks(action)
+
+    def _submit_ready_callbacks(self, action: ActionCore):
+        executor = getattr(self.deck_controller, "action_executor", None)
+        if executor is None:
+            # Deck is being torn down; drop the call.
+            return
+        try:
+            executor.submit(self._run_ready_callbacks, action)
+        except RuntimeError:
+            # Executor already shut down (deck disconnected mid-call)
+            pass
+
+    @log.catch
+    def _run_ready_callbacks(self, action: ActionCore):
+        action.on_ready()
+        action.on_update()
 
     def clear_action_objects(self):
         for input_type in self.action_objects:

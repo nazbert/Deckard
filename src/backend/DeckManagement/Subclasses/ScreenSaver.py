@@ -81,8 +81,11 @@ class ScreenSaver:
         
         # Stop timer if enable == False
         if enable:
-            # Start time if not already running
-            if not self.timer.is_alive:
+            # A threading.Timer can't be restarted once fired/cancelled, so recreate it.
+            if not self.timer.is_alive() and not self.showing:
+                self.timer = threading.Timer(self.time_delay * 60, self.on_timer_end)
+                self.timer.setDaemon(True)
+                self.timer.setName("ScreenSaverTimer")
                 self.timer.start()
         else:
             self.timer.cancel()

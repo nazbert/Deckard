@@ -55,6 +55,9 @@ class DeckManager:
     def __init__(self):
         #TODO: Maybe outsource some objects
         self.deck_controller: list[DeckController] = []
+        # Guards concurrent add/remove of deck_controller (called from the USB
+        # monitor, resume, Flatpak poll and media-thread error paths).
+        self._controllers_lock = threading.Lock()
         self.fake_deck_controller = []
         self.settings_manager = SettingsManager()
         self.page_manager = gl.page_manager
@@ -122,14 +125,30 @@ class DeckManager:
             return
         decks=DeviceManager().enumerate()
         for deck in decks:
+            self.load_hardware_deck(deck)
+
+    def load_hardware_deck(self, deck, attempts: int = 3, retry_delay: float = 0.5):
+        # Opening a deck and reading its serial right after open is occasionally
+        # flaky (TransportError -1): retry, and never let one bad deck crash startup.
+        for attempt in range(1, attempts + 1):
             try:
                 if not deck.is_open():
                     deck.open(self.beta_resume_mode)
-            except:
-                log.error("Failed to open deck. Maybe it's already connected to another instance?")
-                continue
-            deck_controller = DeckController(self, deck)
-            self.deck_controller.append(deck_controller)
+                deck_controller = DeckController(self, deck)
+                self.deck_controller.append(deck_controller)
+                return
+            except StreamDeck.TransportError as e:
+                log.warning(f"Transport error initializing deck (attempt {attempt}/{attempts}): {e}")
+                try:
+                    deck.close()
+                except Exception:
+                    pass
+                if attempt < attempts:
+                    time.sleep(retry_delay)
+            except Exception as e:
+                log.error(f"Failed to initialize deck, maybe it's already connected to another instance? Error: {e}")
+                return
+        log.error("Giving up on deck after repeated transport errors; skipping it. Replugging the deck usually fixes this.")
 
     def load_fake_decks(self):
         old_n_fake_decks = len(self.fake_deck_controller)
@@ -196,18 +215,22 @@ class DeckManager:
         if device_info["ID_VENDOR_ID"] != ELGATO_VENDOR_ID:
             return
 
-        for controller in self.deck_controller:
+        for controller in list(self.deck_controller):
             if not controller.deck.connected():
                 self.remove_controller(controller)
 
         gl.app.main_win.check_for_errors()
 
     def remove_controller(self, deck_controller: DeckController) -> None:
-        self.deck_controller.remove(deck_controller)
+        # Idempotent: several threads may call this for the same controller;
+        # only the first removal proceeds to delete().
+        with self._controllers_lock:
+            if deck_controller not in self.deck_controller:
+                return
+            self.deck_controller.remove(deck_controller)
         if recursive_hasattr(gl, "app.main_win.leftArea.deck_stack"):
             gl.app.main_win.leftArea.deck_stack.remove_page(deck_controller)
         deck_controller.delete()
-        del deck_controller
 
     def get_controller_for_deck(self, deck: StreamDeck) -> DeckController | None:
         for controller in self.deck_controller:
@@ -215,7 +238,11 @@ class DeckManager:
                 return controller
 
     def add_newly_connected_deck(self, deck:StreamDeck, is_fake: bool = False):
-        deck_controller = DeckController(self, deck)
+        try:
+            deck_controller = DeckController(self, deck)
+        except Exception as e:
+            log.error(f"Failed to initialize deck: {e}")
+            return
 
         # Check if ui is loaded - if not it will grab the controller automatically
         if recursive_hasattr(gl, "app.main_win.leftArea.deck_stack"):
@@ -237,15 +264,18 @@ class DeckManager:
 
     def close_all(self):
         log.info("Closing all decks")
-        for controller in self.deck_controller:
+        for controller in list(self.deck_controller):
             if controller.deck is None:
-                return
+                continue
             if not controller.deck.is_open():
-                return
-            
+                continue
+
             log.info(f"Closing deck: {controller.deck.get_serial_number()}")
-            controller.clear()
-            controller.deck.close()
+            try:
+                controller.clear()
+                controller.deck.close()
+            except Exception as e:
+                log.error(f"Failed to close deck cleanly: {e}")
 
     def stop_usb_monitoring(self):
         self.usb_monitor.stop_monitoring(timeout=2)
@@ -286,7 +316,7 @@ class DeckManager:
         log.info("Resume from suspend detected, reloading decks...")
         time.sleep(2) # Give the kernel some time to handle the usb devices
         n_removed = 0
-        for deck_controller in self.deck_controller:
+        for deck_controller in list(self.deck_controller):
             new_device = self.get_device_by_serial(deck_controller.serial_number())
             if new_device:
                 log.info(f"Replacing deck")
@@ -322,7 +352,7 @@ class FlatpakDeckDisconnectThread(threading.Thread):
     def run(self):
         while gl.threads_running:
             time.sleep(2)
-            for controller in self.deck_manager.deck_controller:
+            for controller in list(self.deck_manager.deck_controller):
                 if not controller.deck.connected():
                     self.deck_manager.remove_controller(controller)
                     gl.app.main_win.check_for_errors()
@@ -332,16 +362,14 @@ class DetectResumeThread(threading.Thread):
         super().__init__(name="DetectResumeThread")
         self.deck_manager = deck_manager
 
-        self.last_1 = time.time()
-        self.last_2 = time.time()
-
     def run(self):
+        last = time.time()
         while gl.threads_running:
-            self.last_1 = time.time()
-            if time.time() - self.last_1 >= 5 or time.time() - self.last_2 >= 5:
-                self.deck_manager.on_resumed()
-            self.last_2 = time.time()
-            if time.time() - self.last_1 >= 5 or time.time() - self.last_2 >= 5:
-                self.deck_manager.on_resumed()
-            
             time.sleep(2)
+            now = time.time()
+            # A gap much larger than the sleep interval means the process was
+            # suspended (system sleep) and just resumed.
+            if now - last >= 5:
+                self.deck_manager.on_resumed()
+            # re-read after on_resumed so its own runtime isn't counted as a gap
+            last = time.time()

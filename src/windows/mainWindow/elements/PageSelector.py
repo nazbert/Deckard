@@ -128,6 +128,10 @@ class PageSelector(Gtk.Box):
             return
         
         page_path = self.pages_model[drop_down.get_active()][1]
+        if active_controller.active_page is not None and active_controller.active_page.json_path == page_path:
+            # Selector synced to a deck-triggered switch; the page is already
+            # loading/loaded -- don't kick off a redundant second load.
+            return
         page = gl.page_manager.get_page(path=page_path, deck_controller = active_controller)
         log.info(f"Load page: {page}")
         active_controller.load_page(page)

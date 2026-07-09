@@ -210,9 +210,16 @@ class App(Adw.Application):
         for ctrl in gl.deck_manager.deck_controller:
             ctrl.delete()
 
+        # Must run before the slow joins below: a deck still open when
+        # force_quit fires fails the next startup with TransportError(-1).
+        gl.deck_manager.close_all()
+
         gl.deck_manager.stop_usb_monitoring()
 
         gl.plugin_manager.loop_daemon = False
+
+        from GtkHelper.GtkHelper import shutdown_background_pool
+        shutdown_background_pool()
 
         for thread in threading.enumerate():
             if thread is not threading.current_thread() and not thread.daemon:
@@ -229,12 +236,11 @@ class App(Adw.Application):
 
         gl.tray_icon.stop()
 
-        # Close all decks
-        gl.deck_manager.close_all()
-        # Stop timer
         log.success("Stopped StreamController. Have a nice day!")
         log.stop()
-        sys.exit(0)
+        # os._exit, not sys.exit: interpreter teardown aborts in libusb on the
+        # hidapi read thread during exit.
+        os._exit(0)
 
     def force_quit(self):
         log.info("Forcing quit...")

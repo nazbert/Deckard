@@ -13,11 +13,13 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 import gc
+import os
 import statistics
 import threading
 import time
 # Import Python modules
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from copy import copy
 from dataclasses import dataclass
 from queue import Queue
@@ -44,6 +46,8 @@ from src.backend.DeckManagement.Subclasses.KeyVideo import InputVideo
 from src.backend.DeckManagement.Subclasses.ScreenSaver import ScreenSaver
 from src.backend.DeckManagement.Subclasses.SingleKeyAsset import SingleKeyAsset
 from src.backend.DeckManagement.Subclasses.background_video_cache import BackgroundVideoCache
+from src.backend.DeckManagement.Subclasses.encoded_image_cache import EncodedImageCache
+from src.backend.DeckManagement.Subclasses.media_pipeline_profiler import media_prof
 from src.backend.PageManagement.Page import ActionOutdated, Page, NoActionHolderFound
 from src.api import notify_active_page_changed
 
@@ -66,6 +70,25 @@ if TYPE_CHECKING:
 # Import globals
 import globals as gl
 
+import io
+
+
+def encode_native_key(deck, image: "Image.Image", quality: int = 90) -> bytes:
+    """PILHelper.to_native_key_format with tunable JPEG quality (the library
+    hardcodes q100): smaller JPEGs mean fewer serial USB HID writes per key."""
+    fmt = deck.key_image_format()
+    if image.size != fmt["size"]:
+        image.thumbnail(fmt["size"])
+    if fmt["rotation"]:
+        image = image.rotate(fmt["rotation"])
+    if fmt["flip"][0]:
+        image = image.transpose(Image.FLIP_LEFT_RIGHT)
+    if fmt["flip"][1]:
+        image = image.transpose(Image.FLIP_TOP_BOTTOM)
+    with io.BytesIO() as buf:
+        image.save(buf, fmt["format"], quality=quality)
+        return buf.getvalue()
+
 
 @dataclass
 class MediaPlayerTask:
@@ -83,6 +106,7 @@ class MediaPlayerSetTouchscreenImageTask:
     deck_controller: "DeckController"
     page: Page
     native_image: bytes
+    config_gen: int = None  # generation of the content rendered; dropped at present if stale
 
     n_failed_in_row: ClassVar[dict] = {}
 
@@ -94,18 +118,24 @@ class MediaPlayerSetTouchscreenImageTask:
             self.deck_controller.deck.set_touchscreen_image(self.native_image, x_pos=0, y_pos=0, width=touchscreen_size[0], height=touchscreen_size[1]) # Maybe avoid to always merge the dial images before applying it
             self.native_image = None
             del self.native_image
-            MediaPlayerSetTouchscreenImageTask.n_failed_in_row = 0
+            MediaPlayerSetTouchscreenImageTask.n_failed_in_row[self.deck_controller.serial_number()] = 0
         except StreamDeck.TransportError as e:
             log.error(f"Failed to set deck touchscreen image. Error: {e}")
-            MediaPlayerSetTouchscreenImageTask.n_failed_in_row += 1
-            if MediaPlayerSetTouchscreenImageTask.n_failed_in_row > 5:
-                log.debug(f"Failed to set touchscreen image for 5 times in a row for deck {self.deck_controller.serial_number()}. Removing controller")
-                
-                
+
+            # Under beta-resume, transport errors are transient (suspend/resume);
+            # swallow them instead of counting toward removal.
+            beta_resume = gl.settings_manager.get_app_settings().get("system", {}).get("beta-resume-mode", True)
+            if beta_resume:
+                return
+
+            serial = self.deck_controller.serial_number()
+            count = MediaPlayerSetTouchscreenImageTask.n_failed_in_row.get(serial, 0) + 1
+            MediaPlayerSetTouchscreenImageTask.n_failed_in_row[serial] = count
+            if count > 5:
+                log.debug(f"Failed to set touchscreen image for 5 times in a row for deck {serial}. Removing controller")
                 self.deck_controller.deck.close()
                 self.deck_controller.media_player.running = False # Set stop flag - otherwise remove_controller will wait until this task is done, which it never will because it waits
                 gl.deck_manager.remove_controller(self.deck_controller)
-
                 gl.deck_manager.connect_new_decks()
 
 @dataclass
@@ -114,12 +144,24 @@ class MediaPlayerSetImageTask:
     page: Page
     key_index: int
     native_image: bytes
+    config_gen: int = None  # generation of the content rendered; dropped at present if stale
+    controller_key: "ControllerKey" = None  # stamped once this paint is presented
+    img_hash: int = None  # hash of the presented image, recorded in run()
 
     n_failed_in_row: ClassVar[dict] = {}
 
     def run(self):
         try:
+            if media_prof:
+                _t0 = time.perf_counter()
             self.deck_controller.deck.set_key_image(self.key_index, self.native_image)
+            if media_prof:
+                media_prof.add("usb_write", time.perf_counter() - _t0)
+            # Record the presented image's hash here, not at render time: a paint
+            # dropped at the present boundary must not advance the hash, or the
+            # correcting render would hash-skip and the key would bleed forever.
+            if self.controller_key is not None:
+                self.controller_key._last_img_hash = self.img_hash
             self.native_image = None
             del self.native_image
             MediaPlayerSetImageTask.n_failed_in_row[self.deck_controller.serial_number()] = 0
@@ -130,9 +172,11 @@ class MediaPlayerSetImageTask:
             if beta_resume:
                 return
 
-            MediaPlayerSetImageTask.n_failed_in_row[self.deck_controller.serial_number()] += 1
-            if MediaPlayerSetImageTask.n_failed_in_row[self.deck_controller.serial_number()] > 5:
-                log.debug(f"Failed to set key_image for 5 times in a row for deck {self.deck_controller.serial_number()}. Removing controller")
+            serial = self.deck_controller.serial_number()
+            count = MediaPlayerSetImageTask.n_failed_in_row.get(serial, 0) + 1
+            MediaPlayerSetImageTask.n_failed_in_row[serial] = count
+            if count > 5:
+                log.debug(f"Failed to set key_image for 5 times in a row for deck {serial}. Removing controller")
                 
                 
                 self.deck_controller.deck.close()
@@ -147,6 +191,15 @@ class MediaPlayerThread(threading.Thread):
         super().__init__(name="MediaPlayerThread", daemon=True)
         self.deck_controller: DeckController = deck_controller
         self.FPS = 30 # Max refresh rate of the internal displays
+
+        # Cap how often a background video repaints the device. The Stream Deck
+        # transport serializes all reads and writes on one mutex; a full-rate
+        # video write flood starves the 20Hz HID read poll, so dial encoder
+        # events arrive coalesced and lag badly. Holding writes at/below the
+        # read-poll rate keeps the reader responsive. 0 disables the cap. The
+        # smoothness cost on a *background* video is negligible.
+        self._video_write_hz = float(os.environ.get("STREAMCONTROLLER_VIDEO_WRITE_HZ", 15))
+        self._last_video_write = 0.0
 
         self.running = False
         self.media_ticks = 0
@@ -173,26 +226,47 @@ class MediaPlayerThread(threading.Thread):
 
             # self.check_connection()
 
+            # Read by the FPS throttle below even when paused.
+            has_bg_video = False
+
             if not self.pause:
-                has_bg_video = False
+                bg_strip_dirty = False
+                video_repaint = False
 
                 if self.deck_controller.background.video is not None:
                     if self.deck_controller.background.video.page is self.deck_controller.active_page:
                         has_bg_video = True
-                        # There is a background video
-                        video_each_nth_frame = self.FPS // self.deck_controller.background.video.fps
-                        if self.media_ticks % video_each_nth_frame == 0:
+                        # Rate-limit the video's device writes so the flood
+                        # doesn't starve the HID read thread (see _video_write_hz).
+                        min_gap = 1.0 / self._video_write_hz if self._video_write_hz > 0 else 0
+                        if start - self._last_video_write >= min_gap:
+                            video_repaint = True
+                            self._last_video_write = start
+                        # Background video: guard the tick divider against fps<=0/None
+                        # (would ZeroDivisionError) and >FPS; 0/None plays at loop FPS.
+                        video_fps = self.deck_controller.background.video.fps or self.FPS
+                        video_each_nth_frame = max(1, self.FPS // min(self.FPS, video_fps))
+                        if video_repaint and self.media_ticks % video_each_nth_frame == 0:
                             self.deck_controller.background.update_tiles()
+                            # A video extended onto the strip needs the shared
+                            # touchscreen re-composited for the new frame.
+                            bg_strip_dirty = self.deck_controller.background.get_touchscreen_image() is not None
 
                 # Only iterate keys if there is animated content to update
-                if has_bg_video or self._needs_key_ticks():
+                if video_repaint or self._needs_key_ticks():
                     #TODO: generalize
                     for key in self.deck_controller.inputs[Input.Key]:
                         cast("ControllerKey", key).on_media_player_tick()
 
-                    for dial in self.deck_controller.inputs[Input.Dial]:
-                        cast("ControllerDial", dial).on_media_player_tick()
-                    # self.deck_controller.update_all_inputs()
+                    # Dials share one touchscreen; render it at most once per
+                    # frame instead of once per dial.
+                    dials = self.deck_controller.inputs[Input.Dial]
+                    touchscreen_dirty = False
+                    for dial in dials:
+                        if cast("ControllerDial", dial).on_media_player_tick():
+                            touchscreen_dirty = True
+                    if (touchscreen_dirty or bg_strip_dirty) and dials:
+                        cast("ControllerDial", dials[0]).get_touch_screen().update()
 
                 # Perform media player tasks
                 self.perform_media_player_tasks()
@@ -200,6 +274,10 @@ class MediaPlayerThread(threading.Thread):
             self.media_ticks += 1
 
             end = time.time()
+
+            if media_prof:
+                media_prof.add("tick", end - start)
+                media_prof.maybe_report()
 
             # Use low FPS when idle (no animated content, no pending tasks)
             has_pending = bool(self.tasks or self.image_tasks or self.touchscreen_task)
@@ -223,15 +301,20 @@ class MediaPlayerThread(threading.Thread):
         self.running = False
 
     def _needs_key_ticks(self) -> bool:
-        # Check once per second whether any key has animated content
-        if self.media_ticks % self.FPS != 0:
-            return getattr(self, '_cached_needs_ticks', False)
+        # True if any input has animated content that advances on the media tick:
+        # a key/dial video or a scrolling label.
         needs = False
         for key in self.deck_controller.inputs.get(Input.Key, []):
             state = key.get_active_state()
-            if state.key_video is not None:
+            if state.key_video is not None or state.label_manager.get_has_scroll_labels():
                 needs = True
                 break
+        if not needs:
+            for dial in self.deck_controller.inputs.get(Input.Dial, []):
+                state = dial.get_active_state()
+                if state.video is not None or state.label_manager.get_has_scroll_labels():
+                    needs = True
+                    break
         self._cached_needs_ticks = needs
         return needs
 
@@ -271,10 +354,12 @@ class MediaPlayerThread(threading.Thread):
         GLib.idle_add(deck_stack_child.low_fps_banner.set_revealed, state)
 
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 2.0) -> None:
         self._stop = True
-        while self.running:
-            time.sleep(0.1)
+        self._wake_event.set()  # wake an idle loop so it sees _stop promptly
+        start = time.time()
+        while self.running and time.time() - start < timeout:
+            time.sleep(0.05)
 
     def add_task(self, method: callable, *args, **kwargs):
         self.tasks.append(MediaPlayerTask(
@@ -286,55 +371,87 @@ class MediaPlayerThread(threading.Thread):
         ))
         self._wake_event.set()
 
-    def add_touchscreen_task(self, native_image: bytes):
+    def add_touchscreen_task(self, native_image: bytes, page=None, config_gen=None):
         self.touchscreen_task = MediaPlayerSetTouchscreenImageTask(
             deck_controller=self.deck_controller,
-            page=self.deck_controller.active_page,
-            native_image=native_image
+            page=page if page is not None else self.deck_controller.active_page,
+            native_image=native_image,
+            config_gen=config_gen
         )
         self._wake_event.set()
 
-    def add_image_task(self, key_index: int, native_image: bytes):
+    def add_image_task(self, key_index: int, native_image: bytes, page=None, config_gen=None, controller_key=None, img_hash=None):
         self.image_tasks[key_index] = MediaPlayerSetImageTask(
             deck_controller=self.deck_controller,
-            page=self.deck_controller.active_page,
+            page=page if page is not None else self.deck_controller.active_page,
             key_index=key_index,
-            native_image=native_image
+            native_image=native_image,
+            config_gen=config_gen,
+            controller_key=controller_key,
+            img_hash=img_hash
         )
         self._wake_event.set()
 
     def perform_media_player_tasks(self):
-        for task in self.tasks.copy():
-            if task.page is self.deck_controller.active_page:
-                task.run()
-
+        # Drain the queues BEFORE snapshotting page/gen: every drained task then
+        # predates the snapshot, so a mismatch genuinely means stale. The reverse
+        # order would drop a task just queued for the new page, unrun.
+        task_batch = self.tasks.copy()
+        for task in task_batch:
             try:
                 self.tasks.remove(task)
             except ValueError:
                 pass
 
+        image_batch = []
         for key in list(self.image_tasks.keys()):
             try:
-                self.image_tasks[key].run()
-                del self.image_tasks[key]
+                image_batch.append(self.image_tasks.pop(key))
             except KeyError:
-                pass
+                continue
 
-        if self.touchscreen_task is not None:
-            self.touchscreen_task.run()
-            del self.touchscreen_task
-            self.touchscreen_task = None
+        # clear_media_player_tasks (GTK thread) may null this concurrently.
+        touch_task = self.touchscreen_task
+        self.touchscreen_task = None
+
+        # Snapshot page + generation as one pair (the assignment in load_page
+        # holds the same lock) so the whole batch is judged consistently.
+        with self.deck_controller._page_gen_lock:
+            active_page = self.deck_controller.active_page
+            current_gen = self.deck_controller._page_load_generation
+
+        def _is_current(task):
+            # Drop paints for a page we've left or a superseded generation.
+            # config_gen is the generation the paint rendered.
+            if task.page is not active_page:
+                return False
+            if task.config_gen is not None and task.config_gen != current_gen:
+                return False
+            return True
+
+        for task in task_batch:
+            if task.page is active_page:
+                task.run()
+
+        for task in image_batch:
+            if _is_current(task):
+                task.run()
+
+        if touch_task is not None and _is_current(touch_task):
+            touch_task.run()
     def check_connection(self):
         try:
             self.deck_controller.deck.get_firmware_version()
         except StreamDeck.TransportError as e:
             log.error(f"Seams like the deck is not connected. Error: {e}")
-            MediaPlayerSetImageTask.n_failed_in_row[self.deck_controller.serial_number()] += 1
-            if MediaPlayerSetImageTask.n_failed_in_row[self.deck_controller.serial_number()] > 5:
-                log.debug(f"Failed to contact the deck 5 times in a row: {self.deck_controller.serial_number()}. Removing controller")
-                
+            serial = self.deck_controller.serial_number()
+            count = MediaPlayerSetImageTask.n_failed_in_row.get(serial, 0) + 1
+            MediaPlayerSetImageTask.n_failed_in_row[serial] = count
+            if count > 5:
+                log.debug(f"Failed to contact the deck 5 times in a row: {serial}. Removing controller")
+
                 self.deck_controller.deck.close()
-                self.deck_controller.media_player.running = False # Set stop flat - otherwise remove_controller will wait until this task is done, which it never will because it waiuts
+                self.deck_controller.media_player.running = False # Stop flag so remove_controller's stop() doesn't wait on this in-flight task
                 gl.deck_manager.remove_controller(self.deck_controller)
 
                 gl.deck_manager.connect_new_decks()
@@ -361,8 +478,13 @@ class DeckController:
             self.clear()
         except Exception as e:
             log.error(f"Failed to clear deck, maybe it's already connected to another instance? Skipping... Error: {e}")
-            del self
-            return
+            # Release the handle and raise: the caller must not register a
+            # half-built controller.
+            try:
+                self.deck.close()
+            except Exception:
+                pass
+            raise
         
         self.hold_time: float = gl.settings_manager.get_app_settings().get("general", {}).get("hold-time", 0.5)
         
@@ -386,6 +508,20 @@ class DeckController:
 
         self.active_page: Page = None
 
+        # Bumped on every load_page so overlapping/concurrent loads can tell
+        # whether their queued paints are still current (see _page_is_current).
+        self._page_load_generation: int = 0
+        self._page_gen_lock = threading.Lock()
+        # Serializes load_page's switch body so racing switches can't
+        # interleave: an older switch could cancel the newer one's background
+        # future or strand its queued work. RLock: a ChangePage handler may
+        # nest a load_page.
+        self._load_page_lock = threading.RLock()
+        # Serializes background loads on the pool; a superseded load must not
+        # overwrite a newer page's background.
+        self._background_load_lock = threading.Lock()
+        self._bg_future = None
+
         self.inputs = {}
         for i in Input.All:
             self.inputs[i] = []
@@ -400,6 +536,18 @@ class DeckController:
         # Start media player thread
         self.media_player = MediaPlayerThread(deck_controller=self)
         self.media_player.start()
+
+        # Encoded key images keyed by (composite hash, rotation): repeated
+        # frames (looping background video) skip conversion + JPEG encode.
+        self.encode_memo = EncodedImageCache(max_bytes=32 * 1024 * 1024)
+
+        # Bounded thread pool for action callbacks (tick/update/ready/event),
+        # sized so every input can run its on_tick concurrently.
+        total_inputs = sum(len(inputs) for inputs in self.inputs.values())
+        self.action_executor = ThreadPoolExecutor(
+            max_workers=max(8, total_inputs + 4),
+            thread_name_prefix="action_cb",
+        )
 
         self.keep_actions_ticking = True
         self.TICK_DELAY = 1
@@ -433,7 +581,11 @@ class DeckController:
             input_class = getattr(sys.modules[__name__], i.controller_class_name)
 
             for k in input_class.Available_Identifiers(self.deck):
-                self.inputs[i].append(input_class(self, Input.FromTypeIdentifier(i.input_type, k)))
+                controller_input = input_class(self, Input.FromTypeIdentifier(i.input_type, k))
+                # Stamp with the current generation so paints from freshly built
+                # inputs (e.g. the screensaver's) aren't dropped as stale.
+                controller_input.config_gen = self._page_load_generation
+                self.inputs[i].append(controller_input)
 
     def get_inputs(self, identifier: InputIdentifier) -> list["ControllerInput"]:
         input_type = type(identifier)
@@ -462,7 +614,9 @@ class DeckController:
         i.update()
 
     @log.catch
-    def update_all_inputs(self):
+    def update_all_inputs(self, gen=None):
+        if not self._page_is_current(gen):
+            return
         start = time.time()
         if not self.get_alive(): return
         if self.background.video is not None:
@@ -475,6 +629,18 @@ class DeckController:
             for i in self.inputs[t]:
                 i.update()
         log.debug(f"Updating all inputs took {time.time() - start} seconds")
+
+    def _update_all_inputs_awaiting_background(self, bg_future, gen=None):
+        # Media thread: skip promptly when superseded, then await the background
+        # decode (bounded) so keys composite over the new background.
+        if not self._page_is_current(gen):
+            return
+        if bg_future is not None:
+            try:
+                bg_future.result(timeout=10)
+            except Exception:
+                log.warning("Background not ready before update_all_inputs; painting anyway")
+        self.update_all_inputs(gen=gen)
 
     def event_callback(self, ident: InputIdentifier, *args, **kwargs):
         if not self.allow_interaction:
@@ -616,7 +782,7 @@ class DeckController:
             del gl.api_state_requests[self.serial_number()]
 
     @log.catch
-    def load_background(self, page: Page, update: bool = True):
+    def load_background(self, page: Page, update: bool = True, gen=None):
         deck_settings = self.get_deck_settings()
 
         deck_background_settings = deck_settings.get("background", {})
@@ -630,12 +796,22 @@ class DeckController:
         else:
             config = {}
 
-        self.background.set_from_path(
-            path=config.get("media-path"),
-            update=update,
-            loop=config.get("loop", False),
-            fps=config.get("fps", 30),
-        )
+        # Serialize concurrent loads and drop superseded ones so an older switch
+        # can't overwrite the newer page's background.
+        with self._background_load_lock:
+            if not self._page_is_current(gen):
+                return
+            # Set the flag first (without repainting) so set_from_path renders
+            # tiles and the touchscreen slice with the correct geometry.
+            self.background.set_extend_to_touchscreen(
+                config.get("extend-to-touchscreen", False), update=False
+            )
+            self.background.set_from_path(
+                path=config.get("media-path"),
+                update=update,
+                loop=config.get("loop", False),
+                fps=config.get("fps", 30),
+            )
 
     @log.catch
     def load_brightness(self, page: Page):
@@ -675,17 +851,54 @@ class DeckController:
         self.screen_saver.set_fps(config.get("fps", 30))
         self.screen_saver.set_brightness(config.get("brightness", 30))
 
+    def _page_is_current(self, gen) -> bool:
+        # gen is None for callers outside the page-load path (always run). For a
+        # load_page-issued paint, it's stale once a newer load_page bumped the
+        # generation.
+        return gen is None or gen == self._page_load_generation
+
+    # Deadline for load_all_inputs: input loads run plugin callbacks that can
+    # block forever, and the media-player thread must never be wedged by one.
+    LOAD_INPUTS_TIMEOUT = 10.0
+
     @log.catch
-    def load_all_inputs(self, page: Page, update: bool = True):
+    def load_all_inputs(self, page: Page, update: bool = True, gen=None):
+        if not self._page_is_current(gen):
+            return
         start = time.time()
-        with ThreadPoolExecutor() as executor:
-            futures = []
+        executor = ThreadPoolExecutor()
+        try:
+            pending = []
             for t in self.inputs:
                 for controller_input in self.inputs[t]:
-                    futures.append(executor.submit(self.load_input, controller_input, page, update))
-            for future in futures:
-                future.result()
+                    future = executor.submit(self._load_input_if_current, controller_input, page, update, gen)
+                    pending.append((controller_input, future))
+            deadline = time.monotonic() + self.LOAD_INPUTS_TIMEOUT
+            stuck = []
+            for controller_input, future in pending:
+                try:
+                    future.result(timeout=max(0.0, deadline - time.monotonic()))
+                except FutureTimeoutError:
+                    stuck.append(str(controller_input.identifier))
+            if stuck:
+                log.warning(
+                    f"Loading inputs [{', '.join(stuck)}] did not finish within "
+                    f"{self.LOAD_INPUTS_TIMEOUT}s; continuing without them (a plugin "
+                    f"callback is likely blocked). They will still paint if they return.")
+        finally:
+            # No wait: a stuck load must not block this thread here either.
+            executor.shutdown(wait=False)
         log.info(f"Loading all inputs took {time.time() - start} seconds")
+
+    def _load_input_if_current(self, controller_input: "ControllerInput", page: Page, update: bool = True, gen=None):
+        # A slower in-flight page load must not paint the previous page's images
+        # onto the current page's keys; skip if a newer load superseded this one.
+        if not self._page_is_current(gen):
+            return
+        # Tag the input with the generation of the content being loaded, so a
+        # stale paint of it is dropped at the present boundary.
+        controller_input.config_gen = gen if gen is not None else self._page_load_generation
+        self.load_input(controller_input, page, update)
 
     def load_input_from_identifier(self, identifier: str, page: Page, update: bool = True):
         controller_input = self.get_input(identifier)
@@ -732,50 +945,67 @@ class DeckController:
 
         start = time.time()
 
-        if not allow_reload:
-            if self.active_page is page:
+        # Serialize the whole switch body (see _load_page_lock). The plugin-facing
+        # tail (ChangePage signal, DBus) stays outside so a slow handler can't
+        # block other callers on this lock.
+        with self._load_page_lock:
+            if not allow_reload:
+                if self.active_page is page:
+                    return
+
+            old_path = self.active_page.json_path if self.active_page is not None else None
+
+            # Set active_page and bump the generation atomically: a concurrent switch
+            # must never leave active_page on one page while the newest generation
+            # belongs to another (stale paints would then match both checks and bleed).
+            with self._page_gen_lock:
+                self.active_page = page
+                self._page_load_generation += 1
+                gen = self._page_load_generation
+
+            if page is None:
+                # Clear deck
+                self.clear()
                 return
-        
-        old_path = self.active_page.json_path if self.active_page is not None else None
 
-        if self.active_page is not None and False:
-            self.active_page.clear_action_objects()
-        # self.active_page = None
+            log.info(f"Loading page {page.get_name()} on deck {self.deck.get_serial_number()}")
 
-        self.active_page = page
+            # Stop queued tasks (skipped if a newer switch already superseded this one)
+            self.clear_media_player_tasks(gen)
 
-        if page is None:
-            # Clear deck
-            self.clear()
-            return
+            # Update ui
+            GLib.idle_add(self.update_ui_on_page_change) #TODO: Use new signal manager instead
 
-        log.info(f"Loading page {page.get_name()} on deck {self.deck.get_serial_number()}")
+            bg_future = None
+            if load_background:
+                # Decode the background off the media thread so it overlaps input
+                # loading; the update task below awaits it before keys composite.
+                from GtkHelper.GtkHelper import run_in_background
+                if self._bg_future is not None:
+                    self._bg_future.cancel()
+                bg_future = run_in_background(self.load_background, page, update=False, gen=gen)
+                self._bg_future = bg_future
+            if load_brightness:
+                self.load_brightness(page)
+            if load_screensaver:
+                self.load_screensaver(page)
+            if load_inputs:
+                self.media_player.add_task(self.load_all_inputs, page, update=False, gen=gen)
+            else:
+                # Not reloading content, but the generation bumped: advance each
+                # input's config_gen so its unchanged content isn't dropped as stale.
+                for input_type in self.inputs:
+                    for controller_input in self.inputs[input_type]:
+                        controller_input.config_gen = gen
 
-        # Stop queued tasks
-        self.clear_media_player_tasks()
+            # Load page onto deck, awaiting the background decode first.
+            self.media_player.add_task(self._update_all_inputs_awaiting_background, bg_future, gen)
 
-        old_tick = self.media_player.media_ticks
-        old_time = time.time()
-        while self.media_player.media_ticks <= old_tick and time.time() - old_time <= 0.5:
-            time.sleep(0.05)
-
-        # Update ui
-        GLib.idle_add(self.update_ui_on_page_change) #TODO: Use new signal manager instead
-
-        if load_background:
-            # self.load_background(page, update=False)
-            self.media_player.add_task(self.load_background, page, update=False)
-        if load_brightness:
-            self.load_brightness(page)
-        if load_screensaver:
-            self.load_screensaver(page)
-        if load_inputs:
-            self.media_player.add_task(self.load_all_inputs, page, update=False)
-
-        self.active_page.initialize_actions()
-
-        # Load page onto deck
-        self.media_player.add_task(self.update_all_inputs)
+        # Must stay outside _load_page_lock: initialize_actions can block on a
+        # run_on_main marshal, deadlocking against a main-thread load_page.
+        # `page`, not active_page: a newer switch may already own active_page;
+        # initializing a superseded page is harmless (on_ready_called de-dupes).
+        page.initialize_actions()
 
         # Notify plugin actions
         gl.signal_manager.trigger_signal(Signals.ChangePage, self, old_path, self.active_page.json_path)
@@ -912,23 +1142,16 @@ class DeckController:
         self.own_key_grid = deck_stack_child.page_settings.deck_config.grid
         return deck_stack_child.page_settings.deck_config.grid
     
-    def clear_media_player_tasks(self):
-        ticks = self.media_player.media_ticks
-        self.media_player.tasks.clear()
-        self.media_player.image_tasks.clear()
-
-        # Wait until tick is over
-        while self.media_player.media_ticks <= ticks:
-            time.sleep(1/60)
-
-    def clear_media_player_tasks_via_task(self):
-        self.media_player_tasks.append(MediaPlayerTask(
-            deck_controller=self,
-            page=self.active_page,
-            _callable=self.clear_media_player_tasks,
-            args=(),
-            kwargs={},
-        ))
+    def clear_media_player_tasks(self, gen=None):
+        # Skip the clear when a newer page load has superseded this one, so a late
+        # clear can't wipe the newer load's freshly-queued tasks (stranding). The
+        # lock spans check AND clear so a generation bump can't land mid-clear.
+        with self._page_gen_lock:
+            if gen is not None and gen != self._page_load_generation:
+                return
+            self.media_player.tasks.clear()
+            self.media_player.image_tasks.clear()
+            self.media_player.touchscreen_task = None
 
     def delete(self):
         if hasattr(self, "active_page"):
@@ -940,6 +1163,12 @@ class DeckController:
 
         self.keep_actions_ticking = False
         self.deck.run_read_thread = False
+
+        if getattr(self, "action_executor", None) is not None:
+            # Don't wait: a misbehaving plugin callback could block a worker
+            # forever; the app's force_quit timer is the backstop.
+            self.action_executor.shutdown(wait=False, cancel_futures=True)
+            self.action_executor = None
 
     def get_alive(self) -> bool:
         try:
@@ -955,6 +1184,14 @@ class Background:
         self.image = None
         self.video = None
 
+        # Extend the background onto the touchscreen strip (SD+). For static
+        # images the slice is memoized because the strip re-composites on
+        # every dial label change; for videos update_tiles() refreshes
+        # _video_strip once per frame.
+        self.extend_to_touchscreen: bool = False
+        self._touchscreen_slice: Image.Image = None
+        self._video_strip: Image.Image = None
+
         self.tiles: list[Image.Image] = [None] * deck_controller.deck.key_count()
 
     def set_image(self, image: "BackgroundImage", update: bool = True) -> None:
@@ -962,6 +1199,8 @@ class Background:
         if self.video is not None:
             self.video.close()
         self.video = None
+        self._touchscreen_slice = None
+        self._video_strip = None
         gc.collect()
 
         self.update_tiles()
@@ -973,11 +1212,44 @@ class Background:
             self.video.close()
         self.image = None
         self.video = video
+        self._touchscreen_slice = None
+        self._video_strip = None
         gc.collect()
 
         self.update_tiles()
         if update:
             self.deck_controller.update_all_inputs()
+
+    def set_extend_to_touchscreen(self, extend: bool, update: bool = True) -> None:
+        if extend == self.extend_to_touchscreen:
+            return
+        self.extend_to_touchscreen = extend
+        self._touchscreen_slice = None
+        self._video_strip = None
+
+        self.update_tiles()
+        if update:
+            self.deck_controller.update_all_inputs()
+
+    def _extend_effective(self) -> bool:
+        return (
+            self.extend_to_touchscreen
+            and self.image is not None
+            and self.deck_controller.deck.is_touch()
+        )
+
+    def get_touchscreen_image(self) -> Image.Image:
+        """The strip-sized slice of the current background (image or video
+        frame), or None if the background does not extend to the touchscreen."""
+        if self.video is not None:
+            # Refreshed by update_tiles() once per video frame; None unless
+            # the video was built with extend_touchscreen.
+            return self._video_strip
+        if not self._extend_effective():
+            return None
+        if self._touchscreen_slice is None:
+            self._touchscreen_slice = self.image.get_touchscreen_image()
+        return self._touchscreen_slice
 
     def set_from_path(self, path: str, fps: int = 30, loop: bool = True, update: bool = True, allow_keep: bool = True) -> None:
         if path == "":
@@ -986,17 +1258,22 @@ class Background:
             self.image = None
             # self.video = None
             self.set_video(None, update=False)
+            self._touchscreen_slice = None
             self.update_tiles()
             if update:
                 self.deck_controller.update_all_inputs()
         elif is_video(path):
+            extend = self.extend_to_touchscreen and self.deck_controller.deck.is_touch()
             if allow_keep:
-                if self.video is not None and self.video.video_path == path:
+                # The extend mode is baked into the video's canvas geometry and
+                # cache, so a mode change forces a rebuild even for the same path.
+                if (self.video is not None and self.video.video_path == path
+                        and self.video.extend_touchscreen == extend):
                     self.video.page = self.deck_controller.active_page
                     self.video.fps = fps
                     self.video.loop = loop
                     return
-            self.set_video(BackgroundVideo(self.deck_controller, path, loop=loop, fps=fps), update=update)
+            self.set_video(BackgroundVideo(self.deck_controller, path, loop=loop, fps=fps, extend_touchscreen=extend), update=update)
         else:
             if path is None:
                 return
@@ -1006,27 +1283,36 @@ class Background:
                 self.set_image(BackgroundImage(self.deck_controller, image.copy()), update=update)
 
     def update_tiles(self) -> None:
-        old_tiles = self.tiles # Why store them and close them later? So that there is not key error if the media threads fetches them during the update
-        if self.image is not None:
-            self.tiles = self.image.get_tiles()
-        elif self.video is not None:
-            self.tiles = self.video.get_next_tiles()
-        else:
-            self.tiles = [self.deck_controller.generate_alpha_key() for _ in range(self.deck_controller.deck.key_count())]
-
-        for tile in old_tiles:
-            if tile is not None:
-                tile.close()
-                tile = None
-                del tile
-        del old_tiles
+        # Old tiles are reclaimed by refcounting once unreferenced; closing them
+        # here would race a concurrent composite still holding one.
+        try:
+            if self.image is not None:
+                self.tiles = self.image.get_tiles(extend_touchscreen=self._extend_effective())
+            elif self.video is not None:
+                # An extended video frame carries the strip slice as one extra
+                # entry after the key tiles (see BackgroundVideoCache).
+                entries = self.video.get_next_tiles()
+                key_count = self.deck_controller.deck.key_count()
+                if self.video.extend_touchscreen and len(entries) > key_count:
+                    self._video_strip = entries[key_count]
+                    entries = entries[:key_count]
+                self.tiles = entries
+            else:
+                self.tiles = [self.deck_controller.generate_alpha_key() for _ in range(self.deck_controller.deck.key_count())]
+        except Exception:
+            # A tile error must not kill the media thread; keep the old tiles.
+            # Rate-limited: a broken video would otherwise log every frame.
+            now = time.time()
+            if now - getattr(self, "_last_tile_error_log", 0) > 10:
+                self._last_tile_error_log = now
+                log.opt(exception=True).error("Failed to update background tiles; keeping previous")
 
 class BackgroundImage:
     def __init__(self, deck_controller: DeckController, image: Image) -> None:
         self.deck_controller = deck_controller
         self.image = image
 
-    def create_full_deck_sized_image(self) -> Image:
+    def create_full_deck_sized_image(self, extend_touchscreen: bool = False) -> Image:
         key_rows, key_cols = self.deck_controller.deck.key_layout()
         key_width, key_height = self.deck_controller.get_key_image_size()
         spacing_x, spacing_y = self.deck_controller.key_spacing
@@ -1036,16 +1322,38 @@ class BackgroundImage:
 
         # Compute the total number of extra non-visible pixels that are obscured by
         # the bezel of the StreamDeck.
-        spacing_x *= key_cols - 1
-        spacing_y *= key_rows - 1
+        total_spacing_x = spacing_x * (key_cols - 1)
+        total_spacing_y = spacing_y * (key_rows - 1)
 
         # Compute final full deck image size, based on the number of buttons and
         # obscured pixels.
-        full_deck_image_size = (key_width + spacing_x, key_height + spacing_y)
+        canvas_width = key_width + total_spacing_x
+        canvas_height = key_height + total_spacing_y
+
+        # Grow the canvas below the key grid so the image continues onto the
+        # touchscreen strip: one bezel gap plus the strip mapped into canvas
+        # coordinates (the strip spans the full deck width).
+        if extend_touchscreen:
+            canvas_height += spacing_y + self._get_touchscreen_canvas_height(canvas_width)
 
         # Convert to RGBA first to preserve transparency, then resize
         img_rgba = self.image.convert("RGBA")
-        return ImageOps.fit(img_rgba, full_deck_image_size, Image.LANCZOS)
+        return ImageOps.fit(img_rgba, (canvas_width, canvas_height), Image.LANCZOS)
+
+    def _get_touchscreen_canvas_height(self, canvas_width: int) -> int:
+        """Height of the touchscreen strip in key-grid canvas coordinates."""
+        strip_width, strip_height = self.deck_controller.get_touchscreen_image_size()
+        return round(strip_height * canvas_width / strip_width)
+
+    def get_touchscreen_image(self) -> Image.Image:
+        """The bottom slice of the extended canvas, at strip resolution."""
+        canvas = self.create_full_deck_sized_image(extend_touchscreen=True)
+        strip_width, strip_height = self.deck_controller.get_touchscreen_image_size()
+        slice_height = self._get_touchscreen_canvas_height(canvas.width)
+        strip_slice = canvas.crop(
+            (0, canvas.height - slice_height, canvas.width, canvas.height)
+        )
+        return strip_slice.resize((strip_width, strip_height), Image.LANCZOS)
     
     def crop_key_image_from_deck_sized_image(self, image: Image.Image, key):
         deck = self.deck_controller.deck
@@ -1072,8 +1380,10 @@ class BackgroundImage:
         # Return the segment directly, converting to RGBA to preserve transparency
         return segment.convert("RGBA")
     
-    def get_tiles(self) -> list[Image.Image]:
-        full_deck_sized_image = self.create_full_deck_sized_image()
+    def get_tiles(self, extend_touchscreen: bool = False) -> list[Image.Image]:
+        # Key crop coordinates are unaffected by the extension: the strip
+        # region is appended below the key grid.
+        full_deck_sized_image = self.create_full_deck_sized_image(extend_touchscreen)
 
         tiles: list[Image.Image] = []
         for key in range(self.deck_controller.deck.key_count()):
@@ -1083,7 +1393,7 @@ class BackgroundImage:
         return tiles
 
 class BackgroundVideo(BackgroundVideoCache):
-    def __init__(self, deck_controller: DeckController, video_path: str, loop: bool = True, fps: int = 30) -> None:
+    def __init__(self, deck_controller: DeckController, video_path: str, loop: bool = True, fps: int = 30, extend_touchscreen: bool = False) -> None:
         self.deck_controller = deck_controller
         self.video_path = video_path
         self.loop = loop
@@ -1092,15 +1402,34 @@ class BackgroundVideo(BackgroundVideoCache):
         self.page: Page = self.deck_controller.active_page
 
         self.active_frame: int = -1
+        self._play_start: float = None  # wall-clock playback start, set on first real-time frame
+        self._last_frame_tick: float = None  # last real-time frame pick, for gap clamping
 
-        super().__init__(video_path, deck_controller=deck_controller)
+        super().__init__(video_path, deck_controller=deck_controller, extend_touchscreen=extend_touchscreen)
 
     def get_next_tiles(self) -> list[Image.Image]:
-        # return [self.deck_controller.generate_alpha_key() for _ in range(self.deck_controller.deck.key_count())]
-        self.active_frame += 1
-
-        if self.active_frame >= self.n_frames:
-            if self.loop:
+        if self.is_cache_complete():
+            # Cache built -> any frame is a free lookup. Pick it by wall-clock so a
+            # slow media loop drops frames (stays real-time) instead of playing the
+            # video in slow-motion.
+            now = time.time()
+            if self._play_start is None:
+                # Seed the timebase from the current position, not zero: the cache
+                # completes mid-play (sequential decode or async disk load), and a
+                # zero base would replay a non-looping video / jump a looping one.
+                self._play_start = now - (self.active_frame + 1) / float(self.fps or 30)
+            elif self._last_frame_tick is not None and now - self._last_frame_tick > 1.0:
+                # Ticks stop while the page is away; shift the timebase across the
+                # gap so playback resumes in place instead of fast-forwarding.
+                self._play_start += (now - self._last_frame_tick) - 1.0 / float(self.fps or 30)
+            self._last_frame_tick = now
+            frame = int((now - self._play_start) * (self.fps or 30))
+            self.active_frame = frame % self.n_frames if self.loop else min(frame, self.n_frames - 1)
+        else:
+            # Still decoding into the cache: advance sequentially so every frame is
+            # decoded (wall-clock jumps would leave gaps and force expensive seeks).
+            self.active_frame += 1
+            if self.active_frame >= self.n_frames and self.loop:
                 self.active_frame = 0
 
         tiles =  self.get_tiles(self.active_frame)
@@ -1109,77 +1438,6 @@ class BackgroundVideo(BackgroundVideoCache):
         except:
             copied_tiles = [None for _ in range(len(tiles))]
         return copied_tiles
-
-        frame = self.get_next_frame()
-        frame_full_sized_image = self.create_full_deck_sized_image(frame)
-
-        tiles: list[Image.Image] = []
-        for key in range(self.deck_controller.deck.key_count()):
-            key_image = self.crop_key_image_from_deck_sized_image(frame_full_sized_image, key)
-            tiles.append(key_image)
-
-        return tiles
-
-    def get_next_frame(self) -> Image.Image:
-        self.active_frame += 1
-
-        if self.active_frame >= self.n_frames:
-            if self.loop:
-                self.active_frame = 0
-        
-        return self.get_frame(self.active_frame)
-    
-    def create_full_deck_sized_image(self, frame: Image.Image) -> Image.Image:
-        key_rows, key_cols = self.deck_controller.deck.key_layout()
-        key_width, key_height = self.deck_controller.get_key_image_size()
-        spacing_x, spacing_y = self.deck_controller.key_spacing
-
-        key_width *= key_cols
-        key_height *= key_rows
-
-        # Compute the total number of extra non-visible pixels that are obscured by
-        # the bezel of the StreamDeck.
-        spacing_x *= key_cols - 1
-        spacing_y *= key_rows - 1
-
-        # Compute final full deck image size, based on the number of buttons and
-        # obscured pixels.
-        full_deck_image_size = (key_width + spacing_x, key_height + spacing_y)
-
-        # Resize the image to suit the StreamDeck's full image size. We use the
-        # helper function in Pillow's ImageOps module so that the image's aspect
-        # ratio is preserved.
-        return ImageOps.fit(frame, full_deck_image_size, Image.Resampling.HAMMING)
-    
-    def crop_key_image_from_deck_sized_image(self, image: Image.Image, key):
-        key_spacing = self.deck_controller.key_spacing
-        deck = self.deck_controller.deck
-
-
-        key_rows, key_cols = deck.key_layout()
-        key_width, key_height = deck.key_image_format()['size']
-        spacing_x, spacing_y = key_spacing
-
-        # Determine which row and column the requested key is located on.
-        row = key // key_cols
-        col = key % key_cols
-
-        # Compute the starting X and Y offsets into the full size image that the
-        # requested key should display.
-        start_x = col * (key_width + spacing_x)
-        start_y = row * (key_height + spacing_y)
-
-        # Compute the region of the larger deck image that is occupied by the given
-        # key, and crop out that segment of the full image.
-        region = (start_x, start_y, start_x + key_width, start_y + key_height)
-        segment = image.crop(region)
-
-        # Create a new key-sized image, and paste in the cropped section of the
-        # larger image.
-        key_image = PILHelper.create_key_image(deck)
-        key_image.paste(segment)
-
-        return key_image
 
 class KeyGIF(SingleKeyAsset):
     def __init__(self, controller_key: "ControllerKey", gif_path: str, fps: int = 30, loop: bool = True):
@@ -1241,6 +1499,7 @@ class LabelManager:
         self.action_labels = {}
         self.scroll_wait = 25
         self._has_scroll_labels_cache: bool = None
+        self._has_visible_labels_cache: bool = None
 
         self.init_labels()
         self.frames: dict[str, dict[str, int]] = {
@@ -1266,6 +1525,7 @@ class LabelManager:
     def clear_labels(self):
         self.init_labels()
         self._has_scroll_labels_cache = None
+        self._has_visible_labels_cache = None
 
     def set_page_label(self, position: str, label: "KeyLabel", update: bool = True):
         if label is None:
@@ -1275,6 +1535,7 @@ class LabelManager:
             self.page_labels[position] = label
 
         self._has_scroll_labels_cache = None
+        self._has_visible_labels_cache = None
         if update:
             self.update_label(position)
 
@@ -1298,6 +1559,7 @@ class LabelManager:
             self.action_labels[position] = label
 
         self._has_scroll_labels_cache = None
+        self._has_visible_labels_cache = None
         GLib.idle_add(self.update_label_editor)
         if update:
             self.update_label(position)
@@ -1412,6 +1674,14 @@ class LabelManager:
     def get_available_width(self) -> int:
         return self.controller_input.get_image_size()[0]
 
+    def get_has_visible_labels(self) -> bool:
+        # A label is drawn iff its text is non-empty (see add_labels_to_image).
+        if self._has_visible_labels_cache is None:
+            labels = self.get_composed_labels()
+            self._has_visible_labels_cache = any(
+                label.text not in (None, "") for label in labels.values())
+        return self._has_visible_labels_cache
+
     def get_has_scroll_labels(self) -> bool:
         if self._has_scroll_labels_cache is not None:
             return self._has_scroll_labels_cache
@@ -1509,9 +1779,16 @@ class LayoutManager:
         self.action_layout = ImageLayout()
         self.page_layout = ImageLayout()
 
+        # (token, layout key, resized image): the resized foreground for a
+        # static asset, valid while the caller passes the same asset object
+        # and the layout/geometry is unchanged. Single tuple so concurrent
+        # updates swap it atomically.
+        self._fg_cache: tuple = None
+
     def clear(self):
         self.action_layout = ImageLayout()
         self.page_layout = ImageLayout()
+        self._fg_cache = None
 
     def get_use_page_layout_properties(self) -> dict:
         return {
@@ -1583,7 +1860,7 @@ class LayoutManager:
 
         gl.app.main_win.sidebar.key_editor.image_editor.load_for_identifier(self.controller_input.identifier, self.controller_input.state)
 
-    def add_image_to_background(self, image: Image.Image, background: Image.Image) -> Image.Image:
+    def add_image_to_background(self, image: Image.Image, background: Image.Image, cache_token=None) -> Image.Image:
         if image is None:
             return background
         layout = self.get_composed_layout()
@@ -1594,12 +1871,30 @@ class LayoutManager:
         if 0 in image_size:
             return background.copy()
 
-        if layout.fill_mode == "stretch":
-            image_resized = image.resize(image_size, Image.Resampling.HAMMING)
-        elif layout.fill_mode == "cover":
-            image_resized = ImageOps.cover(image, image_size, Image.Resampling.HAMMING)
-        else:
-            image_resized = ImageOps.contain(image, image_size, Image.Resampling.HAMMING)
+        # The resized foreground depends only on the source asset and layout,
+        # not on the (possibly animated) background. cache_token is the asset
+        # object itself: assets are replaced, never mutated, so a held
+        # reference can't go stale (and can't collide, unlike a freed id()).
+        fg_key = (layout.fill_mode, layout.halign, layout.valign, image_size)
+        image_resized = None
+        if cache_token is not None:
+            cached = self._fg_cache
+            if cached is not None and cached[0] is cache_token and cached[1] == fg_key:
+                image_resized = cached[2]
+                if media_prof:
+                    media_prof.count("fg_cache_hit")
+
+        if image_resized is None:
+            if layout.fill_mode == "stretch":
+                image_resized = image.resize(image_size, Image.Resampling.HAMMING)
+            elif layout.fill_mode == "cover":
+                image_resized = ImageOps.cover(image, image_size, Image.Resampling.HAMMING)
+            else:
+                image_resized = ImageOps.contain(image, image_size, Image.Resampling.HAMMING)
+            if cache_token is not None:
+                self._fg_cache = (cache_token, fg_key, image_resized)
+                if media_prof:
+                    media_prof.count("fg_cache_miss")
 
         halign = layout.halign
         valign = layout.valign
@@ -1683,6 +1978,12 @@ class ControllerInputState:
         self._overlay: Image.Image = None
         self.hide_overlay_timer: Timer = None
 
+        # True while this state's on_tick is still running; the next tick is
+        # dropped, not queued (see own_actions_tick_threaded).
+        self._tick_running: bool = False
+        self._tick_started_at: float = 0.0
+        self._tick_stuck_warned: bool = False
+
         # managers
         self.layout_manager = LayoutManager(self.controller_input)
         self.label_manager = LabelManager(self.controller_input)
@@ -1710,9 +2011,13 @@ class ControllerInputState:
             self._overlay = None
             self.update()
         elif duration > 0:
+            # Cancel any in-flight hide timer first so repeated overlays don't
+            # orphan its thread.
+            self.stop_overlay_timer()
             self._overlay = image
             self.update()
             self.hide_overlay_timer = Timer(duration, self.hide_error)
+            self.hide_overlay_timer.daemon = True
             self.hide_overlay_timer.start()
         else:
             self._overlay = image
@@ -1791,17 +2096,59 @@ class ControllerInputState:
 
             action._raw_event_callback(event, data)
 
+    def _submit_action_callback(self, fn, *args) -> "Future | None":
+        """Route an action callback through the deck's bounded thread pool.
+
+        Returns the Future, or None if the executor is unavailable (deck being
+        torn down).
+        """
+        executor = getattr(self.deck_controller, "action_executor", None)
+        if executor is None:
+            return None
+        try:
+            future = executor.submit(fn, *args)
+        except RuntimeError:
+            # Executor already shut down (deck disconnected mid-call)
+            return None
+        future.add_done_callback(self._log_callback_exception)
+        return future
+
     def own_actions_ready_threaded(self) -> None:
-        threading.Thread(target=self.own_actions_ready, name="own_actions_ready").start()
+        self._submit_action_callback(self.own_actions_ready)
 
     def own_actions_update_threaded(self) -> None:
-        threading.Thread(target=self.own_actions_update, name="own_actions_update").start()
+        self._submit_action_callback(self.own_actions_update)
 
     def own_actions_tick_threaded(self) -> None:
-        threading.Thread(target=self.own_actions_tick, name="own_actions_tick").start()
+        # Drop (don't queue) this tick while the previous one is still running,
+        # so a slow plugin on_tick() can't pile up unbounded callbacks.
+        if self._tick_running:
+            if not self._tick_stuck_warned and time.monotonic() - self._tick_started_at > 10.0:
+                self._tick_stuck_warned = True
+                log.warning(f"on_tick for {self.controller_input.identifier} has been running >10s; this input's updates are paused until it returns")
+            return
+        self._tick_running = True
+        self._tick_stuck_warned = False
+        self._tick_started_at = time.monotonic()
+        future = self._submit_action_callback(self.own_actions_tick)
+        if future is None:
+            self._tick_running = False
+        else:
+            future.add_done_callback(self._on_tick_done)
+
+    def _on_tick_done(self, _future: "Future") -> None:
+        self._tick_running = False
+
+    def _log_callback_exception(self, future: "Future") -> None:
+        try:
+            exc = future.exception()
+        except Exception:
+            return
+        if exc is not None:
+            log.opt(exception=exc).error(f"Action callback for {self.controller_input.identifier} raised")
 
     def own_actions_event_callback_threaded(self, event: InputEvent, data: dict = None, show_notifications: bool = False) -> None:
-        threading.Thread(target=self.own_actions_event_callback, args=(event, data, show_notifications), name="own_actions_event_callback").start()
+        self._submit_action_callback(self.own_actions_event_callback, event, data, show_notifications)
 
     def remove_media(self) -> None:
         page = self.controller_input.deck_controller.active_page
@@ -1822,6 +2169,9 @@ class ControllerInput:
         self.ControllerStateClass = state_class
         self.identifier: InputIdentifier = identifier
         self.media_ticks: int = 0
+        # Generation of the content this input holds; paints tag it at render
+        # start and are dropped at the present boundary once it's superseded.
+        self.config_gen: int = 0
 
         self.is_visual: bool = True
 
@@ -1957,7 +2307,8 @@ class ControllerInput:
         gl.app.main_win.sidebar.key_editor.state_switcher.set_n_states(len(self.states))
 
     def get_active_state(self) -> "ControllerInputState":
-        return self.states.get(self.state, self.ControllerStateClass(self, -1))
+        state = self.states.get(self.state)
+        return state if state is not None else self.ControllerStateClass(self, -1)
 
     def set_state(self, state: int, update_sidebar: bool = True, allow_reload: bool = False) -> None:
         if state == self.state and not allow_reload:
@@ -2071,29 +2422,54 @@ class ControllerKey(ControllerInput):
         return y * cols + x
 
     def update(self, force: bool = False):
+        # Capture page/generation before rendering, so a switch mid-render
+        # invalidates this paint at the present boundary.
+        page = self.deck_controller.active_page
+        config_gen = self.config_gen
+        if media_prof:
+            _t0 = time.perf_counter()
         image = self.get_current_image()
+        if media_prof:
+            _t1 = time.perf_counter()
+            media_prof.add("composite", _t1 - _t0)
 
-        # Quick hash check - skip expensive conversion if image unchanged
+        # Quick hash check - skip expensive conversion only if the image matches
+        # BOTH the last presented hash (_last_img_hash, set in the task's run())
+        # and the last enqueued hash: either alone can be stale (dropped paint /
+        # in-flight revert) and would wrongly skip the correcting repaint.
         img_hash = hash(image.tobytes())
-        if not force and img_hash == getattr(self, '_last_img_hash', None):
+        if media_prof:
+            _t2 = time.perf_counter()
+            media_prof.add("hash", _t2 - _t1)
+        if (not force and img_hash == getattr(self, '_last_img_hash', None)
+                and img_hash == getattr(self, '_last_enqueued_hash', None)):
+            if media_prof:
+                media_prof.count("hash_skip")
             image.close()
             return
-        self._last_img_hash = img_hash
-
-        # Handle transparency properly - composite RGBA onto RGB to preserve smooth edges
-        if image.mode == "RGBA":
-            rgb_background = Image.new("RGB", image.size, (0, 0, 0))
-            rgb_background.paste(image, (0, 0), image)
-            rgb_image = rgb_background.rotate(self.deck_controller.deck.get_rotation())
-        else:
-            rgb_image = image.convert("RGB").rotate(self.deck_controller.deck.get_rotation())
 
         if self.deck_controller.is_visual():
-            native_image = PILHelper.to_native_key_format(self.deck_controller.deck, rgb_image)
-            rgb_image.close()
-            self.deck_controller.media_player.add_image_task(self.index, native_image)
+            memo_key = (img_hash, self.deck_controller.deck.get_rotation())
+            native_image = self.deck_controller.encode_memo.get(memo_key)
+            if native_image is None:
+                # Handle transparency properly - composite RGBA onto RGB to preserve smooth edges
+                if image.mode == "RGBA":
+                    rgb_background = Image.new("RGB", image.size, (0, 0, 0))
+                    rgb_background.paste(image, (0, 0), image)
+                    rgb_image = rgb_background.rotate(self.deck_controller.deck.get_rotation())
+                else:
+                    rgb_image = image.convert("RGB").rotate(self.deck_controller.deck.get_rotation())
+                native_image = encode_native_key(self.deck_controller.deck, rgb_image)
+                rgb_image.close()
+                self.deck_controller.encode_memo.put(memo_key, native_image)
+                if media_prof:
+                    media_prof.add("encode", time.perf_counter() - _t2)
+                    media_prof.count("memo_miss")
+            elif media_prof:
+                media_prof.count("memo_hit")
+            self._last_enqueued_hash = img_hash
+            self.deck_controller.media_player.add_image_task(self.index, native_image, page=page, config_gen=config_gen, controller_key=self, img_hash=img_hash)
 
-        del rgb_image
         self.set_ui_key_image(image)
 
     def get_active_state(self) -> "ControllerKeyState":
@@ -2121,9 +2497,13 @@ class ControllerKey(ControllerInput):
             else:
                 # For non-GIF videos, use the original FPS-based logic
                 needs_update = True
-        elif self.deck_controller.background.video is not None or state.label_manager.get_has_scroll_labels():
-            # Other content types
+        elif state.label_manager.get_has_scroll_labels():
             needs_update = True
+        elif self.deck_controller.background.video is not None:
+            # An opaque background color hides the video tile (see
+            # get_current_image), so that key can't change frame-to-frame.
+            if state.background_manager.get_composed_color()[-1] < 255:
+                needs_update = True
 
         if needs_update:
             self.update()
@@ -2172,6 +2552,25 @@ class ControllerKey(ControllerInput):
 
         background_color = self.get_active_state().background_manager.get_composed_color()
 
+        # A key with no color layer, media, labels, or markers composites to
+        # exactly the shared background tile; return a copy of it directly
+        # (matters per-frame over an animated background).
+        if (background_color[-1] == 0
+                and state._overlay is None
+                and state.key_image is None
+                and state.key_video is None
+                and not state.label_manager.get_has_visible_labels()
+                and not self.is_pressed()
+                and not (self.has_unavailable_action() and not self.deck_controller.screen_saver.showing)):
+            tile = self.deck_controller.background.tiles[self.index]
+            if tile is not None:
+                if media_prof:
+                    media_prof.count("tile_passthrough")
+                return copy(tile)
+
+        if media_prof:
+            _t0 = time.perf_counter()
+
         background: Image.Image = None
         # Only load the background image if it's not gonna be hidden by the background color
         if background_color[-1] < 255:
@@ -2190,6 +2589,10 @@ class ControllerKey(ControllerInput):
         if background is None:
             background = self.deck_controller.generate_alpha_key().copy()
 
+        if media_prof:
+            _t1 = time.perf_counter()
+            media_prof.add("c_tile", _t1 - _t0)
+
         if state._overlay:
             height = round(self.deck_controller.get_key_image_size()[1]*0.75)
             img = state._overlay.resize((height, height))
@@ -2203,7 +2606,9 @@ class ControllerKey(ControllerInput):
             image = state.key_image.get_raw_image()
             key_image = state.layout_manager.add_image_to_background(
                 image=image,
-                background=background
+                background=background,
+                # Static asset: the resize is cacheable (video/GIF is not).
+                cache_token=state.key_image
             )
         elif state.key_video is not None:
             image = state.key_video.get_raw_image()
@@ -2213,7 +2618,14 @@ class ControllerKey(ControllerInput):
         else:
             key_image = background
 
+        if media_prof:
+            _t2 = time.perf_counter()
+            media_prof.add("c_layout", _t2 - _t1)
+
         labeled_image = state.label_manager.add_labels_to_image(key_image)
+
+        if media_prof:
+            media_prof.add("c_labels", time.perf_counter() - _t2)
 
         if self.is_pressed():
             labeled_image = self.shrink_image(labeled_image)
@@ -2428,20 +2840,23 @@ class ControllerTouchScreen(ControllerInput):
         return []
 
     def update(self) -> None:
+        page = self.deck_controller.active_page  # capture at render start (see ControllerKey.update)
+        config_gen = self.config_gen
         image = self.get_current_image()
-        
-        # Touchscreen only supports JPEG, so composite RGBA onto background
-        if image.mode == "RGBA":
-            # Create a background image (black by default)
-            background = Image.new("RGB", image.size, (0, 0, 0))
-            # Composite the RGBA image onto the RGB background
-            background.paste(image, (0, 0), image)
-            image = background
-        
-        native_image = PILHelper.to_native_touchscreen_format(self.deck_controller.deck, image)
-        self.deck_controller.media_player.add_touchscreen_task(native_image)
 
-        self.set_ui_image(self.get_current_image())
+        # Finish device work with `image` before handing it to the UI mirror, so
+        # the media thread isn't reading it while GTK copies it.
+        # Touchscreen only supports JPEG, so composite RGBA onto black.
+        if image.mode == "RGBA":
+            device_image = Image.new("RGB", image.size, (0, 0, 0))
+            device_image.paste(image, (0, 0), image)
+        else:
+            device_image = image
+
+        native_image = PILHelper.to_native_touchscreen_format(self.deck_controller.deck, device_image)
+        self.deck_controller.media_player.add_touchscreen_task(native_image, page=page, config_gen=config_gen)
+
+        self.set_ui_image(image)
 
     def generate_empty_image(self) -> Image.Image:
         return Image.new("RGBA", self.get_screen_dimensions(), (0, 0, 0, 0))
@@ -2475,10 +2890,40 @@ class ControllerTouchScreen(ControllerInput):
 
     def set_ui_image(self, image: Image.Image) -> None:
         if recursive_hasattr(self, "deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar.image") and gl.app.main_win.get_mapped():
+            # Throttle the on-screen preview to a few FPS; the physical
+            # touchscreen still gets every frame.
+            now = time.time()
+            if now - getattr(self, "_last_ui_image_time", 0) < 0.1:
+                # Within the throttle window: keep the latest frame and flush it
+                # after the window, so the final frame (when a scroll stops) isn't lost.
+                self._pending_ui_image = image
+                if not getattr(self, "_ui_flush_scheduled", False):
+                    self._ui_flush_scheduled = True
+                    GLib.timeout_add(100, self._flush_pending_ui_image)
+                return
+            self._last_ui_image_time = now
+            self._pending_ui_image = None
             screenbar = self.deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar
             GLib.idle_add(screenbar.image.set_image, image)
         else:
             self.deck_controller.ui_image_changes_while_hidden[self.identifier] = image
+
+    def _flush_pending_ui_image(self) -> bool:
+        # Runs on the GTK main loop; pushes the last throttled frame so the preview
+        # doesn't freeze mid-scroll. Skipped if a fresh frame already superseded it.
+        self._ui_flush_scheduled = False
+        image = getattr(self, "_pending_ui_image", None)
+        self._pending_ui_image = None
+        if image is None:
+            return False
+        if recursive_hasattr(self, "deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar.image") and gl.app.main_win.get_mapped():
+            self._last_ui_image_time = time.time()
+            screenbar = self.deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar
+            screenbar.image.set_image(image)
+        else:
+            # Window unmapped mid-throttle: keep the frame for the remap restore.
+            self.deck_controller.ui_image_changes_while_hidden[self.identifier] = image
+        return False
 
     def get_current_image(self) -> Image.Image:
         active_state = self.get_active_state()
@@ -2585,13 +3030,18 @@ class ControllerDial(ControllerInput):
                 )
         
         elif event_type == DialEventType.TURN:
+            # value is the HID report's signed detent count — fast rotation
+            # coalesces several detents into one report, so forward the
+            # magnitude instead of collapsing it to a single event.
             if value < 0:
                 active_state.own_actions_event_callback_threaded(
-                    event=Input.Dial.Events.TURN_CCW
+                    event=Input.Dial.Events.TURN_CCW,
+                    data={"ticks": -value}
                 )
             else:
                 active_state.own_actions_event_callback_threaded(
-                    event=Input.Dial.Events.TURN_CW
+                    event=Input.Dial.Events.TURN_CW,
+                    data={"ticks": value}
                 )
 
     def load_from_input_dict(self, page_dict, update: bool = True):
@@ -2683,14 +3133,15 @@ class ControllerDial(ControllerInput):
     def get_active_state(self) -> "ControllerDialState":
         return super().get_active_state()
 
-    def on_media_player_tick(self) -> None:
+    def on_media_player_tick(self) -> bool:
+        # Advance the animation clock and report whether a redraw is needed;
+        # the caller renders the shared touchscreen once per frame.
         self.media_ticks += 1
 
         state = self.get_active_state()
-        if not any([state.video, state.label_manager.get_has_scroll_labels()]):
-            return
-
-        self.update()
+        if state is None:
+            return False
+        return state.video is not None or state.label_manager.get_has_scroll_labels()
 
     def get_image_size(self) -> tuple[int, int]:
         if self.deck_controller.deck.is_touch():
@@ -2728,7 +3179,17 @@ class ControllerTouchScreenState(ControllerInputState):
             except Exception as e:
                 log.error(f"Error loading background image: {e}")
                 background = None
-        
+
+        # Deck background extended onto the strip is the bottom-most layer; an
+        # explicit per-touchscreen background image takes precedence over it.
+        if background is None:
+            deck_background = self.controller_touch.deck_controller.background.get_touchscreen_image()
+            if deck_background is not None:
+                # convert() copies (the slice is shared and dial images get
+                # pasted onto the returned image in place) and normalizes
+                # video-frame slices (RGB) for the alpha_composite below.
+                background = deck_background.convert("RGBA")
+
         # Get background color from touchscreen state's background_manager
         background_color = self.background_manager.get_composed_color()
         

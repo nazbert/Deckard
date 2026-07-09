@@ -32,6 +32,7 @@ import globals as gl
 
 import functools
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 
 def run_on_main(func, *args, **kwargs):
@@ -68,6 +69,41 @@ def on_main(func):
     def wrapper(*args, **kwargs):
         return run_on_main(func, *args, **kwargs)
     return wrapper
+
+
+# App-lifecycle pool for @background work; I/O-bound work only (the GIL
+# serializes pure-Python CPU).
+_background_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="background")
+
+
+def _log_background_exception(future):
+    try:
+        exc = future.exception()
+    except Exception:
+        return
+    if exc is not None:
+        log.opt(exception=exc).error("background task raised")
+
+
+def run_in_background(func, *args, **kwargs):
+    """Submit func to the background pool and return its Future. Never .result()
+    it on the GTK thread while the work calls an on_main method -- that deadlocks."""
+    future = _background_pool.submit(func, *args, **kwargs)
+    future.add_done_callback(_log_background_exception)
+    return future
+
+
+def background(func):
+    """Decorator form of run_in_background."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        return run_in_background(func, *args, **kwargs)
+    return wrapper
+
+
+def shutdown_background_pool():
+    """Stop the @background pool; call on app quit."""
+    _background_pool.shutdown(wait=False, cancel_futures=True)
 
 
 # Helper Functions

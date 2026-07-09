@@ -20,13 +20,21 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.backend.DeckManagement.DeckController import ControllerInput
 
+_error_image: Image.Image = None
+
 class SingleKeyAsset:
     def __init__(self, controller_input: "ControllerInput"):
         self.controller_input = controller_input
         self.deck_controller = controller_input.deck_controller
 
     def get_raw_image(self) -> Image.Image:
-        return Image.open(os.path.join("Assets", "images", "error.png"))
+        # Decode the fallback/error image once; return a copy so callers can
+        # composite/close it freely.
+        global _error_image
+        if _error_image is None:
+            with Image.open(os.path.join("Assets", "images", "error.png")) as img:
+                _error_image = img.copy()
+        return _error_image.copy()
     
     def close(self):
         pass

@@ -1,9 +1,14 @@
+import threading
+
 from StreamDeck.Devices import StreamDeck
 
 class BetterDeck():
     def __init__(self, deck: StreamDeck, rotation: int = 0):
         self.deck: StreamDeck = deck
         self.rotation: int = rotation # [0, 90, 180, 270]
+        # Serializes device I/O: hidapi is not thread-safe and the deck is
+        # written from several threads. Reentrant for nested wrapped calls.
+        self._lock = threading.RLock()
 
 
     def open(self):
@@ -13,7 +18,8 @@ class BetterDeck():
 
         .. seealso:: See :func:`~StreamDeck.close` for the corresponding close method.
         """
-        self.deck.open()
+        with self._lock:
+            self.deck.open()
 
     def close(self):
         """
@@ -21,7 +27,8 @@ class BetterDeck():
 
         .. seealso:: See :func:`~StreamDeck.open` for the corresponding open method.
         """
-        self.deck.close()
+        with self._lock:
+            self.deck.close()
 
     def is_open(self):
         """
@@ -30,6 +37,8 @@ class BetterDeck():
         :rtype: bool
         :return: `True` if the deck is open, `False` otherwise.
         """
+        # No BetterDeck lock: status probes must not stall behind a multi-chunk
+        # image write; the transport's per-chunk mutex covers close() races.
         return self.deck.is_open()
 
     def connected(self):
@@ -40,6 +49,7 @@ class BetterDeck():
         :rtype: bool
         :return: `True` if the deck is still connected, `False` otherwise.
         """
+        # No BetterDeck lock: see is_open(); the transport's mutex covers close() races.
         return self.deck.connected()
 
     def vendor_id(self):
@@ -193,7 +203,8 @@ class BetterDeck():
 
         :param int hz: Reader thread frequency, in Hz (1-1000).
         """
-        self.deck.set_poll_frequency(hz)
+        with self._lock:
+            self.deck.set_poll_frequency(hz)
 
     def set_key_callback(self, callback):
         """
@@ -325,7 +336,8 @@ class BetterDeck():
                  the device (`True` if the button is being pressed, `False`
                  otherwise).
         """
-        return self.reorder_physical_for_rotation(self.deck.key_states())
+        with self._lock:
+            return self.reorder_physical_for_rotation(self.deck.key_states())
 
     def dial_states(self):
         """
@@ -337,14 +349,16 @@ class BetterDeck():
                  the device (`True` if the dial is being pressed, `False`
                  otherwise).
         """
-        return self.deck.dial_states()
+        with self._lock:
+            return self.deck.dial_states()
 
     def reset(self):
         """
         Resets the StreamDeck, clearing all button images and showing the
         standby image.
         """
-        self.deck.reset()
+        with self._lock:
+            self.deck.reset()
 
     def set_brightness(self, percent):
         """
@@ -354,7 +368,8 @@ class BetterDeck():
         :param int/float percent: brightness percent, from [0-100] as an `int`,
                                   or normalized to [0.0-1.0] as a `float`.
         """
-        self.deck.set_brightness(percent)
+        with self._lock:
+            self.deck.set_brightness(percent)
 
     def get_serial_number(self):
         """
@@ -363,7 +378,8 @@ class BetterDeck():
         :rtype: str
         :return: String containing the serial number of the attached device.
         """
-        return self.deck.get_serial_number()
+        with self._lock:
+            return self.deck.get_serial_number()
 
     def get_firmware_version(self):
         """
@@ -372,7 +388,8 @@ class BetterDeck():
         :rtype: str
         :return: String containing the firmware version of the attached device.
         """
-        return self.deck.get_firmware_version()
+        with self._lock:
+            return self.deck.get_firmware_version()
 
     def set_key_image(self, key, image):
         """
@@ -389,7 +406,8 @@ class BetterDeck():
                                  color.
         """
         physical_key = self.get_physical_index(key)
-        self.deck.set_key_image(physical_key, image)
+        with self._lock:
+            self.deck.set_key_image(physical_key, image)
 
     def set_touchscreen_image(self, image, x_pos=0, y_pos=0, width=0, height=0):
         """
@@ -408,7 +426,8 @@ class BetterDeck():
         :param int height: height of the image
 
         """
-        self.deck.set_touchscreen_image(image, x_pos, y_pos, width, height)
+        with self._lock:
+            self.deck.set_touchscreen_image(image, x_pos, y_pos, width, height)
 
     def set_key_color(self, key, r, g, b):
         """
@@ -422,7 +441,8 @@ class BetterDeck():
 
         """
         physical_key = self.get_physical_index(key)
-        self.deck.set_key_color(physical_key, r, g, b)
+        with self._lock:
+            self.deck.set_key_color(physical_key, r, g, b)
 
     def set_screen_image(self, image):
         """
@@ -434,7 +454,8 @@ class BetterDeck():
         :param enumerable image: Raw data of the image to set on the button.
                                  If `None`, the screen will be cleared.
         """
-        self.deck.set_screen_image(image)
+        with self._lock:
+            self.deck.set_screen_image(image)
 
     def set_rotation(self, value: int):
         if not value in [0, 90, 180, 270]:
