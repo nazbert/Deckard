@@ -26,6 +26,8 @@ stub cache object exposing exactly the surface InputVideo reads
 arithmetic/call-count test, independent of cv2/disk decoding or the
 registry.
 """
+import threading
+
 import fixtures
 from src.backend.DeckManagement.Subclasses.KeyVideo import InputVideo
 
@@ -64,6 +66,7 @@ def make_video(n_frames: int, fps: float = 10.0, loop: bool = True) -> InputVide
     v._play_start = None
     v._last_frame_tick = None
     v.video_cache = StubKeyVideoCache(n_frames)
+    v._close_lock = threading.Lock()  # __init__ sets this; __new__ bypasses it
     return v
 
 
