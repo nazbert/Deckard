@@ -65,6 +65,12 @@ def _get_loop() -> asyncio.AbstractEventLoop:
     loop = getattr(_thread_state, "loop", None)
     if loop is None or loop.is_closed():
         loop = asyncio.new_event_loop()
+        # An observer's fire-and-forget create_task otherwise dies in
+        # asyncio's default stderr handler when its exception is never
+        # retrieved (issue #80 §3.5). Imported lazily so this module stays
+        # importable without src on sys.path ordering guarantees.
+        from src.backend.log_hooks import asyncio_exception_handler
+        loop.set_exception_handler(asyncio_exception_handler)
         _thread_state.loop = loop
     return loop
 
@@ -84,6 +90,19 @@ def _dispatch_batch(observers: list[Callable], label: str | None, args: tuple, k
             log.error(f"Callback {name}{where} could not be called")
 
 
+def _log_batch_failure(future) -> None:
+    # Pool-task exceptions live only on the Future -- they never reach
+    # threading.excepthook (issue #80). Without this callback an exception
+    # escaping _dispatch_batch itself (loop creation, not the per-observer
+    # try/except) would vanish into the discarded Future forever.
+    try:
+        exc = future.exception()
+    except Exception:
+        return
+    if exc is not None:
+        log.opt(exception=exc).error("event dispatch batch failed before observer dispatch")
+
+
 def dispatch(observers: Iterable[Callable], args: tuple, kwargs: dict, label: str | None = None) -> None:
     """Queue `observers` for sequential, exception-isolated dispatch on the
     shared background thread. Returns immediately; observers have not
@@ -93,4 +112,5 @@ def dispatch(observers: Iterable[Callable], args: tuple, kwargs: dict, label: st
     observers = list(observers)
     if not observers:
         return
-    _dispatch_executor.submit(_dispatch_batch, observers, label, args, kwargs)
+    future = _dispatch_executor.submit(_dispatch_batch, observers, label, args, kwargs)
+    future.add_done_callback(_log_batch_failure)

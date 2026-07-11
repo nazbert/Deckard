@@ -37,6 +37,9 @@ import setproctitle
 setproctitle.setproctitle("StreamController")
 
 # Dump all-thread tracebacks on a fatal signal, or on demand via SIGQUIT.
+# stderr-only from time zero; main() re-points it at logs/faulthandler.log
+# via log_hooks.redirect_faulthandler() once gl.DATA_PATH is resolved (it
+# can come from --data or the static settings file, so not knowable here).
 import faulthandler, signal
 try:
     faulthandler.enable()
@@ -99,6 +102,7 @@ from src.backend.Wayland.Wayland import Wayland
 from src.backend.LockScreenManager.LockScreenManager import LockScreenManager
 from src.tray import TrayIcon
 from src.backend.Logger import Logger, LoggerConfig, Loglevel
+from src.backend.log_hooks import install_exception_hooks, redirect_faulthandler
 
 # Migration
 from src.backend.Migration.MigrationManager import MigrationManager
@@ -572,12 +576,27 @@ def make_api_calls():
     
 @log.catch
 def main():
+    # Safety net first (issue #80): from here on, uncaught exceptions on the
+    # main thread, GLib callbacks, plain threads and GC-time finalizers all
+    # route through loguru. Until config_logger() below adds the file/ring
+    # sinks these land on loguru's default stderr sink; afterwards the same
+    # hooks hit all three -- no re-install needed.
+    install_exception_hooks()
+
     # Handle listing commands first (they don't need full initialization)
     if handle_listing_commands():
         return
-    
+
     if make_api_calls():
         return
+
+    # Sinks up before the dbus probe / deck reset / migrations, so the
+    # earliest startup phase reaches logs.log + the ring (deep-audit §4 App
+    # shell: this phase used to be stderr-only). Deliberately AFTER the two
+    # early returns above: a short-lived CLI invocation must not open (and
+    # possibly rotate) the running app's log files.
+    config_logger()
+    redirect_faulthandler(os.path.join(gl.DATA_PATH, "logs"))
 
     gsk_render_env_var = os.environ.get("GSK_RENDERER")
     if gsk_render_env_var != "ngl":
@@ -590,8 +609,6 @@ def main():
         quit_running()
 
     reset_all_decks()
-
-    config_logger()
 
     migration_manager = MigrationManager()
     # Add migrators
