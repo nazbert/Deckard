@@ -164,17 +164,21 @@ class ScreenSaver:
             # No `inputs = {}` pre-clear (issue #1 vector a): init_inputs is
             # build-then-swap, so the concurrent media writer sees the old
             # complete dict or the new complete dict, never empty/partial.
-            # In-flight key gestures die with the stash: once the swap below
-            # lands, the physical release arrives on the REPLACEMENT input
-            # set (and is swallowed by the showing-screensaver guard), so a
-            # stashed key's hold timer would stay armed and fire HOLD_START
-            # into its pinned DOWN-time action snapshot after the finger
-            # already left -- mid-screensaver. Cancel them here, while the
-            # stashed keys are still the ones a racing input event would
-            # reach. Pure bookkeeping (attribute stores + timer cancels);
-            # no callbacks, no locks beyond the ones already held.
+            # In-flight key/dial gestures die with the stash: once the swap
+            # below lands, the physical release arrives on the REPLACEMENT
+            # input set (and is swallowed by the showing-screensaver guard),
+            # so a stashed input's hold timer would stay armed and fire
+            # HOLD_START into its pinned DOWN-time action snapshot after the
+            # finger already left -- mid-screensaver. Cancel them here, while
+            # the stashed inputs are still the ones a racing input event
+            # would reach. Pure bookkeeping (attribute stores + timer
+            # cancels); no callbacks, no locks beyond the ones already held.
+            # The touchscreen keeps no gesture state (its events arrive
+            # pre-classified, single-shot) -- nothing to cancel there.
             for key in self.original_inputs.get(Input.Key, []):
                 key.cancel_gesture()
+            for dial in self.original_inputs.get(Input.Dial, []):
+                dial.cancel_gesture()
             self.deck_controller.init_inputs()
 
             self.original_background = self.deck_controller.background
