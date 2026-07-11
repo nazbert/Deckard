@@ -17,7 +17,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GdkPixbuf, Pango
+from gi.repository import Gtk, Adw, GdkPixbuf, GLib, Pango
 
 # Import python modules
 from loguru import logger as log
@@ -87,8 +87,15 @@ class Preview(Gtk.FlowBoxChild):
                                                              width=250,
                                                              height=180,
                                                              preserve_aspect_ratio=True)
-        except Exception as e:
+        except GLib.Error as e:
+            # Expected for a corrupt/unreadable file -- the message says why.
             log.warning(f"Could not load asset preview for {path}: {e}")
+            self.show_broken_image()
+            return
+        except Exception as e:
+            # Unexpected (programming error, not a poison file): keep the
+            # traceback so it stays distinguishable in the logs.
+            log.opt(exception=True).warning(f"Unexpected error loading asset preview for {path}: {e}")
             self.show_broken_image()
             return
 

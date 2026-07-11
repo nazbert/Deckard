@@ -81,7 +81,7 @@ class CustomAssetChooser(ChooserPage):
                 try:
                     task()
                 except Exception as e:
-                    log.warning(f"Deferred asset-chooser task failed: {e}")
+                    log.opt(exception=True).warning(f"Deferred asset-chooser task failed: {e}")
             self.build_task_finished_tasks.clear()
 
     def on_dnd_accept(self, drop, user_data):

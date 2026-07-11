@@ -14,6 +14,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import Python modules
 import os
+import uuid
 import cv2
 from loguru import logger as log
 from PIL import Image, ImageDraw, ImageSequence
@@ -48,6 +49,24 @@ class MediaManager:
         img.info["sc_broken"] = True
         return img
 
+    @staticmethod
+    def save_image_atomic(image: Image.Image, path: str) -> None:
+        """
+        Crash-safe image save: write to a unique temp file in the same
+        directory, then os.replace() into place. A crash/disk-full mid-save
+        must never leave a half-written (poison) file at `path` (#112 rev1).
+        """
+        tmp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+        try:
+            image.save(tmp_path, format="PNG")
+            os.replace(tmp_path, path)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
     def get_thumbnail(self, file_path):
         # Guarded whole (#112): sha256() raises on unreadable files
         # (chmod 000), Image.open raises on a poisoned cache entry, and the
@@ -68,20 +87,32 @@ class MediaManager:
                 cached = False
 
             if cached:
-                with Image.open(thumbnail_path) as img:
-                    img.thumbnail((250, 250), resample=Image.Resampling.LANCZOS)
-                    return img.copy()
-            else:
-                thumbnail = self.generate_thumbnail(file_path)
-                thumbnail.thumbnail((250, 250), resample=Image.Resampling.LANCZOS)
-                if not thumbnail.info.get("sc_broken"):
-                    # Never cache the placeholder -- the cache is keyed by the
-                    # file's content hash, so a cached placeholder would stick
-                    # even for transient failures (e.g. permissions).
-                    thumbnail.save(thumbnail_path)
-                return thumbnail
+                try:
+                    with Image.open(thumbnail_path) as img:
+                        img.thumbnail((250, 250), resample=Image.Resampling.LANCZOS)
+                        return img.copy()
+                except Exception as e:
+                    # Poisoned cache entry (e.g. an old crash mid-write
+                    # truncated it): a bad CACHE file must never wedge a valid
+                    # SOURCE file to the broken placeholder (#112 rev1) --
+                    # drop the entry and fall through to regeneration.
+                    log.opt(exception=True).warning(
+                        f"Poisoned thumbnail cache entry for {file_path}, regenerating: {e}")
+                    try:
+                        os.remove(thumbnail_path)
+                    except OSError:
+                        pass
+
+            thumbnail = self.generate_thumbnail(file_path)
+            thumbnail.thumbnail((250, 250), resample=Image.Resampling.LANCZOS)
+            if not thumbnail.info.get("sc_broken"):
+                # Never cache the placeholder -- the cache is keyed by the
+                # file's content hash, so a cached placeholder would stick
+                # even for transient failures (e.g. permissions).
+                self.save_image_atomic(thumbnail, thumbnail_path)
+            return thumbnail
         except Exception as e:
-            log.warning(f"Could not create thumbnail for {file_path}: {e}")
+            log.opt(exception=True).warning(f"Could not create thumbnail for {file_path}: {e}")
             return self.get_fallback_thumbnail()
 
     def generate_thumbnail(self, file_path):
@@ -107,7 +138,9 @@ class MediaManager:
             thumbnail.load()
             return thumbnail
         except Exception as e:
-            log.warning(f"Could not generate thumbnail for {file_path}: {e}")
+            # exception=True: a real programming error in the decode chain
+            # must stay distinguishable from a poison file in the logs.
+            log.opt(exception=True).warning(f"Could not generate thumbnail for {file_path}: {e}")
             return self.get_fallback_thumbnail()
 
     def generate_video_thumbnail(self, video_path: str) -> Image.Image:
