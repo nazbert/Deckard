@@ -119,12 +119,24 @@ class StoreBackend:
 
         stores = []
         branch = await self.get_official_store_branch()
+        if not isinstance(branch, str) or not branch:
+            # get_official_store_branch guarantees a str; keep the invariant
+            # enforced at this boundary anyway -- a non-str branch would end
+            # up interpolated into build_url URLs and cache keys.
+            log.error(f"Official store branch resolved to {branch!r}; using {self.STORE_BRANCH}")
+            branch = self.STORE_BRANCH
         log.info(f"Official store branch: {branch}")
         stores.append((self.STORE_REPO_URL, branch))
 
         if settings.get("store", {}).get("enable-custom-stores", False):
             for store in settings.get("store", {}).get("custom-stores", {}):
-                stores.append((store.get("url"), store.get("branch")))
+                url = store.get("url")
+                if not url:
+                    continue
+                custom_branch = store.get("branch")
+                if not isinstance(custom_branch, str) or not custom_branch:
+                    custom_branch = "main"
+                stores.append((url, custom_branch))
 
         return stores
     
@@ -139,13 +151,34 @@ class StoreBackend:
         return plugins
     
     async def get_official_store_branch(self) -> str:
+        """Always returns a str branch name. On any failure (fetch failed
+        AND cache too stale, truncated/corrupt versions.json) it falls back
+        to STORE_BRANCH -- returning an error object here used to leak into
+        get_stores' (url, branch) tuples and get interpolated into URLs and
+        cache keys by build_url. The fallback is deliberately NOT cached in
+        official_store_branch_cache, so a later successful fetch corrects it.
+        """
         if self.official_store_branch_cache is not None:
             return self.official_store_branch_cache
         versions_file = await self.get_remote_file(self.STORE_REPO_URL, "versions.json", branch_name="versions", force_refetch=True)
-        if isinstance(versions_file, NoConnectionError):
-            return versions_file
-        versions = json.loads(versions_file)
+        if isinstance(versions_file, NoConnectionError) or versions_file is None:
+            log.warning(f"Could not fetch versions.json; falling back to store branch {self.STORE_BRANCH}")
+            return self.STORE_BRANCH
+        try:
+            versions = json.loads(versions_file)
+        except (json.decoder.JSONDecodeError, TypeError) as e:
+            # A truncated cached versions.json (served by the stale-cache
+            # fallback) used to raise out of here, freeze the store tab's
+            # spinner and mark the page loaded-forever.
+            log.error(f"Corrupt versions.json; falling back to store branch {self.STORE_BRANCH}: {e}")
+            return self.STORE_BRANCH
+        if not isinstance(versions, dict):
+            log.error(f"versions.json is not an object; falling back to store branch {self.STORE_BRANCH}")
+            return self.STORE_BRANCH
         v = versions.get(gl.app_version, "main")
+        if not isinstance(v, str) or not v:
+            log.error(f"versions.json maps {gl.app_version} to {v!r}; falling back to store branch {self.STORE_BRANCH}")
+            return self.STORE_BRANCH
         self.official_store_branch_cache = v
         return v
 

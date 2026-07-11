@@ -49,7 +49,8 @@ class WallpaperPage(StorePage):
         self.store = store
         self.compatible_section.search_entry.set_placeholder_text(gl.lm.get("store.wallpapers.search-placeholder"))
 
-    @log.catch
+    # No @log.catch here: StorePage._load_guarded needs to SEE the failure to
+    # show the error page and re-arm the tab for a retry.
     def load(self):
         self.set_loading()
         wallpapers = asyncio.run(self.store.backend.get_all_wallpapers())
