@@ -6,6 +6,8 @@ Year: 2024
 import json
 import os.path
 
+from loguru import logger as log
+
 from .Manager import Manager
 from .Asset import Color, Icon
 
@@ -20,11 +22,29 @@ class AssetManager:
         if not os.path.exists(self.plugin_base.settings_path):
             return {}
 
-        with open(self.plugin_base.settings_path, "r") as f:
-            assets = json.load(f)
-            assets = assets.get("assets", {})
-            self.icons.load_json(assets)
-            self.colors.load_json(assets)
+        # This runs inside PluginBase.__init__ -- a corrupt settings file
+        # (e.g. truncated by a crash) must not raise, or the whole plugin
+        # silently fails to load.
+        try:
+            with open(self.plugin_base.settings_path, "r") as f:
+                assets = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            log.opt(exception=e).error(
+                f"Could not read plugin assets from {self.plugin_base.settings_path} "
+                f"-- continuing without custom assets"
+            )
+            return {}
+
+        if not isinstance(assets, dict):
+            log.error(
+                f"Plugin settings file {self.plugin_base.settings_path} does not "
+                f"contain a JSON object -- continuing without custom assets"
+            )
+            return {}
+
+        assets = assets.get("assets", {})
+        self.icons.load_json(assets)
+        self.colors.load_json(assets)
 
     def save_assets(self):
         os.makedirs(os.path.dirname(self.plugin_base.settings_path), exist_ok=True)

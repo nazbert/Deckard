@@ -142,7 +142,23 @@ class PluginBase(rpyc.Service):
                 log.error(f"Plugin: {self.plugin_name}: Plugin already exists")
                 return
             
-        if self.is_app_version_matching():
+        # A version check that CRASHES (unparseable version string, missing
+        # minimum-app-version) must not unwind the plugin's __init__ -- that
+        # made the plugin vanish entirely (neither registered nor disabled)
+        # with only a generic, traceback-free log line. Treat it like an
+        # incompatible version instead: disable the plugin, visibly.
+        version_check_failed = False
+        try:
+            app_version_matching = self.is_app_version_matching()
+        except Exception as e:
+            log.opt(exception=e).error(
+                f"Plugin {self.plugin_id}: could not check version compatibility "
+                f"(app-version={self.app_version!r}, minimum-app-version={self.min_app_version!r}). Disabling plugin."
+            )
+            app_version_matching = False
+            version_check_failed = True
+
+        if app_version_matching:
             # Register plugin
             PluginBase.plugins[self.plugin_id] = {
                 "object": self,
@@ -157,26 +173,37 @@ class PluginBase(rpyc.Service):
             settings = self.get_settings()
             self.first_setup = settings.get("first-setup", True)
         else:
-            reason = None
+            reason = "invalid-version" if version_check_failed else None
 
-            if self._get_parsed_base_version(self.min_app_version) > self._get_parsed_base_version(gl.app_version):
-                # Plugin is too new - StreamController is too old
-                log.warning(
-                    f"Plugin {self.plugin_id} is not compatible with this version of StreamController. "
-                    f"Please update StreamController! Plugin requires app version {self.min_app_version} "
-                    f"you are running version {gl.app_version}. Disabling plugin."
-                )
-                reason = "app-out-of-date"
+            if not version_check_failed:
+                try:
+                    min_app_version = self._get_parsed_base_version(self.min_app_version)
+                    if min_app_version is not None and min_app_version > self._get_parsed_base_version(gl.app_version):
+                        # Plugin is too new - StreamController is too old
+                        log.warning(
+                            f"Plugin {self.plugin_id} is not compatible with this version of StreamController. "
+                            f"Please update StreamController! Plugin requires app version {self.min_app_version} "
+                            f"you are running version {gl.app_version}. Disabling plugin."
+                        )
+                        reason = "app-out-of-date"
 
-            elif version.parse(self.app_version).major != version.parse(gl.app_version).major:
-                # Plugin is too old - StreamController is too new
-                max_version = f"{version.parse(self.app_version).major}.x.x"
-                log.warning(
-                    f"Plugin {self.plugin_id} is not compatible with this version of StreamController. "
-                    f"Please update your assets! Plugin requires an app version between {self.min_app_version} and {max_version} "
-                    f"you are running version {gl.app_version}. Disabling plugin."
-                )
-                reason = "plugin-out-of-date"
+                    elif version.parse(self.app_version).major != version.parse(gl.app_version).major:
+                        # Plugin is too old - StreamController is too new
+                        max_version = f"{version.parse(self.app_version).major}.x.x"
+                        log.warning(
+                            f"Plugin {self.plugin_id} is not compatible with this version of StreamController. "
+                            f"Please update your assets! Plugin requires an app version between {self.min_app_version} and {max_version} "
+                            f"you are running version {gl.app_version}. Disabling plugin."
+                        )
+                        reason = "plugin-out-of-date"
+                except Exception as e:
+                    # is_app_version_matching()'s `and` short-circuits, so a
+                    # malformed minimum-app-version can first surface here.
+                    log.opt(exception=e).error(
+                        f"Plugin {self.plugin_id}: could not determine the disable reason from its version "
+                        f"metadata (app-version={self.app_version!r}, minimum-app-version={self.min_app_version!r})."
+                    )
+                    reason = "invalid-version"
 
             PluginBase.disabled_plugins[self.plugin_id] = {
                 "object": self,
@@ -386,23 +413,46 @@ class PluginBase(rpyc.Service):
         """
         if not os.path.exists(self.settings_path):
             return {}
-        with open(self.settings_path, "r") as f:
-            settings = json.load(f)
+        # A corrupt settings file (e.g. truncated by a crash) must not raise:
+        # this runs inside register()/plugin __init__, where an exception used
+        # to kill the whole plugin -- empty action list with no explanation.
+        try:
+            with open(self.settings_path, "r") as f:
+                settings = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            log.opt(exception=e).error(
+                f"Plugin {self.plugin_name or self.PATH}: could not read settings file "
+                f"{self.settings_path} -- falling back to empty settings"
+            )
+            return {}
 
-            if settings.get("file-version") == "2.0":
-                # Is newest version, return settings
-                return settings.get("settings", {})
-            
-            else:
-                # Is the old format, convert it
-                new_settings = {
-                    "file-version": "2.0",
-                    "settings": settings
-                }
+        if not isinstance(settings, dict):
+            log.error(
+                f"Plugin {self.plugin_name or self.PATH}: settings file {self.settings_path} "
+                f"does not contain a JSON object -- falling back to empty settings"
+            )
+            return {}
+
+        if settings.get("file-version") == "2.0":
+            # Is newest version, return settings
+            return settings.get("settings", {})
+
+        else:
+            # Is the old format, convert it
+            new_settings = {
+                "file-version": "2.0",
+                "settings": settings
+            }
+            try:
                 with open(self.settings_path, "w") as f:
                     json.dump(new_settings, f, indent=4)
+            except OSError as e:
+                log.opt(exception=e).error(
+                    f"Plugin {self.plugin_name or self.PATH}: could not migrate settings file "
+                    f"{self.settings_path} to the new format"
+                )
 
-                return settings
+            return settings
                 
     def get_manifest(self):
         """
@@ -411,9 +461,22 @@ class PluginBase(rpyc.Service):
         Returns:
             dict: The contents of the manifest file as a dictionary, or an empty dictionary if the file does not exist.
         """
-        if os.path.exists(os.path.join(self.PATH, "manifest.json")):
-            with open(os.path.join(self.PATH, "manifest.json"), "r") as f:
-                return json.load(f)
+        manifest_path = os.path.join(self.PATH, "manifest.json")
+        if os.path.exists(manifest_path):
+            # A corrupt manifest must not raise: get_plugin_id()/register()
+            # call this during plugin __init__, where an exception used to
+            # make the plugin vanish without a trace.
+            try:
+                with open(manifest_path, "r") as f:
+                    manifest = json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                log.opt(exception=e).error(
+                    f"Could not read plugin manifest {manifest_path} -- treating it as empty"
+                )
+                return {}
+            if isinstance(manifest, dict):
+                return manifest
+            log.error(f"Plugin manifest {manifest_path} does not contain a JSON object -- treating it as empty")
         return {}
 
     def get_about(self):
