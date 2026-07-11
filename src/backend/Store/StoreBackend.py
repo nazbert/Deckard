@@ -323,16 +323,44 @@ class StoreBackend:
         elif data_type == "content":
             return answer.content
         
-    async def get_last_commit(self, repo_url: str, branch_name: str = "main") -> str:
+    async def get_last_commit(self, repo_url: str, branch_name: str = "main"):
+        """Resolves the tip sha of a branch via the GitHub API.
+
+        The blocking round-trip runs in a worker thread under the fetch
+        semaphore: prepare_plugin awaits this inside the catalog gather for
+        every branch-pinned custom plugin, and a synchronous requests.get()
+        on the loop thread serialized the whole page load behind each call's
+        latency (up to timeout=30 apiece) while also evading the fetch
+        limiter every sibling fetch goes through.
+
+        Returns the sha str, None when the branch resolves to no commits
+        (non-200 answer, empty/unparseable commit list), or NoConnectionError
+        on a network failure -- the same contract as request_from_url, so
+        callers isinstance-check instead of catching requests exceptions
+        out of a gather.
+        """
         url = f"https://api.github.com/repos/{self.get_user_name(repo_url)}/{self.get_repo_name(repo_url)}/commits?sha={branch_name}&per_page=1"
-        response = requests.get(url, timeout=30)
+
+        def _fetch() -> requests.Response:
+            with self._fetch_limiter:
+                return requests.get(url, timeout=30)
+
+        try:
+            response = await asyncio.to_thread(_fetch)
+        except requests.exceptions.RequestException as e:
+            log.error(f"Failed to fetch the last commit of {repo_url}@{branch_name}: {e}")
+            return NoConnectionError()
 
         if response.status_code != 200:
-            return
-        
-        commits = response.json()
-        if len(commits) == 0:
-            return
+            return None
+
+        try:
+            commits = response.json()
+        except ValueError as e:
+            log.error(f"Unparseable commits answer for {repo_url}@{branch_name}: {e}")
+            return None
+        if not isinstance(commits, list) or len(commits) == 0:
+            return None
         return commits[0].get("sha")
     
     async def get_official_authors(self) -> list:
@@ -453,6 +481,12 @@ class StoreBackend:
         branch = plugin.get("branch")
         if branch is not None:
             commit = await self.get_last_commit(url, branch)
+            if isinstance(commit, NoConnectionError):
+                # NoConnectionError is falsy: letting it fall through would
+                # fetch the manifest at `branch` but store the error object
+                # as the entry's commit_sha (poisoning sha comparisons).
+                log.error(f"Could not resolve the last commit of {url}@{branch} due to NoConnectionError")
+                return commit
 
         manifest = await self.get_manifest(url, commit or branch)
         if isinstance(manifest, NoConnectionError):
@@ -934,6 +968,13 @@ class StoreBackend:
         if commit_sha is None and branch_name is not None:
             # Used to write the version
             sha = await self.get_last_commit(repo_url, branch_name)
+            if isinstance(sha, NoConnectionError):
+                return sha
+            if sha is None:
+                # Fail up front rather than building a ".../None.zip" URL
+                # that 404s later with a misleading log.
+                log.error(f"Could not resolve branch {branch_name!r} of {repo_url}")
+                return 404
         zip_url = f"https://github.com/{username}/{projectname}/archive/{sha}.zip"
 
         zip_path = os.path.join(gl.DATA_PATH, "cache", f"{projectname}-{sha}.zip")
