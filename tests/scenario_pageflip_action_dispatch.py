@@ -71,6 +71,16 @@ class ChangePageAction(RecordingAction):
             self.deck_controller.load_page(self.target_page)
 
 
+class RaisingAction(RecordingAction):
+    """Records, then raises on SHORT_UP/UP -- exercises per-action isolation
+    in the dispatch loop (one raiser must not starve its siblings)."""
+
+    def _raw_event_callback(self, event, data=None):
+        super()._raw_event_callback(event, data)
+        if event in (SHORT_UP, UP):
+            raise RuntimeError("intentional test failure in action callback")
+
+
 class RunCommandLikeAction(RecordingAction):
     """Mirrors com_core447_OSPlugin's RunCommand latch verbatim: DOWN is
     swallowed while registered_down is set; only UP clears it."""
@@ -169,6 +179,72 @@ def main() -> None:
             "second UP lost"
         assert bleed_recorder.received == [], \
             f"gesture bleed onto page B on press 2: {bleed_recorder.received}"
+
+        # ---- Press 3: origin page evicted MID-GESTURE ---- #
+        # mark_page_ready_to_clear(True) runs when the DOWN callback returns,
+        # not at gesture end, so the origin page is genuinely evictable while
+        # the key is still down. The snapshot pins the action objects across
+        # ActionCore.teardown (clean_up: _cleaned_up=True, page=None) -- the
+        # dispatch loop must skip the corpses, and still serve any healthy
+        # snapshot member. `sentinel` stands in for the healthy member: it
+        # is in the DOWN-time snapshot but detached from page A's
+        # action_objects before the eviction, so clear_action_objects never
+        # tears it down.
+        sentinel = RecordingAction(
+            tag="snapshot_sentinel",
+            deck_controller=controller, page=page_a, input_ident=ident)
+        inject(page_a, ident, [change_action, run_action, sentinel])
+
+        controller.load_page(page_a)
+        assert fixtures.wait_until(lambda: controller.active_page is page_a)
+
+        deck.fire_key_event(0, True)
+        assert fixtures.wait_until(lambda: run_action.received.count(DOWN) == 3)
+        assert run_action.run_count == 3
+        assert fixtures.wait_until(lambda: controller.active_page is page_b)
+
+        # Evict page A through the real path (cache-budget eviction).
+        page_a.ready_to_clear = True
+        old_max_pages = gl.page_manager.max_pages
+        gl.page_manager.max_pages = 0
+        # The sentinel leaves the page before eviction (see above).
+        page_a.action_objects[ident.input_type][ident.json_identifier][0].pop(2)
+        gl.page_manager.clear_old_cached_pages()
+        gl.page_manager.max_pages = old_max_pages
+        assert run_action._cleaned_up and change_action._cleaned_up, \
+            "eviction should have torn the origin page's actions down"
+        assert not sentinel._cleaned_up
+
+        deck.fire_key_event(0, False)
+        assert fixtures.wait_until(lambda: UP in sentinel.received), \
+            "healthy snapshot member never got the UP after its siblings were torn down"
+        assert SHORT_UP in sentinel.received
+        assert run_action.received.count(UP) == 2, (
+            "UP was dispatched into a torn-down action (clean_up already "
+            f"ran): {run_action.received}"
+        )
+        assert change_action.received.count(UP) == 2, \
+            f"UP was dispatched into a torn-down action: {change_action.received}"
+
+        # ---- Per-action isolation: a raiser must not starve siblings ---- #
+        ident_iso = Input.Key("1x0")
+        raiser = RaisingAction(
+            tag="raiser",
+            deck_controller=controller, page=page_b, input_ident=ident_iso)
+        survivor = RecordingAction(
+            tag="survivor",
+            deck_controller=controller, page=page_b, input_ident=ident_iso)
+        inject(page_b, ident_iso, [raiser, survivor])
+
+        deck.fire_key_event(1, True)  # physical 1 -> "1x0" on the 2x4 layout
+        assert fixtures.wait_until(lambda: DOWN in survivor.received)
+        deck.fire_key_event(1, False)
+        assert fixtures.wait_until(lambda: UP in survivor.received), (
+            "a raising action starved its sibling of the UP -- per-action "
+            f"isolation missing (survivor saw {survivor.received})"
+        )
+        assert SHORT_UP in survivor.received
+        assert UP in raiser.received  # the raiser itself was still dispatched
 
         print("PASS: gesture events route to the DOWN-time action snapshot across page flips")
     finally:

@@ -3504,7 +3504,29 @@ class ControllerInputState:
             if not isinstance(action, ActionCore):
                 continue
 
-            action._raw_event_callback(event, data)
+            # A pinned snapshot (ControllerKey's DOWN-time gesture list) can
+            # outlive its page's cache entry: mark_page_ready_to_clear(True)
+            # runs when the DOWN callback returns -- not at gesture end -- so
+            # a mid-hold eviction (clear_old_cached_pages), remove_page, or
+            # reload-diff can run ActionCore.teardown on a snapshot member
+            # (clean_up(): page=None, signals disconnected) while its UP is
+            # still owed. Never dispatch into a torn-down action.
+            # _cleaned_up is clean_up()'s idempotency marker, set under
+            # _cleanup_lock; the lock-free read here is benign -- worst case
+            # one event reaches an action mid-teardown, the same envelope as
+            # live resolution always had.
+            if getattr(action, "_cleaned_up", False):
+                continue
+
+            # Per-action isolation: the method-level @log.catch would abort
+            # this whole loop at the first raiser, starving every later
+            # action in the list of its event.
+            try:
+                action._raw_event_callback(event, data)
+            except Exception:
+                log.opt(exception=True).error(
+                    f"Action {getattr(action, 'action_id', action)} raised handling {event}"
+                )
 
     def _submit_action_callback(self, fn, *args) -> "Future | None":
         """Route an action callback through the deck's bounded thread pool.
