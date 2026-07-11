@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 import os
 import shutil
 import sys
+import threading
 
 # Automatically detect macOS
 IS_MAC = sys.platform == "darwin"
@@ -30,40 +31,70 @@ from loguru import logger as log
 def is_flatpak():
     return os.path.isfile('/.flatpak-info')
 
-log.catch
+# Serializes concurrent setup_autostart() calls: the portal's async callback
+# may land long after a NEWER setup_autostart() call already changed the
+# on-disk state -- a stale callback must never clobber it (the classic case:
+# disable removes the entry synchronously, then the disable/enable portal
+# request fails asynchronously and the fallback re-installed a flatpak-style
+# entry exec'ing /app/bin/launch.sh, which is broken on native installs).
+_autostart_lock = threading.Lock()
+_autostart_generation = 0
+
+
+def _current_autostart_generation() -> int:
+    with _autostart_lock:
+        return _autostart_generation
+
+
+@log.catch
 def setup_autostart(enable: bool = True):
+    global _autostart_generation
     if IS_MAC:
         return
-    if enable:
-        if is_flatpak():
-            setup_autostart_flatpak(True)
 
-        else:
-            setup_autostart_desktop_entry(True, True)
+    with _autostart_lock:
+        _autostart_generation += 1
+        generation = _autostart_generation
 
+    if is_flatpak():
+        setup_autostart_flatpak(enable, generation)
+        if not enable:
+            # Also remove any manual fallback entry a previous failed portal
+            # request may have left behind.
+            setup_autostart_desktop_entry(False)
     else:
-        setup_autostart_flatpak(False)
-        setup_autostart_desktop_entry(False)
-    
-    
+        # Native installs never go through the portal: its async callback was
+        # the racing writer that re-installed a flatpak-style entry after the
+        # synchronous removal. The native desktop file is the only correct
+        # entry here, for enable and disable alike.
+        setup_autostart_desktop_entry(enable, native=True)
 
 
-def setup_autostart_flatpak(enable: bool = True):
+def setup_autostart_flatpak(enable: bool = True, generation: int = None):
     """
     Use portal to autostart for Flatpak
     Documentation:
     https://libportal.org/method.Portal.request_background.html
-    https://libportal.org/method.Portal.request_background_finish.html 
+    https://libportal.org/method.Portal.request_background_finish.html
     https://docs.flatpak.org/de/latest/portal-api-reference.html#gdbus-org.freedesktop.portal.Background
     """
     def request_background_callback(portal, result, user_data):
         try:
             success = portal.request_background_finish(result)
-        except:
+        except Exception:
             success = False
         log.info(f"request_background success={success}")
-        if not success:
-            setup_autostart_desktop_entry()
+        if success:
+            return
+        if generation is not None and generation != _current_autostart_generation():
+            # A newer setup_autostart() call superseded this request; its
+            # outcome, not ours, owns the on-disk state now.
+            log.info("Skipping stale autostart fallback (superseded request)")
+            return
+        # Fall back to a manual desktop entry -- honoring the ORIGINAL
+        # intent: a failed disable request must remove (never re-create)
+        # the entry.
+        setup_autostart_desktop_entry(enable)
 
     xdp = Xdp.Portal.new()
 
@@ -80,7 +111,7 @@ def setup_autostart_flatpak(enable: bool = True):
             request_background_callback,
             None,  # user_data
         )
-    except:
+    except Exception:
         log.error(f"request_background failed")
         setup_autostart_desktop_entry(enable)
 
