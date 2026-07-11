@@ -88,6 +88,31 @@ class StoreBackend:
         into / delete a path the author never named."""
         return isinstance(asset_id, str) and bool(cls.ASSET_ID_PATTERN.fullmatch(asset_id))
 
+    # A git commit sha is exactly 40 lowercase hex chars. `commit_sha` reaches
+    # git as an argv token (no shell), so this is a sanity gate, not a shell
+    # guard -- but a malformed value should fail loudly rather than be handed
+    # to `git reset --hard`.
+    COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
+
+    # A branch/ref name that came from a REMOTE store catalog (plugin["branch"]).
+    # Even as an argv token it must never carry shell metacharacters, newlines,
+    # NUL, or a leading "-" (which git would read as an option). Kept permissive
+    # enough for real ref names (slashes, dots, dashes-in-the-middle) but no
+    # whitespace or shell-significant characters.
+    SAFE_REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
+
+    @classmethod
+    def is_safe_commit_sha(cls, commit_sha) -> bool:
+        return isinstance(commit_sha, str) and bool(cls.COMMIT_SHA_PATTERN.fullmatch(commit_sha))
+
+    @classmethod
+    def is_safe_ref_name(cls, ref_name) -> bool:
+        """Whether a remote-catalog branch/ref name is safe to pass to git.
+        Rejects shell metachars, whitespace, newlines, and leading '-' so a
+        catalog `branch: "main; rm -rf ~"` can neither inject a shell nor be
+        misread by git as an option."""
+        return isinstance(ref_name, str) and bool(cls.SAFE_REF_PATTERN.fullmatch(ref_name))
+
     def __init__(self):
         self.store_cache = StoreCache()
 
@@ -135,6 +160,11 @@ class StoreBackend:
                     continue
                 custom_branch = store.get("branch")
                 if not isinstance(custom_branch, str) or not custom_branch:
+                    # Third-party stores follow the "main" convention; this
+                    # deliberately differs from the OFFICIAL store's fallback
+                    # (STORE_BRANCH, currently "1.5.0" -- a version-pinned tag
+                    # of THIS app's own store repo, which custom repos don't
+                    # share). Not a copy-paste slip.
                     custom_branch = "main"
                 stores.append((url, custom_branch))
 
@@ -855,9 +885,34 @@ class StoreBackend:
         if extracted_folder_name is None:
             log.error("Could not find extracted folder name")
             return 400
-        
+
         return extracted_folder_name
-    
+
+    def zip_has_unsafe_members(self, zip_path: str) -> bool:
+        """Defense-in-depth Zip-Slip check on a downloaded archive.
+
+        We only ever download GitHub-generated .zip archives, and CPython's
+        zipfile already strips leading "/" and ".." when extracting -- so this
+        is belt-and-suspenders, not the primary guard. It exists so that a
+        future change (a different archive source, or swapping in tar/other
+        formats that CPython does NOT sanitize the same way) can't silently
+        reintroduce a path-traversal write. Any member whose normalized path
+        is absolute or escapes the extraction root fails the whole archive.
+        """
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            for name in zip_ref.namelist():
+                # Reject absolute paths and drive-style/backslash members.
+                if name.startswith(("/", "\\")) or (len(name) > 1 and name[1] == ":"):
+                    log.error(f"Archive member has absolute path, refusing: {name!r}")
+                    return True
+                normalized = os.path.normpath(name.replace("\\", "/"))
+                # normpath collapses "a/../b"; a leading ".." (or a bare "..")
+                # means the member resolves outside the extraction root.
+                if normalized == ".." or normalized.startswith(".." + os.sep) or normalized.startswith("../"):
+                    log.error(f"Archive member escapes extraction root, refusing: {name!r}")
+                    return True
+        return False
+
     async def download_repo(self, repo_url:str, directory:str, commit_sha:str = None, branch_name:str = None):
         """Returns 200 on success, 404 for a hard failure (e.g. git missing
         on the devel clone path), or NoConnectionError."""
@@ -898,6 +953,11 @@ class StoreBackend:
             # case-sensitive, so it may not match projectname) BEFORE unpacking,
             # so the finally-cleanup also covers a mid-extraction failure.
             extracted_folder_name = self.get_main_folder_of_zip(zip_path)
+            # Defense-in-depth: refuse a traversal/absolute member before we
+            # let shutil.unpack_archive write anything to disk.
+            if self.zip_has_unsafe_members(zip_path):
+                log.error(f"Refusing to extract {projectname}: archive contains unsafe member paths")
+                return NoConnectionError()
             extracted_folder = os.path.join(gl.DATA_PATH, "cache", extracted_folder_name)
             if os.path.exists(extracted_folder):
                 shutil.rmtree(extracted_folder)
@@ -943,11 +1003,24 @@ class StoreBackend:
             # Use the main branch for the initial clone
             branch_name = None
 
+        # commit_sha and branch_name originate from the REMOTE store catalog
+        # (plugin["commits"][version] / plugin["branch"]). They used to be
+        # f-string-interpolated into os.system() -- a catalog branch of
+        # "main; <cmd>" injected a shell. Validate them here and pass them to
+        # git as argv tokens with no shell (git -C, see below), the same way
+        # the install-script runners were de-shelled.
+        if commit_sha is not None and not self.is_safe_commit_sha(commit_sha):
+            log.error(f"Refusing to clone {repo_url}: malformed commit sha {commit_sha!r}")
+            return 400
+        if branch_name is not None and not self.is_safe_ref_name(branch_name):
+            log.error(f"Refusing to clone {repo_url}: unsafe branch/ref name {branch_name!r}")
+            return 400
+
         # Check if git is installed on the system - should be the case for most linux systems
         if shutil.which("git") is None:
             log.error("Git is not installed on this system. Please install it.")
             return 404
-        
+
         # Remove folder if it already exists
         shutil.rmtree(local_path, ignore_errors=True)
 
@@ -958,8 +1031,10 @@ class StoreBackend:
         # FIXME: Check if not already added
         await self.subp_call(["git", "config", "--global", "--add", "safe.directory", os.path.abspath(local_path)])
 
-        # Run git pull to create .git/FETCH_HEAD. This allows us to check for available updates
-        await self.os_sys(f"cd '{local_path}' && git pull")
+        # Run git pull to create .git/FETCH_HEAD. This allows us to check for available updates.
+        # `git -C <dir>` (argv, no shell) instead of the old
+        # `os.system("cd '<dir>' && git pull")` which built a shell command line.
+        await self.subp_call(["git", "-C", local_path, "pull"])
 
 
         ## Write version
@@ -969,11 +1044,11 @@ class StoreBackend:
 
         # Set repository to the given commit_sha
         if commit_sha is not None:
-            await self.os_sys(f"cd '{local_path}' && git reset --hard {commit_sha}")
+            await self.subp_call(["git", "-C", local_path, "reset", "--hard", commit_sha])
             return 200
 
         if branch_name is not None:
-            await self.os_sys(f"cd '{local_path}' && git switch {branch_name}")
+            await self.subp_call(["git", "-C", local_path, "switch", branch_name])
             return 200
 
         return 200
