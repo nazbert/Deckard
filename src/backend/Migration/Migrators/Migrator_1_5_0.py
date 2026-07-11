@@ -94,27 +94,39 @@ class Migrator_1_5_0(Migrator):
                 page["screensaver"]["path"] = page["screensaver"]["path"].replace("Core447::Pixabay Favorites", "com_core447_PixabayFavorites")
 
             for key in page.get("keys", {}):
-                for label in page["keys"][key].get("labels", {}):
-                    if page["keys"][key]["labels"][label].get("text") == "":
-                        page["keys"][key]["labels"][label]["text"] = None
+                key_dict = page["keys"][key]
+                # Migrator_1_5_0_beta_5 sorts before this migrator
+                # (1.5.0-beta.5 < 1.5.0) and nests each key's labels/media
+                # under states.0, so a pre-beta.5 page is already
+                # states-shaped by the time this walker runs. Handle both
+                # that nested shape and the legacy flat one.
+                if "states" in key_dict:
+                    state_dicts = list(key_dict["states"].values())
+                else:
+                    state_dicts = [key_dict]
 
-                    if page["keys"][key]["labels"][label].get("font-family") == "":
-                        page["keys"][key]["labels"][label]["font-family"] = None
+                for state_dict in state_dicts:
+                    for label in state_dict.get("labels", {}):
+                        if state_dict["labels"][label].get("text") == "":
+                            state_dict["labels"][label]["text"] = None
 
-                    if page["keys"][key]["labels"][label].get("font-size") == 15:
-                        page["keys"][key]["labels"][label]["font-size"] = None
+                        if state_dict["labels"][label].get("font-family") == "":
+                            state_dict["labels"][label]["font-family"] = None
 
-                    if page["keys"][key]["labels"][label].get("color") == [255, 255, 255, 255]:
-                        page["keys"][key]["labels"][label]["color"] = None
+                        if state_dict["labels"][label].get("font-size") == 15:
+                            state_dict["labels"][label]["font-size"] = None
 
-                media_path = page["keys"][key].get("media", {}).get("path", "")
-                if media_path is None:
-                    media_path = ""
-                if "Core447::Material Icons" in media_path:
-                    page["keys"][key]["media"]["path"] = page["keys"][key]["media"]["path"].replace("Core447::Material Icons", "com_core447_MaterialIcons")
+                        if state_dict["labels"][label].get("color") == [255, 255, 255, 255]:
+                            state_dict["labels"][label]["color"] = None
 
-                if "Core447::Pixabay Favorites" in media_path:
-                    page["keys"][key]["media"]["path"] = page["keys"][key]["media"]["path"].replace("Core447::Pixabay Favorites", "com_core447_PixabayFavorites")
+                    media_path = state_dict.get("media", {}).get("path", "")
+                    if media_path is None:
+                        media_path = ""
+                    if "Core447::Material Icons" in media_path:
+                        state_dict["media"]["path"] = state_dict["media"]["path"].replace("Core447::Material Icons", "com_core447_MaterialIcons")
+
+                    if "Core447::Pixabay Favorites" in media_path:
+                        state_dict["media"]["path"] = state_dict["media"]["path"].replace("Core447::Pixabay Favorites", "com_core447_PixabayFavorites")
 
             with open(page_path, "w") as f:
                 json.dump(page, f, indent=4)
