@@ -591,7 +591,9 @@ class StoreBackend:
         thumbnail_path = manifest.get("thumbnail")
         image = await self.get_web_image(url, thumbnail_path, commit)
         if isinstance(image, NoConnectionError):
-            return image
+            # A missing/rate-limited thumbnail must not drop the pack from
+            # the catalog -- list it without an image, like prepare_plugin.
+            image = None
 
         author = self.get_user_name(url)
 
@@ -660,12 +662,15 @@ class StoreBackend:
         thumbnail_path = manifest.get("thumbnail")
         image = await self.get_web_image(url, thumbnail_path, commit)
         if isinstance(image, NoConnectionError):
-            return image
+            # A missing/rate-limited thumbnail must not drop the wallpaper
+            # from the catalog -- list it without an image, like
+            # prepare_plugin.
+            image = None
         attribution = await self.get_attribution(url, commit)
         if isinstance(attribution, NoConnectionError):
             return attribution
         attribution = attribution.get("generic", {}) #TODO: Choose correct attribution
-        
+
         author = self.get_user_name(url)
 
         translated_description = gl.lm.get_custom_translation(manifest.get("descriptions", {}))
@@ -727,14 +732,17 @@ class StoreBackend:
         thumbnail_path = manifest.get("thumbnail")
         image = await self.get_web_image(url, thumbnail_path, commit)
         if isinstance(image, NoConnectionError):
-            return image
+            # A missing/rate-limited thumbnail must not drop the SD+ bar
+            # wallpaper from the catalog -- list it without an image, like
+            # prepare_plugin.
+            image = None
         attribution = await self.get_attribution(url, commit)
         if isinstance(attribution, NoConnectionError):
             return attribution
         attribution = attribution.get("generic", {}) #TODO: Choose correct attribution
-        
+
         author = self.get_user_name(url)
-        
+
         translated_description = gl.lm.get_custom_translation(manifest.get("descriptions", {}))
         translated_short_description = gl.lm.get_custom_translation(manifest.get("short-descriptions", {}))
 
