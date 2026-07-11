@@ -5,6 +5,8 @@ import sys
 from loguru import logger as log
 import threading
 
+from gi.repository import GLib
+
 # Import own modules
 from src.backend.PluginManager.ActionHolder import ActionHolder
 from src.backend.PluginManager.PluginBase import PluginBase
@@ -54,6 +56,13 @@ class PluginManager:
         self.backends:list[BackendBase] = []
         # subprocess.Popen handles for launched backends, terminated on teardown.
         self.backend_processes: list = []
+        # Plugins that failed to load, keyed by their folder name under
+        # PLUGIN_DIR, with a short human-readable reason (the full traceback
+        # goes to the logs). Surfaced in the UI (startup toast + the Add
+        # Action dialog's empty state) so a broken plugin never fails
+        # silently. Entries are pruned when the folder disappears or the
+        # plugin later registers successfully.
+        self.load_errors: dict[str, str] = {}
 
     def terminate_all_backends(self) -> None:
         """Terminate every launched backend child process; called on app quit."""
@@ -63,24 +72,38 @@ class PluginManager:
 
     def load_plugins(self, show_notification: bool = False):
         # get all folders in plugins folder
-        if not os.path.exists(gl.PLUGIN_DIR):
-            os.mkdir(gl.PLUGIN_DIR)
-        folders = os.listdir(gl.PLUGIN_DIR)
+        os.makedirs(gl.PLUGIN_DIR, exist_ok=True)
+        try:
+            folders = os.listdir(gl.PLUGIN_DIR)
+        except OSError as e:
+            log.opt(exception=e).error(
+                f"Could not read the plugin directory {gl.PLUGIN_DIR} -- no plugins will be loaded"
+            )
+            folders = []
+
+        # Drop stale errors for plugins that no longer exist on disk (uninstalled).
+        self.load_errors = {folder: error for folder, error in self.load_errors.items() if folder in folders}
+
         for folder in folders:
+            if folder.startswith(".") or not os.path.isdir(os.path.join(gl.PLUGIN_DIR, folder)):
+                # Stray files and hidden directories in the plugin dir are not plugins.
+                continue
             # Import main module
             import_string = f"plugins.{folder}.main"
             if import_string not in sys.modules.keys():
                 # Import module only if it's not already imported
                 try:
-                    importlib.import_module(f"plugins.{folder}.main")
+                    importlib.import_module(import_string)
                 except Exception as e:
-                    log.error(f"Error importing plugin {folder}: {e}")
+                    log.opt(exception=e).error(f"Error importing plugin {folder}: {e}")
+                    self.load_errors[folder] = f"import failed: {e}"
 
         # Get all classes inheriting from PluginBase and generate objects for them
         self.init_plugins()
 
         if show_notification:
             self.show_n_disabled_plugins_notification()
+            self.show_load_errors_notification()
 
     def show_n_disabled_plugins_notification(self):
         n_deactivated_plugins = len(PluginBase.disabled_plugins)
@@ -102,18 +125,73 @@ class PluginManager:
         else:
             call()
 
+    def show_load_errors_notification(self):
+        """Surfaces plugin load failures as an in-app error toast. Safe to
+        call from any thread and at any point during startup: before the app
+        exists the toast is deferred via gl.app_loading_finished_tasks (which
+        on_activate drains on the main thread once the window is up),
+        afterwards it is dispatched through GLib.idle_add."""
+        n_failed = len(self.load_errors)
+        if n_failed == 0:
+            return
+
+        if n_failed == 1:
+            body = "1 plugin failed to load -- check the logs for details"
+        else:
+            body = f"{n_failed} plugins failed to load -- check the logs for details"
+
+        def call():
+            main_win = getattr(gl.app, "main_win", None) if gl.app is not None else None
+            if main_win is not None:
+                main_win.show_error_toast(body)
+
+        if gl.app is None:
+            gl.app_loading_finished_tasks.append(call)
+        else:
+            GLib.idle_add(call)
+
+    @staticmethod
+    def _get_plugin_folder_from_subclass(subclass) -> str:
+        """Maps a PluginBase subclass back to its folder name under
+        PLUGIN_DIR (plugins.<folder>.main -> <folder>) for load_errors
+        bookkeeping."""
+        module = getattr(subclass, "__module__", "") or ""
+        parts = module.split(".")
+        if len(parts) >= 2 and parts[0] == "plugins":
+            return parts[1]
+        return module or str(subclass)
+
+    @staticmethod
+    def _is_plugin_disabled(plugin_base: PluginBase) -> bool:
+        return any(entry.get("object") is plugin_base for entry in PluginBase.disabled_plugins.values())
+
     def init_plugins(self):
         subclasses = PluginBase.__subclasses__()
         for subclass in subclasses:
             if subclass in self.initialized_plugin_classes:
                 log.info(f"Skipping {subclass} because it's already initialized")
                 continue
+            folder = self._get_plugin_folder_from_subclass(subclass)
             try:
                 obj = subclass()
             except Exception as e:
-                log.error(f"Error initializing plugin {subclass}: {e}. Skipping...")
+                log.opt(exception=e).error(f"Error initializing plugin {subclass} (folder: {folder}): {e}. Skipping...")
+                self.load_errors[folder] = f"crashed during initialization: {e}"
                 continue
             self.initialized_plugin_classes.append(subclass)
+
+            if getattr(obj, "registered", False):
+                # A previously recorded failure for this folder is obsolete.
+                self.load_errors.pop(folder, None)
+            elif not self._is_plugin_disabled(obj):
+                # register() bailed out (invalid manifest, duplicate name, ...)
+                # without even disabling the plugin -- without this record the
+                # plugin would vanish without any user-visible trace.
+                log.error(
+                    f"Plugin {subclass} (folder: {folder}) initialized but never registered successfully "
+                    f"-- its actions will not be available. See the errors above for the reason."
+                )
+                self.load_errors[folder] = "did not register (invalid or incomplete manifest?)"
 
     def generate_action_index(self):
         self.action_index.clear()
@@ -170,6 +248,12 @@ class PluginManager:
         
         return action_id.split("::")[0]
     
+    def get_load_health(self) -> tuple[int, int]:
+        """Returns (n_failed, n_disabled) -- how many plugins failed to load
+        and how many are disabled (version-gated). Used by the UI to explain
+        an empty action list instead of showing a blank page."""
+        return len(self.load_errors), len(PluginBase.disabled_plugins)
+
     def get_is_plugin_out_of_date(self, plugin_id: str) -> bool:
         plugin = PluginBase.disabled_plugins.get(plugin_id)
         if plugin is None:

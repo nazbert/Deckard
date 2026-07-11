@@ -316,6 +316,16 @@ class MainWindow(Adw.ApplicationWindow):
         )
         self.toast_overlay.add_toast(toast)
 
+    def show_error_toast(self, text: str) -> None:
+        # Errors linger longer and jump the queue -- they explain missing
+        # functionality (e.g. plugins that failed to load).
+        toast = Adw.Toast(
+            title=text,
+            timeout=7,
+            priority=Adw.ToastPriority.HIGH
+        )
+        self.toast_overlay.add_toast(toast)
+
     def get_active_controller(self) -> DeckController:
         if not recursive_hasattr(self, "leftArea.deck_stack"): return
         visible_child = self.leftArea.deck_stack.get_visible_child()
