@@ -3440,8 +3440,15 @@ class ControllerInputState:
             action.on_tick()
 
     @log.catch
-    def own_actions_event_callback(self, event: InputEvent, data: dict = None, show_notifications: bool = False) -> None:
-        for action in self.get_own_actions():
+    def own_actions_event_callback(self, event: InputEvent, data: dict = None, show_notifications: bool = False, actions: list = None) -> None:
+        # `actions` lets the caller pin the dispatch to a list resolved
+        # earlier (ControllerKey's DOWN-time gesture snapshot, #107). By
+        # default it's resolved here, when the pool worker actually runs --
+        # which reads deck_controller.active_page and therefore tracks any
+        # page swap that happened between the event and this dispatch.
+        if actions is None:
+            actions = self.get_own_actions()
+        for action in actions:
             if isinstance(action, ActionOutdated):
                 if show_notifications:
                     plugin_id = gl.plugin_manager.get_plugin_id_from_action_id(action.id)
@@ -3513,8 +3520,8 @@ class ControllerInputState:
         if exc is not None:
             log.opt(exception=exc).error(f"Action callback for {self.controller_input.identifier} raised")
 
-    def own_actions_event_callback_threaded(self, event: InputEvent, data: dict = None, show_notifications: bool = False) -> None:
-        self._submit_action_callback(self.own_actions_event_callback, event, data, show_notifications)
+    def own_actions_event_callback_threaded(self, event: InputEvent, data: dict = None, show_notifications: bool = False, actions: list = None) -> None:
+        self._submit_action_callback(self.own_actions_event_callback, event, data, show_notifications, actions)
 
     def remove_media(self) -> None:
         page = self.controller_input.deck_controller.active_page
@@ -3763,10 +3770,28 @@ class ControllerKey(ControllerInput):
 
         self.down_start_time: float = None
 
+        # DOWN-time gesture snapshot (#107): the state and its resolved
+        # action objects captured when the key went down. The rest of the
+        # gesture (HOLD_START, HOLD_STOP/SHORT_UP, UP) dispatches to this
+        # snapshot, NOT to whatever the key resolves to at release time --
+        # a ChangePage action on this key swaps active_page (and rebuilds
+        # this key's states) synchronously during the DOWN dispatch, which
+        # used to send the UP to the NEW page's actions: the old page's
+        # actions never saw their release (RunCommand's registered_down
+        # latch then jammed shut, upstream #475) while the new page's
+        # actions got a spurious SHORT_UP for a press that wasn't theirs.
+        # Written only from the deck's serialized input-callback path.
+        self._gesture_state: "ControllerKeyState" = None
+        self._gesture_actions: list = None
+
     def on_hold_timer_end(self):
-        state = self.get_active_state()
+        # Part of an in-flight gesture: route to the DOWN-time snapshot (see
+        # __init__). Fall back to live resolution only if there is no
+        # snapshot (timer raced a teardown path that cleared it).
+        state = self._gesture_state or self.get_active_state()
         state.own_actions_event_callback_threaded(
-            event=Input.Key.Events.HOLD_START
+            event=Input.Key.Events.HOLD_START,
+            actions=self._gesture_actions,
         )
 
     @staticmethod
@@ -3884,27 +3909,44 @@ class ControllerKey(ControllerInput):
         active_state = self.get_active_state()
         if press_state: # Key down
             self.down_start_time = time.time()
+            # Snapshot the state and its resolved actions NOW (#107, see
+            # __init__): every event of this gesture -- including this DOWN,
+            # which otherwise resolves actions only when the pool worker
+            # runs -- goes to the actions that were on the key when the
+            # finger landed, regardless of page swaps in between.
+            self._gesture_state = active_state
+            self._gesture_actions = active_state.get_own_actions()
             self.start_hold_timer()
             active_state.own_actions_event_callback_threaded(
                 event=Input.Key.Events.DOWN,
-                show_notifications=True
+                show_notifications=True,
+                actions=self._gesture_actions
             )
 
         elif self.down_start_time is not None: # Key up
+            gesture_state = self._gesture_state or active_state
+            gesture_actions = self._gesture_actions
             if time.time() - self.down_start_time >= self.deck_controller.hold_time:
-                active_state.own_actions_event_callback_threaded(
-                    event=Input.Key.Events.HOLD_STOP
+                gesture_state.own_actions_event_callback_threaded(
+                    event=Input.Key.Events.HOLD_STOP,
+                    actions=gesture_actions
                 )
             else:
-                active_state.own_actions_event_callback_threaded(
-                    event=Input.Key.Events.SHORT_UP
+                gesture_state.own_actions_event_callback_threaded(
+                    event=Input.Key.Events.SHORT_UP,
+                    actions=gesture_actions
                 )
             self.down_start_time = None
             self.stop_hold_timer()
-            active_state.own_actions_event_callback_threaded(
+            gesture_state.own_actions_event_callback_threaded(
                 event=Input.Key.Events.UP,
-                show_notifications=False
+                show_notifications=False,
+                actions=gesture_actions
             )
+            # Gesture complete: drop the snapshot so a superseded page's
+            # action objects aren't pinned past their last event.
+            self._gesture_state = None
+            self._gesture_actions = None
         # Reset the SAME page the False-call marked (issue #16) -- a press
         # that triggers a page change would otherwise pin the old page.
         self.deck_controller.mark_page_ready_to_clear(True, pressed_page)
