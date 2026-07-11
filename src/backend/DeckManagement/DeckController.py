@@ -2867,6 +2867,14 @@ class KeyGIF(SingleKeyAsset):
         del self.frames
         del self.frame_delays
 
+# Shared, context-independent text measurement for label layout / scroll
+# detection: textbbox only computes layout (it never touches the pixels), and
+# it matches what the per-key render's own draw context would report --
+# unlike font.getbbox, which is single-line and counts '\n' toward the width
+# (issue #116's phantom-scroll trigger).
+_label_measure_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+
+
 class LabelManager:
     def __init__(self, controller_input: "ControllerInput"):
         self.controller_input = controller_input
@@ -2874,23 +2882,33 @@ class LabelManager:
         self.page_labels = {}
         self.action_labels = {}
         self.scroll_wait = 25
-        self._has_scroll_labels_cache: bool = None
+        # position -> text width, for composed labels that are wider than the
+        # key AND rolling labels are enabled -- i.e. the labels that actually
+        # scroll. None = needs recompute (invalidated with the label setters;
+        # a rolling-labels toggle lands via reload_page, which rebuilds these
+        # managers). get_has_scroll_labels() derives from this.
+        self._scroll_widths_cache: dict[str, int] = None
         self._has_visible_labels_cache: bool = None
+        # position -> (cache key, strip image, ax, ay): the label's text +
+        # outline rasterized ONCE onto a transparent strip; scroll frames
+        # composite a window of it instead of re-running draw.text
+        # (issue #115/#116 -- the per-tick raster was ~2.5ms per key).
+        self._scroll_strips: dict[str, tuple] = {}
+        # position -> (cache key, (w, h)): textbbox measurement of the
+        # composed label; the freetype layout pass is the second-biggest
+        # per-frame cost after the raster itself.
+        self._bbox_cache: dict[str, tuple] = {}
 
         self.init_labels()
-        self.frames: dict[str, dict[str, int]] = {
-            "top": {
-                "position": 0,
-                "wait": self.scroll_wait
-            },
-            "center": {
-                "position": 0,
-                "wait": self.scroll_wait
-            },
-            "bottom": {
-                "position": 0,
-                "wait": self.scroll_wait
-            },
+        # Rolling-label animation state per position: the current scroll
+        # offset in whole pixels, and the wall-clock deadline of the next
+        # advance (None = fresh, starts with the leading hold). Wall-clock
+        # (not tick-count) so the scroll speed doesn't change with the media
+        # loop's actual iteration rate, which event wakes can push past FPS.
+        self.frames: dict[str, dict] = {
+            "top": {"position": 0, "next_step_at": None},
+            "center": {"position": 0, "next_step_at": None},
+            "bottom": {"position": 0, "next_step_at": None},
         }
 
     def init_labels(self):
@@ -2900,8 +2918,10 @@ class LabelManager:
  
     def clear_labels(self):
         self.init_labels()
-        self._has_scroll_labels_cache = None
+        self._scroll_widths_cache = None
         self._has_visible_labels_cache = None
+        self._scroll_strips.clear()
+        self._bbox_cache.clear()
 
     def set_page_label(self, position: str, label: "KeyLabel", update: bool = True):
         if label is None:
@@ -2910,7 +2930,7 @@ class LabelManager:
         else:
             self.page_labels[position] = label
 
-        self._has_scroll_labels_cache = None
+        self._scroll_widths_cache = None
         self._has_visible_labels_cache = None
         if update:
             self.update_label(position)
@@ -2934,7 +2954,7 @@ class LabelManager:
                 return
             self.action_labels[position] = label
 
-        self._has_scroll_labels_cache = None
+        self._scroll_widths_cache = None
         self._has_visible_labels_cache = None
         GLib.idle_add(self.update_label_editor)
         if update:
@@ -3058,25 +3078,162 @@ class LabelManager:
                 label.text not in (None, "") for label in labels.values())
         return self._has_visible_labels_cache
 
-    def get_has_scroll_labels(self) -> bool:
-        if self._has_scroll_labels_cache is not None:
-            return self._has_scroll_labels_cache
+    def _measure_text(self, position: str, label: "KeyLabel") -> tuple[int, int]:
+        """(w, h) of the composed label's rendered text block, cached per
+        position. Both scroll detection and the render path measure through
+        here, so they can never disagree about whether a label overflows."""
+        font = label.get_font()
+        key = (label.text, getattr(font, "path", None), getattr(font, "size", None))
+        cached = self._bbox_cache.get(position)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        _, _, w, h = _label_measure_draw.textbbox((0, 0), label.text, font=font)
+        self._bbox_cache[position] = (key, (w, h))
+        return (w, h)
 
-        labels = self.get_composed_labels()
-        for label in labels:
-            if labels[label].text is not None and labels[label].text != "":
-                _, _, w, _ = labels[label].get_font().getbbox(labels[label].text)
-                if w > self.get_available_width():
-                    self._has_scroll_labels_cache = True
-                    return True
-        self._has_scroll_labels_cache = False
-        return False
+    def get_scroll_label_widths(self) -> dict[str, int]:
+        """Text widths of the composed labels that actually scroll: rolling
+        labels enabled AND rendered text wider than the input. Measured with
+        the same multiline-aware textbbox the render path uses, so detection
+        can never flag a label the render would draw statically (that
+        mismatch kept the media loop at full FPS re-rendering identical
+        frames -- issues #115/#116)."""
+        if self._scroll_widths_cache is not None:
+            return self._scroll_widths_cache
+
+        widths: dict[str, int] = {}
+        rolling_labels_enabled = gl.settings_manager.get_app_settings().get("general", {}).get("rolling-labels", True)
+        if rolling_labels_enabled:
+            available_width = self.get_available_width()
+            labels = self.get_composed_labels()
+            for position in labels:
+                text = labels[position].text
+                if text in (None, ""):
+                    continue
+                w, _ = self._measure_text(position, labels[position])
+                if w > available_width:
+                    widths[position] = w
+        self._scroll_widths_cache = widths
+        return widths
+
+    def get_has_scroll_labels(self) -> bool:
+        return len(self.get_scroll_label_widths()) > 0
+
+    # Original cadence, expressed in wall time instead of loop iterations
+    # (at the nominal 30 FPS the old code advanced 1px per two ticks and
+    # burned scroll_wait=25 ticks -- even ticks at the leading edge -- per
+    # hold). Wall-clock keeps the speed stable when event wakes push the
+    # loop past its nominal rate.
+    _NOMINAL_TICK_RATE = 30.0
+    SCROLL_STEP_SECONDS = 2.0 / _NOMINAL_TICK_RATE
+
+    def _scroll_hold_start_seconds(self) -> float:
+        return self.scroll_wait * 2.0 / self._NOMINAL_TICK_RATE
+
+    def _scroll_hold_end_seconds(self) -> float:
+        return self.scroll_wait / self._NOMINAL_TICK_RATE
+
+    def tick_scroll_labels(self) -> bool:
+        """Advances the rolling-label animation and reports whether any
+        visible scroll offset changed (= a re-render is needed). This is the
+        ONLY place scroll state moves -- rendering is pure -- so the hold
+        plateaus and the between-step ticks cost integer/time math here
+        instead of a full composite that the hash de-dup would throw away
+        anyway (#115)."""
+        changed = False
+        now = time.monotonic()
+        available_width = self.get_available_width()
+        for position, w in self.get_scroll_label_widths().items():
+            frame = self.frames[position]
+            # The sweep runs from x=start (10px right of centered) down to
+            # one pixel past x=stop (10px left of centered), like the
+            # original: overshoot = start - stop.
+            overshoot = w - available_width + 20
+            next_at = frame.get("next_step_at")
+            if next_at is None:
+                # Fresh label: hold at the start position first.
+                frame["next_step_at"] = now + self._scroll_hold_start_seconds()
+                continue
+            if now < next_at:
+                continue
+            if frame["position"] > overshoot:
+                # Trailing hold elapsed: snap back to the start and hold.
+                frame["position"] = 0
+                frame["next_step_at"] = now + self._scroll_hold_start_seconds()
+            else:
+                frame["position"] += 1
+                if frame["position"] > overshoot:
+                    frame["next_step_at"] = now + self._scroll_hold_end_seconds()
+                else:
+                    frame["next_step_at"] += self.SCROLL_STEP_SECONDS
+                    # Re-anchor instead of bursting to catch up if the loop
+                    # stalled (page switch, suspend, ...).
+                    if frame["next_step_at"] < now - 0.5:
+                        frame["next_step_at"] = now
+            changed = True
+        return changed
+
+    def _composite_scroll_strip(self, image: Image.Image, position: str, label: "KeyLabel",
+                                w: int, h: int, x_position: float, y_position: float) -> None:
+        """Draws a scrolling label by compositing a window of its precomposed
+        text strip at this tick's offset. The strip is rasterized once per
+        (text, font, colors) and reused for every frame of the sweep; a
+        direct draw.text with stroke costs ~2.5ms per frame, the composite
+        ~0.014ms, pixel-identical (the target coords' fractional parts are
+        constant across the sweep and get baked into the strip, so the paste
+        offset is always a whole pixel)."""
+        font = label.get_font()
+        outline_width = label.outline_width
+        pad = outline_width + 6
+        ay_base = pad + h / 2
+        dy = (y_position - ay_base) % 1.0
+        key = (label.text, getattr(font, "path", None), label.font_size,
+               tuple(label.color), outline_width, tuple(label.outline_color),
+               label.alignment, w, h, dy)
+        cached = self._scroll_strips.get(position)
+        if cached is None or cached[0] != key:
+            ax = pad + w / 2
+            ay = ay_base + dy
+            # Antialiased edge pixels blend toward the canvas color; pre-fill
+            # with the outermost ink color (at alpha 0) so the strip's edges
+            # match a direct draw onto the key image.
+            edge = tuple(label.outline_color[:3]) if outline_width > 0 else tuple(label.color[:3])
+            strip = Image.new("RGBA", (int(w) + 2 * pad + 1, int(h) + 2 * pad + 1), edge + (0,))
+            ImageDraw.Draw(strip).text((ax, ay), text=label.text, font=font,
+                                       anchor="mm", align=label.alignment,
+                                       fill=tuple(label.color),
+                                       stroke_width=outline_width,
+                                       stroke_fill=tuple(label.outline_color))
+            cached = (key, strip, ax, ay)
+            self._scroll_strips[position] = cached
+        _, strip, ax, ay = cached
+
+        px = round(x_position - ax)
+        py = round(y_position - ay)
+        # Crop to the visible window: in-place alpha_composite requires a
+        # non-negative dest, and it does the correct straight-alpha OVER
+        # (paste-with-mask would under-write the alpha channel on the
+        # antialiased edges).
+        crop_left, crop_top = max(0, -px), max(0, -py)
+        crop_right = min(strip.width, image.width - px)
+        crop_bottom = min(strip.height, image.height - py)
+        if crop_right <= crop_left or crop_bottom <= crop_top:
+            return
+        if (crop_left, crop_top, crop_right, crop_bottom) != (0, 0, strip.width, strip.height):
+            window = strip.crop((crop_left, crop_top, crop_right, crop_bottom))
+        else:
+            window = strip
+        if image.mode == "RGBA":
+            image.alpha_composite(window, (px + crop_left, py + crop_top))
+        else:
+            image.paste(window, (px + crop_left, py + crop_top), window)
 
     def add_labels_to_image(self, image: Image.Image) -> Image.Image:
         # image = image.rotate(self.deck.get_rotation()*-1)
         draw = ImageDraw.Draw(image)
 
         labels = self.get_composed_labels()
+        scroll_widths = self.get_scroll_label_widths()
         for label in labels:
             text = labels[label].text
             if text in [None, ""]:
@@ -3088,7 +3245,26 @@ class LabelManager:
             outline_color = tuple(labels[label].outline_color)
             alignment = labels[label].alignment
 
-            _, _, w, h = draw.textbbox((0, 0), text, font=font)
+            w, h = self._measure_text(label, labels[label])
+
+            # Vertical placement is shared by the static and scrolling paths.
+            if label == "top":
+                y_position = h/2 + 3
+            elif label == "bottom":
+                y_position = image.height - h/2 - 3
+            else:
+                y_position = (image.height - 0) / 2
+
+            if label in scroll_widths:
+                # Rolling label: composite the precomposed strip at this
+                # tick's offset. Scroll state advances in
+                # tick_scroll_labels() only -- rendering is pure, so paints
+                # from key presses / page loads can't perturb the animation.
+                start = image.width / 2 - (image.width - w) / 2 + 10
+                x_position = start - self.frames[label]["position"]
+                self._composite_scroll_strip(image, label, labels[label], w, h,
+                                             x_position, y_position)
+                continue
 
             # Calculate x position based on alignment
             padding = 3
@@ -3102,42 +3278,10 @@ class LabelManager:
                 x_position = image.width / 2
                 anchor_x = "m"
 
-            rolling_labels_enabled = gl.settings_manager.get_app_settings().get("general", {}).get("rolling-labels", True)
-            if rolling_labels_enabled and image.width < w:
-                # Need to scroll - always use center anchor for scrolling
-                start = image.width / 2 - (image.width - w) / 2 + 10
-                stop = image.width / 2 + (image.width - w) / 2 - 10
-
-                x_position = start - self.frames[label]["position"]
-                anchor_x = "m"
-                if x_position < stop:
-                    if self.frames[label]["wait"] == 0:
-                        x_position = start
-                        self.frames[label]["position"] = 0
-                        self.frames[label]["wait"] = self.scroll_wait
-                    else:
-                        self.frames[label]["wait"] -= 1
-                elif self.controller_input.media_ticks % 2 == 0:
-                    if self.frames[label]["wait"] == 0:
-                        if x_position == stop:
-                            self.frames[label]["wait"] = self.scroll_wait
-
-                        self.frames[label]["position"] += 1
-                    else:
-                        self.frames[label]["wait"] -= 1
-
-
-            if label == "top":
-                position = (x_position, h/2 + 3)
-            elif label == "bottom":
-                position = (x_position, image.height - h/2 - 3)
-            else:
-                position = (x_position, (image.height - 0) / 2)
-
             # Use appropriate anchor based on alignment (x-anchor + "m" for vertical middle)
             anchor = anchor_x + "m"
 
-            draw.text(position,
+            draw.text((x_position, y_position),
                       text=text, font=font, anchor=anchor, align=alignment,
                       fill=color, stroke_width=outline_width,
                       stroke_fill=outline_color)
@@ -3958,6 +4102,14 @@ class ControllerKey(ControllerInput):
         state = self.get_active_state()
         needs_update = False
 
+        # Rolling labels advance their state here, on the tick, whether or
+        # not anything else forces a repaint (rendering is pure); the key
+        # only re-renders when a scroll offset visibly moved, instead of 30x
+        # a second producing frames the hash de-dup discards (#115/#116).
+        scroll_moved = False
+        if state.label_manager.get_has_scroll_labels():
+            scroll_moved = state.label_manager.tick_scroll_labels()
+
         # Check if we need to update based on content type
         if state.key_video is not None:
             # Both InputVideo and KeyGIF now pick their current frame from
@@ -3967,7 +4119,7 @@ class ControllerKey(ControllerInput):
             # elapsed. This also matches how non-GIF videos were already
             # handled here (unconditional needs_update).
             needs_update = True
-        elif state.label_manager.get_has_scroll_labels():
+        elif scroll_moved:
             needs_update = True
         elif self.deck_controller.background.video is not None:
             # An opaque background color hides the video tile (see
@@ -4827,7 +4979,12 @@ class ControllerDial(ControllerInput):
         state = self.get_active_state()
         if state is None:
             return False
-        return state.video is not None or state.label_manager.get_has_scroll_labels()
+        # Rolling labels advance here on the tick (rendering is pure); the
+        # strip only re-renders when a scroll offset visibly moved (#115).
+        scroll_moved = False
+        if state.label_manager.get_has_scroll_labels():
+            scroll_moved = state.label_manager.tick_scroll_labels()
+        return state.video is not None or scroll_moved
 
     def get_image_size(self) -> tuple[int, int]:
         if self.deck_controller.deck.is_touch():
