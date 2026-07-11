@@ -215,8 +215,13 @@ class PluginManager:
                 path = get_last_dir(path)
                 self.action_index[action_id] = plugins[plugin]["object"].ACTIONS[action_id]
 
-    def get_plugins(self, include_disabled: bool = False) -> list[PluginBase]:
-        plugins = PluginBase.plugins
+    def get_plugins(self, include_disabled: bool = False) -> dict:
+        # Copy: updating PluginBase.plugins (a class attribute) in place would
+        # permanently merge the disabled plugins into the enabled registry --
+        # get_plugin_by_id() defaults to include_disabled=True and runs on
+        # every page-load action resolution, so the very first hit would leak
+        # every disabled plugin into the action index and the action chooser.
+        plugins = dict(PluginBase.plugins)
 
         if include_disabled:
             plugins.update(PluginBase.disabled_plugins)
