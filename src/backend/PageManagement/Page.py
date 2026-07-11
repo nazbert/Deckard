@@ -19,7 +19,6 @@ import json
 import sys
 import threading
 import time
-import tempfile
 
 # Import globals first to get IS_MAC
 import globals as gl
@@ -34,6 +33,7 @@ import shutil
 # Import globals
 from src.backend.PluginManager.EventAssigner import EventAssigner
 from src.backend.DeckManagement.ImageHelpers import crop_key_image_from_deck_sized_image
+from src.backend.atomic_json import atomic_write_json
 import globals as gl
 
 from src.backend.PluginManager.ActionCore import ActionCore
@@ -93,37 +93,9 @@ class Page:
             # Make keys last element
             for type in Input.KeyTypes:
                 self.move_key_to_end(without_objects, type)
-            # Write to a temp file and atomically replace it, so an interrupted
-            # write can't leave a truncated page.
-            fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(self.json_path),
-                                            prefix=".save-", suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w") as f:
-                    json.dump(without_objects, f, indent=4)
-                    f.flush()
-                    os.fsync(f.fileno())
-                # mkstemp creates 0600; keep the existing file's mode
-                try:
-                    mode = os.stat(self.json_path).st_mode & 0o777
-                except FileNotFoundError:
-                    mode = 0o644
-                os.chmod(tmp_path, mode)
-                os.replace(tmp_path, self.json_path)
-                # fsync the directory so the rename itself is durable, not just data.
-                try:
-                    dir_fd = os.open(os.path.dirname(self.json_path), os.O_RDONLY)
-                    try:
-                        os.fsync(dir_fd)
-                    finally:
-                        os.close(dir_fd)
-                except OSError:
-                    pass
-            except BaseException:
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
-                raise
+            # Atomic replace, so an interrupted write can't leave a
+            # truncated page.
+            atomic_write_json(self.json_path, without_objects)
 
     def make_backup(self):
         os.makedirs(os.path.join(gl.DATA_PATH, "pages","backups"), exist_ok=True)

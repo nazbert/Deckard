@@ -8,6 +8,7 @@ import os.path
 
 from .Manager import Manager
 from .Asset import Color, Icon
+from src.backend.atomic_json import atomic_write_json
 
 
 class AssetManager:
@@ -27,24 +28,19 @@ class AssetManager:
             self.colors.load_json(assets)
 
     def save_assets(self):
-        os.makedirs(os.path.dirname(self.plugin_base.settings_path), exist_ok=True)
-
-        if not os.path.isfile(self.plugin_base.settings_path):
-            with open(self.plugin_base.settings_path, "w") as f:
-                json.dump({}, f)
-
         assets = {}
         assets[self.colors.get_save_key()] = self.colors.get_override_json()
         assets[self.icons.get_save_key()] = self.icons.get_override_json()
 
-        with open(self.plugin_base.settings_path, "r+") as f:
-            try:
-                content = json.load(f)
-            except json.JSONDecodeError as e:
-                content = {}
+        content = {}
+        if os.path.isfile(self.plugin_base.settings_path):
+            with open(self.plugin_base.settings_path, "r") as f:
+                try:
+                    content = json.load(f)
+                except json.JSONDecodeError:
+                    content = {}
 
-            content["assets"] = assets
+        content["assets"] = assets
 
-            f.seek(0)
-            json.dump(content, f, indent=4)
-            f.truncate()
+        # Atomic write so an interrupted save can't truncate the file.
+        atomic_write_json(self.plugin_base.settings_path, content)

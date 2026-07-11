@@ -31,6 +31,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, Pango
 
 from src.backend.DeckManagement import font_resolver
+from src.backend.atomic_json import atomic_write_json
 
 # Import globals
 from autostart import is_flatpak
@@ -170,15 +171,11 @@ def get_image_aspect_ratio(img: Image) -> str:
 
 
 def create_empty_json(path: str, ignore_present: bool = False):
-    # Create all dirs
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-
     if not ignore_present and os.path.exists(path):
         return
 
-    # Write empty json
-    with open(path, "w") as f:
-        json.dump({}, f, indent=4)
+    # Write empty json (atomically; also creates parent dirs)
+    atomic_write_json(path, {})
 
 
 def get_file_name_from_url(url: str):

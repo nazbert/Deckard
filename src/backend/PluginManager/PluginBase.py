@@ -33,6 +33,7 @@ import globals as gl
 from locales.LegacyLocaleManager import LegacyLocaleManager
 from src.backend.PluginManager.ActionHolder import ActionHolder
 from src.backend.PluginManager.EventHolder import EventHolder
+from src.backend.atomic_json import atomic_write_json
 
 class PluginBase(rpyc.Service):
     """
@@ -392,15 +393,14 @@ class PluginBase(rpyc.Service):
             if settings.get("file-version") == "2.0":
                 # Is newest version, return settings
                 return settings.get("settings", {})
-            
+
             else:
                 # Is the old format, convert it
                 new_settings = {
                     "file-version": "2.0",
                     "settings": settings
                 }
-                with open(self.settings_path, "w") as f:
-                    json.dump(new_settings, f, indent=4)
+                atomic_write_json(self.settings_path, new_settings)
 
                 return settings
                 
@@ -439,28 +439,23 @@ class PluginBase(rpyc.Service):
         Returns:
             None
         """
-        os.makedirs(os.path.dirname(self.settings_path), exist_ok=True)
+        content = {}
+        if os.path.isfile(self.settings_path):
+            with open(self.settings_path, "r") as f:
+                content = json.load(f)
 
-        if not os.path.isfile(self.settings_path):
-            with open(self.settings_path, "w") as f:
-                json.dump({}, f)
+        if content.get("file-version") == "2.0":
+            new_content = content
+            new_content["settings"] = settings
+        else:
+            new_content = {
+                "file-version": "2.0",
+                "settings": settings
+            }
 
-        with open(self.settings_path, "r+") as f:
-            content = json.load(f)
-
-            new_content = content.copy()
-
-            if content.get("file-version") == "2.0":
-                new_content["settings"] = settings
-            else:
-                new_content = {
-                    "file-version": "2.0",
-                    "settings": settings
-                }
-
-            f.seek(0)
-            json.dump(new_content, f, indent=4)
-            f.truncate()
+        # Atomic write: an interrupted save must not truncate the plugin's
+        # settings file.
+        atomic_write_json(self.settings_path, new_content)
 
 
     def add_css_stylesheet(self, path):

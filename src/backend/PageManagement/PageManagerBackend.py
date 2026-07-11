@@ -35,6 +35,7 @@ from src.backend.DeckManagement.DeckController import DeckController
 from src.backend.PageManagement.Page import Page
 from src.backend.PageManagement.DummyPage import DummyPage
 from src.backend.DeckManagement.HelperMethods import get_sub_folders, natural_sort, natural_sort_by_filenames, recursive_hasattr, sort_times
+from src.backend.atomic_json import atomic_write_json
 
 # Import globals
 import globals as gl
@@ -335,9 +336,8 @@ class PageManagerBackend:
         path = os.path.join(self.PAGE_PATH, f"{page_name}.json")
         if os.path.exists(path):
             raise FileExistsError(f"A page with the name '{page_name}' already exists.")
-        
-        with open(path, "w") as f:
-            json.dump(page_dict, f)
+
+        atomic_write_json(path, page_dict)
 
         #self.update_auto_change_info()
         return path
@@ -474,9 +474,8 @@ class PageManagerBackend:
 
             # If any asset was removed, update page file and reload pages
             if page_had_asset:
-                # Write updated page data back to file with pretty JSON
-                with open(page_path, "w") as f:
-                    json.dump(page_dict, f, indent=4)
+                # Write updated page data back to file (atomically)
+                atomic_write_json(page_path, page_dict)
 
                 # Update internal cache or tracking dict with this page path
                 self.update_dict_of_pages_with_path(page_path)

@@ -19,6 +19,7 @@ from functools import lru_cache
 
 # Import own modules
 import globals as gl
+from src.backend.atomic_json import atomic_write_json
 
 class SettingsManager:
     def __init__(self):
@@ -44,12 +45,9 @@ class SettingsManager:
         
     @staticmethod
     def save_settings_to_file(file_path: str, settings: dict) -> None:
-        # Create directories if they don't exist
-        if not os.path.exists(os.path.dirname(file_path)) and os.path.dirname(file_path) != "":
-            os.makedirs(os.path.dirname(file_path))
-
-        with open(file_path, "w") as f:
-            json.dump(settings, f, indent=4)
+        # Atomic write (tmp file + fsync + os.replace) so an interrupted
+        # write can't truncate the settings file; also creates parent dirs.
+        atomic_write_json(file_path, settings)
 
         gl.settings_manager.invalidate_all_caches()
 
