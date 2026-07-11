@@ -61,7 +61,15 @@ class AssetManagerBackend(list):
             return
         
         
-        hash = sha256(asset_path)
+        try:
+            hash = sha256(asset_path)
+        except OSError as e:
+            # Unreadable file (e.g. permissions): fail this one asset with a
+            # warning instead of killing the import worker thread (#112).
+            # Callers already handle a None id.
+            log.warning(f"Could not read asset {asset_path}: {e}")
+            return None
+
         if self.has_by_sha256(hash):
             #TODO: It is possible that the some image has the same sha but not the name because it got renamed
             log.warning(f"Tried to add already existing asset. Ignoring. File: {asset_path}")
@@ -70,6 +78,7 @@ class AssetManagerBackend(list):
             return id
         
         # Copy asset to internal folder if it does not exist
+        internal_path = asset_path  # fallback: use the file in place (the branch below may not run)
         if not file_in_dir(os.path.basename(asset_path), os.path.join(gl.DATA_PATH, "cache")):
             internal_path = self.copy_asset(asset_path)
         
@@ -113,10 +122,22 @@ class AssetManagerBackend(list):
         
         # Create missing directories
         os.makedirs(os.path.join(gl.DATA_PATH, "Assets", "AssetManager", "thumbnails"), exist_ok=True)
-        
-        # Create thumbnail
-        thumbnail = gl.media_manager.generate_thumbnail(asset_path)
-        thumbnail.save(thumbnail_path)
+
+        # Create thumbnail. Guarded (#112): this runs on the import worker
+        # thread (add) AND at app startup (fill_missing_thumbnails) -- one
+        # corrupt video/svg must not kill either. On failure fall back to the
+        # asset itself as its own "thumbnail": the path exists, and the
+        # Preview layer renders its broken-image marker for undecodable files.
+        try:
+            thumbnail = gl.media_manager.generate_thumbnail(asset_path)
+            if thumbnail.info.get("sc_broken"):
+                # generate_thumbnail already logged the decode failure; don't
+                # persist the placeholder (keeps the file retryable).
+                return asset_path
+            thumbnail.save(thumbnail_path)
+        except Exception as e:
+            log.warning(f"Could not create thumbnail for {asset_path}: {e}")
+            return asset_path
 
         return thumbnail_path
     
@@ -210,12 +231,20 @@ class AssetManagerBackend(list):
 
         def fill_missing_thumbnails():
             for asset in self:
-                if "thumbnail" in asset:
+                # A previously failed run can leave thumbnail as null in the
+                # json -- os.path.exists(None) would TypeError and take app
+                # startup down with it (#112), so null-check first.
+                if asset.get("thumbnail") is not None:
                     if os.path.exists(asset["thumbnail"]):
                         continue
 
-                # Create thumbnail
-                thumbnail_path = self.save_thumbnail(asset["internal-path"], asset["sha256"])
+                # Create thumbnail -- per-asset guard so one poison entry
+                # cannot block the rest of the batch (or startup).
+                try:
+                    thumbnail_path = self.save_thumbnail(asset["internal-path"], asset["sha256"])
+                except Exception as e:
+                    log.warning(f"Could not restore thumbnail for {asset.get('internal-path')}: {e}")
+                    thumbnail_path = asset.get("internal-path")
 
                 asset["thumbnail"] = thumbnail_path
 

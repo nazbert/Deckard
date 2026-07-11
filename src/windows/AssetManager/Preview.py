@@ -19,6 +19,9 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GdkPixbuf, Pango
 
+# Import python modules
+from loguru import logger as log
+
 class Preview(Gtk.FlowBoxChild):
     def __init__(self, image_path: str = None, text:str = None, can_be_deleted: bool = False):
         super().__init__()
@@ -51,6 +54,13 @@ class Preview(Gtk.FlowBoxChild):
         self.picture.set_pixbuf(self.pixbuf)
         self.main_box.append(self.picture)
 
+        # Shown instead of the picture when the file can't be decoded (#112).
+        # Hidden by default; set_image toggles it so recycled cells recover.
+        self.broken_icon = Gtk.Image(icon_name="image-missing-symbolic", pixel_size=48,
+                                     halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER,
+                                     visible=False, tooltip_text="Could not load this file")
+        self.overlay.add_overlay(self.broken_icon)
+
         self.label = Gtk.Label(xalign=0.5, hexpand=False, ellipsize=Pango.EllipsizeMode.END, max_width_chars=20,
                                margin_start=20, margin_end=20)
         self.main_box.append(self.label)
@@ -64,16 +74,34 @@ class Preview(Gtk.FlowBoxChild):
         self.overlay.add_overlay(self.remove_button)
 
     def set_image(self, path:str):
-        path = str(path)
-
+        # The None check must run BEFORE any str() coercion (str(None) is the
+        # truthy "None"), and the decode must be guarded: a corrupt/unreadable
+        # file raises GLib.Error and previously killed the (idle) callback,
+        # leaving the recycled cell showing a stale image (#112).
         if path is None:
-            self.pixbuf = GdkPixbuf.Pixbuf.new(width=250, height=180)
+            self.show_broken_image()
             return
-        self.pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(path,
-                                                              width=250,
-                                                              height=180,
-                                                              preserve_aspect_ratio=True)
+
+        try:
+            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path),
+                                                             width=250,
+                                                             height=180,
+                                                             preserve_aspect_ratio=True)
+        except Exception as e:
+            log.warning(f"Could not load asset preview for {path}: {e}")
+            self.show_broken_image()
+            return
+
+        self.pixbuf = pixbuf
         self.picture.set_pixbuf(self.pixbuf)
+        self.broken_icon.set_visible(False)
+
+    def show_broken_image(self) -> None:
+        """Marks this preview as broken: clears any (possibly recycled)
+        pixbuf and shows the themed "image-missing" icon instead."""
+        self.pixbuf = None
+        self.picture.set_pixbuf(None)
+        self.broken_icon.set_visible(True)
 
     def set_text(self, text:str):
         self.label.set_text(text)

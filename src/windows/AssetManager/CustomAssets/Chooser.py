@@ -41,6 +41,7 @@ class CustomAssetChooser(ChooserPage):
         super().__init__()
         self.asset_manager = asset_manager
 
+        self.asset_chooser: CustomAssetChooserFlowBox = None
         self.build_finished = False
         self.build_task_finished_tasks: list[callable] = []
 
@@ -49,29 +50,39 @@ class CustomAssetChooser(ChooserPage):
     @log.catch
     def build(self):
         self.build_finished = False
-        self.asset_chooser = CustomAssetChooserFlowBox(self)
-        # Append to main_box (like the Wallpaper / SD+ Bar / Icon choosers do),
-        # NOT into ChooserPage's outer ScrolledWindow: a ScrolledWindow sizes
-        # its child to natural height (never stretches it), which collapses a
-        # nested grid, and the flow box brings its own ScrolledWindow +
-        # pagination. As a direct main_box child its own scroller fills the
-        # available height. The default scrolled_window must also be REMOVED
-        # (as the sibling choosers do) -- an empty vexpand=True child competes
-        # for the page's height and squeezes the grid.
-        GLib.idle_add(self.main_box.remove, self.scrolled_window)
-        GLib.idle_add(self.main_box.append, self.asset_chooser)
+        try:
+            self.asset_chooser = CustomAssetChooserFlowBox(self)
+            # Append to main_box (like the Wallpaper / SD+ Bar / Icon choosers do),
+            # NOT into ChooserPage's outer ScrolledWindow: a ScrolledWindow sizes
+            # its child to natural height (never stretches it), which collapses a
+            # nested grid, and the flow box brings its own ScrolledWindow +
+            # pagination. As a direct main_box child its own scroller fills the
+            # available height. The default scrolled_window must also be REMOVED
+            # (as the sibling choosers do) -- an empty vexpand=True child competes
+            # for the page's height and squeezes the grid.
+            GLib.idle_add(self.main_box.remove, self.scrolled_window)
+            GLib.idle_add(self.main_box.append, self.asset_chooser)
 
-        self.browse_files_button = Gtk.Button(label=gl.lm.get("asset-chooser.custom.browse-files"), margin_top=15)
-        self.browse_files_button.connect("clicked", self.on_browse_files_clicked)
-        GLib.idle_add(self.main_box.append, self.browse_files_button)
+            self.browse_files_button = Gtk.Button(label=gl.lm.get("asset-chooser.custom.browse-files"), margin_top=15)
+            self.browse_files_button.connect("clicked", self.on_browse_files_clicked)
+            GLib.idle_add(self.main_box.append, self.browse_files_button)
 
-        self.load_defaults()
+            self.load_defaults()
+        finally:
+            # GUARANTEE the spinner is dismissed (#112): any exception above
+            # used to be swallowed by @log.catch with set_loading(False) never
+            # reached, leaving the Custom Assets page loading forever.
+            # (@log.catch stays -- finally runs first, then the exception
+            # propagates into it and gets logged.)
+            self.set_loading(False)
 
-        self.set_loading(False)
-
-        self.build_finished = True
-        for task in self.build_task_finished_tasks:
-            task()
+            self.build_finished = True
+            for task in self.build_task_finished_tasks:
+                try:
+                    task()
+                except Exception as e:
+                    log.warning(f"Deferred asset-chooser task failed: {e}")
+            self.build_task_finished_tasks.clear()
 
     def on_dnd_accept(self, drop, user_data):
         return True
@@ -102,6 +113,10 @@ class CustomAssetChooser(ChooserPage):
     def show_for_path(self, path):
         if not self.build_finished:
             self.build_task_finished_tasks.append(lambda: self.asset_chooser.show_for_path(path))
+            return
+        if self.asset_chooser is None:
+            # build() failed before the flow box existed -- the failure is
+            # already logged; don't raise into the caller as well.
             return
         self.asset_chooser.show_for_path(path)
 
