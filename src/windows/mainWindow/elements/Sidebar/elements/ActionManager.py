@@ -557,23 +557,36 @@ class ActionRow(Adw.ActionRow):
         return self.expander.get_index_of_child(self)
 
     def on_click_up(self, button):
+        # The neighbour is the row widget itself (ActionRow /
+        # MissingActionButtonRow / the add-action Adw.ButtonRow). The add
+        # button is only reachable here via the index-0 wrap-around
+        # (get_rows()[-1]); moving past it makes no sense, so bail. NOTE:
+        # upstream dfcbd44a (beta.14) broke both lines below by referencing
+        # AddActionButtonRow.button (a class attribute that doesn't exist)
+        # and one_up_child.button (ActionRow has no .button) -- every click
+        # raised AttributeError inside the signal handler and the buttons
+        # appeared dead (upstream #577).
         one_up_child = self.expander.get_rows()[self.index - 1]
-        if isinstance(one_up_child, AddActionButtonRow.button):
+        if one_up_child is self.expander.add_action_button:
             return
-        self.expander.reorder_child_after(self, one_up_child.button)
+        self.expander.reorder_child_after(self, one_up_child)
         self.expander.reorder_actions(self.index - 1, self.index)
 
-        # self.expander.update_indices()
+        # Keep row.index in sync with the new visual order: the sidebar
+        # rebuild runs at idle priority (load_page ->
+        # GLib.idle_add(update_ui_on_page_change)), so a second click can be
+        # dispatched before it lands and would otherwise use stale indices.
+        self.expander.update_indices()
 
 
     def on_click_down(self, button):
         one_down_child = self.expander.get_rows()[self.index + 1]
-        if isinstance(one_down_child, AddActionButtonRow.button):
+        if one_down_child is self.expander.add_action_button:
             return
-        self.expander.reorder_child_after(self, one_down_child.button)
+        self.expander.reorder_child_after(self, one_down_child)
         self.expander.reorder_actions(self.index, self.index + 1)
 
-        # self.expander.update_indices()
+        self.expander.update_indices()
         
     def on_click_remove(self, button):
         visible_child = gl.app.main_win.leftArea.deck_stack.get_visible_child()
