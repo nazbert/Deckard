@@ -574,10 +574,14 @@ class PageManagerBackend:
         data["settings"] = settings
         self.settings_manager.save_settings_to_file(path, data)
 
-        for controller in gl.deck_manager.deck_controller:
-            if controller.active_page.json_path != path:
-                continue
-            controller.active_page.dict = data
+        # Refresh EVERY cached Page object for this path, not just the ones
+        # active on a controller (same mechanism set_page_data uses). A
+        # cached-but-not-active Page kept its pre-edit dict here, and the
+        # next Page.save() from any trigger (plugin set_settings, key/state
+        # edits, ...) rewrote the file from that stale dict -- silently
+        # erasing the just-saved settings section (auto-change, screensaver,
+        # brightness, background overrides). See #113/#104.
+        self.update_dict_of_pages_with_path(path)
 
     def get_auto_change_settings(self, path: str) -> dict:
         """
