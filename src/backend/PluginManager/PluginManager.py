@@ -61,6 +61,37 @@ class PluginManager:
             terminate_backend_process(process, escalate=False)
         self.backend_processes.clear()
 
+    def warm_up_plugins(self) -> None:
+        """Eagerly initialize plugin backends without blocking the caller
+        (issue #117).
+
+        Invokes every registered plugin's on_app_ready() hook on a single
+        background daemon thread, one plugin at a time, each call
+        exception-isolated. This is the supported eager-init point for
+        backend launches: in background/autostart mode (-b) no config UI is
+        ever opened, and if no deck was enumerable at startup no page load
+        fires action on_ready either -- so a lazily-launched backend would
+        otherwise stay down until the first user interaction that happens to
+        force it, leaving the first hardware presses inert. Backend launches
+        spawn subprocesses, so this must never run on (or block) the GTK
+        main thread.
+        """
+        threading.Thread(
+            target=self._warm_up_plugins,
+            name="plugin_warm_up",
+            daemon=True,
+        ).start()
+
+    def _warm_up_plugins(self) -> None:
+        for plugin_id, plugin in list(PluginBase.plugins.items()):
+            plugin_base = plugin.get("object")
+            if plugin_base is None:
+                continue
+            try:
+                plugin_base.on_app_ready()
+            except Exception as e:
+                log.error(f"Plugin {plugin_id}: on_app_ready failed: {e}")
+
     def load_plugins(self, show_notification: bool = False):
         # get all folders in plugins folder
         if not os.path.exists(gl.PLUGIN_DIR):

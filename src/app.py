@@ -127,6 +127,13 @@ class App(Adw.Application):
         if not gl.IS_MAC:
             start_dbus_service()
 
+        # Eagerly warm plugin backends (issue #117): async on its own daemon
+        # thread, so backend subprocess launches can never block this GTK
+        # main loop. Matters most in background mode (-b), where no config
+        # UI ever opens to trigger lazy backend init before the first
+        # hardware press.
+        gl.plugin_manager.warm_up_plugins()
+
         log.success("Finished loading app")
 
     def on_reopen(self, *args, **kwargs):

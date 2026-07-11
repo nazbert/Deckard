@@ -652,6 +652,42 @@ class PluginBase(rpyc.Service):
         gl.plugin_manager.backend_processes.append(self.backend_process)
 
         self.wait_for_backend()
+        if self.backend_connection is None:
+            # Registration is asynchronous (the subprocess must boot python,
+            # rpyc-connect back and call register_backend) and the bounded
+            # wait above gives up after ~0.3s. At boot that window is
+            # routinely missed -- keep watching so the gap is visible
+            # instead of silently leaving self.backend None (issue #117).
+            self._watch_backend_registration(self.backend_process)
+
+    def _watch_backend_registration(self, process: subprocess.Popen, timeout: float = 30.0) -> None:
+        """Observe (never manage) a launched backend that hasn't registered
+        yet: on a bounded daemon thread, log the registration latency once
+        it arrives, or an explicit error if the process died or the timeout
+        expires. Process lifecycle stays entirely with launch_backend /
+        on_disconnect / terminate_backend_process."""
+        plugin_id = self.get_plugin_id_from_folder_name()
+
+        def _watch() -> None:
+            start = time.time()
+            deadline = start + timeout
+            while time.time() < deadline:
+                if self.backend_connection is not None:
+                    log.info(f"Plugin {plugin_id}: backend registered after {time.time() - start:.1f}s")
+                    return
+                if process is not None and process.poll() is not None:
+                    log.error(
+                        f"Plugin {plugin_id}: backend process exited with code "
+                        f"{process.returncode} before registering -- its actions will stay inert"
+                    )
+                    return
+                time.sleep(0.25)
+            log.error(
+                f"Plugin {plugin_id}: backend did not register within {timeout:.0f}s -- "
+                f"its actions will stay inert until it does"
+            )
+
+        threading.Thread(target=_watch, name=f"backend_watch_{plugin_id}", daemon=True).start()
 
     def wait_for_backend(self, tries: int = 3) -> None:
         """
@@ -686,6 +722,38 @@ class PluginBase(rpyc.Service):
         self.backend = self.backend_connection.root
 
         gl.plugin_manager.backends.append(self.backend_connection)
+
+        # Exception-isolated: register_backend is invoked over rpyc by the
+        # backend process itself -- a raising plugin hook must not blow up
+        # the backend's registration call.
+        try:
+            self.on_backend_ready()
+        except Exception as e:
+            log.error(f"Plugin {self.get_plugin_id_from_folder_name()}: on_backend_ready failed: {e}")
+
+    def on_backend_ready(self) -> None:
+        """
+        Called once the backend has connected and registered itself
+        (mirrors ActionCore.on_backend_ready). Backends can register
+        noticeably late on a busy boot, so use this to (re)sync any state
+        that depends on the backend instead of assuming it was available at
+        launch_backend() time. Runs on the rpyc service thread -- do not
+        touch GTK directly. Default: no-op.
+        """
+        pass
+
+    def on_app_ready(self) -> None:
+        """
+        Called once, asynchronously, after the app has finished starting --
+        in both windowed and background (-b) mode. This is the supported
+        place to eagerly launch a plugin backend or start long-lived work:
+        __init__ runs during (and blocks) startup, and an action's on_ready
+        never fires while no deck is connected, so backends launched from
+        either can leave the first hardware presses inert after an
+        autostart boot (issue #117). Runs on a background thread -- do not
+        touch GTK directly. Default: no-op.
+        """
+        pass
 
     def ping(self) -> bool:
         """
