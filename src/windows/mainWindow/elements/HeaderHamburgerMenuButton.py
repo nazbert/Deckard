@@ -102,9 +102,9 @@ class HeaderHamburgerMenuButton(Gtk.MenuButton):
 
     def get_contributer_list(self):
         try:
-            contents = urllib.request.urlopen("https://api.github.com/repos/StreamController/StreamController/contributors").read().decode()
+            contents = urllib.request.urlopen("https://api.github.com/repos/StreamController/StreamController/contributors", timeout=10).read().decode()
             data = json.loads(contents)
-            
+
             contributors = []
             for contributor in data:
                 if contributor["login"] in ["dependabot[bot]"]:
@@ -112,8 +112,26 @@ class HeaderHamburgerMenuButton(Gtk.MenuButton):
                 contributors.append(f"{contributor["login"]} {contributor["html_url"]}")
 
             return contributors
-        except:
+        except Exception:
             return []
+
+    def _fetch_contributors_async(self, about: Adw.AboutDialog) -> None:
+        """Runs on a worker thread: fetches the contributor list and, when it
+        arrives, adds the credit section on the main loop. On network failure
+        (offline, rate-limited, black-holed connection) the dialog simply
+        stays up without a contributors section."""
+        contributors = self.get_contributer_list()
+        if not contributors:
+            return
+
+        def add_section():
+            about.add_credit_section(
+                f"Contributors ({len(contributors)})",
+                sorted(set(contributors), key=str.casefold),
+            )
+            return False
+
+        GLib.idle_add(add_section)
 
     def on_open_about(self, action, parameter):
         self.about = Adw.AboutDialog()
@@ -131,10 +149,6 @@ class HeaderHamburgerMenuButton(Gtk.MenuButton):
         self.about.set_issue_url("https://github.com/StreamController/StreamController/issues")
         # self.about.set_support_url("https://discord.com/invite/MSyHM8TN3u")
 
-        contributors = self.get_contributer_list()
-        self.about.add_credit_section(f"Contributors ({len(contributors)})", sorted(set(contributors),
-                                                       key=str.casefold))
-        
         self.about.set_copyright("Copyright (C) 2024 Core447")
         self.about.set_application_icon("com.core447.StreamController")
         self.about.set_visible(True)
@@ -189,6 +203,17 @@ class HeaderHamburgerMenuButton(Gtk.MenuButton):
         self.about.set_release_notes_version(gl.app_version)
         
         self.about.present(gl.app.get_active_window())
+
+        # The contributor list comes from the GitHub API -- fetching it here
+        # (synchronously) froze the whole UI for a full network round trip and
+        # hung indefinitely on a black-holed connection. Present the dialog
+        # immediately and fill the section in when (and if) the data arrives.
+        threading.Thread(
+            target=self._fetch_contributors_async,
+            args=(self.about,),
+            daemon=True,
+            name="about-contributors",
+        ).start()
 
     def set_optional_actions_state(self, state: bool) -> None:
         self.open_store_action.set_enabled(state)
