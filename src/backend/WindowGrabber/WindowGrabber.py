@@ -118,40 +118,57 @@ class WindowGrabber:
             if deck_controller is None or not deck_controller.deck.is_open():
                 continue
 
-            found_page = False
-            for page_path in gl.page_manager.get_pages():
-                info = gl.page_manager.get_auto_change_settings(page_path)
-                wm_regex = info.get("wm-class")
-                title_regex = info.get("title")
-                enabled = info.get("enable", False)
-                decks = info.get("decks", [])
-                if not enabled:
+            try:
+                self._apply_auto_change(deck_controller, window)
+            except Exception:
+                # One deck failing mid-switch (e.g. torn down concurrently:
+                # close() flips is_open() after the check above already
+                # passed) must not abort auto-switching for the remaining
+                # decks -- and since the watcher threads wrap their loops in
+                # @log.catch, an exception escaping here would kill
+                # auto-switching entirely until restart.
+                log.opt(exception=True).warning(
+                    "Auto page switch failed for one deck; continuing with the others"
+                )
+
+    def _apply_auto_change(self, deck_controller, window: Window) -> None:
+        """Applies the auto-change page rules to a single deck for the given
+        foreground window. May raise if the deck is torn down mid-call; the
+        caller isolates that per deck."""
+        found_page = False
+        for page_path in gl.page_manager.get_pages():
+            info = gl.page_manager.get_auto_change_settings(page_path)
+            wm_regex = info.get("wm-class")
+            title_regex = info.get("title")
+            enabled = info.get("enable", False)
+            decks = info.get("decks", [])
+            if not enabled:
+                continue
+
+            if self.get_is_window_matching(window, wm_regex, title_regex):
+                if deck_controller.serial_number() not in decks:
                     continue
 
-                if self.get_is_window_matching(window, wm_regex, title_regex):
-                    if deck_controller.serial_number() not in decks:
-                        continue
+                if deck_controller.active_page.json_path != page_path:
+                    log.debug(f"Auto changing page: {page_path} on deck {deck_controller.deck.get_serial_number()}")
+                    page = gl.page_manager.get_page(page_path, deck_controller)
+                    if not deck_controller.page_auto_loaded:
+                        deck_controller.last_manual_loaded_page_path = deck_controller.active_page.json_path
+                    deck_controller.load_page(page)
+                deck_controller.page_auto_loaded = True
+                found_page = True
+                break
 
-                    if deck_controller.active_page.json_path != page_path:
-                        log.debug(f"Auto changing page: {page_path} on deck {deck_controller.deck.get_serial_number()}")
-                        page = gl.page_manager.get_page(page_path, deck_controller)
-                        if not deck_controller.page_auto_loaded:
-                            deck_controller.last_manual_loaded_page_path = deck_controller.active_page.json_path
-                        deck_controller.load_page(page)
-                    deck_controller.page_auto_loaded = True
-                    found_page = True
-                    break
+        if not found_page:
+            if not hasattr(deck_controller, "page_auto_loaded"):
+                return
 
-            if not found_page:
-                if not hasattr(deck_controller, "page_auto_loaded"):
-                    continue
-
-                if deck_controller.page_auto_loaded:
-                    active_page_change_info = gl.page_manager.get_auto_change_settings(deck_controller.active_page.json_path)
-                    if active_page_change_info.get("stay-on-page", True):
-                        continue
-                    deck_controller.page_auto_loaded = False
-                    if deck_controller.last_manual_loaded_page_path is None:
-                        continue
-                    page = gl.page_manager.get_page(deck_controller.last_manual_loaded_page_path, deck_controller)
-                    deck_controller.load_page(page, allow_reload=False)
+            if deck_controller.page_auto_loaded:
+                active_page_change_info = gl.page_manager.get_auto_change_settings(deck_controller.active_page.json_path)
+                if active_page_change_info.get("stay-on-page", True):
+                    return
+                deck_controller.page_auto_loaded = False
+                if deck_controller.last_manual_loaded_page_path is None:
+                    return
+                page = gl.page_manager.get_page(deck_controller.last_manual_loaded_page_path, deck_controller)
+                deck_controller.load_page(page, allow_reload=False)

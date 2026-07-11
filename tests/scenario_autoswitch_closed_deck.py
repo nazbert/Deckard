@@ -68,6 +68,40 @@ def main() -> None:
             "stay-on-page was not honored after a non-matching window change"
         )
         print("PASS: non-matching window change handled with a closed deck present")
+
+        # Review round 1 (#104): per-deck exception isolation. A deck that
+        # passes the loop-top is_open() check but raises mid-body (narrow
+        # teardown race: close() flips is_open() after the check) must not
+        # abort auto-switching for the decks after it -- and must not let the
+        # exception escape (the KDE/X11 watcher threads run under @log.catch;
+        # an escaping exception kills auto-switch until restart).
+        controller_boom = fixtures.make_headless_controller(serial="boom-3")
+        try:
+            def boom():
+                raise RuntimeError("injected: deck torn down mid-switch")
+            controller_boom.serial_number = boom
+
+            # Order the raising deck BEFORE the open one.
+            dc_list = gl.deck_manager.deck_controller
+            dc_list.remove(controller_open)
+            dc_list.append(controller_open)
+            assert dc_list.index(controller_boom) < dc_list.index(controller_open)
+
+            mail_path = fixtures.seed_page("MailPage")
+            gl.page_manager.set_auto_change_settings(
+                mail_path, enable=True, wm_class="thunderbird", regex_title=".*",
+                stay_on_page=True, decks=[controller_open.serial_number()],
+            )
+
+            grabber.on_active_window_changed(Window(wm_class="thunderbird", title="Inbox"))
+
+            assert controller_open.active_page.json_path == mail_path, (
+                "a deck raising mid-switch prevented the next deck from "
+                "auto-switching (missing per-deck exception isolation)"
+            )
+            print("PASS: one deck raising mid-switch doesn't block the others")
+        finally:
+            fixtures.teardown(controller_boom)
     finally:
         fixtures.teardown(controller_open)
         fixtures.teardown(controller_closed)
