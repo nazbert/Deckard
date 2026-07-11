@@ -13,6 +13,7 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
  
+import re
 import sys
 import zipfile
 import requests
@@ -70,6 +71,22 @@ class StoreBackend:
     # small requests (the fetch itself is what dominates store load time),
     # few enough not to present as a scrape burst to raw.githubusercontent.
     MAX_CONCURRENT_REQUESTS = 10
+
+    # Whitelist for manifest-supplied asset ids (plugin/icon/wallpaper "id"
+    # fields). These come from a REMOTE manifest.json and are used as single
+    # path components under the app's data dirs -- including as rmtree and
+    # install targets. Must start alphanumeric (rejects ".", "..", hidden
+    # dirs) and may only continue with [A-Za-z0-9._-] (rejects "/", "\\",
+    # whitespace, absolute paths). Length-capped to stay a sane dirname.
+    ASSET_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+    @classmethod
+    def is_safe_asset_id(cls, asset_id) -> bool:
+        """Whether a manifest-supplied id is safe to use as a single path
+        component. Reject (don't normalize): an id that fails this check is
+        a hostile or broken manifest, and quietly repairing it would install
+        into / delete a path the author never named."""
+        return isinstance(asset_id, str) and bool(cls.ASSET_ID_PATTERN.fullmatch(asset_id))
 
     def __init__(self):
         self.store_cache = StoreCache()
@@ -414,7 +431,7 @@ class StoreBackend:
             official=author in self.official_authors or False,
             commit_sha=commit,
             branch=branch,
-            local_sha=await self.get_local_sha(os.path.join(gl.PLUGIN_DIR, manifest.get("id"))),
+            local_sha=await self.get_local_sha_for_id(gl.PLUGIN_DIR, manifest.get("id")),
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
             repository_name=self.get_repo_name(url),
@@ -455,6 +472,14 @@ class StoreBackend:
         except Exception as e:
             raise RuntimeError(f"Unable to retrieve git commit hash: {e}")
     
+    async def get_local_sha_for_id(self, base_dir: str, asset_id) -> str:
+        """get_local_sha guarded by the asset-id whitelist: an unsafe or
+        missing manifest id never probes the filesystem and simply reads as
+        'not installed' (None)."""
+        if not self.is_safe_asset_id(asset_id):
+            return None
+        return await self.get_local_sha(os.path.join(base_dir, asset_id))
+
     async def get_local_sha(self, git_dir: str):
         if not os.path.exists(git_dir):
             return
@@ -524,7 +549,7 @@ class StoreBackend:
             author=author or None,  # Formerly: user_name
             official=author in self.official_authors or False,
             commit_sha=commit,
-            local_sha=await self.get_local_sha(os.path.join(gl.DATA_PATH, "icons", (manifest.get("id") or ""))),
+            local_sha=await self.get_local_sha_for_id(os.path.join(gl.DATA_PATH, "icons"), manifest.get("id")),
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
             repository_name=self.get_repo_name(url),
@@ -593,7 +618,7 @@ class StoreBackend:
             author=author or None,  # Formerly: user_name
             official=author in self.official_authors or False,
             commit_sha=commit,
-            local_sha=await self.get_local_sha(os.path.join(gl.DATA_PATH, "wallpapers", (manifest.get("id") or ""))),
+            local_sha=await self.get_local_sha_for_id(os.path.join(gl.DATA_PATH, "wallpapers"), manifest.get("id")),
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
             repository_name=self.get_repo_name(url),
@@ -660,7 +685,7 @@ class StoreBackend:
             author=author or None,  # Formerly: user_name
             official=author in self.official_authors or False,
             commit_sha=commit,
-            local_sha=await self.get_local_sha(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", (manifest.get("id") or ""))),
+            local_sha=await self.get_local_sha_for_id(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers"), manifest.get("id")),
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
             repository_name=self.get_repo_name(url),
@@ -921,6 +946,12 @@ class StoreBackend:
     async def install_plugin(self, plugin_data:PluginData, auto_update: bool = False):
         url = plugin_data.github
 
+        if not self.is_safe_asset_id(plugin_data.plugin_id):
+            # The id names the install dir (which download_repo rmtree-resets)
+            # -- a traversal id like "../../.." must never reach that join.
+            log.error(f"Refusing to install plugin with unsafe id {plugin_data.plugin_id!r} from {url}")
+            return 400
+
         local_path = os.path.join(gl.PLUGIN_DIR, plugin_data.plugin_id)
 
         response = await self.download_repo(repo_url=url, directory=local_path, commit_sha=plugin_data.commit_sha, branch_name=plugin_data.branch)
@@ -932,13 +963,15 @@ class StoreBackend:
         if isinstance(response, NoConnectionError):
             return response
 
-        # Run install script if present. Make sure to use python binary used to run this process to not break venv dependency installations
+        # Run install script if present. Make sure to use python binary used to run this process to not break venv dependency installations.
+        # List form without a shell: an f-string command both broke on spaces
+        # in the data path and let crafted path components inject shell syntax.
         if os.path.isfile(os.path.join(local_path, "__install__.py")):
-            subprocess.run(f"{sys.executable} {os.path.join(local_path, '__install__.py')}", shell=True, start_new_session=True)
+            subprocess.run([sys.executable, os.path.join(local_path, "__install__.py")], start_new_session=True)
 
         # Install requirements from requirements.txt
         if os.path.isfile(os.path.join(local_path, "requirements.txt")):
-            subprocess.run(f"{sys.executable} -m pip install -r {os.path.join(local_path, 'requirements.txt')}", shell=True, start_new_session=True)
+            subprocess.run([sys.executable, "-m", "pip", "install", "-r", os.path.join(local_path, "requirements.txt")], start_new_session=True)
 
         # Update plugin manager
         gl.plugin_manager.load_plugins()
@@ -1032,7 +1065,16 @@ class StoreBackend:
                     controller.active_page.load_action_objects()
                     controller.load_page(controller.active_page)
 
+    # The (un)install pairs below all join a manifest-supplied id under a
+    # data dir and rmtree/replace the result -- every one of them must reject
+    # unsafe ids (icon/wallpaper packs are data-only; a traversal id would
+    # hand them filesystem-wide delete with no code execution involved).
+
     async def install_icon(self, icon_data:IconData):
+        if not self.is_safe_asset_id(icon_data.icon_id):
+            log.error(f"Refusing to install icon pack with unsafe id {icon_data.icon_id!r} from {icon_data.github}")
+            return 400
+
         icon_path = os.path.join(gl.DATA_PATH, "icons", icon_data.icon_id)
 
         await self.uninstall_icon(icon_data)
@@ -1041,10 +1083,17 @@ class StoreBackend:
 
     async def uninstall_icon(self, icon_data:IconData):
         folder_name = icon_data.icon_id
+        if not self.is_safe_asset_id(folder_name):
+            log.error(f"Refusing to uninstall icon pack with unsafe id {folder_name!r}")
+            return 400
         if os.path.exists(os.path.join(gl.DATA_PATH, "icons", folder_name)):
             shutil.rmtree(os.path.join(gl.DATA_PATH, "icons", folder_name))
 
     async def install_wallpaper(self, wallpaper_data:WallpaperData):
+        if not self.is_safe_asset_id(wallpaper_data.wallpaper_id):
+            log.error(f"Refusing to install wallpaper with unsafe id {wallpaper_data.wallpaper_id!r} from {wallpaper_data.github}")
+            return 400
+
         wallpaper_path = os.path.join(gl.DATA_PATH, "wallpapers", wallpaper_data.wallpaper_id)
 
         await self.uninstall_wallpaper(wallpaper_data)
@@ -1053,10 +1102,17 @@ class StoreBackend:
 
     async def uninstall_wallpaper(self, wallpaper_data:WallpaperData):
         folder_name = wallpaper_data.wallpaper_id
+        if not self.is_safe_asset_id(folder_name):
+            log.error(f"Refusing to uninstall wallpaper with unsafe id {folder_name!r}")
+            return 400
         if os.path.exists(os.path.join(gl.DATA_PATH, "wallpapers", folder_name)):
             shutil.rmtree(os.path.join(gl.DATA_PATH, "wallpapers", folder_name))
 
     async def install_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper_data:SDPlusBarWallpaperData):
+        if not self.is_safe_asset_id(sd_plus_bar_wallpaper_data.id):
+            log.error(f"Refusing to install SD+ bar wallpaper with unsafe id {sd_plus_bar_wallpaper_data.id!r} from {sd_plus_bar_wallpaper_data.github}")
+            return 400
+
         wallpaper_path = os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", sd_plus_bar_wallpaper_data.id)
 
         await self.uninstall_sd_plus_bar_wallpaper(sd_plus_bar_wallpaper_data)
@@ -1065,6 +1121,9 @@ class StoreBackend:
 
     async def uninstall_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper_data:SDPlusBarWallpaperData):
         folder_name = sd_plus_bar_wallpaper_data.id
+        if not self.is_safe_asset_id(folder_name):
+            log.error(f"Refusing to uninstall SD+ bar wallpaper with unsafe id {folder_name!r}")
+            return 400
         if os.path.exists(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", folder_name)):
             shutil.rmtree(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", folder_name))
 
