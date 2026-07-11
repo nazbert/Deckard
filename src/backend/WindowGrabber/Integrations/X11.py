@@ -186,11 +186,18 @@ class WatchForActiveWindowChange(threading.Thread):
     def run(self) -> None:
         while gl.threads_running:
             time.sleep(0.2)
-            new_active_window = self.x11.get_active_window()
-            if new_active_window is None:
-                continue
-            if new_active_window == self.last_active_window:
-                continue
+            # Catch per iteration (like the Hyprland integration's socket
+            # listener): one failing poll or page-switch must not end this
+            # thread -- an exception escaping to @log.catch would kill
+            # window-based page switching until app restart (#44).
+            try:
+                new_active_window = self.x11.get_active_window()
+                if new_active_window is None:
+                    continue
+                if new_active_window == self.last_active_window:
+                    continue
 
-            self.last_active_window = new_active_window
-            self.x11.window_grabber.on_active_window_changed(new_active_window)
+                self.last_active_window = new_active_window
+                self.x11.window_grabber.on_active_window_changed(new_active_window)
+            except Exception as e:
+                log.error(f"Unexpected error in X11 active window watcher: {e}")
