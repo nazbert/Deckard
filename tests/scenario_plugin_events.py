@@ -8,13 +8,19 @@ Covers:
   (a) #33 -- a raising observer (sync AND `async def`) dispatched through
       event_dispatch produces a logged ERROR that carries the exception
       type, message and a traceback, not just the bare one-liner.
+  (b) #37 -- InputBases (KeyAction/DialAction/TouchScreenAction) default
+      event assigners survive real delivery: _raw_event_callback forwards
+      one positional data arg and the documented no-arg on_* handlers
+      (including subclass overrides) run instead of TypeError-ing.
 """
 import fixtures  # noqa: F401  (isolated data dir + sys.path, house convention)
 
 from loguru import logger as log
 
 from fixtures import wait_until
+from src.backend.DeckManagement.InputIdentifier import Input
 from src.backend.PluginManager import event_dispatch
+from src.backend.PluginManager.InputBases import DialAction, KeyAction, TouchScreenAction
 
 
 class _LogCapture:
@@ -103,10 +109,114 @@ def check_raising_observer_does_not_stop_batch():
         )
 
 
+# ===================================================================== #
+# (b) #37 -- InputBases event delivery reaches the no-arg handlers
+# ===================================================================== #
+
+_ACTION_KWARGS = dict(
+    action_id="test::InputBases",
+    action_name="InputBases test action",
+    deck_controller=None,
+    page=None,
+    plugin_base=None,
+    state=0,
+    input_ident=None,
+)
+
+
+class _RecordingKeyAction(KeyAction):
+    """Subclass with the documented no-arg override signatures -- delivery
+    must keep working for exactly this shape."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.calls: list[str] = []
+
+    def on_key_down(self):
+        self.calls.append("down")
+
+    def on_key_up(self):
+        self.calls.append("up")
+
+    def on_key_hold_start(self):
+        self.calls.append("hold_start")
+
+
+class _RecordingDialAction(DialAction):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.calls: list[str] = []
+
+    def on_dial_turn_cw(self):
+        self.calls.append("turn_cw")
+
+    def on_dial_turn_ccw(self):
+        self.calls.append("turn_ccw")
+
+    def on_dial_short_touch_press(self):
+        self.calls.append("short_touch")
+
+
+class _RecordingTouchScreenAction(TouchScreenAction):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.calls: list[str] = []
+
+    def on_touchscreen_drag_left(self):
+        self.calls.append("drag_left")
+
+    def on_touchscreen_drag_right(self):
+        self.calls.append("drag_right")
+
+
+def check_key_action_event_delivery():
+    action = _RecordingKeyAction(**_ACTION_KWARGS)
+    # Drive the exact production delivery path -- _raw_event_callback is
+    # what ControllerInput invokes, and unlike the real call site there is
+    # no @log.catch here, so a TypeError fails the scenario loudly.
+    action._raw_event_callback(Input.Key.Events.DOWN, {"coords": (1, 2)})
+    action._raw_event_callback(Input.Key.Events.UP, None)
+    action._raw_event_callback(Input.Key.Events.HOLD_START, {"coords": (1, 2)})
+    assert action.calls == ["down", "up", "hold_start"], action.calls
+
+
+def check_dial_action_event_delivery():
+    action = _RecordingDialAction(**_ACTION_KWARGS)
+    action._raw_event_callback(Input.Dial.Events.TURN_CW, {"ticks": 1})
+    action._raw_event_callback(Input.Dial.Events.TURN_CCW, {"ticks": -1})
+    action._raw_event_callback(Input.Dial.Events.SHORT_TOUCH_PRESS, None)
+    assert action.calls == ["turn_cw", "turn_ccw", "short_touch"], action.calls
+
+
+def check_touchscreen_action_event_delivery():
+    action = _RecordingTouchScreenAction(**_ACTION_KWARGS)
+    # DRAG_LEFT was doubly broken: wrong arity AND wired to on_trigger
+    # instead of on_touchscreen_drag_left.
+    action._raw_event_callback(Input.Touchscreen.Events.DRAG_LEFT, {"x": 10})
+    action._raw_event_callback(Input.Touchscreen.Events.DRAG_RIGHT, {"x": 90})
+    assert action.calls == ["drag_left", "drag_right"], action.calls
+
+
+def check_base_handlers_are_callable_noops():
+    # The unsubclassed bases must also survive delivery -- their handlers
+    # are documented no-ops, not crash sites.
+    for cls, event in (
+        (KeyAction, Input.Key.Events.SHORT_UP),
+        (DialAction, Input.Dial.Events.HOLD_STOP),
+        (TouchScreenAction, Input.Touchscreen.Events.DRAG_LEFT),
+    ):
+        action = cls(**_ACTION_KWARGS)
+        action._raw_event_callback(event, {"some": "data"})
+
+
 def main() -> None:
     check_raising_sync_observer_logs_traceback()
     check_raising_async_observer_logs_traceback()
     check_raising_observer_does_not_stop_batch()
+    check_key_action_event_delivery()
+    check_dial_action_event_delivery()
+    check_touchscreen_action_event_delivery()
+    check_base_handlers_are_callable_noops()
     print("PASS: scenario_plugin_events")
 
 

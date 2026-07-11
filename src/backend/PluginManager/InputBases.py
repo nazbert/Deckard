@@ -4,6 +4,14 @@ from src.backend.PluginManager.EventAssigner import EventAssigner
 from src.backend.DeckManagement.InputIdentifier import Input, InputIdentifier
 from src.backend.PluginManager.ActionCore import ActionCore
 
+# Event delivery always passes exactly one positional argument:
+# ActionCore._raw_event_callback(event, data) -> EventAssigner.call(data)
+# -> callback(data). The on_* handlers below are the documented plugin
+# override points and take no argument, so every registration adapts the
+# arity with a data-dropping lambda -- same pattern as ActionBase. The
+# lambdas also dispatch dynamically through self, so subclass overrides of
+# the no-arg handlers keep working unchanged (issue #37).
+
 class InputAction(ABC):
     pass
 
@@ -15,31 +23,31 @@ class KeyAction(InputAction, ActionCore):
                 id="Key Down",
                 ui_label="Key Down",
                 default_events=[Input.Key.Events.DOWN],
-                callback=self.on_key_down
+                callback=lambda data: self.on_key_down()
             ))
             self.add_event_assigner(EventAssigner(
                 id="Key Up",
                 ui_label="Key Up",
                 default_events=[Input.Key.Events.UP],
-                callback=self.on_key_up
+                callback=lambda data: self.on_key_up()
             ))
             self.add_event_assigner(EventAssigner(
                 id="Key Short Up",
                 ui_label="Key Short Up",
                 default_events=[Input.Key.Events.SHORT_UP],
-                callback=self.on_key_short_up
+                callback=lambda data: self.on_key_short_up()
             ))
             self.add_event_assigner(EventAssigner(
                 id="Key Hold Start",
                 ui_label="Key Hold Start",
                 default_events=[Input.Key.Events.HOLD_START],
-                callback=self.on_key_hold_start
+                callback=lambda data: self.on_key_hold_start()
             ))
             self.add_event_assigner(EventAssigner(
                 id="Key Hold Stop",
                 ui_label="Key Hold Stop",
                 default_events=[Input.Key.Events.HOLD_STOP],
-                callback=self.on_key_hold_stop
+                callback=lambda data: self.on_key_hold_stop()
             ))
 
     def on_key_down(self):
@@ -65,55 +73,55 @@ class DialAction(InputAction, ActionCore):
                 id="Dial Down",
                 ui_label="Dial Down",
                 default_events=[Input.Dial.Events.DOWN],
-                callback=self.on_dial_down
+                callback=lambda data: self.on_dial_down()
             ))
             self.add_event_assigner(EventAssigner(
                 id="Dial Up",
                 ui_label="Dial Up",
                 default_events=[Input.Dial.Events.UP],
-                callback=self.on_dial_up
+                callback=lambda data: self.on_dial_up()
             ))
             self.add_event_assigner(EventAssigner(
                 id="Dial Short Up",
                 ui_label="Dial Short Up",
                 default_events=[Input.Dial.Events.SHORT_UP],
-                callback=self.on_dial_short_up
+                callback=lambda data: self.on_dial_short_up()
             ))
             self.add_event_assigner(EventAssigner(
                 id="Dial Hold Start",
                 ui_label="Dial Hold Start",
                 default_events=[Input.Dial.Events.HOLD_START],
-                callback=self.on_dial_hold_start
+                callback=lambda data: self.on_dial_hold_start()
             ))
             self.add_event_assigner(EventAssigner(
                 id="Dial Hold Stop",
                 ui_label="Dial Hold Stop",
                 default_events=[Input.Dial.Events.HOLD_STOP],
-                callback=self.on_dial_hold_stop
+                callback=lambda data: self.on_dial_hold_stop()
             ))
             self.add_event_assigner(EventAssigner(
                 id="Dial Turn CW",
                 ui_label="Dial Turn CW",
                 default_events=[Input.Dial.Events.TURN_CW],
-                callback=self.on_dial_turn_cw
+                callback=lambda data: self.on_dial_turn_cw()
             ))
             self.add_event_assigner(EventAssigner(
                 id="Dial Turn CCW",
                 ui_label="Dial Turn CCW",
                 default_events=[Input.Dial.Events.TURN_CCW],
-                callback=self.on_dial_turn_ccw
+                callback=lambda data: self.on_dial_turn_ccw()
             ))
             self.add_event_assigner(EventAssigner(
                 id="Dial Touchscreen Short Press",
                 ui_label="Dial Touchscreen Short Press",
                 default_events=[Input.Dial.Events.SHORT_TOUCH_PRESS],
-                callback=self.on_dial_short_touch_press
+                callback=lambda data: self.on_dial_short_touch_press()
             ))
             self.add_event_assigner(EventAssigner(
                 id="Dial Touchscreen Long Press",
                 ui_label="Dial Touchscreen Long Press",
                 default_events=[Input.Dial.Events.LONG_TOUCH_PRESS],
-                callback=self.on_dial_long_touch_press
+                callback=lambda data: self.on_dial_long_touch_press()
             ))
 
     def on_dial_down(self):
@@ -151,13 +159,13 @@ class TouchScreenAction(InputAction, ActionCore):
                 id="Touchscreen Drag Left",
                 ui_label="Touchscreen Drag Left",
                 default_events=[Input.Touchscreen.Events.DRAG_LEFT],
-                callback=self.on_trigger
+                callback=lambda data: self.on_touchscreen_drag_left()
             ))
             self.add_event_assigner(EventAssigner(
                 id="Touchscreen Drag Right",
                 ui_label="Touchscreen Drag Right",
                 default_events=[Input.Touchscreen.Events.DRAG_RIGHT],
-                callback=self.on_touchscreen_drag_right
+                callback=lambda data: self.on_touchscreen_drag_right()
             ))
 
     def on_touchscreen_drag_left(self):
