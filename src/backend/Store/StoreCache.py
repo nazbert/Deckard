@@ -124,6 +124,14 @@ class StoreCache:
         # refetching versions.json can't interleave writes. Readers need no
         # lock: os.replace guarantees they see either the old or the new
         # complete file.
+        #
+        # This map is never evicted -- deliberately. It is keyed by cache
+        # string (user::repo::branch::type::path), so its size is bounded by
+        # the number of DISTINCT store files ever written this session (the
+        # catalog: a few hundred entries, each a bare threading.Lock of tens
+        # of bytes). Evicting a key is not worth the risk of dropping a lock
+        # while a writer still holds it; the bound is the catalog, not user
+        # input, so it cannot grow without limit.
         self._file_locks: dict[str, threading.Lock] = {}
         self._file_locks_guard = threading.Lock()
 
