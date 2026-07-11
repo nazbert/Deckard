@@ -5,6 +5,8 @@ import gi
 gi.require_version("Gtk","4.0")
 from gi.repository import Gio, GLib
 
+from loguru import logger as log
+
 SNI_NODE_INFO = Gio.DBusNodeInfo.new_for_xml("""
 <?xml version="1.0" encoding="UTF-8"?>
 <node>
@@ -337,6 +339,7 @@ class StatusNotifierItemService(DBusService):
 
         self.bus = session_bus
         self.dbus_path = path
+        self._watcher_watch_id = None
 
         if menu_path == "":
             self._menu = DBusMenuService(session_bus, menu_items)
@@ -348,19 +351,50 @@ class StatusNotifierItemService(DBusService):
         self._menu.register()
         super().register()
 
-        watcher = Gio.DBusProxy.new_sync(
-            connection=self.bus,
-            flags=Gio.DBusProxyFlags.DO_NOT_LOAD_PROPERTIES,
-            info=None,
-            name='org.kde.StatusNotifierWatcher',
-            object_path='/StatusNotifierWatcher',
-            interface_name='org.kde.StatusNotifierWatcher',
-            cancellable=None
+        # A one-shot RegisterStatusNotifierItem call loses the icon for the
+        # rest of the app's lifetime whenever the StatusNotifierWatcher
+        # restarts (e.g. plasmashell/waybar crash) or appears late (GNOME's
+        # AppIndicator support loading after us): a fresh watcher instance
+        # knows nothing about previously registered items (#47). Watch the
+        # well-known name instead and (re-)announce the item every time the
+        # name gains an owner.
+        if self._watcher_watch_id is None:
+            self._watcher_watch_id = Gio.bus_watch_name_on_connection(
+                self.bus,
+                'org.kde.StatusNotifierWatcher',
+                Gio.BusNameWatcherFlags.NONE,
+                self._on_watcher_appeared,
+                self._on_watcher_vanished,
+            )
+
+    def _on_watcher_appeared(self, connection, name, name_owner):
+        log.info(f"StatusNotifierWatcher appeared (owner: {name_owner}), announcing tray icon")
+        connection.call(
+            'org.kde.StatusNotifierWatcher',
+            '/StatusNotifierWatcher',
+            'org.kde.StatusNotifierWatcher',
+            'RegisterStatusNotifierItem',
+            GLib.Variant('(s)', (self.dbus_path,)),
+            None,
+            Gio.DBusCallFlags.NONE,
+            -1,
+            None,
+            self._on_announce_finished,
         )
 
-        watcher.RegisterStatusNotifierItem('(s)', self.dbus_path)
+    def _on_announce_finished(self, connection, result):
+        try:
+            connection.call_finish(result)
+        except GLib.Error as e:
+            log.warning(f"Failed to register the tray icon with the StatusNotifierWatcher: {e}")
+
+    def _on_watcher_vanished(self, connection, name):
+        log.info("StatusNotifierWatcher vanished, re-announcing the tray icon once it returns")
 
     def unregister(self):
+        if self._watcher_watch_id is not None:
+            Gio.bus_unwatch_name(self._watcher_watch_id)
+            self._watcher_watch_id = None
         super().unregister()
         self._menu.unregister()
 
