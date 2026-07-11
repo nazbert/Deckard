@@ -1437,6 +1437,39 @@ class StoreBackend:
 
         return n_updated
 
+    async def get_sd_plus_bar_wallpapers_to_update(self):
+        wallpapers = await self.get_all_sd_plus_bar_wallpapers()
+        if isinstance(wallpapers, NoConnectionError):
+            return wallpapers
+
+        wallpapers_to_update: list[SDPlusBarWallpaperData] = []
+
+        for wallpaper in wallpapers:
+            if wallpaper.local_sha is None:
+                # Wallpaper is not installed
+                continue
+            if wallpaper.local_sha != wallpaper.commit_sha:
+                wallpapers_to_update.append(wallpaper)
+
+        return wallpapers_to_update
+
+    async def update_all_sd_plus_bar_wallpapers(self) -> int:
+        """
+        Returns number of SUCCESSFULLY updated SD+ bar wallpapers
+        """
+        wallpapers_to_update = await self.get_sd_plus_bar_wallpapers_to_update()
+        if isinstance(wallpapers_to_update, NoConnectionError):
+            return wallpapers_to_update
+        n_updated = 0
+        for wallpaper in wallpapers_to_update:
+            result = await self.install_sd_plus_bar_wallpaper(wallpaper)
+            if result == 200:
+                n_updated += 1
+            else:
+                log.error(f"Failed to update SD+ bar wallpaper {wallpaper.id}: {result!r}")
+
+        return n_updated
+
     async def update_everything(self) -> int:
         """
         Returns number of SUCCESSFULLY updated assets, or NoConnectionError
@@ -1444,14 +1477,17 @@ class StoreBackend:
         n_plugins = await self.update_all_plugins()
         n_icons = await self.update_all_icons()
         n_wallpapers = await self.update_all_wallpapers()
+        # SD+ bar wallpaper packs used to have NO update leg at all -- they
+        # were installed once and never auto-updated.
+        n_sd_plus = await self.update_all_sd_plus_bar_wallpapers()
 
-        # All three legs must be checked -- a NoConnectionError leaking into
-        # the sum below used to raise TypeError (and n_wallpapers wasn't
-        # checked at all).
-        if any(isinstance(n, NoConnectionError) for n in (n_plugins, n_icons, n_wallpapers)):
+        # Every leg must be checked -- a NoConnectionError leaking into the
+        # sum below used to raise TypeError (and n_wallpapers wasn't checked
+        # at all).
+        if any(isinstance(n, NoConnectionError) for n in (n_plugins, n_icons, n_wallpapers, n_sd_plus)):
             return NoConnectionError()
 
-        return n_plugins + n_icons + n_wallpapers
+        return n_plugins + n_icons + n_wallpapers + n_sd_plus
 
 class NoCompatibleVersion:
     pass

@@ -21,7 +21,7 @@ import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl  # noqa: F401
 
 from src.backend.Store.StoreBackend import StoreBackend, NoConnectionError
-from src.windows.Store.StoreData import PluginData, IconData
+from src.windows.Store.StoreData import PluginData, IconData, SDPlusBarWallpaperData
 
 
 class RecordingPluginManager:
@@ -118,16 +118,18 @@ def test_update_all_plugins_counts_only_successes_and_recovers() -> None:
     assert recovery_calls == [], "no recovery reload when every update succeeded"
 
 
-def test_update_everything_checks_all_three_legs() -> None:
+def test_update_everything_checks_all_four_legs() -> None:
     sb = _make_backend()
 
     async def plugins_ok(): return 2
     async def icons_ok(): return 1
     async def wallpapers_fail(): return NoConnectionError()
+    async def sd_plus_ok(): return 4
 
     sb.update_all_plugins = plugins_ok
     sb.update_all_icons = icons_ok
     sb.update_all_wallpapers = wallpapers_fail
+    sb.update_all_sd_plus_bar_wallpapers = sd_plus_ok
 
     result = asyncio.run(sb.update_everything())
     assert isinstance(result, NoConnectionError), (
@@ -138,7 +140,57 @@ def test_update_everything_checks_all_three_legs() -> None:
     async def wallpapers_ok(): return 3
     sb.update_all_wallpapers = wallpapers_ok
     result = asyncio.run(sb.update_everything())
-    assert result == 6
+    assert result == 10, (
+        f"the sum must include the SD+ bar wallpapers leg (2+1+3+4), got {result!r}"
+    )
+
+    # An SD+-only failure must surface too -- before gl#22 the leg simply
+    # did not exist, so SD+ bar packs were never auto-updated at all.
+    async def sd_plus_fail(): return NoConnectionError()
+    sb.update_all_sd_plus_bar_wallpapers = sd_plus_fail
+    result = asyncio.run(sb.update_everything())
+    assert isinstance(result, NoConnectionError), (
+        f"an SD+-leg failure must surface as NoConnectionError, got {result!r}"
+    )
+
+
+def test_update_all_sd_plus_bar_wallpapers_counts_only_successes() -> None:
+    sb = _make_backend()
+
+    wp_ok = SDPlusBarWallpaperData(github="https://github.com/a/sdplus", id="com_a_SDPlus",
+                                   local_sha="old", commit_sha="new")
+    wp_bad = SDPlusBarWallpaperData(github="https://github.com/b/sdplus", id="com_b_SDPlus",
+                                    local_sha="old", commit_sha="new")
+    wp_current = SDPlusBarWallpaperData(github="https://github.com/c/sdplus", id="com_c_SDPlus",
+                                        local_sha="same", commit_sha="same")
+    wp_not_installed = SDPlusBarWallpaperData(github="https://github.com/d/sdplus", id="com_d_SDPlus",
+                                              local_sha=None, commit_sha="new")
+
+    async def fake_get_all(*args, **kwargs):
+        return [wp_ok, wp_bad, wp_current, wp_not_installed]
+
+    installed = []
+
+    async def fake_install(wallpaper_data):
+        installed.append(wallpaper_data.id)
+        return 200 if wallpaper_data is wp_ok else NoConnectionError()
+
+    sb.get_all_sd_plus_bar_wallpapers = fake_get_all
+    sb.install_sd_plus_bar_wallpaper = fake_install
+
+    n = asyncio.run(sb.update_all_sd_plus_bar_wallpapers())
+    assert n == 1, f"only the ONE successful SD+ update may be counted, got {n!r}"
+    assert installed == ["com_a_SDPlus", "com_b_SDPlus"], (
+        f"exactly the outdated installed packs may be reinstalled, got {installed}"
+    )
+
+    # Catalog failure propagates.
+    async def fake_get_all_fail(*args, **kwargs):
+        return NoConnectionError()
+
+    sb.get_all_sd_plus_bar_wallpapers = fake_get_all_fail
+    result = asyncio.run(sb.update_all_sd_plus_bar_wallpapers())
+    assert isinstance(result, NoConnectionError)
 
 
 def test_update_all_icons_counts_only_successes() -> None:
@@ -186,7 +238,8 @@ def main() -> None:
     fixtures.start_watchdog(30, label="scenario_store_install_contract")
     test_install_plugin_failure_propagates_and_skips_reload()
     test_update_all_plugins_counts_only_successes_and_recovers()
-    test_update_everything_checks_all_three_legs()
+    test_update_everything_checks_all_four_legs()
+    test_update_all_sd_plus_bar_wallpapers_counts_only_successes()
     test_update_all_icons_counts_only_successes()
     test_install_icon_propagates_download_result()
     print("scenario_store_install_contract: PASS")
