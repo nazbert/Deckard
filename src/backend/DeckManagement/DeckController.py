@@ -1644,6 +1644,13 @@ class DeckController:
         content upgrades to the new factor on its first playthrough after
         that, not instantaneously."""
         value = round(float(value), 2)
+        if abs(value - self.display_saturation) <= 0.001:
+            # Same-value echo -- notably the settings pane re-emitting the
+            # loaded value on open (DeckGroup's Saturation.load_default is
+            # deferred to map, so its set_value() fires the already-connected
+            # value-changed handler): persisting + a full page reload would
+            # be a pure no-op with a visible flicker, so skip entirely.
+            return
         deck_settings = self.get_deck_settings()
         deck_settings.setdefault("display", {})["saturation"] = value
         gl.settings_manager.save_deck_settings(self.deck.get_serial_number(), deck_settings)
