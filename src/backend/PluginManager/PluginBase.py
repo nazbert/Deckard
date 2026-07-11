@@ -312,8 +312,10 @@ class PluginBase(rpyc.Service):
         Connects a Callback to the Event which gets specified by the event ID
 
         Args:
-            event_id (str): The ID of the Event.
             callback (callable): The Callback that gets Called when the Event triggers
+            event_id (str): The full ID of the Event. Alternatively pass
+                event_id_suffix to address this plugin's own
+                "<plugin_id>::<suffix>" events.
 
         Returns:
             None
@@ -321,9 +323,9 @@ class PluginBase(rpyc.Service):
         full_id = event_id or f"{self.get_plugin_id()}::{event_id_suffix}"
 
         if full_id in self.event_holders:
-            self.event_holders[event_id].add_listener(callback)
+            self.event_holders[full_id].add_listener(callback)
         else:
-            log.warning(f"{event_id} does not exist in {self.plugin_name}")
+            log.warning(f"{full_id} does not exist in {self.plugin_name}")
 
     def connect_to_event_directly(self, plugin_id: str, event_id: str, callback: callable) -> None:
         """
@@ -341,7 +343,7 @@ class PluginBase(rpyc.Service):
         if plugin is None:
             log.warning(f"{plugin_id} does not exist")
         else:
-            plugin.connect_to_event(event_id, callback)
+            plugin.connect_to_event(callback=callback, event_id=event_id)
 
     def disconnect_from_event(self, event_id: str, callback: callable) -> None:
         """
@@ -375,7 +377,7 @@ class PluginBase(rpyc.Service):
         if plugin is None:
             log.warning(f"{plugin_id} does not exist")
         else:
-            self.disconnect_from_event(event_id, callback)
+            plugin.disconnect_from_event(event_id, callback)
 
     def get_settings(self):
         """

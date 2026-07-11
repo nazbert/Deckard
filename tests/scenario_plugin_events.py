@@ -12,15 +12,23 @@ Covers:
       event assigners survive real delivery: _raw_event_callback forwards
       one positional data arg and the documented no-arg on_* handlers
       (including subclass overrides) run instead of TypeError-ing.
+  (c) #36 -- the cross-plugin event APIs work: connect_to_event_directly
+      attaches to the TARGET plugin's holder (and the callback really
+      receives a trigger_event), suffix-based connect_to_event no longer
+      KeyErrors on None, and disconnect_from_event_directly detaches from
+      the target plugin -- not from the calling one.
 """
 import fixtures  # noqa: F401  (isolated data dir + sys.path, house convention)
 
 from loguru import logger as log
 
+import globals as gl
 from fixtures import wait_until
 from src.backend.DeckManagement.InputIdentifier import Input
 from src.backend.PluginManager import event_dispatch
+from src.backend.PluginManager.EventHolder import EventHolder
 from src.backend.PluginManager.InputBases import DialAction, KeyAction, TouchScreenAction
+from src.backend.PluginManager.PluginBase import PluginBase
 
 
 class _LogCapture:
@@ -209,6 +217,110 @@ def check_base_handlers_are_callable_noops():
         action._raw_event_callback(event, {"some": "data"})
 
 
+# ===================================================================== #
+# (c) #36 -- cross-plugin connect/disconnect target the right plugin
+# ===================================================================== #
+
+PROVIDER_ID = "com_test_provider"
+CONSUMER_ID = "com_test_consumer"
+EVENT_SUFFIX = "VolumeChanged"
+EVENT_ID = f"{PROVIDER_ID}::{EVENT_SUFFIX}"
+
+
+class _StubPluginManager:
+    """Only get_plugin_by_id is dereferenced on the paths under test
+    (PluginBase.get_plugin -> gl.plugin_manager.get_plugin_by_id)."""
+
+    def __init__(self, plugins: dict):
+        self._plugins = plugins
+
+    def get_plugin_by_id(self, plugin_id: str, include_disabled: bool = True):
+        return self._plugins.get(plugin_id)
+
+
+def make_plugin(plugin_id: str) -> PluginBase:
+    """A PluginBase carrying exactly the state the event API reads --
+    PluginBase.__init__ needs a manifest/locales/assets on disk, none of
+    which the connect/disconnect paths touch."""
+    plugin = PluginBase.__new__(PluginBase)
+    plugin.event_holders = {}
+    plugin.plugin_name = plugin_id
+    plugin._plugin_id_cache = plugin_id  # short-circuits get_plugin_id()
+    return plugin
+
+
+def make_provider_and_consumer():
+    provider = make_plugin(PROVIDER_ID)
+    consumer = make_plugin(CONSUMER_ID)
+    gl.plugin_manager = _StubPluginManager({PROVIDER_ID: provider, CONSUMER_ID: consumer})
+    # Suffix construction must yield "<plugin_id>::<suffix>".
+    holder = EventHolder(plugin_base=provider, event_id_suffix=EVENT_SUFFIX)
+    assert holder.event_id == EVENT_ID, holder.event_id
+    provider.add_event_holder(holder)
+    return provider, consumer, holder
+
+
+def check_connect_to_event_directly_reaches_target_plugin():
+    provider, consumer, holder = make_provider_and_consumer()
+
+    received = []
+    consumer_side_callback = lambda *args, **kwargs: received.append(args)  # noqa: E731
+
+    consumer.connect_to_event_directly(PROVIDER_ID, EVENT_ID, consumer_side_callback)
+
+    assert consumer_side_callback in holder.observers.snapshot(), (
+        "connect_to_event_directly did not attach to the target plugin's holder"
+    )
+    assert consumer.event_holders == {}, (
+        "connect_to_event_directly grew state on the CALLING plugin"
+    )
+
+    # The connection must be live end-to-end, not just present in the
+    # registry: trigger_event dispatches (event_id, *args) asynchronously.
+    holder.trigger_event(42)
+    assert wait_until(lambda: received == [(EVENT_ID, 42)], timeout=5.0), (
+        f"connected callback never received the trigger: {received!r}"
+    )
+
+
+def check_connect_to_event_suffix_path():
+    provider, consumer, holder = make_provider_and_consumer()
+
+    # Pre-fix this was the Known 6.26 shape: `full_id in self.event_holders`
+    # passed, then `self.event_holders[event_id]` indexed with None ->
+    # KeyError: None.
+    suffix_callback = lambda *args, **kwargs: None  # noqa: E731
+    provider.connect_to_event(callback=suffix_callback, event_id_suffix=EVENT_SUFFIX)
+    assert suffix_callback in holder.observers.snapshot(), (
+        "suffix-based connect_to_event did not attach to the holder"
+    )
+
+
+def check_disconnect_from_event_directly_targets_right_plugin():
+    provider, consumer, holder = make_provider_and_consumer()
+
+    # Give the CONSUMER its own holder under the identical event id, with
+    # its own listener: the old bug detached from the calling plugin, so
+    # this decoy is exactly what a regression would (wrongly) touch.
+    consumer_holder = EventHolder(plugin_base=consumer, event_id=EVENT_ID)
+    consumer.add_event_holder(consumer_holder)
+    decoy_callback = lambda *args, **kwargs: None  # noqa: E731
+    consumer_holder.add_listener(decoy_callback)
+
+    shared_callback = lambda *args, **kwargs: None  # noqa: E731
+    consumer.connect_to_event_directly(PROVIDER_ID, EVENT_ID, shared_callback)
+    assert shared_callback in holder.observers.snapshot()
+
+    consumer.disconnect_from_event_directly(PROVIDER_ID, EVENT_ID, shared_callback)
+
+    assert shared_callback not in holder.observers.snapshot(), (
+        "disconnect_from_event_directly left the callback on the target plugin"
+    )
+    assert decoy_callback in consumer_holder.observers.snapshot(), (
+        "disconnect_from_event_directly detached from the CALLING plugin's holder"
+    )
+
+
 def main() -> None:
     check_raising_sync_observer_logs_traceback()
     check_raising_async_observer_logs_traceback()
@@ -217,6 +329,9 @@ def main() -> None:
     check_dial_action_event_delivery()
     check_touchscreen_action_event_delivery()
     check_base_handlers_are_callable_noops()
+    check_connect_to_event_directly_reaches_target_plugin()
+    check_connect_to_event_suffix_path()
+    check_disconnect_from_event_directly_targets_right_plugin()
     print("PASS: scenario_plugin_events")
 
 
