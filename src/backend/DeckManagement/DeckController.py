@@ -1670,6 +1670,23 @@ class DeckController:
 
             old_path = self.active_page.json_path if self.active_page is not None else None
 
+            # Reset every key's pressed visual BEFORE the generation bump
+            # (#103): press_state lives on the reused ControllerKey and
+            # survives the page swap, so the key that triggered this switch
+            # (still physically down) had every new-page render composed
+            # through is_pressed() -> shrink_image(), and the release's
+            # repaint can lose the enqueue race against a loader render that
+            # read press_state just before the UP landed -- leaving the new
+            # page's key stuck "pressed". Ordering is the point: renders read
+            # config_gen at the start of update() and press_state later (at
+            # composite time), so writing press_state=False before the bump
+            # guarantees any render stamped with the new generation composes
+            # unpressed. Gesture bookkeeping (down_start_time, hold timer,
+            # the DOWN-time action snapshot) is deliberately untouched: the
+            # physical release must still dispatch its events (#107).
+            for controller_key in self.inputs.get(Input.Key, []):
+                controller_key.press_state = False
+
             # Set active_page and bump the generation atomically: a concurrent switch
             # must never leave active_page on one page while the newest generation
             # belongs to another (stale paints would then match both checks and bleed).
