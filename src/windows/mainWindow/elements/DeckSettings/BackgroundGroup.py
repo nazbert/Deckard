@@ -105,6 +105,18 @@ class BackgroundMediaRow(Adw.PreferencesRow):
         self.fps_spinner = Gtk.SpinButton.new_with_range(1, 30, 1)
         self.fps_box.append(self.fps_spinner)
 
+        self.extend_touchscreen_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, hexpand=True, margin_top=15)
+        self.config_box.append(self.extend_touchscreen_box)
+
+        self.extend_touchscreen_label = Gtk.Label(
+            label=gl.lm.get("Extend Background To Touchscreen", "Extend the background across the buttons and touchscreen"),
+            hexpand=True, xalign=0
+        )
+        self.extend_touchscreen_box.append(self.extend_touchscreen_label)
+
+        self.extend_touchscreen_switch = Gtk.Switch()
+        self.extend_touchscreen_box.append(self.extend_touchscreen_switch)
+
         self.connect_signals()
         self.load_defaults()
 
@@ -113,13 +125,15 @@ class BackgroundMediaRow(Adw.PreferencesRow):
         self.media_selector_button.connect("clicked", self.on_choose_image)
         self.loop_switch.connect("state-set", self.on_toggle_loop)
         self.fps_spinner.connect("value-changed", self.on_change_fps)
-        
+        self.extend_touchscreen_switch.connect("state-set", self.on_toggle_extend_touchscreen)
+
 
     def disconnect_signals(self):
         self.enable_switch.disconnect_by_func(self.on_toggle_enable)
         self.media_selector_button.disconnect_by_func(self.on_choose_image)
         self.loop_switch.disconnect_by_func(self.on_toggle_loop)
         self.fps_spinner.disconnect_by_func(self.on_change_fps)
+        self.extend_touchscreen_switch.disconnect_by_func(self.on_toggle_extend_touchscreen)
 
 
     def load_defaults(self):
@@ -136,6 +150,7 @@ class BackgroundMediaRow(Adw.PreferencesRow):
         enable = original_values["background"].setdefault("enable", False)
         loop = original_values["background"].setdefault("loop", True)
         fps = original_values["background"].setdefault("fps", 30)
+        extend_touchscreen = original_values["background"].setdefault("extend-to-touchscreen", False)
 
         # Save if changed
         if original_values != gl.settings_manager.get_deck_settings(self.deck_serial_number):
@@ -146,6 +161,8 @@ class BackgroundMediaRow(Adw.PreferencesRow):
         self.config_box.set_visible(enable)
         self.loop_switch.set_active(loop)
         self.fps_spinner.set_value(fps)
+        self.extend_touchscreen_switch.set_active(extend_touchscreen)
+        self.extend_touchscreen_box.set_visible(self.settings_page.deck_controller.deck.is_touch())
         self.set_thumbnail(path)
 
         self.connect_signals()
@@ -190,6 +207,16 @@ class BackgroundMediaRow(Adw.PreferencesRow):
     def on_toggle_loop(self, toggle_switch, state):
         settings = gl.settings_manager.get_deck_settings(self.deck_serial_number)
         settings["background"]["loop"] = state
+
+        # Save
+        gl.settings_manager.save_deck_settings(self.deck_serial_number, settings)
+
+        # Update
+        self.settings_page.deck_controller.load_background(page=self.settings_page.deck_controller.active_page)
+
+    def on_toggle_extend_touchscreen(self, toggle_switch, state):
+        settings = gl.settings_manager.get_deck_settings(self.deck_serial_number)
+        settings["background"]["extend-to-touchscreen"] = state
 
         # Save
         gl.settings_manager.save_deck_settings(self.deck_serial_number, settings)

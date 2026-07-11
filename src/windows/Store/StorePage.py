@@ -53,7 +53,19 @@ class StorePage(Gtk.Stack):
 
         self.store = store
 
+        # P4.3: subclasses no longer kick off their own load() thread from __init__ -- Store
+        # only starts it for the default/first tab eagerly, and lazily for the rest on first
+        # notify::visible-child-name. Guarded so switching back to an already-loaded tab is a
+        # no-op instead of re-fetching from the store backend.
+        self._loaded = False
+
         self.build()
+
+    def ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        threading.Thread(target=self.load, name=f"load_{type(self).__name__}").start()
 
     def build(self):
         self.main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)

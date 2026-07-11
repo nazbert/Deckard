@@ -61,6 +61,8 @@ class AssetManager(Gtk.ApplicationWindow):
 
     def on_close(self, *args, **kwargs):
         gl.asset_manager = None
+        if gl.app is not None and getattr(gl.app, "asset_manager", None) is self:
+            gl.app.asset_manager = None
 
     def build(self):
         self.main_stack = Gtk.Stack(transition_duration=200, transition_type=Gtk.StackTransitionType.SLIDE_LEFT_RIGHT, hexpand=True, vexpand=True)
@@ -86,11 +88,23 @@ class AssetManager(Gtk.ApplicationWindow):
         self.callback_func = callback_func
         self.callback_args = callback_args
         self.callback_kwargs = callback_kwargs
-        
+
         self.asset_chooser.show_for_path(path)
         self.main_stack.set_visible_child(self.asset_chooser)
         # self.back_button.set_visible(False)
         self.present()
+
+    def deliver_selection(self, path: str) -> None:
+        """Invokes the opener's selection callback and hides the window.
+
+        The callback is guarded: the window can be up without one. hide(), not
+        close() -- GTK4's default close-request handling destroys the window on
+        the next main-loop iteration even without an explicit destroy() call,
+        and this window is reused across opens (P4.2).
+        """
+        if callable(self.callback_func):
+            self.callback_func(path, *self.callback_args, **self.callback_kwargs)
+        self.hide()
 
     def show_info_for_asset(self, asset:dict):
         self.asset_info.show_for_asset(asset)

@@ -15,8 +15,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import os
 import json
-from functools import lru_cache
 from pathlib import Path
+
+from src.backend.DeckManagement.HelperMethods import instance_cache
 
 # Import own modules
 from src.backend.IconPackManagement.Icon import Icon
@@ -30,7 +31,7 @@ class IconPack:
 
         self.generate_folder_structure("icons")
 
-    @lru_cache(maxsize=None)
+    @instance_cache
     def get_manifest(self):
         path = Path(os.path.join(self.path, "manifest.json"))
 
@@ -40,18 +41,18 @@ class IconPack:
 
         return self.get_json(path)
         
-    @lru_cache(maxsize=None)
+    @instance_cache
     def get_attribution_json(self):
         path = Path(os.path.join(self.path, "attribution.json"))
 
         return self.get_json(path)
     
-    @lru_cache(maxsize=None)
+    @instance_cache
     def get_pack_attribution(self):
         attribution = self.get_attribution_json()
         return attribution.get("default", attribution.get("general", attribution.get("generic", {})))
         
-    @lru_cache(maxsize=None)
+    @instance_cache
     def get_json(self, json_path: Path):
         if not json_path.exists(follow_symlinks=True):
             return {}
@@ -59,7 +60,7 @@ class IconPack:
         with open(json_path) as f:
             return json.load(f)
 
-    @lru_cache(maxsize=None)
+    @instance_cache
     def get_thumbnail_path(self):
         manifest = self.get_manifest()
         path = Path(os.path.join(self.path, manifest.get("thumbnail")))

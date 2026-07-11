@@ -13,32 +13,72 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
+import threading
+
 from src.Signals.Signals import AppQuit, Signal
+from src.Signals.weak_callbacks import CallbackRegistry
 
 from gi.repository import GLib
 
 class SignalManager:
     def __init__(self):
+        # signal -> CallbackRegistry. Values are CallbackRegistry instances
+        # rather than plain lists (weak storage for bound methods + a lock
+        # per registry -- see weak_callbacks.py, design doc D2 / bug 28:
+        # trigger_signal used to iterate this dict's lists while any thread
+        # could be mutating them, unlocked). A CallbackRegistry is iterable
+        # and supports `list(...)`, so `connected_signals[signal]` stays a
+        # drop-in for code that read it directly.
         self.connected_signals: dict = {}
+        # Guards creation of a new per-signal CallbackRegistry; the
+        # registries themselves have their own internal lock for add/
+        # remove/snapshot.
+        self._registries_lock = threading.Lock()
+
+    def _get_registry(self, signal: Signal, create: bool) -> CallbackRegistry | None:
+        registry = self.connected_signals.get(signal)
+        if registry is not None or not create:
+            return registry
+        with self._registries_lock:
+            registry = self.connected_signals.get(signal)
+            if registry is None:
+                registry = CallbackRegistry()
+                self.connected_signals[signal] = registry
+            return registry
 
     def connect_signal(self, signal: Signal, callback: callable) -> None:
         # Verify signal
         if not issubclass(signal, Signal):
             raise TypeError("signal_name must be of type Signal")
-        
+
         # Verify callback
         if not callable(callback):
             raise TypeError("callback must be callable")
-        
-        self.connected_signals.setdefault(signal, [])
-        self.connected_signals[signal].append(callback)
+
+        self._get_registry(signal, create=True).add(callback)
+
+    def disconnect_signal(self, signal: Signal, callback: callable) -> None:
+        # Verify signal
+        if not issubclass(signal, Signal):
+            raise TypeError("signal_name must be of type Signal")
+
+        registry = self._get_registry(signal, create=False)
+        if registry is not None:
+            registry.remove(callback)
 
     def trigger_signal(self, signal: Signal, *args, **kwargs) -> None:
         # Verify signal
         if not issubclass(signal, Signal):
             raise TypeError("signal must be of type Signal")
-        
-        for callback in self.connected_signals.get(signal, []):
+
+        registry = self._get_registry(signal, create=False)
+        if registry is None:
+            return
+
+        # snapshot() takes the registry's own lock and returns a plain list
+        # of currently-live callbacks -- safe to iterate here even while
+        # another thread concurrently connects/disconnects.
+        for callback in registry.snapshot():
             if signal == AppQuit:
                 callback(*args, **kwargs)
             else:

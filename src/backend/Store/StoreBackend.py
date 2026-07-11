@@ -29,7 +29,6 @@ import os
 import uuid
 import shutil
 from packaging import version
-import urllib.request
 import threading
 
 # Import GLib
@@ -51,7 +50,9 @@ from src.windows.Store.StoreData import PluginData, IconData, SDPlusBarWallpaper
 
 
 class NoConnectionError:
-    pass
+    # Falsy so callers can treat any error result as a failed operation.
+    def __bool__(self) -> bool:
+        return False
 
 class StoreBackend:
     STORE_REPO_URL = "https://github.com/StreamController/StreamController-Store" #"https://github.com/StreamController/StreamController-Store"
@@ -65,8 +66,18 @@ class StoreBackend:
     SDPLUSWALLPAPERS_FILE = "SDPlusBarWallpapers.json"
 
 
+    # Cap concurrent GitHub fetches: enough to overlap the catalog's ~150
+    # small requests (the fetch itself is what dominates store load time),
+    # few enough not to present as a scrape burst to raw.githubusercontent.
+    MAX_CONCURRENT_REQUESTS = 10
+
     def __init__(self):
         self.store_cache = StoreCache()
+
+        # threading (not asyncio) semaphore: StoreBackend methods run under a
+        # fresh asyncio.run() per store page load thread, and an
+        # asyncio.Semaphore cannot be shared across event loops.
+        self._fetch_limiter = threading.Semaphore(self.MAX_CONCURRENT_REQUESTS)
 
         self.official_store_branch_cache: str = None
 
@@ -122,13 +133,28 @@ class StoreBackend:
         return v
 
     async def request_from_url(self, url: str) -> requests.Response:
+        # The blocking fetch (connection AND body read) runs in a worker
+        # thread: process_store_data gathers dozens of prepare_* coroutines,
+        # and a blocking requests.get() on the event loop would serialize
+        # every one of them behind each request's latency.
+        def _fetch() -> requests.Response | None:
+            with self._fetch_limiter:
+                req = requests.get(url, stream=True, timeout=30)
+                try:
+                    if req.status_code == 200:
+                        req.content  # read the body while still in the worker thread
+                        return req
+                    log.error(f"Request to {url} failed with status code {req.status_code}")
+                    return None
+                finally:
+                    req.close()  # content stays cached on the Response
+
         try:
-            req = requests.get(url, stream=True)
-            if req.status_code == 200:
-                return req
-            log.error(f"Request to {url} failed with status code {req.status_code}")
-            return NoConnectionError()
-        except requests.exceptions.ConnectionError as e:
+            req = await asyncio.to_thread(_fetch)
+            if req is None:
+                return NoConnectionError()
+            return req
+        except requests.exceptions.RequestException as e:
             log.error(e)
             return NoConnectionError()
     
@@ -187,6 +213,18 @@ class StoreBackend:
         answer = await self.request_from_url(url)
 
         if isinstance(answer, NoConnectionError):
+            # Fetch failed (offline, or raw.githubusercontent rate-limiting
+            # us with 429s): fall back to the cached copy, even when the
+            # caller forced a refetch -- a slightly stale catalog beats an
+            # empty/errored store page. Bounded by the entry's FETCHED age;
+            # its "date" field is a last-use clock that every read renews,
+            # so it cannot bound staleness (see StoreCache).
+            if self.store_cache.is_cached(url=repo_url, branch=branch_name, path=file_path):
+                fetched = self.store_cache.get_fetched_date(url=repo_url, branch=branch_name, path=file_path)
+                if fetched is not None and time.time() - fetched <= StoreCache.DAYS_TO_KEEP * 24 * 60 * 60:
+                    log.warning(f"Serving cached copy of {file_path} from {repo_url} after failed fetch")
+                    with self.store_cache.open_cache_file(url=repo_url, branch=branch_name, path=file_path, mode=f"r{byte_suffix}") as f:
+                        return f.read()
             return answer
         
         if answer is None:
@@ -207,7 +245,7 @@ class StoreBackend:
         
     async def get_last_commit(self, repo_url: str, branch_name: str = "main") -> str:
         url = f"https://api.github.com/repos/{self.get_user_name(repo_url)}/{self.get_repo_name(repo_url)}/commits?sha={branch_name}&per_page=1"
-        response = requests.get(url)
+        response = requests.get(url, timeout=30)
 
         if response.status_code != 200:
             return
@@ -261,7 +299,13 @@ class StoreBackend:
                 }
                 prepare_tasks.append(process_func(asset, include_images, False))
 
-        results = await asyncio.gather(*prepare_tasks)
+        # return_exceptions: one misbehaving store entry must not raise out of
+        # the gather and blank the whole page (the page's @log.catch load()
+        # would swallow it and leave the spinner up forever).
+        results = await asyncio.gather(*prepare_tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                log.error(f"Store item preparation failed: {result!r}")
         results = [result for result in results if isinstance(result, data_class)]
 
         return results
@@ -342,8 +386,10 @@ class StoreBackend:
         thumbnail_path = manifest.get("thumbnail")
         if include_image:
             image = await self.get_web_image(url, thumbnail_path, commit or branch)
-            if isinstance(manifest, NoConnectionError):
-                return image
+            if isinstance(image, NoConnectionError):
+                # A missing/rate-limited thumbnail must not drop the plugin --
+                # list it without an image.
+                image = None
         
         attribution = await self.get_attribution(url, commit or branch)
         if isinstance(attribution, NoConnectionError):
@@ -765,44 +811,61 @@ class StoreBackend:
         sha = commit_sha
         if commit_sha is None and branch_name is not None:
             # Used to write the version
-            sha = self.get_last_commit(repo_url, branch_name)
+            sha = await self.get_last_commit(repo_url, branch_name)
         zip_url = f"https://github.com/{username}/{projectname}/archive/{sha}.zip"
-        
+
+        zip_path = os.path.join(gl.DATA_PATH, "cache", f"{projectname}-{sha}.zip")
+
         # Download
         try:
             # Create cache dir
             os.makedirs(os.path.join(gl.DATA_PATH, "cache"), exist_ok=True)
-            urllib.request.urlretrieve(zip_url, os.path.join(gl.DATA_PATH, "cache", f"{projectname}-{sha}.zip"))
-        except TypeError as e:
+            with requests.get(zip_url, stream=True, timeout=30) as r:
+                r.raise_for_status()
+                with open(zip_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+        except Exception as e:
             log.error(e)
+            # Don't leave a partial/zero-byte archive behind for the next run.
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
             return NoConnectionError()
         
         ## Extract
-        if os.path.exists(os.path.join(gl.DATA_PATH, "cache", f"{projectname}-{sha}")):
-            shutil.rmtree(os.path.join(gl.DATA_PATH, "cache", f"{projectname}-{sha}"))
-        shutil.unpack_archive(os.path.join(gl.DATA_PATH, "cache", f"{projectname}-{sha}.zip"), os.path.join(gl.DATA_PATH, "cache"))
+        extracted_folder = None
+        try:
+            # Resolve the folder name from the zip listing (github urls aren't
+            # case-sensitive, so it may not match projectname) BEFORE unpacking,
+            # so the finally-cleanup also covers a mid-extraction failure.
+            extracted_folder_name = self.get_main_folder_of_zip(zip_path)
+            extracted_folder = os.path.join(gl.DATA_PATH, "cache", extracted_folder_name)
+            if os.path.exists(extracted_folder):
+                shutil.rmtree(extracted_folder)
+            shutil.unpack_archive(zip_path, os.path.join(gl.DATA_PATH, "cache"))
 
+            # Reset destination folder
+            if os.path.isdir(directory):
+                shutil.rmtree(directory)
+            if os.path.isfile(directory):
+                os.remove(directory)
+            os.makedirs(directory, exist_ok=True)
 
-        ## Why - because github is not case sensitive for the urls, so the casing of the zip file might be different than the one of the contained folder
-        extracted_folder_name = self.get_main_folder_of_zip(os.path.join(gl.DATA_PATH, "cache", f"{projectname}-{sha}.zip"))
-        
-        extracted_folder = os.path.join(gl.DATA_PATH, "cache", extracted_folder_name)
-
-        # Remove destination folder
-        if os.path.isdir(directory):
-            shutil.rmtree(directory)
-        if os.path.isfile(directory): # No idea how this could happen - but just in case
-            os.remove(directory)
-
-        # Create empty destination folder
-        os.makedirs(directory, exist_ok=True)
-
-        for name in os.listdir(extracted_folder):
-            shutil.move(os.path.join(extracted_folder, name), directory)
-
-
-        os.remove(os.path.join(gl.DATA_PATH, "cache", f"{projectname}-{sha}.zip"))
-        shutil.rmtree(extracted_folder)
+            for name in os.listdir(extracted_folder):
+                shutil.move(os.path.join(extracted_folder, name), directory)
+        except Exception as e:
+            log.error(f"Failed to extract {projectname}: {e}")
+            return NoConnectionError()
+        finally:
+            # Best-effort: never leave the archive or extracted temp folder behind,
+            # and never let cleanup replace the try-block's outcome.
+            try:
+                if os.path.exists(zip_path):
+                    os.remove(zip_path)
+            except OSError:
+                pass
+            if extracted_folder is not None and os.path.isdir(extracted_folder):
+                shutil.rmtree(extracted_folder, ignore_errors=True)
         
         ## Write version
         path = os.path.join(directory, "VERSION")
@@ -862,6 +925,13 @@ class StoreBackend:
 
         response = await self.download_repo(repo_url=url, directory=local_path, commit_sha=plugin_data.commit_sha, branch_name=plugin_data.branch)
 
+        # Bail before running install scripts or reloading plugins over a
+        # missing or partial tree.
+        if response == 404:
+            return 404
+        if isinstance(response, NoConnectionError):
+            return response
+
         # Run install script if present. Make sure to use python binary used to run this process to not break venv dependency installations
         if os.path.isfile(os.path.join(local_path, "__install__.py")):
             subprocess.run(f"{sys.executable} {os.path.join(local_path, '__install__.py')}", shell=True, start_new_session=True)
@@ -870,9 +940,6 @@ class StoreBackend:
         if os.path.isfile(os.path.join(local_path, "requirements.txt")):
             subprocess.run(f"{sys.executable} -m pip install -r {os.path.join(local_path, 'requirements.txt')}", shell=True, start_new_session=True)
 
-        if response == 404:
-            return 404
-        
         # Update plugin manager
         gl.plugin_manager.load_plugins()
         gl.plugin_manager.init_plugins()
@@ -896,30 +963,34 @@ class StoreBackend:
         gl.signal_manager.trigger_signal(Signals.PluginInstall, plugin_data.plugin_id)
 
         log.success(f"Plugin {plugin_data.plugin_id} installed successfully under: {local_path} with sha: {plugin_data.commit_sha}")
-        
+        return True
+
     def uninstall_plugin(self, plugin_id:str, remove_from_pages:bool = False, remove_files:bool = True) -> bool:
-        ## 1. Remove all action objects in all pages
-        for deck_controller in gl.deck_manager.deck_controller:
-            # Track all keys controlled by this plugin
-            if deck_controller.active_page is None:
-                continue
-            #keys = deck_controller.active_page.get_keys_with_plugin(plugin_id=plugin_id)
-
-            deck_controller.active_page.remove_plugin_action_objects(plugin_id=plugin_id)
-            if remove_from_pages:
-                deck_controller.active_page.remove_plugin_actions_from_json(plugin_id=plugin_id)
-
-            #TODO: figure out
-            # Clear all keys in this page which were controlled by this plugin
-            #for key in keys:
-            #    key_index = deck_controller.coords_to_index(key.split("x"))
-            #    deck_controller.load_key(key_index, deck_controller.active_page)
+        ## 1. Remove all action objects in every cached page of every
+        ## controller -- not just each controller's currently active page.
+        ## A page that was previously visited and is still sitting in the
+        ## page cache (`gl.page_manager.pages`) would otherwise keep dead
+        ## plugin action objects alive with no teardown.
+        for controller, controller_pages in list(gl.page_manager.pages.items()):
+            for page_entry in list(controller_pages.values()):
+                page = page_entry.get("page")
+                if page is None:
+                    continue
+                page.remove_plugin_action_objects(plugin_id=plugin_id)
+                if remove_from_pages:
+                    page.remove_plugin_actions_from_json(plugin_id=plugin_id)
 
         ## 2. Inform plugin base
         plugins = gl.plugin_manager.get_plugins()
         plugin = gl.plugin_manager.get_plugin_by_id(plugin_id)
         if plugin is None:
             return
+        # Capture the actual import folder now, before on_uninstall()/rmtree
+        # below can remove the directory or rewrite plugin.PATH through the
+        # symlink-resolution branch -- the sys.modules purge below needs the
+        # real "plugins.<folder>" prefix, which may differ from plugin_id
+        # (the manifest id) when the folder was renamed (bug 7).
+        plugin_folder = os.path.basename(os.path.normpath(plugin.PATH))
         if remove_files:
             plugin.on_uninstall()
             
@@ -944,7 +1015,7 @@ class StoreBackend:
         GLib.idle_add(gl.app.main_win.sidebar.page_selector.update)
 
 
-        base_module = f"plugins.{plugin_id}"
+        base_module = f"plugins.{plugin_folder}"
         for module in sys.modules.copy():
             if module.startswith(base_module):
                 del sys.modules[module]

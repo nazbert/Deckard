@@ -27,20 +27,20 @@ class ToggleRow(GenerativeUI[bool]):
                  auto_add: bool = True,
                  complex_var_name: bool = False
                  ):
-        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change)
+        def build():
+            self._widget: Toggle = Toggle(
+                toggles = toggles,
+                active_toggle = self._default_value,
+                title=self.get_translation(title),
+                subtitle=self.get_translation(subtitle),
+                can_shrink=can_shrink,
+                homogeneous=homogeneous,
+                active=active
+            )
 
-        self._widget: Toggle = Toggle(
-            toggles = toggles,
-            active_toggle = self._default_value,
-            title=self.get_translation(title),
-            subtitle=self.get_translation(subtitle),
-            can_shrink=can_shrink,
-            homogeneous=homogeneous,
-            active=active
-        )
-
-        self._handle_reset_button_creation()
-        self.connect_signals()
+            self._handle_reset_button_creation()
+            self.connect_signals()
+        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change, build=build)
 
     def _handle_value_changed(self, new_value, update_settings: bool = True, trigger_callback: bool = True):
         old_value = self.get_value()
@@ -49,10 +49,13 @@ class ToggleRow(GenerativeUI[bool]):
             self.set_value(new_value)
 
         if trigger_callback and self.on_change:
+            # Resolving toggle objects needs the widget, so this branch is
+            # only reachable once one exists (see reset_value/_value_changed
+            # -- both guarantee a built widget before getting here).
             new_toggle = self._widget.get_toggle_at(new_value)
             old_toggle = self._widget.get_toggle_at(old_value)
 
-            self.on_change(self.widget, new_toggle, old_toggle)
+            self.on_change(self._widget, new_toggle, old_toggle)
 
     def connect_signals(self):
         self.widget.toggle_group.connect("notify::active", self._value_changed)
@@ -69,6 +72,13 @@ class ToggleRow(GenerativeUI[bool]):
         self.widget.set_active_toggle(value)
 
     def reset_value(self):
+        """Resets the active toggle to its default. An unbuilt row has no
+        toggle objects to resolve old/new against, so it just persists the
+        default and skips the on_change callback -- it must not force a
+        build just to reset a setting."""
+        if self._widget is None:
+            self.set_value(self._default_value)
+            return
         self.widget.set_active_toggle(self._default_value)
         self._handle_value_changed(self._default_value)
 

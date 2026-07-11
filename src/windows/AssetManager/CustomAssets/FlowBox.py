@@ -30,6 +30,7 @@ import globals as gl
 # Import own modules
 from src.backend.DeckManagement.HelperMethods import is_video
 from src.windows.AssetManager.CustomAssets.AssetPreview import AssetPreview
+from src.windows.AssetManager.DynamicFlowBox import DynamicFlowBox
 
 # Import typing
 from typing import TYPE_CHECKING
@@ -37,94 +38,114 @@ if TYPE_CHECKING:
     from src.windows.AssetManager.CustomAssets.Chooser import CustomAssetChooser
 
 
-class CustomAssetChooserFlowBox(Gtk.Box):
+class CustomAssetChooserFlowBox(DynamicFlowBox):
     def __init__(self, asset_chooser, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.set_orientation(Gtk.Orientation.HORIZONTAL)
+        super().__init__(base_class=AssetPreview, *args, **kwargs)
         self.set_hexpand(True)
 
         self.asset_chooser:"CustomAssetChooser" = asset_chooser
+        self.selected_asset: str = None
 
-        self.all_assets:list["AssetPreview"] = []
+        self.set_factory(self.preview_factory)
+        self.set_filter_func(self.filter_func)
+        self.set_sort_func(self.sort_func)
 
-        self.build()
-
-        self.flow_box.set_filter_func(self.filter_func)
-        self.flow_box.set_sort_func(self.sort_func)
-
-
-    def build(self):
-        self.flow_box = Gtk.FlowBox(hexpand=True, orientation=Gtk.Orientation.HORIZONTAL)
         self.flow_box.connect("child-activated", self.on_child_activated)
-        GLib.idle_add(self.append, self.flow_box)
 
-        for asset in gl.asset_manager_backend.get_all():
-            asset = AssetPreview(flow=self, asset=asset, width_request=100, height_request=100)
-            GLib.idle_add(self.flow_box.append, asset)
+        # There is only ever one "pack" for custom assets (the whole backend list), so it can
+        # be loaded eagerly once the recycler itself is built -- see DynamicFlowBox docstring.
+        self.load_assets()
+
+    def load_assets(self) -> None:
+        self.set_item_list(gl.asset_manager_backend.get_all())
+        self.refresh()
+
+    def refresh(self) -> None:
+        self.show_range(0, self.N_ITEMS_PER_PAGE)
 
     def show_for_path(self, path):
-        i = 0
-        while True:
-            child = self.flow_box.get_child_at_index(i)
-            if child == None:
-                return
-            if child.asset["internal-path"] == path:
-                GLib.idle_add(self.flow_box.select_child, child)
-                return
-            i += 1
-            
-    def filter_func(self, child):
+        self.select_asset(path)
+        self.refresh()
+
+    def select_asset(self, path) -> None:
+        self.selected_asset = path
+
+    def preview_factory(self, preview: AssetPreview, asset: dict):
+        preview.set_asset(self, asset)
+        if self.selected_asset == asset.get("internal-path"):
+            self.flow_box.select_child(preview)
+
+    def filter_func(self, asset: dict) -> bool:
         search_string = self.asset_chooser.search_entry.get_text()
         show_image = self.asset_chooser.image_button.get_active()
         show_video = self.asset_chooser.video_button.get_active()
 
-        child_is_video = is_video(child.asset["internal-path"])
+        asset_is_video = is_video(asset["internal-path"])
 
-        if child_is_video and not show_video:
+        if asset_is_video and not show_video:
             return False
-        if not child_is_video and not show_image:
+        if not asset_is_video and not show_image:
             return False
-        
+
         if search_string == "":
             return True
-        
-        fuzz_score = fuzz.ratio(search_string.lower(), child.name.lower())
+
+        fuzz_score = fuzz.ratio(search_string.lower(), asset["name"].lower())
         if fuzz_score < 40:
             return False
-        
+
         return True
-    
-    def sort_func(self, a, b):
+
+    def sort_func(self, a: dict, b: dict) -> int:
         search_string = self.asset_chooser.search_entry.get_text()
 
         if search_string == "":
             # Sort alphabetically
-            if a.asset["name"] < b.asset["name"]:
+            if a["name"] < b["name"]:
                 return -1
-            if a.asset["name"] > b.asset["name"]:
+            if a["name"] > b["name"]:
                 return 1
             return 0
-        
-        a_fuzz = fuzz.ratio(search_string.lower(), a.asset["name"].lower())
-        b_fuzz = fuzz.ratio(search_string.lower(), b.asset["name"].lower())
+
+        a_fuzz = fuzz.ratio(search_string.lower(), a["name"].lower())
+        b_fuzz = fuzz.ratio(search_string.lower(), b["name"].lower())
 
         if a_fuzz > b_fuzz:
             return -1
         elif a_fuzz < b_fuzz:
             return 1
-        
+
         return 0
-    
+
     def on_child_activated(self, flow_box, child):
-        if callable(self.asset_chooser.asset_manager.callback_func):
-            callback_thread = threading.Thread(target=self.callback_thread, args=(), name="flow_box_callback_thread")
+        # Capture the selection and callback *before* spawning the thread (P4.2 prerequisite b):
+        # under window reuse, a stale thread that re-reads `self.asset_chooser.asset_manager`
+        # from inside the thread body could end up calling a *new* callback with a *new*
+        # window's state if the user reopens the Asset Manager while this thread is still
+        # in flight.
+        asset_path = child.asset["internal-path"]
+        callback = self.asset_chooser.asset_manager.callback_func
+        callback_args = self.asset_chooser.asset_manager.callback_args
+        callback_kwargs = self.asset_chooser.asset_manager.callback_kwargs
+
+        if callable(callback):
+            callback_thread = threading.Thread(
+                target=self.callback_thread,
+                args=(asset_path, callback, callback_args, callback_kwargs),
+                name="flow_box_callback_thread"
+            )
             callback_thread.start()
 
-        self.asset_chooser.asset_manager.close()
+        # Hide (not close()) so the window survives for reuse (P4.2): close() falls through to
+        # GTK4's default close-request handling, which destroys the window on the next
+        # main-loop iteration even without an explicit destroy() call (verified empirically).
+        self.asset_chooser.asset_manager.hide()
 
     @log.catch
-    def callback_thread(self):
-        child = self.flow_box.get_selected_children()[0]
-        self.asset_chooser.asset_manager.callback_func(child.asset["internal-path"],
-                                                *self.asset_chooser.asset_manager.callback_args,
-                                                **self.asset_chooser.asset_manager.callback_kwargs)
+    def callback_thread(self, asset_path, callback, callback_args, callback_kwargs):
+        callback(asset_path, *callback_args, **callback_kwargs)
+
+    def remove_asset(self, asset: dict) -> None:
+        gl.asset_manager_backend.remove_asset_by_id(asset["id"])
+        self.flow_box.unselect_all()
+        self.refresh()

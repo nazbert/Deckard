@@ -13,43 +13,14 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 from src.backend.DeckManagement.Subclasses.SingleKeyAsset import SingleKeyAsset
+from src.backend.DeckManagement import font_resolver
 from PIL import Image, ImageFont
 from dataclasses import dataclass
-import matplotlib.font_manager
 from functools import lru_cache
 from fontTools.ttLib import TTFont
-import subprocess
-import os
 
 import globals as gl
 
-# Add symbol fonts to matplotlib at startup
-_symbol_fonts_added = False
-def _ensure_symbol_fonts():
-    global _symbol_fonts_added
-    if _symbol_fonts_added:
-        return
-    
-    # Common symbol font names - use fc-match to find actual paths
-    symbol_font_names = ["Webdings", "Wingdings"]
-    
-    for font_name in symbol_font_names:
-        try:
-            result = subprocess.run(
-                ["fc-match", "-f", "%{file}", font_name],
-                capture_output=True, text=True, timeout=2
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                font_path = result.stdout.strip()
-                if os.path.exists(font_path):
-                    try:
-                        matplotlib.font_manager.fontManager.addfont(font_path)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-    
-    _symbol_fonts_added = True
 
 @lru_cache(maxsize=128)
 def _load_font(font_path: str, font_size: int, encoding: str) -> ImageFont.FreeTypeFont:
@@ -75,6 +46,19 @@ def _is_symbol_font(font_path: str) -> bool:
         return False
 
 
+@lru_cache(maxsize=64)
+def _load_font(font_path: str, font_size: int, encoding: str) -> ImageFont.FreeTypeFont:
+    # ImageFont.truetype re-reads the file and re-parses the FreeType face on
+    # every call; labels render every frame, so cache the face object.
+    return ImageFont.truetype(font_path, font_size, encoding=encoding)
+
+
+def _find_font_path(font_name: str, font_weight, style) -> str:
+    # font_resolver.resolve() is itself lru_cache'd on these same attributes
+    # (size doesn't affect which file is picked, so it isn't part of the key).
+    return font_resolver.resolve(font_name, font_weight, style)
+
+
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.backend.DeckManagement.DeckController import ControllerKey
@@ -97,17 +81,7 @@ class KeyLabel:
         if self.font_name in ["", None]:
             font_name = gl.fallback_font
 
-        # Ensure symbol fonts are available to matplotlib
-        _ensure_symbol_fonts()
-
-        return matplotlib.font_manager.findfont(
-            matplotlib.font_manager.FontProperties(
-                family=font_name,
-                weight=self.font_weight,
-                size=self.font_size,
-                style=self.style
-            )
-        )
+        return _find_font_path(font_name, self.font_weight, self.style)
 
     def clear_values(self):
         self.text = None

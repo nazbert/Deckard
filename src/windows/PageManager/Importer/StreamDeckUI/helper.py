@@ -1,5 +1,8 @@
 from fontTools import ttLib
-import matplotlib.colors
+
+import gi
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk
 
 def font_family_from_path(path: str) -> str:
     """
@@ -27,5 +30,9 @@ def font_family_from_path(path: str) -> str:
 
 def hex_to_rgba255(color_hex: str) -> list[int]:
     if color_hex in [None, ""]: return None
-    rbga = matplotlib.colors.to_rgba(color_hex)
-    return [int(x * 255) for x in rbga]
+    color = Gdk.RGBA()
+    if not color.parse(color_hex):
+        raise ValueError(f"Could not parse color: {color_hex!r}")
+    # int() truncation (not round()) to match the previous
+    # matplotlib.colors.to_rgba()-based conversion's rounding behavior.
+    return [int(x * 255) for x in (color.red, color.green, color.blue, color.alpha)]

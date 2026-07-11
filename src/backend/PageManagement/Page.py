@@ -19,6 +19,7 @@ import json
 import sys
 import threading
 import time
+import tempfile
 
 # Import globals first to get IS_MAC
 import globals as gl
@@ -29,8 +30,6 @@ if not gl.IS_MAC:
 from loguru import logger as log
 from copy import copy
 import shutil
-
-from numpy import isin
 
 # Import globals
 from src.backend.PluginManager.EventAssigner import EventAssigner
@@ -86,17 +85,45 @@ class Page:
         log.debug(f"Loaded page {self.get_name()} in {end - start:.2f} seconds")
 
     def save(self):
-        self.file_access_semaphore.acquire()
-        # Make backup in case something goes wrong
-        self.make_backup()
+        with self.file_access_semaphore:
+            # Make backup in case something goes wrong
+            self.make_backup()
 
-        without_objects = self.get_without_action_objects()
-        # Make keys last element
-        for type in Input.KeyTypes:
-            self.move_key_to_end(without_objects, type)
-        with open(self.json_path, "w") as f:
-            json.dump(without_objects, f, indent=4)
-        self.file_access_semaphore.release()
+            without_objects = self.get_without_action_objects()
+            # Make keys last element
+            for type in Input.KeyTypes:
+                self.move_key_to_end(without_objects, type)
+            # Write to a temp file and atomically replace it, so an interrupted
+            # write can't leave a truncated page.
+            fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(self.json_path),
+                                            prefix=".save-", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(without_objects, f, indent=4)
+                    f.flush()
+                    os.fsync(f.fileno())
+                # mkstemp creates 0600; keep the existing file's mode
+                try:
+                    mode = os.stat(self.json_path).st_mode & 0o777
+                except FileNotFoundError:
+                    mode = 0o644
+                os.chmod(tmp_path, mode)
+                os.replace(tmp_path, self.json_path)
+                # fsync the directory so the rename itself is durable, not just data.
+                try:
+                    dir_fd = os.open(os.path.dirname(self.json_path), os.O_RDONLY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
+                except OSError:
+                    pass
+            except BaseException:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+                raise
 
     def make_backup(self):
         os.makedirs(os.path.join(gl.DATA_PATH, "pages","backups"), exist_ok=True)
@@ -164,7 +191,10 @@ class Page:
 
         for old_action in old_actions:
             if old_action not in new_actions:
-                old_action.on_removed_from_cache()
+                # Framework-owned teardown: notify then unconditionally
+                # clean_up(), so a plugin overriding the hook without
+                # super() can't leak the dropped action (D1).
+                ActionCore.teardown(old_action)
 
         self.action_objects = new_action_objects
 
@@ -325,19 +355,25 @@ class Page:
         plugin_obj = gl.plugin_manager.get_plugin_by_id(plugin_id)
         if plugin_obj is None:
             return False
+
+        # Collect first, then delete + tear down. `del action` on the local
+        # variable used to be the only "cleanup" here -- it doesn't do
+        # anything to the actual object, which is why plugin uninstall never
+        # called clean_up() (design-doc bug 7).
+        to_remove: list[tuple] = []
         for type in list(self.action_objects.keys()):
             for key in list(self.action_objects[type].keys()):
                 for state in list(self.action_objects[type][key].keys()):
                     for index in list(self.action_objects[type][key][state].keys()):
-                        if not isinstance(self.action_objects[type][key][state][index], ActionCore):
+                        action = self.action_objects[type][key][state][index]
+                        if not isinstance(action, ActionCore):
                             continue
-                        if self.action_objects[type][key][state][index].plugin_base == plugin_obj:
-                            # Remove object
-                            action = self.action_objects[type][key][state][index]
-                            del action
+                        if action.plugin_base == plugin_obj:
+                            to_remove.append((type, key, state, index, action))
 
-                            # Remove action from action_objects
-                            del self.action_objects[type][key][state][index]
+        for type, key, state, index, action in to_remove:
+            del self.action_objects[type][key][state][index]
+            ActionCore.teardown(action)
 
         return True
     
@@ -376,12 +412,22 @@ class Page:
 
     def remove_plugin_actions_from_json(self, plugin_id: str):
         for type in Input.KeyTypes:
-            for key in self.dict[type]:
+            # A page json doesn't necessarily have every input type present
+            # (e.g. no "touchscreens" section on a non-Plus deck) -- bug 38.
+            for key in self.dict.get(type, {}):
                 for state in self.dict[type][key].get("states", {}):
-                    for i, action in enumerate(self.dict[type][key]["states"][state]["actions"]):
-                        # Check if the action is from the plugin by using the plugin id before the action name
-                        if action.id.split("::")[0] == plugin_id:
-                            del self.dict[type][key]["states"][state]["actions"][i]
+                    actions = self.dict[type][key]["states"][state].get("actions", [])
+                    # Collect indices first: deleting from `actions` while
+                    # enumerate() is still walking it skips the entry right
+                    # after each deletion (bug 38).
+                    to_remove = [
+                        i for i, action in enumerate(actions)
+                        # Actions are plain dicts here (raw json), not
+                        # ActionCore objects -- `action.id` doesn't exist.
+                        if action.get("id", "").split("::")[0] == plugin_id
+                    ]
+                    for i in reversed(to_remove):
+                        del actions[i]
 
         self.save()
 
@@ -563,21 +609,40 @@ class Page:
                 action.on_ready_called = True
                 action.load_event_overrides()
                 action.load_initial_generative_ui()
-                action.on_ready()
-                action.on_update()
+                # Plugin callbacks can block indefinitely; run them on the
+                # deck's action pool, never on the caller's (often GTK) thread.
+                self._submit_ready_callbacks(action)
+
+    def _submit_ready_callbacks(self, action: ActionCore):
+        executor = getattr(self.deck_controller, "action_executor", None)
+        if executor is None:
+            # Deck is being torn down; drop the call.
+            return
+        try:
+            executor.submit(self._run_ready_callbacks, action)
+        except RuntimeError:
+            # Executor already shut down (deck disconnected mid-call)
+            pass
+
+    @log.catch
+    def _run_ready_callbacks(self, action: ActionCore):
+        action.on_ready()
+        action.on_update()
 
     def clear_action_objects(self):
         for input_type in self.action_objects:
             for input_identifier in self.action_objects[input_type]:
                 for state in self.action_objects[input_type][input_identifier]:
-                    for i, action in enumerate(list(self.action_objects[input_type][input_identifier][state].values())):
-                        self.action_objects[input_type][input_identifier][state][i].page = None
-                        self.action_objects[input_type][input_identifier][state][i] = None
-                        if isinstance(self.action_objects[input_type][input_identifier][state][i], ActionCore):
-                            if hasattr(self.action_objects[input_type][input_identifier][state][i], "on_removed_from_cache"):
-                                self.action_objects[input_type][input_identifier][state][i].on_removed_from_cache()
-                        self.action_objects[input_type][input_identifier][state][i] = None
-                        del self.action_objects[input_type][input_identifier][state][i]
+                    state_dict = self.action_objects[input_type][input_identifier][state]
+                    for action in list(state_dict.values()):
+                        # Notify before detaching: plugin cleanup code may
+                        # still need action.page. clean_up() is unconditional
+                        # regardless of what the hook does (D1) -- teardown()
+                        # is a no-op for non-ActionCore placeholders.
+                        ActionCore.teardown(action)
+                        if hasattr(action, "page"):
+                            action.page = None
+                    state_dict.clear()
             self.action_objects[input_type] = {}
 
     def get_name(self):
@@ -918,6 +983,24 @@ class Page:
         if update:
             self.update_input(identifier, state)
 
+    def get_media_fps(self, identifier: InputIdentifier, state: int) -> int:
+        value = self._get_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "media", "fps"])
+        return 30 if value is None else int(value)
+
+    def set_media_fps(self, identifier: InputIdentifier, state: int, fps: int, update: bool = True) -> None:
+        # Live-apply to any playing video so the change doesn't wait for a
+        # page reload. GIF media (KeyGIF) has its own timeline and no
+        # set_playback -- only InputVideo-style media takes the cap.
+        for input_state in self.get_controller_input_states(identifier, state):
+            video = getattr(input_state, "key_video", None) or getattr(input_state, "video", None)
+            if video is not None and hasattr(video, "set_playback"):
+                video.set_playback(fps=fps, loop=video.loop)
+
+        self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "media", "fps"], fps)
+
+        if update:
+            self.update_input(identifier, state)
+
     def get_background_color(self, identifier: InputIdentifier, state: int) -> list[int]:
         return self._get_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "background", "color"])
 
@@ -932,6 +1015,24 @@ class Page:
 
     def set_background_image(self, identifier: InputIdentifier, state: int, path: str, update: bool = True) -> None:
         self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "background", "image"], path)
+        if update:
+            self.update_input(identifier, state)
+
+    def get_background_loop(self, identifier: InputIdentifier, state: int) -> bool:
+        value = self._get_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "background", "loop"])
+        return True if value is None else bool(value)
+
+    def set_background_loop(self, identifier: InputIdentifier, state: int, loop: bool, update: bool = True) -> None:
+        self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "background", "loop"], loop)
+        if update:
+            self.update_input(identifier, state)
+
+    def get_background_fps(self, identifier: InputIdentifier, state: int) -> int:
+        value = self._get_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "background", "fps"])
+        return 30 if value is None else int(value)
+
+    def set_background_fps(self, identifier: InputIdentifier, state: int, fps: int, update: bool = True) -> None:
+        self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "background", "fps"], fps)
         if update:
             self.update_input(identifier, state)
 

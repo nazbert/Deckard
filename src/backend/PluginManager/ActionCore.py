@@ -66,7 +66,17 @@ class ActionCore(rpyc.Service):
         self.backend_connection: Connection = None
         self.backend: netref = None
         self.server: ThreadedServer = None
-        
+        self.backend_process: subprocess.Popen = None
+
+        # (signal, callback) pairs registered by this action, disconnected on teardown.
+        self._connected_signals: list[tuple] = []
+
+        # clean_up() is reachable from eviction (whatever thread calls
+        # get_page -- USB monitor, media thread) AND the rpyc on_disconnect
+        # hook, so idempotency needs a real lock, not just a bool.
+        self._cleaned_up = False
+        self._cleanup_lock = threading.Lock()
+
         self.deck_controller = deck_controller
         self.page = page
         self.state = state
@@ -162,9 +172,15 @@ class ActionCore(rpyc.Service):
         if self.get_state().state != self.state:
             return
 
+        # mem-plan P2.4: only set when `image` came from opening media_path
+        # ourselves -- a plugin-supplied `image` has no known source file to
+        # re-decode from later, so InputImage must keep upscaling it as
+        # before rather than trying (and failing) to re-open media_path.
+        path_for_reopen = None
         if is_image(media_path) and image is None:
             with Image.open(media_path) as img:
                 image = img.copy()
+            path_for_reopen = media_path
 
         if is_svg(media_path) and image is None:
             image = gl.media_manager.generate_svg_thumbnail(media_path)
@@ -173,6 +189,7 @@ class ActionCore(rpyc.Service):
             input_state.set_image(InputImage(
                 controller_input=self.get_state().controller_input,
                 image=image,
+                path=path_for_reopen,
             ), update=False)
 
         elif is_video(media_path):
@@ -351,6 +368,8 @@ class ActionCore(rpyc.Service):
     def connect(self, signal: Signal = None, callback: callable = None) -> None:
         # Connect
         gl.signal_manager.connect_signal(signal = signal, callback = callback)
+        # Track so we can disconnect on teardown (see clean_up)
+        self._connected_signals.append((signal, callback))
 
     def get_own_key(self) -> "ControllerKey":
         return self.deck_controller.keys[self.key_index]
@@ -489,6 +508,14 @@ class ActionCore(rpyc.Service):
     def add_generative_ui_object(self, generative_ui_object: GenerativeUI):
         self.generative_ui_objects.append(generative_ui_object)
 
+    def remove_generative_ui_object(self, generative_ui_object: GenerativeUI):
+        """Unregister a GenerativeUI element (e.g. a dynamically-rebuilt config
+        row) so it stops being retained for the action's lifetime."""
+        try:
+            self.generative_ui_objects.remove(generative_ui_object)
+        except ValueError:
+            pass
+
     def get_generative_ui(self):
         return self.generative_ui_objects
 
@@ -508,8 +535,18 @@ class ActionCore(rpyc.Service):
         GLib.idle_add(self._do_load_initial_generative_ui)
 
     def _do_load_initial_generative_ui(self):
+        # P4.1: GenerativeUI widgets build lazily on first `.widget` access
+        # (config-open, normally). Calling load_initial_ui()
+        # unconditionally here would touch `.widget` on every action's
+        # on_ready and force every gen-ui object in the app to build,
+        # defeating the laziness entirely. The persisted value is already
+        # the source of truth (get_value() reads settings directly), so an
+        # unbuilt object has nothing to sync -- only reconcile widgets that
+        # some plugin already forced into existence (e.g. touched `.widget`
+        # at construction time).
         for generative_object in self.generative_ui_objects:
-            generative_object.load_initial_ui()
+            if generative_object.is_built:
+                generative_object.load_initial_ui()
     
     # ---------- #
     # Rpyc stuff #
@@ -522,12 +559,10 @@ class ActionCore(rpyc.Service):
         self.server = ThreadedServer(self, hostname="localhost", port=0, protocol_config={"allow_public_attrs": True})
         threading.Thread(target=self.server.start, name="server_start", daemon=True).start()
 
-    def on_disconnect(self):
-        if self.server is not None:
-            self.server.close()
-        if self.backend_connection is not None:
-            self.backend_connection.close()
-        self.backend = None
+    def on_disconnect(self, conn=None):
+        # rpyc disconnect hook: a dropped connection with the process still
+        # alive would orphan the backend, so run the full teardown here too.
+        self._release_backend_resources()
     
     def launch_backend(self, backend_path: str, venv_path: str = None, open_in_terminal: bool = False):
         self.start_server()
@@ -553,7 +588,8 @@ class ActionCore(rpyc.Service):
             command += f"python3 {backend_path} --port={port}"
 
         log.info(f"Launching backend: {command}")
-        subprocess.Popen(command, shell=True, start_new_session=open_in_terminal)
+        self.backend_process = subprocess.Popen(command, shell=True, start_new_session=True)
+        gl.plugin_manager.backend_processes.append(self.backend_process)
 
         self.wait_for_backend()
 
@@ -578,9 +614,150 @@ class ActionCore(rpyc.Service):
         return True
     
     def on_removed_from_cache(self) -> None:
-        #TODO: Fully implement
+        """Notification hook: fired when this action is dropped from a live
+        page/cache (reload diff, plugin uninstall, sidebar/config removal,
+        cache eviction -- see docs/memory-footprint-plan.md D1). This is a
+        pure notification. The framework unconditionally calls clean_up()
+        immediately after invoking this hook -- even if a plugin overrides
+        this method without calling super(), and even if the override
+        raises -- so plugins must NOT rely on calling clean_up() themselves
+        from here (harmless if they do; clean_up() is idempotent)."""
         pass
 
     def on_remove(self) -> None:
-        #TODO: Fully implement
+        """Notification hook: fired when the user removes this action via the
+        action configurator's remove button. Same contract as
+        on_removed_from_cache() -- clean_up() is guaranteed by the framework
+        regardless of what this override does."""
         pass
+
+    @staticmethod
+    def teardown(action, hook_name: str = "on_removed_from_cache") -> None:
+        """Framework-owned drop-site teardown. Call this (instead of just
+        invoking the hook) at every place an action is dropped from a live
+        structure: it notifies via the named hook (best-effort -- a plugin
+        override that raises or forgets super() can't skip cleanup) and then
+        unconditionally calls clean_up(). `action` may be a non-ActionCore
+        placeholder (NoActionHolderFound/ActionOutdated); those are silently
+        ignored, matching the existing isinstance guards at the call sites."""
+        if not isinstance(action, ActionCore):
+            return
+        try:
+            getattr(action, hook_name)()
+        except Exception:
+            log.opt(exception=True).error(
+                f"{hook_name} failed for {getattr(action, 'action_id', action)}"
+            )
+        action.clean_up()
+
+    def clean_up(self) -> None:
+        """Framework teardown when this action is dropped (page reload,
+        plugin uninstall, sidebar/config removal, or cache eviction).
+        Idempotent -- guarded by a lock, since eviction and the rpyc
+        on_disconnect path can race to call this from different threads.
+
+        Runs from *any* thread (main, USB monitor, media thread via page
+        eviction) -- never call run_on_main() from in here, or from anything
+        this method calls synchronously. GenerativeUI disposal is real GTK
+        work, so it's marshalled onto the main loop via GLib.idle_add instead
+        of being done inline. Backend teardown is likewise offloaded to a
+        worker thread: closing an rpyc server/connection can block on an
+        in-flight call that needs the main loop, which would deadlock the UI."""
+        with self._cleanup_lock:
+            if self._cleaned_up:
+                return
+            self._cleaned_up = True
+
+        # Disconnect signal callbacks synchronously so the SignalManager stops
+        # retaining this action.
+        for signal, callback in self._connected_signals:
+            try:
+                gl.signal_manager.disconnect_signal(signal, callback)
+            except Exception as e:
+                log.error(f"Failed to disconnect signal {signal}: {e}")
+        self._connected_signals.clear()
+
+        # Snapshot-and-clear synchronously (cheap list ops) so callers can
+        # observe an empty generative_ui_objects list the moment clean_up()
+        # returns; the actual widget teardown is GTK work and must happen on
+        # the main loop, so it's queued rather than done here.
+        gen_ui_snapshot = list(self.generative_ui_objects)
+        self.generative_ui_objects.clear()
+        if gen_ui_snapshot:
+            GLib.idle_add(self._destroy_gen_ui_batch, gen_ui_snapshot)
+
+        self._release_backend_resources()
+
+    @staticmethod
+    def _destroy_gen_ui_batch(snapshot: list[GenerativeUI]) -> None:
+        """GLib.idle_add callback queued from clean_up(): destroys each
+        GenerativeUI object snapshotted at teardown time. Runs on the GTK
+        main loop, where GenerativeUI.destroy()'s internal run_on_main()
+        executes inline (GtkHelper.py) -- no re-queueing, no deadlock risk."""
+        for obj in snapshot:
+            try:
+                owner = obj.action_core
+                if owner is not None and obj in owner.generative_ui_objects:
+                    # Re-registered on a live action since the snapshot was
+                    # taken (e.g. a rebuilt/resurrected row) -- it's owned
+                    # again, don't tear it down out from under the action.
+                    continue
+                if getattr(obj, "_widget", None) is None:
+                    # Never built a widget -- nothing to unparent, and it's
+                    # already off generative_ui_objects. Also covers P4.1's
+                    # future lazy-widget objects that never got touched.
+                    continue
+                obj.destroy()
+            except Exception:
+                log.opt(exception=True).error(f"Failed to destroy GenerativeUI object {obj!r}")
+
+    def _release_backend_resources(self) -> None:
+        """Detach and tear down the rpyc server/connection and the backend
+        process. Idempotent; safe against concurrent calls from clean_up and
+        the rpyc on_disconnect hook (close/terminate tolerate a lost race)."""
+        if self.backend_connection is None and self.server is None and self.backend_process is None:
+            return
+
+        # Snapshot and detach the backend resources, then close them off-thread.
+        server, connection, process = self.server, self.backend_connection, self.backend_process
+        self.server = None
+        self.backend_connection = None
+        self.backend_process = None
+        self.backend = None
+
+        # Drop from the global registries synchronously (cheap list removals).
+        if connection is not None:
+            try:
+                gl.plugin_manager.backends.remove(connection)
+            except ValueError:
+                pass
+        if process is not None:
+            try:
+                gl.plugin_manager.backend_processes.remove(process)
+            except ValueError:
+                pass
+
+        threading.Thread(
+            target=self._teardown_backend_resources,
+            args=(server, connection, process),
+            name="action_backend_teardown",
+            daemon=True,
+        ).start()
+
+    @staticmethod
+    def _teardown_backend_resources(server, connection, process) -> None:
+        # Runs on a worker thread (see clean_up). Each close()/terminate() is
+        # best-effort; a hung backend must not take the app down with it.
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception as e:
+                log.error(f"Failed to close backend connection: {e}")
+        if server is not None:
+            try:
+                server.close()
+            except Exception as e:
+                log.error(f"Failed to close backend server: {e}")
+        if process is not None:
+            from src.backend.PluginManager.PluginManager import terminate_backend_process
+            terminate_backend_process(process)

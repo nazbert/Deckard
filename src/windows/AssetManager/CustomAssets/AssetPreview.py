@@ -17,7 +17,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GdkPixbuf
+from gi.repository import Gtk, Adw, GLib, GdkPixbuf
 
 # Import own modules
 from src.windows.AssetManager.Preview import Preview
@@ -31,15 +31,19 @@ if TYPE_CHECKING:
     from src.windows.AssetManager.CustomAssets.FlowBox import CustomAssetChooserFlowBox
 
 class AssetPreview(Preview):
-    def __init__(self, flow:"CustomAssetChooserFlowBox", asset:dict, *args, **kwargs):
-        super().__init__(
-            image_path=asset["thumbnail"],
-            text=asset["name"],
-            can_be_deleted=True
-        )
-        self.asset = asset
-        self.flow = flow
+    def __init__(self):
+        # DynamicFlowBox recycles a fixed pool of placeholders built with no arguments
+        # (P4.2); the actual asset is bound later via set_asset() from the factory func.
+        super().__init__(can_be_deleted=True)
+        self.asset: dict = None
+        self.flow: "CustomAssetChooserFlowBox" = None
 
+    def set_asset(self, flow: "CustomAssetChooserFlowBox", asset: dict) -> None:
+        self.flow = flow
+        self.asset = asset
+
+        GLib.idle_add(self.set_text, asset["name"])
+        GLib.idle_add(self.set_image, asset["thumbnail"])
 
     def on_click_info(self, button):
         self.flow.asset_chooser.asset_manager.show_info(
@@ -55,11 +59,11 @@ class AssetPreview(Preview):
         dial.present()
 
     def on_remove_confirmed(self):
-        gl.asset_manager_backend.remove_asset_by_id(self.asset["id"])
-        
-        parent: Gtk.FlowBox = self.get_parent()
-        parent.unselect_all()
-        parent.remove(self)
+        # self.flow owns a fixed pool of recycled placeholders (P4.2's DynamicFlowBox
+        # conversion) -- removing `self` from its native FlowBox would shrink that pool below
+        # N_ITEMS_PER_PAGE, so route the removal through the flow instead of touching the
+        # widget tree directly.
+        self.flow.remove_asset(self.asset)
 
 
 class DeleteConfirmationDialog(Adw.MessageDialog):

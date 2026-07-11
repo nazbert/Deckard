@@ -1,4 +1,5 @@
 import os
+import signal
 import importlib
 import sys
 from loguru import logger as log
@@ -12,11 +13,53 @@ from streamcontroller_plugin_tools import BackendBase
 
 import globals as gl
 
+
+def terminate_backend_process(process, escalate: bool = True) -> None:
+    """SIGTERM a launched backend's process group (it leads its own session). If
+    escalate, wait briefly and SIGKILL if it doesn't exit, then reap it so it
+    doesn't linger as a zombie. Pass escalate=False on app-quit -- os._exit reaps
+    the whole tree, so we don't want to wait per backend."""
+    if process is None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError:
+        try:
+            process.terminate()
+        except Exception:
+            pass
+    if not escalate:
+        return
+    try:
+        process.wait(timeout=3)
+    except Exception:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            try:
+                process.kill()
+            except Exception:
+                pass
+        try:
+            process.wait(timeout=2)
+        except Exception:
+            pass
+
 class PluginManager:
     action_index = {}
     def __init__(self):
         self.initialized_plugin_classes = list[PluginBase]()
         self.backends:list[BackendBase] = []
+        # subprocess.Popen handles for launched backends, terminated on teardown.
+        self.backend_processes: list = []
+
+    def terminate_all_backends(self) -> None:
+        """Terminate every launched backend child process; called on app quit."""
+        for process in list(self.backend_processes):
+            terminate_backend_process(process, escalate=False)
+        self.backend_processes.clear()
 
     def load_plugins(self, show_notification: bool = False):
         # get all folders in plugins folder

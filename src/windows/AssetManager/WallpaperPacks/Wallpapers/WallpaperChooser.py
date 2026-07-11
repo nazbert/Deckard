@@ -75,9 +75,7 @@ class WallpaperChooserPage(ChooserPage):
         self.selected_wallpaper = path
 
     def on_child_activated(self, flow_box, child):
-        self.asset_manager.callback_func(child.wallpaper.path, *self.asset_manager.callback_args, **self.asset_manager.callback_kwargs)
-        self.asset_manager.close()
-        self.asset_manager.destroy()
+        self.asset_manager.deliver_selection(child.wallpaper.path)
 
     def preview_factory(self, preview: WallpaperPreview, wallpaper):
         preview.set_wallpaper(wallpaper)

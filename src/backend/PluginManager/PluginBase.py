@@ -1,4 +1,3 @@
-from functools import lru_cache
 import importlib
 import os
 import inspect
@@ -47,6 +46,7 @@ class PluginBase(rpyc.Service):
         self.backend_connection: Connection = None
         self.backend: netref = None
         self.server: ThreadedServer = None
+        self.backend_process: subprocess.Popen = None
 
         self.logger = gl.loggers.get("plugins", None)
 
@@ -77,18 +77,20 @@ class PluginBase(rpyc.Service):
 
         self.registered_pages: list[str] = []
 
-    @lru_cache(maxsize=1)
     def get_plugin_id(self) -> str:
         """
         Retrieves the plugin ID from the manifest. If the ID is not found, it falls back to getting the plugin ID from the folder name.
-        
-        The function uses the `lru_cache` decorator to cache the result of the function. The cache size is set to 1, meaning that only the most recent result is stored.
-        
+
         Returns:
             str: The plugin ID.
         """
+        # Memoized per-instance so the cache is freed with the instance.
+        cached = getattr(self, "_plugin_id_cache", None)
+        if cached is not None:
+            return cached
         manifest = self.get_manifest()
-        return manifest.get("id") or self.get_plugin_id_from_folder_name()
+        self._plugin_id_cache = manifest.get("id") or self.get_plugin_id_from_folder_name()
+        return self._plugin_id_cache
 
     def register(self, plugin_name: str = None, github_repo: str = None, plugin_version: str = None,
                  app_version: str = None):
@@ -600,8 +602,20 @@ class PluginBase(rpyc.Service):
         if self.server is not None:
             self.server.close()
         if self.backend_connection is not None:
+            try:
+                gl.plugin_manager.backends.remove(self.backend_connection)
+            except ValueError:
+                pass
             self.backend_connection.close()
         self.backend_connection = None
+        if self.backend_process is not None:
+            from src.backend.PluginManager.PluginManager import terminate_backend_process
+            terminate_backend_process(self.backend_process)
+            try:
+                gl.plugin_manager.backend_processes.remove(self.backend_process)
+            except ValueError:
+                pass
+            self.backend_process = None
 
     def launch_backend(self, backend_path: str, venv_path: str = None, open_in_terminal: bool = False) -> None:
         """
@@ -634,7 +648,8 @@ class PluginBase(rpyc.Service):
             command += f"python3 {backend_path} --port={port}"
 
         log.info(f"Launching backend: {command}")
-        subprocess.Popen(command, shell=True, start_new_session=open_in_terminal)
+        self.backend_process = subprocess.Popen(command, shell=True, start_new_session=True)
+        gl.plugin_manager.backend_processes.append(self.backend_process)
 
         self.wait_for_backend()
 

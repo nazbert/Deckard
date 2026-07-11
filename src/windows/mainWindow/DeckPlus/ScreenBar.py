@@ -108,14 +108,25 @@ class ScreenBar(Gtk.Frame):
         self.load_from_changes()
 
     def load_from_changes(self) -> None:
-        # Applt changes made before creation of self
+        # Apply changes accumulated before creation of self, or while the
+        # window was hidden (mem plan P5.4): the entry is a dirty MARKER, not
+        # a stashed PIL image -- recomposite the current frame and push it
+        # through the same set-image path a live update would use.
         if not hasattr(self.deck_controller, "ui_image_changes_while_hidden"):
             return
         tasks = self.deck_controller.ui_image_changes_while_hidden
 
         if self.identifier in tasks:
-            self.image.set_image(tasks[self.identifier])
-            tasks.pop(self.identifier)
+            controller_input = self.deck_controller.get_input(self.identifier)
+            if controller_input is not None:
+                try:
+                    self.image.set_image(controller_input.get_current_image())
+                except Exception:
+                    log.exception(f"Failed to recomposite {self.identifier} on map")
+            try:
+                tasks.pop(self.identifier)
+            except KeyError:
+                pass
 
     def on_click(self, gesture, n_press, x, y):
         # print(f"Click: {self.parse_xy(x, y)}")
@@ -266,7 +277,9 @@ class ScreenBarImage(Gtk.Picture):
 
         pixbuf = image2pixbuf(thumbnail.convert("RGBA"), force_transparency=True)
         self.latest_task_id = self.get_new_task_id()
-        GLib.idle_add(self.set_pixbuf_and_del, pixbuf, self.latest_task_id, priority=GLib.PRIORITY_HIGH)
+        # Default idle priority: high-priority pixbuf updates every frame can
+        # starve the main loop's layout/draw.
+        GLib.idle_add(self.set_pixbuf_and_del, pixbuf, self.latest_task_id)
 
         thumbnail.close()
         del thumbnail
@@ -288,5 +301,11 @@ class ScreenBarImage(Gtk.Picture):
             if task_id != self.latest_task_id:
                 log.debug("Screenbar: Abort task")
                 return
-        self.set_pixbuf(pixbuf)
-        del pixbuf
+        # Skip if the widget was unmapped between queuing and running this
+        # callback: painting a disposed widget crashes GTK.
+        try:
+            if not self.get_mapped():
+                return
+            self.set_pixbuf(pixbuf)
+        except Exception as e:
+            log.debug(f"Screenbar mirror paint skipped: {e}")
