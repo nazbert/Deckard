@@ -336,51 +336,83 @@ class MediaPlayerThread(threading.Thread):
         # run() would be wrong -- it logs once and RETURNS, dying anyway; the
         # guard must sit inside the while. #80's threading.excepthook is the
         # complement (reports an escaping death); this prevents the death.
-        while True:
-            try:
-                if not self._run_one_tick():
-                    break
-            except Exception:
-                now = time.time()
-                if now - self._last_tick_error_log >= 5.0:
-                    suffix = (f" ({self._suppressed_tick_errors} repeats suppressed in the last 5s)"
-                              if self._suppressed_tick_errors else "")
-                    log.opt(exception=True).error(
-                        f"media writer tick failed -- survived, continuing{suffix}")
-                    self._last_tick_error_log = now
-                    self._suppressed_tick_errors = 0
-                else:
-                    self._suppressed_tick_errors += 1
-                # A raising body never reaches the FPS wait below -- without
-                # this backoff a persistent failure becomes a 100% spin.
-                # _wake_event (not sleep) so stop() still wakes us instantly.
-                if self._stop:
-                    break
-                self._wake_event.wait(0.25)
-                self._wake_event.clear()
-
-        self.running = False
+        try:
+            while True:
+                try:
+                    if not self._run_one_tick():
+                        break
+                except Exception:
+                    now = time.time()
+                    if now - self._last_tick_error_log >= 5.0:
+                        suffix = (f" ({self._suppressed_tick_errors} earlier repeats were suppressed)"
+                                  if self._suppressed_tick_errors else "")
+                        log.opt(exception=True).error(
+                            f"media writer tick failed -- survived, continuing{suffix}")
+                        self._last_tick_error_log = now
+                        self._suppressed_tick_errors = 0
+                    else:
+                        self._suppressed_tick_errors += 1
+                    # A tick that raised mid-batch already popped its task
+                    # lists (perform_media_player_tasks drains image_tasks/
+                    # touchscreen_task before running them), so the failing
+                    # frame's SIBLINGS are lost too -- without a scheduled
+                    # recovery the not-yet-painted keys keep their previous
+                    # imagery silently forever. Arm the pending full repaint
+                    # (the same recovery a failed device write uses); its 2s
+                    # rate limit makes this safe against a deterministic
+                    # per-tick failure.
+                    self.deck_controller._schedule_full_repaint()
+                    # A raising body never reaches the FPS wait below --
+                    # without this backoff a persistent failure becomes a
+                    # 100% spin. _wake_event (not sleep) so stop() still
+                    # wakes us instantly -- but every producer sets that
+                    # event too, so a single wait() under a set_media storm
+                    # returns immediately and the retry rate would track the
+                    # producer rate instead of ~4Hz. Re-wait until the
+                    # backoff truly elapsed; only _stop cuts it short.
+                    deadline = time.monotonic() + 0.25
+                    while not self._stop:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        self._wake_event.wait(remaining)
+                        self._wake_event.clear()
+                    if self._stop:
+                        break
+        finally:
+            # In a finally, not at the loop's tail: the guard is `except
+            # Exception`, so a BaseException (SystemExit/KeyboardInterrupt)
+            # escapes it -- if that death left running=True, every later
+            # stop() would burn its full join timeout waiting on a corpse.
+            self.running = False
 
     def _run_one_tick(self) -> bool:
         """One iteration of the writer loop. Returns False to stop."""
         start = time.time()
 
-        self.check_resume_gap(start)
-        self.deck_controller._run_pending_repaint()
-
-        # 1. Drain the control queue fully, first, every wake (plan
-        # §2.2) -- before any animation tick or task work, and before
-        # honoring a pending stop. Order matters: stop()'s caller
-        # (close_all()) submits a terminal ClearAndCloseMsg and then
-        # immediately calls stop() -- if _stop were checked before this
-        # drain (or at the bottom of the loop, after a wake that raced
-        # stop()'s flag-set against this iteration's work), the just-
-        # submitted terminal message could be stranded unprocessed. Every
-        # iteration drains first, unconditionally, THEN looks at _stop.
+        # 1. Drain the control queue fully, FIRST, every wake (plan §2.2) --
+        # before the resume-gap check, the pending-repaint hook, any
+        # animation tick or task work, and before honoring a pending stop.
+        # Two orderings matter:
+        #   * drain before _stop: stop()'s caller (close_all()) submits a
+        #     terminal ClearAndCloseMsg and then immediately calls stop() --
+        #     if _stop were checked before this drain (or at the bottom of
+        #     the loop, after a wake that raced stop()'s flag-set against
+        #     this iteration's work), the just-submitted terminal message
+        #     could be stranded unprocessed.
+        #   * drain before EVERYTHING else: the rest of this tick can raise
+        #     into run()'s guard -- if any of it ran ahead of the drain, a
+        #     persistently failing tick would starve SetBrightnessMsg/
+        #     ClearMsg/ClearAndCloseMsg forever (deck never blanked or
+        #     closed on quit).
+        # Every iteration drains first, unconditionally, THEN looks at _stop.
         if not self.drain_control_queue():
             return False
         if self._stop:
             return False
+
+        self.check_resume_gap(start)
+        self.deck_controller._run_pending_repaint()
 
         # Read by the FPS throttle below even when paused.
         has_bg_video = False
@@ -889,11 +921,13 @@ class DeckController:
 
         # Unified write-error/resume-repaint state (plan §4 M2). Touched only
         # from the media thread (_on_write_result from the task classes'
-        # run() and _exec_set_brightness; _run_pending_repaint from the run
-        # loop) -- no lock needed, single writer. MUST be initialized before
-        # the media thread starts: its very first iteration dereferences
-        # _full_repaint_pending, and the loop has no exception guard -- an
-        # AttributeError here kills the sole writer silently.
+        # run() and _exec_set_brightness; _run_pending_repaint and the
+        # guard's except path from the run loop) -- no lock needed, single
+        # writer. MUST be initialized before the media thread starts: its
+        # very first iteration dereferences _full_repaint_pending. (The loop
+        # is guarded now -- issue #1 -- so an AttributeError here no longer
+        # kills the writer, but it would still fail every tick until this
+        # init won the race; keep the order.)
         self._had_write_failure: bool = False
         self._full_repaint_pending: bool = False
         self._last_full_repaint_ts: float = 0.0
