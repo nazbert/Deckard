@@ -853,12 +853,17 @@ class Page:
     def set_label_text(self, identifier: InputIdentifier, state: int, label_position: str, text: str, update: bool = True) -> None:
         for input_state in self.get_controller_input_states(identifier, state):
             input_state.label_manager.page_labels[label_position].text = text
+            # In-place mutation bypasses set_page_label's invalidation, so the
+            # scroll caches must be dropped here or a shortened label keeps
+            # scrolling / a lengthened one never starts (review round 1).
+            input_state.label_manager.invalidate_scroll_caches()
 
         self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "labels", label_position, "text"], text)
 
         label_manager = self.get_label_manager(identifier, state)
         if label_manager is not None:
             label_manager.page_labels[label_position].text = text
+            label_manager.invalidate_scroll_caches()
 
         if update:
             self.update_input(identifier, state)
@@ -869,12 +874,14 @@ class Page:
     def set_label_font_family(self, identifier: InputIdentifier, state: int, label_position: str, font_family: str, update: bool = True) -> None:
         for input_state in self.get_controller_input_states(identifier, state):
             input_state.label_manager.page_labels[label_position].font_family = font_family
+            input_state.label_manager.invalidate_scroll_caches()
 
         self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "labels", label_position, "font-family"], font_family)
 
         label_manager = self.get_label_manager(identifier, state)
         if label_manager is not None:
             label_manager.page_labels[label_position].font_name = font_family
+            label_manager.invalidate_scroll_caches()
             label_manager.update_label_editor()
 
         if update:
@@ -892,12 +899,14 @@ class Page:
     def set_label_font_size(self, identifier: InputIdentifier, state: int, label_position: str, font_size: int, update: bool = True) -> None:
         for key_state in self.get_controller_input_states(identifier, state):
             key_state.label_manager.page_labels[label_position].font_size = font_size
+            key_state.label_manager.invalidate_scroll_caches()
 
         self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "labels", label_position, "font-size"], font_size)
 
         label_manager = self.get_label_manager(identifier, state)
         if label_manager is not None:
             label_manager.page_labels[label_position].font_size = font_size
+            label_manager.invalidate_scroll_caches()
             label_manager.update_label_editor()
 
         if update:
@@ -906,12 +915,14 @@ class Page:
     def set_label_font_weight(self, identifier: InputIdentifier, state: int, label_position: str, font_weight: int, update: bool = True) -> None:
         for key_state in self.get_controller_input_states(identifier, state):
             key_state.label_manager.page_labels[label_position].font_weight = font_weight
+            key_state.label_manager.invalidate_scroll_caches()
 
         self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "labels", label_position, "font-weight"], font_weight)
 
         label_manager = self.get_label_manager(identifier, state)
         if label_manager is not None:
             label_manager.page_labels[label_position].font_weight = font_weight
+            label_manager.invalidate_scroll_caches()
             label_manager.update_label_editor()
 
         if update:
@@ -920,12 +931,14 @@ class Page:
     def set_label_font_color(self, identifier: InputIdentifier, state: int, label_position: str, font_color: list[int], update: bool = True) -> None:
         for key_state in self.get_controller_input_states(identifier, state):
             key_state.label_manager.page_labels[label_position].color = font_color
+            key_state.label_manager.invalidate_scroll_caches()
 
         self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "labels", label_position, "color"], font_color)
 
         label_manager = self.get_label_manager(identifier, state)
         if label_manager is not None:
             label_manager.page_labels[label_position].color = font_color
+            label_manager.invalidate_scroll_caches()
             label_manager.update_label_editor()
 
         if update:
@@ -934,12 +947,14 @@ class Page:
     def set_label_outline_width(self, identifier: InputIdentifier, state: int, label_position: str, outline_width: list[int], update: bool = True) -> None:
         for key_state in self.get_controller_input_states(identifier, state):
             key_state.label_manager.page_labels[label_position].outline_width = outline_width
+            key_state.label_manager.invalidate_scroll_caches()
 
         self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "labels", label_position, "outline_width"], outline_width)
 
         label_manager = self.get_label_manager(identifier, state)
         if label_manager is not None:
             label_manager.page_labels[label_position].outline_width = outline_width
+            label_manager.invalidate_scroll_caches()
             label_manager.update_label_editor()
 
         if update:
@@ -948,12 +963,14 @@ class Page:
     def set_label_outline_color(self, identifier: InputIdentifier, state: int, label_position: str, outline_color: list[int], update: bool = True) -> None:
         for key_state in self.get_controller_input_states(identifier, state):
             key_state.label_manager.page_labels[label_position].outline_color = outline_color
+            key_state.label_manager.invalidate_scroll_caches()
 
         self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "labels", label_position, "outline_color"], outline_color)
 
         label_manager = self.get_label_manager(identifier, state)
         if label_manager is not None:
             label_manager.page_labels[label_position].outline_color = outline_color
+            label_manager.invalidate_scroll_caches()
             label_manager.update_label_editor()
 
         if update:
@@ -962,12 +979,14 @@ class Page:
     def set_label_font_style(self, identifier: InputIdentifier, state: int, label_position: str, font_style: str, update: bool = True) -> None:
         for key_state in self.get_controller_input_states(identifier, state):
             key_state.label_manager.page_labels[label_position].style = font_style
+            key_state.label_manager.invalidate_scroll_caches()
 
         self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "labels", label_position, "style"], font_style)
 
         label_manager = self.get_label_manager(identifier, state)
         if label_manager is not None:
             label_manager.page_labels[label_position].style = font_style
+            label_manager.invalidate_scroll_caches()
             label_manager.update_label_editor()
 
         if update:
@@ -976,12 +995,14 @@ class Page:
     def set_label_alignment(self, identifier: InputIdentifier, state: int, label_position: str, alignment: str, update: bool = True) -> None:
         for key_state in self.get_controller_input_states(identifier, state):
             key_state.label_manager.page_labels[label_position].alignment = alignment
+            key_state.label_manager.invalidate_scroll_caches()
 
         self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "labels", label_position, "alignment"], alignment)
 
         label_manager = self.get_label_manager(identifier, state)
         if label_manager is not None:
             label_manager.page_labels[label_position].alignment = alignment
+            label_manager.invalidate_scroll_caches()
             label_manager.update_label_editor()
 
         if update:

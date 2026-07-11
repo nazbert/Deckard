@@ -269,12 +269,134 @@ def check_strip_matches_direct_draw() -> None:
         fixtures.teardown(controller)
 
 
+def check_editor_label_edit_invalidates_detection() -> None:
+    """A label edit through Page.set_label_* (the sidebar editor's path)
+    mutates the KeyLabel in place, bypassing set_page_label's cache
+    invalidation. Without an explicit invalidate the scroll-detection cache
+    goes stale: a shortened label keeps scrolling forever (loop pinned at
+    full FPS, fitting text drawn mid-sweep) and a lengthened one never starts
+    scrolling until a page reload (review round 1, both directions)."""
+    from src.backend.DeckManagement.InputIdentifier import Input
+
+    controller = _make_controller("scrolllbl-e", rolling=True)
+    try:
+        key = controller.inputs[Input.Key][0]
+        lm = key.get_active_state().label_manager
+
+        # long -> short: was scrolling, must fall back to idle + static draw.
+        _set_center_label(key, WIDE_TEXT)
+        time.sleep(2.0)  # past the leading hold: genuinely sweeping
+        assert lm.get_has_scroll_labels(), "wide label not scrolling before edit"
+
+        controller.active_page.set_label_text(key.identifier, 0, "center", "ok", update=True)
+        time.sleep(0.3)
+        assert not lm.get_has_scroll_labels(), (
+            "shortened label still scroll-flagged after set_label_text -- the "
+            "detection cache is stale (Page.set_label_* bypasses the invalidator)")
+        assert lm.get_scroll_label_widths() == {}, "stale scroll widths after shorten"
+        rate = _tick_rate(controller, 1.5)
+        assert rate < 8, (
+            f"loop at {rate:.1f} t/s after shortening a scrolling label -- stale "
+            f"detection is still forcing full-FPS ticks on now-static text")
+        # And it must draw statically (no leftover sweep offset applied).
+        size = key.get_image_size()
+        composed = lm.get_composed_label("center")
+        w, h = lm._measure_text("center", composed)
+        drawn = lm.add_labels_to_image(Image.new("RGBA", size, (0, 0, 0, 255)))
+        ref = Image.new("RGBA", size, (0, 0, 0, 255))
+        ImageDraw.Draw(ref).text((size[0] / 2, size[1] / 2), text=composed.text,
+                                 font=composed.get_font(), anchor="mm",
+                                 align=composed.alignment, fill=tuple(composed.color),
+                                 stroke_width=composed.outline_width,
+                                 stroke_fill=tuple(composed.outline_color))
+        a, b = drawn.tobytes(), ref.tobytes()
+        dev = sum(1 for x, y in zip(a, b) if abs(x - y) > 8) / len(a)
+        assert dev < 0.002, (
+            f"shortened label drawn {dev:.2%} off a centered static draw -- it is "
+            f"still being composited at a scroll offset")
+
+        # short -> long: must START scrolling with no page reload.
+        controller.active_page.set_label_text(key.identifier, 0, "center", WIDE_TEXT, update=True)
+        time.sleep(0.3)
+        assert lm.get_has_scroll_labels(), (
+            "lengthened label not scroll-flagged after set_label_text -- detection "
+            "cache stale, scrolling would not begin until a page reload")
+        rate = _tick_rate(controller, 1.5)
+        assert rate > 20, (
+            f"loop at {rate:.1f} t/s after lengthening a label past key width -- "
+            f"scrolling did not resume the full-rate tick")
+        print("PASS: editor label edits invalidate scroll detection (long->short idles, "
+              "short->long resumes scrolling; no reload)")
+    finally:
+        fixtures.teardown(controller)
+
+
+def check_pathological_label_strip_capped() -> None:
+    """The precomposed strip is width x keyheight x 4 bytes RGBA, retained per
+    label. Strip width scales with TEXT length, so an uncapped strip on a
+    pasted 50k-char label retains ~95 MB and stalls the sole-writer media
+    thread rasterizing it (review round 1). Past the width cap the render
+    falls back to the pre-MR direct draw: nothing retained, pixels still
+    correct."""
+    from src.backend.DeckManagement.InputIdentifier import Input
+    from src.backend.DeckManagement.DeckController import LabelManager
+
+    controller = _make_controller("scrolllbl-f", rolling=True)
+    try:
+        key = controller.inputs[Input.Key][0]
+        lm = key.get_active_state().label_manager
+        size = key.get_image_size()
+        cap = LabelManager._MAX_STRIP_WIDTH
+
+        # A normal wide label still uses (and retains) a strip.
+        _set_center_label(key, WIDE_TEXT)
+        time.sleep(0.3)
+        lm.frames["center"]["position"] = 10
+        lm.add_labels_to_image(Image.new("RGBA", size, (0, 0, 0, 255)))
+        assert lm._scroll_strips.get("center") is not None, (
+            "normal wide label should still use the precomposed strip")
+
+        # A pathological label must NOT retain a strip, and must render
+        # correctly (pixel-equivalent to a direct draw at the same offset).
+        pathological = "m" * 20000
+        _set_center_label(key, pathological)
+        time.sleep(0.3)
+        composed = lm.get_composed_label("center")
+        w, h = lm._measure_text("center", composed)
+        assert w + 1 > cap, f"probe premise: {w}px text must exceed the {cap}px cap"
+
+        offset = 30
+        lm.frames["center"]["position"] = offset
+        rendered = lm.add_labels_to_image(Image.new("RGBA", size, (0, 0, 0, 255)))
+        assert lm._scroll_strips.get("center") is None, (
+            f"a {w}px-wide label retained a strip past the {cap}px cap -- this is "
+            f"the uncapped per-label pixel buffer the memory war closed")
+
+        ref = Image.new("RGBA", size, (0, 0, 0, 255))
+        start = size[0] / 2 - (size[0] - w) / 2 + 10
+        ImageDraw.Draw(ref).text((start - offset, size[1] / 2), text=composed.text,
+                                 font=composed.get_font(), anchor="mm",
+                                 align=composed.alignment, fill=tuple(composed.color),
+                                 stroke_width=composed.outline_width,
+                                 stroke_fill=tuple(composed.outline_color))
+        a, b = rendered.tobytes(), ref.tobytes()
+        dev = sum(1 for x, y in zip(a, b) if abs(x - y) > 8) / len(a)
+        assert dev < 0.002, (
+            f"capped direct-draw fallback deviates {dev:.2%} from the direct draw")
+        print(f"PASS: strip width capped at {cap}px (normal label strips; {w}px "
+              f"pathological label falls back to direct draw, 0 retained, dev {dev:.4%})")
+    finally:
+        fixtures.teardown(controller)
+
+
 def main() -> None:
-    fixtures.start_watchdog(90, label="scenario_scroll_label_cpu")
+    fixtures.start_watchdog(120, label="scenario_scroll_label_cpu")
     check_rolling_disabled_idles()
     check_multiline_no_phantom_scroll()
     check_scroll_render_budget()
     check_strip_matches_direct_draw()
+    check_editor_label_edit_invalidates_detection()
+    check_pathological_label_strip_capped()
     print("PASS: scenario_scroll_label_cpu")
 
 

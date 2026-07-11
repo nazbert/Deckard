@@ -2916,6 +2916,22 @@ class LabelManager:
             self.page_labels[position] = KeyLabel(self.controller_input)
             self.action_labels[position] = KeyLabel(self.controller_input)
  
+    def invalidate_scroll_caches(self) -> None:
+        """Drop the derived label caches so the next tick/render recomputes
+        scroll detection and geometry. Any code path that mutates a label's
+        attributes IN PLACE (i.e. not through set_page_label/set_action_label
+        -- notably Page.set_label_* poking page_labels[pos].<attr> directly)
+        must call this, or get_scroll_label_widths() keeps returning the old
+        overflow set and the render composites a stale strip: a shortened
+        label keeps scrolling forever and a lengthened one never starts until
+        a page reload (#115 through the editor, review round 1). Cheap: the
+        widths/visible flags are recomputed lazily and the strip/bbox dicts
+        are re-keyed on demand."""
+        self._scroll_widths_cache = None
+        self._has_visible_labels_cache = None
+        self._bbox_cache.clear()
+        self._scroll_strips.clear()
+
     def clear_labels(self):
         self.init_labels()
         self._scroll_widths_cache = None
@@ -3098,6 +3114,14 @@ class LabelManager:
         can never flag a label the render would draw statically (that
         mismatch kept the media loop at full FPS re-rendering identical
         frames -- issues #115/#116)."""
+        # Cache invalidation: label edits go through invalidate_scroll_caches()
+        # (set_page_label/set_action_label and the Page.set_label_* setters); a
+        # rolling-labels TOGGLE lands via reload_page(), which rebuilds these
+        # managers. A rolling-labels change made OUTSIDE the Settings dialog
+        # (a direct settings.json edit, or a plugin writing app settings) does
+        # NOT reload_page and so leaves this cache stale until the next label
+        # edit or page load -- a pre-existing lifecycle assumption, acceptable
+        # because that path isn't a supported runtime toggle.
         if self._scroll_widths_cache is not None:
             return self._scroll_widths_cache
 
@@ -3173,6 +3197,17 @@ class LabelManager:
             changed = True
         return changed
 
+    # A precomposed strip is width x keyheight x 4 bytes, retained per label
+    # position per state for the whole sweep. Strip width scales with TEXT
+    # length, so a pasted 50k-char label would retain ~95 MB and stall the
+    # sole-writer media thread for seconds rasterizing it (review round 1).
+    # Past this width we fall back to the pre-MR direct per-frame draw: only
+    # pathological labels pay the per-frame raster CPU, and nothing is
+    # retained. 4096 px is ~290 'm' glyphs at font 15 -- far past any legible
+    # key label -- and caps the retained strip near ~1.6 MB even on a
+    # 100px-tall SD+ dial image.
+    _MAX_STRIP_WIDTH = 4096
+
     def _composite_scroll_strip(self, image: Image.Image, position: str, label: "KeyLabel",
                                 w: int, h: int, x_position: float, y_position: float) -> None:
         """Draws a scrolling label by compositing a window of its precomposed
@@ -3181,10 +3216,31 @@ class LabelManager:
         direct draw.text with stroke costs ~2.5ms per frame, the composite
         ~0.014ms, pixel-identical (the target coords' fractional parts are
         constant across the sweep and get baked into the strip, so the paste
-        offset is always a whole pixel)."""
+        offset is always a whole pixel).
+
+        NOTE: the composite matches a direct draw for opaque ink. Semi-
+        transparent fill/outline (alpha < 255, reachable only via the plugin
+        set_label API / hand-edited page JSON, not the color picker) blends
+        with straight-alpha OVER here vs PIL's coverage blend in draw.text, so
+        the scrolling frame differs slightly from the static draw for those."""
         font = label.get_font()
         outline_width = label.outline_width
         pad = outline_width + 6
+
+        strip_width = int(w) + 2 * pad + 1
+        if strip_width > self._MAX_STRIP_WIDTH:
+            # Pathological label: skip the strip cache entirely and draw the
+            # text directly at the scroll offset (the pre-MR path). Bounded
+            # memory (nothing retained), correct pixels; per-frame raster CPU
+            # is the trade, acceptable for a label this long.
+            self._scroll_strips.pop(position, None)
+            ImageDraw.Draw(image).text((x_position, y_position), text=label.text,
+                                       font=font, anchor="mm", align=label.alignment,
+                                       fill=tuple(label.color),
+                                       stroke_width=outline_width,
+                                       stroke_fill=tuple(label.outline_color))
+            return
+
         ay_base = pad + h / 2
         dy = (y_position - ay_base) % 1.0
         key = (label.text, getattr(font, "path", None), label.font_size,
