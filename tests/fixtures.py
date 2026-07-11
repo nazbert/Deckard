@@ -168,6 +168,28 @@ class StubBackground:
         self.video = None
 
 
+class _QuietInputState:
+    """The attrs MediaPlayerThread._needs_key_ticks dereferences on an
+    input's active state, all quiet (no videos, no scrolling labels) so the
+    live loop's animated-content branch stays off. Added for issue #1's
+    scenario, which runs the REAL run() loop over the stub tier -- before
+    that only perform_media_player_tasks() was driven directly, so this
+    path never executed on stubs (#69 stub-drift)."""
+    key_video = None
+    video = None
+    background_video = None
+
+    class _NoScrollLabels:
+        @staticmethod
+        def get_has_scroll_labels() -> bool:
+            return False
+
+    label_manager = _NoScrollLabels()
+
+
+_QUIET_STATE = _QuietInputState()
+
+
 class StubInput:
     """Minimal ControllerKey/ControllerTouchScreen stand-in for the
     resume-repaint / write-result scenarios (plan §4 M2): exposes exactly
@@ -183,6 +205,9 @@ class StubInput:
         self.touchscreen = touchscreen
         self._last_img_hash = None
         self._last_enqueued_hash = None
+
+    def get_active_state(self) -> _QuietInputState:
+        return _QUIET_STATE
 
     def update(self) -> None:
         img = make_native_image(fill=self.index)

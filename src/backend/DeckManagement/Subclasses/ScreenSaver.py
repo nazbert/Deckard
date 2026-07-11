@@ -161,7 +161,9 @@ class ScreenSaver:
             self.showing = True
 
             self.original_inputs = self.deck_controller.inputs
-            self.deck_controller.inputs = {}
+            # No `inputs = {}` pre-clear (issue #1 vector a): init_inputs is
+            # build-then-swap, so the concurrent media writer sees the old
+            # complete dict or the new complete dict, never empty/partial.
             self.deck_controller.init_inputs()
 
             self.original_background = self.deck_controller.background
