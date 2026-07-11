@@ -893,8 +893,10 @@ class DeckController:
 
         deck_settings = self.get_deck_settings()
 
-        self.brightness = 75
-        brightness = deck_settings.get("brightness", {}).get("value", self.brightness)
+        # None so the first set_brightness() below always writes to the device,
+        # even when the stored value equals the skip-write guard's default.
+        self.brightness = None
+        brightness = deck_settings.get("brightness", {}).get("value", 75)
         self.set_brightness(brightness)
 
         # self.rotation = 270
@@ -1523,6 +1525,10 @@ class DeckController:
     def set_brightness(self, value):
         value = min(100, max(0, value))
         if not self.get_alive(): return
+        if value == self.brightness:
+            # Unchanged: skip the queued device write. The device can stall
+            # noticeably on a brightness write during an image-write burst.
+            return
         # Routed through the media thread's control queue (plan §2.1) so the
         # device write happens on the sole writer, not the calling (GTK/
         # Timer/switch) thread. self.brightness is the last-commanded value,
