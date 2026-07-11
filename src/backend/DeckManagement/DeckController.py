@@ -4215,16 +4215,22 @@ class ControllerTouchScreenState(ControllerInputState):
         self.update()
 
     def _get_fitted_background_image(self, path: str, size: tuple[int, int]) -> Image.Image:
-        # Decode + fit once per (path, mtime, size) and cache: this runs on
-        # every composite (30/s while a background video plays), and a failed
-        # decode must not log per frame. Videos take the playback path in
-        # _get_background_video_frame instead.
+        # Decode + fit once per (path, mtime, size, saturation) and cache:
+        # this runs on every composite (30/s while a background video plays),
+        # and a failed decode must not log per frame. Videos take the playback
+        # path in _get_background_video_frame instead.
         try:
             mtime = os.path.getmtime(path)
         except OSError:
             return None
 
-        key = (path, mtime, size)
+        # The saturation boost is baked into the cached fitted image (same
+        # one-time contract as BackgroundImage for the key grid), so the
+        # factor is part of the cache key -- a saturation change must not
+        # keep serving the stale enhancement from before it.
+        saturation = self.controller_touch.deck_controller.get_display_saturation()
+
+        key = (path, mtime, size, saturation)
         cached_key, cached_image = self._fitted_background_cache
         if cached_key == key:
             # Callers paste dial images onto the returned image in place --
@@ -4241,6 +4247,8 @@ class ControllerTouchScreenState(ControllerInputState):
         fitted = None
         if image is not None:
             fitted = ImageOps.fit(image, size, Image.Resampling.LANCZOS).convert("RGBA")
+            if abs(saturation - 1.0) > 0.001:
+                fitted = ImageEnhance.Color(fitted).enhance(saturation)
 
         # Failures are cached too: a bad file logs once, not every frame.
         self._fitted_background_cache = (key, fitted)
