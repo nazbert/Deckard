@@ -467,19 +467,28 @@ class PluginBase(rpyc.Service):
         """
         Adds a CSS stylesheet to the application's style context.
 
+        Marshalled onto the GTK main loop: plugins call this from __init__,
+        which runs on a store worker thread on the install path (issue #35),
+        and provider construction / style-context mutation are
+        main-thread-only. Inline (zero-cost) when already on main.
+
         Args:
             path (str): The path to the CSS file.
 
         Returns:
             None
         """
-        css_provider = Gtk.CssProvider()
-        css_provider.load_from_path(path)
-        Gtk.StyleContext.add_provider_for_display(
-            Gdk.Display.get_default(),
-            css_provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
-        )
+        def _add():
+            css_provider = Gtk.CssProvider()
+            css_provider.load_from_path(path)
+            Gtk.StyleContext.add_provider_for_display(
+                Gdk.Display.get_default(),
+                css_provider,
+                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            )
+
+        from GtkHelper.GtkHelper import run_on_main
+        run_on_main(_add)
 
     def register_page(self, path: str) -> None:
         """

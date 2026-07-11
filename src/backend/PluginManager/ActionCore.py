@@ -146,6 +146,13 @@ class ActionCore(rpyc.Service):
         """
         This method is called when the page is ready to process requests made by the actions.
         Setting the default image in this method is recommended over setting it in the constructor.
+
+        Threading contract: this hook runs OFF the GTK main thread (page
+        loads happen on worker/USB/store threads). Do not construct or touch
+        raw GTK objects here -- that is the process-fatal off-main-GTK crash
+        class (issue #35). Use the GenerativeUI layer (which marshals itself
+        to the main loop) or wrap unavoidable GTK work in
+        GtkHelper.GtkHelper.run_on_main.
         """
         pass
 
