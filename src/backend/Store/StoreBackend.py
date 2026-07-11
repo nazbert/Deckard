@@ -1323,8 +1323,22 @@ class StoreBackend:
             if plugin.local_sha is None:
                 # Plugin is not installed
                 continue
-            if plugin.local_sha != plugin.commit_sha:
-                plugins_to_update.append(plugin)
+            if plugin.local_sha == plugin.commit_sha:
+                # Up to date
+                continue
+            if plugin.is_compatible is False:
+                # When no compatible version exists, prepare_plugin pins the
+                # newest INCOMPATIBLE commit (so the store can still list the
+                # entry). Auto-updating onto it would replace a working
+                # plugin with a build for a different app major -- skip and
+                # report instead. PluginPreview.get_install_state_for makes
+                # the same call for the store UI's update button.
+                log.warning(
+                    f"Skipping update of plugin {plugin.plugin_id}: pinned version "
+                    f"{plugin.commit_sha} is not compatible with app version {gl.app_version}"
+                )
+                continue
+            plugins_to_update.append(plugin)
 
         return plugins_to_update
     

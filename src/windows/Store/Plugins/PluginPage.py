@@ -98,17 +98,29 @@ class PluginPreview(StorePreview):
         self.verified_badge.set_tooltip("store.badges.plugin.verified")
 
         # Set install button state
-        if plugin_data.local_sha is None:
-            self.set_install_state(0)
-        elif plugin_data.local_sha == plugin_data.commit_sha:
-            self.set_install_state(1)
-        else:
-            self.set_install_state(2)
+        self.set_install_state(self.get_install_state_for(plugin_data))
 
         description = self.plugin_data.short_description
         if description in ["", "N/A", None]:
             description = self.plugin_data.description
         self.set_description(description)
+
+    @staticmethod
+    def get_install_state_for(plugin_data: PluginData) -> int:
+        """0 = not installed, 1 = installed (nothing to offer), 2 = update
+        available. An installed plugin whose pinned store version is
+        incompatible (is_compatible False -- prepare_plugin pins the newest
+        commit of ANOTHER app major when no compatible one exists) reads as
+        state 1: offering that update would replace a working plugin with an
+        incompatible build, exactly what get_plugins_to_update refuses to do
+        on the auto-update path."""
+        if plugin_data.local_sha is None:
+            return 0
+        if plugin_data.local_sha == plugin_data.commit_sha:
+            return 1
+        if plugin_data.is_compatible is False:
+            return 1
+        return 2
 
     def install(self) -> bool:
         """Runs on the store's download worker thread; returns whether the
