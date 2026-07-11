@@ -591,7 +591,11 @@ class PluginBase(rpyc.Service):
         """
         Handles the disconnection of the RPyC server.
 
-        This method closes the RPyC server and the backend connection if they are running.
+        Releases the RPyC server, the backend connection and the backend
+        process. References are nulled synchronously; the blocking close/
+        terminate work runs on a worker thread (see
+        _release_backend_resources), so calling this from the UI thread
+        (e.g. the uninstall path via on_uninstall) never stalls it.
 
         Args:
             conn (Connection): The connection object to be disconnected.
@@ -599,23 +603,67 @@ class PluginBase(rpyc.Service):
         Returns:
             None
         """
-        if self.server is not None:
-            self.server.close()
-        if self.backend_connection is not None:
-            try:
-                gl.plugin_manager.backends.remove(self.backend_connection)
-            except ValueError:
-                pass
-            self.backend_connection.close()
+        self._release_backend_resources()
+
+    def _release_backend_resources(self) -> None:
+        """Detach and tear down the rpyc server/connection and the backend
+        process (mirrors ActionCore._release_backend_resources). References
+        are nulled synchronously so a later launch_backend()/start_server()
+        sees a clean slate instead of skipping against a dead server; the
+        blocking work (rpyc closes can wait on in-flight calls, and
+        terminate_backend_process escalates SIGTERM -> wait 3s -> SIGKILL ->
+        wait 2s) happens on a daemon worker so the caller -- often the GTK
+        main thread on the uninstall path -- never blocks on it. Idempotent;
+        concurrent callers tolerate a lost race the same way ActionCore's
+        implementation does (close/terminate on an already-dead resource is
+        harmless)."""
+        if self.backend_connection is None and self.server is None and self.backend_process is None:
+            return
+
+        # Snapshot and detach the backend resources, then close them off-thread.
+        server, connection, process = self.server, self.backend_connection, self.backend_process
+        self.server = None
         self.backend_connection = None
-        if self.backend_process is not None:
-            from src.backend.PluginManager.PluginManager import terminate_backend_process
-            terminate_backend_process(self.backend_process)
+        self.backend_process = None
+        self.backend = None
+
+        # Drop from the global registries synchronously (cheap list removals).
+        if connection is not None:
             try:
-                gl.plugin_manager.backend_processes.remove(self.backend_process)
+                gl.plugin_manager.backends.remove(connection)
             except ValueError:
                 pass
-            self.backend_process = None
+        if process is not None:
+            try:
+                gl.plugin_manager.backend_processes.remove(process)
+            except ValueError:
+                pass
+
+        threading.Thread(
+            target=self._teardown_backend_resources,
+            args=(server, connection, process),
+            name="plugin_backend_teardown",
+            daemon=True,
+        ).start()
+
+    @staticmethod
+    def _teardown_backend_resources(server, connection, process) -> None:
+        # Runs on a worker thread (see _release_backend_resources). Each
+        # close()/terminate() is best-effort; a hung backend must not take
+        # the app down with it.
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception as e:
+                log.error(f"Failed to close backend connection: {e}")
+        if server is not None:
+            try:
+                server.close()
+            except Exception as e:
+                log.error(f"Failed to close backend server: {e}")
+        if process is not None:
+            from src.backend.PluginManager.PluginManager import terminate_backend_process
+            terminate_backend_process(process)
 
     def launch_backend(self, backend_path: str, venv_path: str = None, open_in_terminal: bool = False) -> None:
         """
