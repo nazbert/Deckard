@@ -42,7 +42,10 @@ DeckController._log_callback_exception convention).
 
 Import discipline: this module must stay importable before `globals` (the
 test harness's fixtures.py contract) -- stdlib + loguru only, nothing from
-src/ or globals.py.
+src/ or globals.py. log_redaction is the one allowed sibling import: it
+follows the same stdlib+loguru-only contract, and install_exception_hooks()
+installs its scrubbing patcher (issue #105) so these hooks can never route
+an unredacted traceback into the sinks.
 """
 import faulthandler
 import os
@@ -52,6 +55,8 @@ import threading
 from datetime import datetime
 
 from loguru import logger as _LOG
+
+from src.backend.log_redaction import install_log_redaction
 
 _installed = False
 _prev_sys_hook = None
@@ -118,8 +123,14 @@ def asyncio_exception_handler(loop, context) -> None:
 
 def install_exception_hooks() -> None:
     """Install sys/threading/unraisable hooks. Idempotent; call before any
-    code that can throw on a background thread or GLib callback."""
+    code that can throw on a background thread or GLib callback.
+
+    Also installs the issue-#105 redaction patcher: these hooks are what
+    route full tracebacks into the sinks, so they must never fire without
+    the scrubbing layer in place. main()'s boot path relies on this
+    piggyback -- scenario_log_redaction asserts the coupling."""
     global _installed, _prev_sys_hook
+    install_log_redaction()
     if _installed:
         return
     _prev_sys_hook = sys.excepthook

@@ -103,7 +103,6 @@ from src.backend.LockScreenManager.LockScreenManager import LockScreenManager
 from src.tray import TrayIcon
 from src.backend.Logger import Logger, LoggerConfig, Loglevel
 from src.backend.log_hooks import install_exception_hooks, redirect_faulthandler
-from src.backend.log_redaction import install_log_redaction
 
 # Migration
 from src.backend.Migration.MigrationManager import MigrationManager
@@ -577,13 +576,6 @@ def make_api_calls():
     
 @log.catch
 def main():
-    # Redaction before the safety net (issue #105): the patcher lives on
-    # loguru's core, so every record -- including the hooks' tracebacks and
-    # anything logged before/after config_logger()'s remove()/add() cycle --
-    # is scrubbed (home paths, usernames, URL credentials) before ANY sink
-    # formats it.
-    install_log_redaction()
-
     # Safety net first (issue #80): from here on, uncaught exceptions on the
     # main thread, GLib callbacks, plain threads and GC-time finalizers all
     # route through loguru. Until config_logger() below adds the file/ring
