@@ -801,6 +801,9 @@ class DeckController:
         # close() itself idempotent against a second call.
         self._closing: bool = False
 
+        # Timestamp of the last post-load GC (see maybe_collect_garbage).
+        self._last_gc_time: float = 0.0
+
         self.active_page: Page = None
 
         # Bumped on every load_page so overlapping/concurrent loads can tell
@@ -1497,6 +1500,18 @@ class DeckController:
         notify_active_page_changed(self.serial_number(), page.get_name())
 
         log.info(f"Loaded page {page.get_name()} on deck {self.deck.get_serial_number()}")
+        self.maybe_collect_garbage()
+
+    # Minimum seconds between post-load garbage collections, so rapid page
+    # switching doesn't pay a full GC pause on every single switch. Adopted
+    # from upstream "Improve page swich speeds" (88d632cc).
+    GC_MIN_INTERVAL = 10.0
+
+    def maybe_collect_garbage(self):
+        now = time.time()
+        if now - self._last_gc_time < self.GC_MIN_INTERVAL:
+            return
+        self._last_gc_time = now
         gc.collect()
 
     def reload_page(self):
