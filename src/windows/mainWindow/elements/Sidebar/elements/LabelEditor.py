@@ -257,7 +257,10 @@ class LabelRow(Adw.PreferencesRow):
         self.update_values()
 
     def update_values(self, composed_label: KeyLabel = None):
-        self.lock.acquire()
+        with self.lock:
+            self._update_values_locked(composed_label)
+
+    def _update_values_locked(self, composed_label: KeyLabel = None):
         self.disconnect_signals()
         if composed_label is None:
             controller = gl.app.main_win.get_active_controller()
@@ -292,8 +295,6 @@ class LabelRow(Adw.PreferencesRow):
         self.font_chooser_button.button.set_font_desc(desc)
 
         self.connect_signals()
-
-        self.lock.release()
 
     def set_color(self, color_values: list):
         color = color_values_to_gdk(color_values)

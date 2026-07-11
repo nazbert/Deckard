@@ -23,7 +23,6 @@ from gi.repository import Gtk, Adw, GLib, Gio, Gdk, GObject, GdkPixbuf
 # Import python modules
 import webbrowser as web
 import asyncio
-import threading
 import os
 import shutil
 from loguru import logger as log
@@ -51,8 +50,6 @@ class IconPage(StorePage):
         self.store = store
         self.compatible_section.search_entry.set_placeholder_text(gl.lm.get("store.icons.search-placeholder"))
         self.incompatible_section.search_entry.set_placeholder_text(gl.lm.get("store.icons.search-placeholder"))
-
-        threading.Thread(target=self.load, name="load_icon_page").start()
 
     @log.catch
     def load(self):

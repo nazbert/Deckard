@@ -44,15 +44,15 @@ class PasswordEntryRow(GenerativeUI[str]):
             can_reset (bool, optional): Whether the password can be reset. Defaults to True.
             auto_add (bool, optional): Whether to automatically add this entry to the UI. Defaults to True.
         """
-        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change)
+        def build():
+            self._widget: Adw.PasswordEntryRow = Adw.PasswordEntryRow(
+                title=self.get_translation(title, title),
+                text=self._default_value
+            )
 
-        self._widget: Adw.PasswordEntryRow = Adw.PasswordEntryRow(
-            title=self.get_translation(title, title),
-            text=self._default_value
-        )
-
-        self._handle_reset_button_creation()
-        self.connect_signals()
+            self._handle_reset_button_creation()
+            self.connect_signals()
+        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change, build=build)
 
     def connect_signals(self):
         """
@@ -87,10 +87,16 @@ class PasswordEntryRow(GenerativeUI[str]):
     def get_password(self) -> str:
         """
         Retrieves the current password entered in the password entry field.
+        Falls back to the settings-backed value layer (already base64-
+        decoded by this class's get_value() override) if the widget hasn't
+        been built yet -- reading the password is a value query and must
+        not force a build.
 
         Returns:
             str: The current password entered in the widget.
         """
+        if self._widget is None:
+            return self.get_value()
         return self.widget.get_text()
 
     def _value_changed(self, entry_row: Adw.EntryRow):

@@ -23,7 +23,6 @@ from gi.repository import Gtk, GLib
 # Import python modules
 import webbrowser as web
 import asyncio
-import threading
 import os
 import shutil
 from loguru import logger as log
@@ -49,8 +48,6 @@ class SDPlusBarWallpaperPage(StorePage):
         super().__init__(store=store)
         self.store = store
         self.compatible_section.search_entry.set_placeholder_text(gl.lm.get("store.wallpapers.search-placeholder"))
-
-        threading.Thread(target=self.load, name="load_sd_plus_bar_wallpaper_page").start()
 
     @log.catch
     def load(self):

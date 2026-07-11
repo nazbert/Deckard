@@ -43,16 +43,16 @@ class SwitchRow(GenerativeUI[bool]):
             can_reset (bool, optional): Whether the switch value can be reset. Defaults to True.
             auto_add (bool, optional): Whether to automatically add the switch row to the UI. Defaults to True.
         """
-        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change)
+        def build():
+            self._widget: Adw.SwitchRow = Adw.SwitchRow(
+                title=self.get_translation(title, title),
+                subtitle=self.get_translation(subtitle, subtitle),
+                active=default_value
+            )
 
-        self._widget: Adw.SwitchRow = Adw.SwitchRow(
-            title=self.get_translation(title, title),
-            subtitle=self.get_translation(subtitle, subtitle),
-            active=default_value
-        )
-
-        self._handle_reset_button_creation()
-        self.connect_signals()
+            self._handle_reset_button_creation()
+            self.connect_signals()
+        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change, build=build)
 
     def connect_signals(self):
         """
@@ -81,11 +81,15 @@ class SwitchRow(GenerativeUI[bool]):
 
     def get_active(self) -> bool:
         """
-        Retrieves the current state of the switch.
+        Retrieves the current state of the switch. Falls back to the
+        settings-backed value layer if the widget hasn't been built yet --
+        reading the state is a value query and must not force a build.
 
         Returns:
             bool: The current state of the switch (True for on, False for off).
         """
+        if self._widget is None:
+            return self.get_value()
         return self.widget.get_active()
 
     def _value_changed(self, switch, _):

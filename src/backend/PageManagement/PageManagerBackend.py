@@ -19,6 +19,7 @@ import gc
 import os
 import shutil
 import json
+import threading
 import zipfile
 from copy import copy
 from signal import Signals
@@ -43,12 +44,29 @@ class PageManagerBackend:
     def __init__(self, settings_manager):
         self.settings_manager = settings_manager
 
+        # Guards `pages`: it's read/mutated from arbitrary threads --
+        # DeckController.close() pops one controller's whole entry (P1.3
+        # step 8) while clear_old_cached_pages() may concurrently be
+        # iterating (and evicting from) a *different* controller's entry on
+        # that deck's own media/tick thread (design doc M5). An RLock so the
+        # methods below can call each other without deadlocking.
+        self._pages_lock = threading.RLock()
         self.pages: dict["DeckController", dict[str, dict[str, Union["Page", int]]]] = {}
         self.custom_pages = []
 
         self.page_order = []
 
-        self.max_pages = 3
+        # `n-cached-pages` means "cached pages besides the active one" in the
+        # Settings UI; set_pages_to_cache() (called when the user changes the
+        # spinner) accordingly stores max_pages = value + 1. Read the same
+        # setting with the same +1 here so a fresh boot gets the identical
+        # cache budget the Settings window would apply for the same value --
+        # before this fix, merely *opening* Settings once (even without
+        # touching the spinner) silently grew the live budget by one, since
+        # this constructor hardcoded 3 instead of applying the +1 (design
+        # doc bug 35).
+        n_cached_pages = self.settings_manager.get_app_settings().get("performance", {}).get("n-cached-pages", 3)
+        self.max_pages = int(n_cached_pages) + 1
         self.page_number = 0
 
         self.MAX_BACKUPS = 5
@@ -66,24 +84,46 @@ class PageManagerBackend:
             return None
 
         page = Page(json_path=path, deck_controller=deck_controller)
-        self.pages.setdefault(deck_controller, {})
-        self.pages[deck_controller][path] = {"page": page, "page_number": self.page_number}
-        self.page_number += 1
+        with self._pages_lock:
+            self.pages.setdefault(deck_controller, {})
+            self.pages[deck_controller][path] = {"page": page, "page_number": self.page_number}
+            self.page_number += 1
 
         return page
 
     def get_page(self, path: str, deck_controller: "DeckController") -> Page:
-        page = self.pages.get(deck_controller, {}).get(path, {})
+        with self._pages_lock:
+            page = self.pages.get(deck_controller, {}).get(path, {})
+            if page:
+                page["page_number"] = self.page_number
+                page_object = page["page"]
+                self.page_number += 1
+                return page_object
 
-        if not page:
-            page_object = self.load_page(path, deck_controller)
-            #self.clear_old_cached_pages()
-        else:
-            page["page_number"] = self.page_number
-            page_object = page["page"]
-            self.page_number += 1
-
+        # Cache miss: load_page() takes the lock itself for the actual
+        # insert -- constructing Page() (file I/O) outside our hold here
+        # keeps a slow load from stalling unrelated controllers' lookups.
+        page_object = self.load_page(path, deck_controller)
+        self.clear_old_cached_pages()
         return page_object
+
+    def discard_controller(self, deck_controller: "DeckController") -> None:
+        """Drops every cached page entry for a torn-down controller (plan
+        docs/memory-footprint-impl-plan.md P1.3 step 8; design doc bug 1):
+        the dead controller's active_page was otherwise permanently
+        unevictable and kept distorting clear_old_cached_pages()'s budget
+        for every other live controller."""
+        with self._pages_lock:
+            self.pages.pop(deck_controller, None)
+
+    def pages_for_controller(self, deck_controller: "DeckController") -> list["Page"]:
+        """Snapshot of every cached Page object for one controller. Used by
+        DeckController.close() step 6 so it can run clear_action_objects()
+        (which may invoke plugin hooks) without holding `_pages_lock` while
+        doing so."""
+        with self._pages_lock:
+            cached = self.pages.get(deck_controller, {})
+            return [entry["page"] for entry in cached.values() if entry.get("page") is not None]
 
     def get_pages(self, add_custom_pages: bool = True, sort: bool = True) -> list[str]:
         pages = []
@@ -115,34 +155,44 @@ class PageManagerBackend:
         return page_names
 
     def clear_old_cached_pages(self):
-        pages = sum(len(controller) for controller in self.pages.values())
+        # Snapshot the eviction decision under the lock, then act on it
+        # outside: clear_action_objects() below can run plugin hooks (D1),
+        # and a wedged one must not stall a concurrent close()/get_page()
+        # from some other controller waiting on this same lock (design doc
+        # M5 -- close() pops its whole controller entry under this lock from
+        # its own dedicated thread while this can run on any deck's
+        # media/tick thread).
+        with self._pages_lock:
+            total = sum(len(controller_pages) for controller_pages in self.pages.values())
+            excess = total - self.max_pages
+            if excess <= 0:
+                return
 
-        for i in range(pages - self.max_pages):
-            lowest_page = min(
-                page_data["page_number"]
-                for controller_pages in self.pages.values()
-                for page_data in controller_pages.values()
-            )
-
+            # Oldest first by page_number; the active page of each controller
+            # and pages mid-tick (ready_to_clear False) are never evicted.
+            evictable = []
             for controller, controller_pages in self.pages.items():
+                if controller.active_page is None:
+                    continue
                 for path, page_data in controller_pages.items():
-                    if controller.active_page is None:
-                        continue
-
                     page_obj = page_data["page"]
-
-                    if not page_obj.ready_to_clear:
-                        continue
-
                     if page_obj is controller.active_page:
                         continue
-
-                    if page_data["page_number"] != lowest_page:
+                    if not page_obj.ready_to_clear:
                         continue
+                    evictable.append((page_data["page_number"], controller_pages, path, page_obj))
 
-                    page_obj.clear_action_objects()
-                    del controller_pages[path]
-                    break
+            evictable.sort(key=lambda entry: entry[0])
+            to_evict = evictable[:excess]
+
+        # A concurrent discard_controller() may have already popped one of
+        # these controllers' whole entry out from under us; controller_pages
+        # is still the same (now possibly orphaned) dict object, so the pop
+        # below is a harmless no-op in that case rather than a KeyError.
+        for _, controller_pages, path, page_obj in to_evict:
+            log.info(f"Evicting cached page {path}")
+            page_obj.clear_action_objects()
+            controller_pages.pop(path, None)
 
     def get_default_page(self, deck_serial_number: str):
         page_settings = self.settings_manager.load_settings_from_file(self.PAGE_SETTINGS_PATH)
@@ -251,15 +301,18 @@ class PageManagerBackend:
                 controller.load_page(new_page)
 
             # Remove the page from the created pages cache for this controller
-            controller_pages = self.pages.get(controller, {})
-            if page_path in controller_pages:
-                page_obj = controller_pages[page_path]["page"]
-                page_obj.clear_action_objects()
-                del controller_pages[page_path]
-
+            with self._pages_lock:
+                controller_pages = self.pages.get(controller, {})
+                entry = controller_pages.pop(page_path, None)
+            if entry is not None:
+                # Outside the lock: clear_action_objects() may run plugin
+                # hooks (D1), which must not stall a concurrent close()/
+                # get_page() waiting on _pages_lock from another thread.
+                entry["page"].clear_action_objects()
                 # Remove the controller entry entirely if it no longer has cached pages
                 if not controller_pages:
-                    del self.pages[controller]
+                    with self._pages_lock:
+                        self.pages.pop(controller, None)
 
         # Delete the JSON file representing the page
         if os.path.exists(page_path):
@@ -337,7 +390,7 @@ class PageManagerBackend:
             if page.deck_controller.active_page != page:
                 continue
 
-            page.deck_controller.load_page(page, allow_relaod=True,
+            page.deck_controller.load_page(page, allow_reload=True,
                                            load_brightness=brightness,
                                            load_screensaver=screensaver,
                                            load_background=background,
@@ -640,7 +693,7 @@ class PageManagerBackend:
         page_settings = self.get_page_settings(path)
         return page_settings.get("background", {})
 
-    def set_background_settings(self, path: str, overwrite: bool = False, show: bool = False, fps: int = 30, loop: bool = False, media_path: str = ""):
+    def set_background_settings(self, path: str, overwrite: bool = False, show: bool = False, fps: int = 30, loop: bool = False, media_path: str = "", extend_to_touchscreen: bool = False):
         settings = self.get_page_settings(path)
 
         settings["background"] = {
@@ -648,12 +701,13 @@ class PageManagerBackend:
             "show": show,
             "fps": fps,
             "loop": loop,
-            "media-path": media_path
+            "media-path": media_path,
+            "extend-to-touchscreen": extend_to_touchscreen
         }
 
         self.set_page_settings(path, settings)
 
-    def overwrite_background_settings(self, path: str, overwrite: bool = None, show: bool = None, fps: int = None, loop: bool = None, media_path: str = None):
+    def overwrite_background_settings(self, path: str, overwrite: bool = None, show: bool = None, fps: int = None, loop: bool = None, media_path: str = None, extend_to_touchscreen: bool = None):
         settings = self.get_page_settings(path)
         background_settings = settings.get("background", {})
 
@@ -667,6 +721,8 @@ class PageManagerBackend:
             background_settings["loop"] = loop
         if media_path is not None:
             background_settings["media-path"] = media_path
+        if extend_to_touchscreen is not None:
+            background_settings["extend-to-touchscreen"] = extend_to_touchscreen
 
         settings["background"] = background_settings
         self.set_page_settings(path, settings)

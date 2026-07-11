@@ -30,6 +30,82 @@ import webbrowser as web
 # Import globals
 import globals as gl
 
+import functools
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+
+def run_on_main(func, *args, **kwargs):
+    """Run func on the GTK main loop and block until it returns; runs inline if
+    already on the main thread (GTK4 is main-thread-only)."""
+    if threading.current_thread() is threading.main_thread():
+        return func(*args, **kwargs)
+
+    done = threading.Event()
+    box = {}
+
+    def _cb():
+        try:
+            box["result"] = func(*args, **kwargs)
+        except BaseException as e:
+            box["exc"] = e
+        finally:
+            done.set()
+        return GLib.SOURCE_REMOVE
+
+    GLib.idle_add(_cb)
+    # Bounded: if the main loop stops pumping (e.g. during quit), waiting
+    # forever would park this worker and every lock it holds.
+    if not done.wait(timeout=30):
+        raise RuntimeError(f"main loop did not service run_on_main({getattr(func, '__name__', func)}) within 30s")
+    if "exc" in box:
+        raise box["exc"]
+    return box.get("result")
+
+
+def on_main(func):
+    """Decorator form of run_on_main."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        return run_on_main(func, *args, **kwargs)
+    return wrapper
+
+
+# App-lifecycle pool for @background work; I/O-bound work only (the GIL
+# serializes pure-Python CPU).
+_background_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="background")
+
+
+def _log_background_exception(future):
+    try:
+        exc = future.exception()
+    except Exception:
+        return
+    if exc is not None:
+        log.opt(exception=exc).error("background task raised")
+
+
+def run_in_background(func, *args, **kwargs):
+    """Submit func to the background pool and return its Future. Never .result()
+    it on the GTK thread while the work calls an on_main method -- that deadlocks."""
+    future = _background_pool.submit(func, *args, **kwargs)
+    future.add_done_callback(_log_background_exception)
+    return future
+
+
+def background(func):
+    """Decorator form of run_in_background."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        return run_in_background(func, *args, **kwargs)
+    return wrapper
+
+
+def shutdown_background_pool():
+    """Stop the @background pool; call on app quit."""
+    _background_pool.shutdown(wait=False, cancel_futures=True)
+
+
 # Helper Functions
 def get_focused_widgets(start: Gtk.Widget) -> list[Gtk.Widget]:
     widgets = []
@@ -107,13 +183,8 @@ class BetterExpander(Adw.ExpanderRow):
         return revealer_list_box
 
     def clear(self):
-        rows = self.get_rows()
         list_box = self.get_list_box()
         list_box.remove_all()
-        for row in rows:
-            row = None
-            del row
-        del rows
 
     def reorder_child_after(self, child, after):
         childs = self.get_rows()

@@ -54,20 +54,20 @@ class FileDialogRow(GenerativeUI[str]):
             can_reset (bool, optional): Whether the value can be reset. Defaults to True.
             auto_add (bool, optional): Whether to automatically add this entry to the UI. Defaults to True.
         """
-        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change)
+        def build():
+            self._widget: FileDialog = FileDialog(
+                title=self.get_translation(title),
+                subtitle=self.get_translation(subtitle),
+                dialog_title=self.get_translation(dialog_title),
+                initial_path=default_value,
+                block_interaction=block_interaction,
+                only_show_filename=only_show_filename,
+                filters=filters,
+                file_change_callback=self._file_changed
+            )
 
-        self._widget: FileDialog = FileDialog(
-            title=self.get_translation(title),
-            subtitle=self.get_translation(subtitle),
-            dialog_title=self.get_translation(dialog_title),
-            initial_path=default_value,
-            block_interaction=block_interaction,
-            only_show_filename=only_show_filename,
-            filters=filters,
-            file_change_callback=self._file_changed
-        )
-
-        self._handle_reset_button_creation()
+            self._handle_reset_button_creation()
+        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change, build=build)
 
     def set_file(self, path: str, update_setting: bool = False):
         """
@@ -84,11 +84,16 @@ class FileDialogRow(GenerativeUI[str]):
 
     def get_file(self) -> Gio.File:
         """
-        Retrieves the currently selected file from the file dialog.
+        Retrieves the currently selected file from the file dialog. Falls
+        back to the settings-backed value layer (a path string) if the
+        widget hasn't been built yet -- reading the selection is a value
+        query and must not force a build.
 
         Returns:
             Gio.File: The selected file in the file dialog.
         """
+        if self._widget is None:
+            return Gio.File.new_for_path(self.get_value())
         return self.widget.selected_file
 
     def _file_changed(self, file: Gio.File):

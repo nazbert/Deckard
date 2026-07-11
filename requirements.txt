@@ -1,112 +1,45 @@
-annotated-types==0.7.0
-async-lru==2.0.4
-bcrypt==4.2.1
-blinker==1.9.0
-cairocffi==1.7.1
-CairoSVG==2.7.1
-certifi==2025.1.31
-cffi==1.17.1
-charset-normalizer==3.4.1
-click==8.1.8
-cloudpickle==3.1.1
-colorama==0.4.6
-contourpy==1.3.1
-cssselect2==0.7.0
-cycler==0.12.1
-dasbus==1.7
-dbus-python==1.3.2
-decorator==5.2.1
-defusedxml==0.7.1
-distlib==0.3.9
-dnspython==2.7.0
-evdev==1.9.1
-filelock==3.17.0
-fonttools==4.56.0
-fuzzywuzzy==0.18.0
-get-video-properties==0.1.1
-gitdb==4.0.12
-h2==4.2.0
-hpack==4.1.0
-hyperframe==6.1.0
-idna==3.10
-imageio==2.37.0
-imageio-ffmpeg==0.6.0
-indexed_bzip2==1.6.0
-itsdangerous==2.2.0
-Jinja2==3.1.6
-joblib==1.4.2
-kiwisolver==1.4.8
-Levenshtein==0.27.3
-linkify-it-py==2.0.3
-loguru==0.7.3
-markdown-it-py==3.0.0
-MarkupSafe==3.0.2
-matplotlib==3.10.0
-mdit-py-plugins==0.4.2
-mdurl==0.1.2
-memray==1.15.0
-meson==1.7.0
-meson-python==0.17.1
-natsort==8.4.0
-nltk==3.9.1
-numpy==2.2.3
-opencv-python==4.11.0.86
-packaging==24.2
-patchelf==0.17.2.1
-pillow==11.1.0
-pip-review==1.3.0
-pipenv==2024.4.1
-platformdirs==4.3.6
-plumbum==1.9.0
-proglog==0.1.10
-psutil==7.0.0
-pulsectl==24.12.0
-py-gcode-metadata==0.2.0
-pycairo==1.27.0
-pyclip==0.7.0
-pycparser==2.22
-pydantic==2.12.3
-pydantic_core==2.41.4
-pyenchant==3.2.2
-Pygments==2.19.1
-PyGObject==3.50.0
-PyGObject-stubs==2.12.0
-pymongo==4.11.1
-pyparsing==3.2.1
-pyperclip==1.9.0
-pyproject-metadata==0.9.0
-Pyro5==5.15
-pyspellchecker==0.8.2
-python-dateutil==2.9.0.post0
-python-wayland-extra==0.7.0
-pyudev==0.24.3
-pyusb==1.3.1
-PyYAML==6.0.2
-RapidFuzz==3.14.3
-regex==2024.11.6
-req2flatpak==0.2.0
-requests==2.32.3
-requirements-parser==0.11.0
-rich==13.9.4
-rpyc==6.0.1
-serpent==1.41
-setproctitle==1.3.5
-setuptools==78.1.1
-six==1.17.0
-smmap==5.0.2
-speedtest-cli==2.1.3
-streamcontroller-plugin-tools==2.0.2
-streamcontroller-streamdeck==0.1.5
-textual==2.1.2
-tinycss2==1.4.0
-tqdm==4.67.1
-types-setuptools==75.8.0.20250225
-typing-inspection==0.4.2
-typing_extensions==4.14.1
-uc-micro-py==1.0.3
-urllib3==2.3.0
-usb-monitor==1.23
-virtualenv==20.29.2
-webencodings==0.5.1
-websocket-client==1.8.0
-Werkzeug==3.1.3
+# StreamController runtime dependencies — hand-curated (P3.4).
+#
+# This list is DIRECT app dependencies only. Transitive deps (e.g. matplotlib's
+# contourpy/cycler/kiwisolver, requests' certifi/urllib3/idna/charset-normalizer,
+# CairoSVG's cairocffi/cssselect2/defusedxml/tinycss2/webencodings, PyGObject's
+# pycairo, cairocffi's cffi/pycparser, Pyro5's serpent) are intentionally omitted
+# and left to pip's own dependency resolution -- do not re-add them here unless
+# a specific version needs pinning.
+#
+# Build-only tooling (meson, meson-python, patchelf, req2flatpak, pip-review,
+# memray, PyGObject-stubs, types-setuptools) lives in requirements-dev.txt, not
+# here -- see that file for dev/build/profiling tools.
+#
+# For every package below with no direct `import` in this repo, see the
+# "ecosystem pin" comment explaining why it stays anyway.
+
+async-lru==2.0.4          # src/backend/Store/StoreBackend.py
+CairoSVG==2.7.1           # src/backend/DeckManagement/HelperMethods.py (svg2png)
+dasbus==1.7               # src/api.py (DBus API service)
+dbus-python==1.3.2        # main.py (dbus / dbus.mainloop.glib) -- classic dbus-python client used for --change-page/--change-state/quit_running IPC, distinct from dasbus's server-side use
+evdev==1.9.1              # src/backend/PageManagement/Page.py, StreamDeckUI importer; also used by OSPlugin/VolumeMixer
+fonttools==4.56.0         # src/backend/DeckManagement/Subclasses/KeyLabel.py (symbol-font detection)
+fuzzywuzzy==0.18.0        # Store/AssetManager/ActionChooser/PageSelector search (9 call sites); also used by VolumeMixer plugin
+get-video-properties==0.1.1  # src/windows/AssetManager/InfoPage.py (import name: videoprops)
+Levenshtein==0.27.3       # ecosystem pin: fuzzywuzzy's own speedup backend (fuzzywuzzy/StringMatcher.py does `from Levenshtein import *`); without it every fuzzy search in Store/AssetManager/ActionChooser/PageSelector falls back to the slow pure-Python matcher and fuzzywuzzy logs a warning on first use
+loguru==0.7.3             # logging, used throughout
+matplotlib==3.10.0        # ecosystem pin: OSPlugin imports matplotlib directly for its graph actions and ships no requirements.txt of its own; removal is blocked on an upstream OSPlugin release. The app's own font-rendering use of matplotlib is being replaced separately (perf/import-diet-fonts); the RSS win from that work lands regardless of this pin.
+numpy==2.2.3              # src/backend/DeckManagement/Subclasses/background_video_cache.py
+opencv-python-headless==4.11.0.86  # cv2, used throughout the media pipeline; verified zero highgui/GUI usage in this repo and in all installed plugins, so the headless build is sufficient
+packaging==24.2           # version checks/migrators (Migrator.py, ActionHolder.py, PluginBase.py, ...)
+pillow==11.1.0            # PIL, used throughout image handling
+psutil==7.0.0             # DeckController.py, MediaManager.py (memory/process telemetry)
+pulsectl==24.12.0         # ecosystem pin: AudioSwitcher, AudioControl and VolumeMixer plugins import pulsectl directly and ship no requirements.txt of their own
+pyclip==0.7.0             # src/windows/Permissions/FlatpakPermissionRequest.py
+python-wayland-extra==0.7.0  # src/backend/Wayland/Wayland.py
+pyusb==1.3.1              # main.py, DeckManager.py (usb.core/usb.util)
+requests==2.32.3          # HelperMethods.py, StoreBackend.py; also used by Clocks/MediaPlugin/Spotify plugins
+rpyc==6.0.1               # src/backend/PluginManager/ActionCore.py (plugin backend RPC)
+setproctitle==1.3.5       # main.py
+streamcontroller-plugin-tools==2.0.2  # src/backend/PluginManager/PluginManager.py
+streamcontroller-streamdeck==0.1.5    # StreamDeck.*, the pinned/patched Stream Deck device library (main.py + DeckManagement)
+typing_extensions==4.14.1  # GtkHelper/*
+usb-monitor==1.23         # DeckManager.py (import name: usbmonitor)
+websocket-client==1.8.0   # ecosystem pin: HomeAssistantPlugin runtime-imports `websocket` and ships no requirements.txt of its own
+PyGObject==3.50.0         # gi.repository, the GTK4/Adwaita bindings the whole UI is built on

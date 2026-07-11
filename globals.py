@@ -1,12 +1,11 @@
 import json
-import Pyro5.api
 import os
 from typing import TYPE_CHECKING
 import argparse
 import sys
+import threading
+from collections import deque
 from loguru import logger as log
-
-from src.backend.DeckManagement.HelperMethods import find_fallback_font
 
 # Automatically detect macOS
 IS_MAC = sys.platform == "darwin"
@@ -73,6 +72,7 @@ os.makedirs(PLUGIN_DIR, exist_ok=True)
 sys.path.append(DATA_PATH)
 
 if TYPE_CHECKING:
+    import Pyro5.api
     from src.app import App
     from locales.LocaleManager import LocaleManager
     from src.backend.AssetManagerBackend import AssetManagerBackend
@@ -116,7 +116,7 @@ icon_pack_manager: "IconPackManager" = None
 wallpaper_pack_manager: "WallpaperPackManager" = None
 sd_plus_bar_wallpaper_pack_manager: "SDPlusBarWallpaperPackManager" = None
 store_backend: "StoreBackend" = None
-pyro_daemon: Pyro5.api.Daemon = None
+pyro_daemon: "Pyro5.api.Daemon" = None  # never actually set/read (P3.2 grep); Pyro5 stays TYPE_CHECKING-only
 signal_manager: "SignalManager" = None
 window_grabber: "WindowGrabber" = None
 lock_screen_detector: "LockScreenManager" = None
@@ -127,14 +127,16 @@ app_loading_finished_tasks: callable = []
 api_page_requests: dict[str, str] = {} # Stores api page requests made my --change-page
 api_state_requests: dict[str, dict] = {} # Stores api state change requests made by --change-state
 tray_icon: "TrayIcon" = None
-fallback_font: str = find_fallback_font()
 showed_donate_window: bool = False
 screen_locked: bool = False
 loggers: dict[str, "Logger"] = {}
 
 app_version: str = "1.5.0-beta.15"  # In breaking.feature.fix-state format
 exact_app_version_check: bool = False
-logs: list[str] = []
+# Bounded ring buffer of recent log records (shown in the About dialog).
+# logs_lock guards appends/reads against concurrent iteration.
+logs: "deque[str]" = deque(maxlen=10000)
+logs_lock = threading.Lock()
 
 release_notes: str = """
 <p>Features:</p>
@@ -152,3 +154,23 @@ release_notes: str = """
     <ul>
     </ul>
 """
+
+
+def __getattr__(name: str):
+    """PEP 562 module-level lazy attribute.
+
+    `fallback_font` used to be computed eagerly at import time via
+    HelperMethods.find_fallback_font(), which did a full matplotlib system
+    font scan before a single window existed. font_resolver.fallback_font()
+    is one fontconfig round trip instead of a directory walk, but there's
+    still no reason to pay for it before the first label actually renders.
+    Deferring the lookup to first access (and caching the result as a plain
+    module attribute, so this function only runs once) keeps `gl.fallback_font`
+    working unmodified for every existing reader -- including plugins.
+    """
+    if name == "fallback_font":
+        from src.backend.DeckManagement.font_resolver import fallback_font
+        value = fallback_font()
+        globals()["fallback_font"] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

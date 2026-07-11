@@ -1,4 +1,5 @@
 import functools
+import threading
 from abc import ABC, abstractmethod
 from typing import TypeVar, Callable
 
@@ -6,6 +7,8 @@ import gi
 from gi.repository import Gtk
 
 from typing import TYPE_CHECKING
+
+from loguru import logger as log
 
 from globals import signal_manager
 
@@ -35,10 +38,20 @@ class GenerativeUI[T](ABC):
     _auto_add: bool
     _complex_var_name: bool
 
+    # Classes that have already logged the off-main forced-build deprecation
+    # note (see _ensure_built) -- one log line per class, not per instance.
+    _logged_forced_build_classes: set = set()
+
     def __init__(self, action_core: "ActionCore", var_name: str, default_value: T, can_reset: bool = True,
-                 auto_add: bool = True, complex_var_name: bool = False, on_change: Callable[[Gtk.Widget, T, T], None] = None):
+                 auto_add: bool = True, complex_var_name: bool = False, on_change: Callable[[Gtk.Widget, T, T], None] = None,
+                 build: Callable[[], None] = None):
         """
-        Initializes the UI element.
+        Initializes the UI element. The widget itself is NOT built here --
+        construction is deferred to the first `.widget` access (typically
+        when the config sidebar opens for this action). This keeps actions
+        that never have their config sidebar opened from paying for a full
+        Adw row tree. See _ensure_built for the build trigger and its
+        off-main handling.
 
         Args:
             action_core (ActionCore): The action this UI element is associated with.
@@ -47,6 +60,8 @@ class GenerativeUI[T](ABC):
             can_reset (bool, optional): Whether the UI element can be reset. Defaults to True.
             auto_add (bool, optional): Whether the UI element is automatically added to the action. Defaults to True.
             on_change (Callable[[Gtk.Widget, T, T], None], optional): Function called when the value changes. Defaults to None.
+            build (Callable[[], None], optional): Builds `self._widget` (and any widget-only
+                state the subclass needs). Called at most once, on first `.widget` access.
         """
         self._action_core = action_core
         self._var_name = var_name
@@ -56,8 +71,52 @@ class GenerativeUI[T](ABC):
         self._auto_add = auto_add
         self._complex_var_name = complex_var_name
         self._widget: Gtk.Widget = None
+        self._built = False
+        self._build_flag_lock = threading.Lock()
+        self._build_fn = build
 
+        # Register immediately -- registration timing is unchanged from the
+        # eager-build era. load_initial_generative_ui and teardown both cope
+        # with an object that hasn't built its widget yet (see is_built /
+        # ActionCore._destroy_gen_ui_batch's `_widget is None` skip).
         self._action_core.add_generative_ui_object(self)
+
+    def _ensure_built(self):
+        """Builds the widget on first access. Idempotent -- safe to call from
+        every `.widget` read. Off-main access is marshaled through
+        run_on_main with its existing 30s bound (the same exposure the old
+        constructor-time build had) and logs one deprecation note per class:
+        touching `.widget` before config-open forces an eager build and
+        forfeits the laziness this exists for."""
+        # Lock only the flag transition, never the build itself: run_on_main
+        # executes build_fn on the main thread, so holding a lock across it
+        # from a worker would deadlock the exact moment build_fn (or anything
+        # it calls) re-enters .widget. The early flag also keeps that
+        # re-entrant access from recursing -- it sees _built and falls
+        # through to reading self._widget, same as the eager-build era.
+        with self._build_flag_lock:
+            if self._built:
+                return
+            self._built = True
+        build_fn = self._build_fn
+        if build_fn is None:
+            return
+        if threading.current_thread() is not threading.main_thread():
+            cls_name = type(self).__name__
+            if cls_name not in GenerativeUI._logged_forced_build_classes:
+                GenerativeUI._logged_forced_build_classes.add(cls_name)
+                log.debug(
+                    f"{cls_name}: gen-ui widget forced at construction; will become config-open-only"
+                )
+        from GtkHelper.GtkHelper import run_on_main
+        try:
+            run_on_main(build_fn)
+        except BaseException:
+            # A failed build must not latch the object into "built with no
+            # widget" forever -- let a later access retry.
+            with self._build_flag_lock:
+                self._built = False
+            raise
 
     @abstractmethod
     def connect_signals(self):
@@ -86,8 +145,24 @@ class GenerativeUI[T](ABC):
 
     @property
     def widget(self):
-        """Returns the GTK widget representing the UI element."""
+        """Returns the GTK widget representing the UI element, building it on
+        first access (see _ensure_built)."""
+        self._ensure_built()
+        # Back-reference so a container can recover the owning GenerativeUI object.
+        if self._widget is not None:
+            try:
+                self._widget._generative_ui_owner = self
+            except Exception:
+                pass
         return self._widget
+
+    @property
+    def is_built(self) -> bool:
+        """True once the widget has actually been constructed. Value-layer
+        operations (get_value/set_value/settings sync) never need this;
+        widget-sync code paths use it to skip work when there's no widget to
+        sync yet, instead of forcing a build just to find that out."""
+        return self._widget is not None
 
     @property
     def can_reset(self):
@@ -118,11 +193,16 @@ class GenerativeUI[T](ABC):
 
         @functools.wraps(func)
         def wrapper(self, *args, **kwargs):
-            self.disconnect_signals()
-            try:
-                return func(self, *args, **kwargs)
-            finally:
-                self.connect_signals()
+            from GtkHelper.GtkHelper import run_on_main
+
+            def _run():
+                self.disconnect_signals()
+                try:
+                    return func(self, *args, **kwargs)
+                finally:
+                    self.connect_signals()
+
+            return run_on_main(_run)
 
         return wrapper
 
@@ -150,7 +230,10 @@ class GenerativeUI[T](ABC):
             self.set_value(new_value)
 
         if trigger_callback and self.on_change:
-            self.on_change(self.widget, new_value, old_value)
+            # Pass the raw widget reference (may be None if unbuilt). This is
+            # a value-layer operation and must not force a build just to
+            # hand the callback a widget it may not even dereference.
+            self.on_change(self._widget, new_value, old_value)
 
     def update_value_in_ui(self):
         """Updates the UI element with the current value from settings."""
@@ -158,9 +241,12 @@ class GenerativeUI[T](ABC):
         self.set_ui_value(value)
 
     def reset_value(self):
-        """Resets the UI element to its default value."""
+        """Resets the value to its default. Syncs the widget only if it has
+        already been built -- an unbuilt row has nothing to sync, so this
+        must not force a build just to reset a setting."""
         self._handle_value_changed(self._default_value)
-        self.update_value_in_ui()
+        if self._widget is not None:
+            self.update_value_in_ui()
 
     def resolve_var_name(self):
         keys = [self.var_name]
@@ -178,7 +264,6 @@ class GenerativeUI[T](ABC):
             value (T): The value to set.
         """
         settings = self._action_core.get_settings()
-        self._action_core.set_settings(settings)
 
         keys = self.resolve_var_name()
 
@@ -191,7 +276,6 @@ class GenerativeUI[T](ABC):
 
         d[keys[-1]] = value
 
-        #settings[self._var_name] = value
         self._action_core.set_settings(settings)
 
     def get_value(self, fallback: T = None) -> T:
@@ -241,9 +325,38 @@ class GenerativeUI[T](ABC):
         return self._action_core.get_translation(key, fallback) if key else ""
 
     def unparent(self):
-        """Removes the UI element from its parent widget if it has one."""
-        if self.widget and self.widget.get_parent():
-            self.widget.unparent()
+        """Removes the UI element from its parent widget if it has one. A
+        never-built widget has no parent to remove, so this is a no-op that
+        does not force a build."""
+        from GtkHelper.GtkHelper import run_on_main
+
+        def _do():
+            widget = self._widget
+            if widget is not None and widget.get_parent():
+                widget.unparent()
+        run_on_main(_do)
+
+    def destroy(self):
+        """Disconnect signals, unparent the widget, and unregister from the
+        action. Idempotent. Never run_dispose() the widget: disposing a live
+        Adw composite (ComboRow/ExpanderRow) trips Gtk-CRITICALs. A
+        never-built widget skips disconnect_signals()/unparent entirely --
+        there is nothing to disconnect or unparent, and touching `.widget`
+        here would force the very build this class exists to avoid."""
+        from GtkHelper.GtkHelper import run_on_main
+
+        def _do():
+            if self._widget is not None:
+                try:
+                    self.disconnect_signals()
+                except Exception:
+                    pass
+            self._action_core.remove_generative_ui_object(self)
+            widget = self._widget
+            if widget is not None and widget.get_parent() is not None:
+                widget.unparent()
+            self._widget = None
+        run_on_main(_do)
 
     def _create_reset_button(self):
         """Creates a reset button for the UI element."""

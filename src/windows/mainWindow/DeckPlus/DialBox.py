@@ -412,6 +412,7 @@ class DialContextMenu(Gtk.PopoverMenu):
     def __init__(self, dial: Dial, **kwargs):
         super().__init__(**kwargs)
         self.dial = dial
+        self._unparenting = False
         self.build()
 
         self.connect("closed", self.on_close)
@@ -444,7 +445,20 @@ class DialContextMenu(Gtk.PopoverMenu):
         super().popup()
 
     def on_close(self, *args, **kwargs):
-        return
-    
+        # Unparent on idle rather than inline: we're inside the "closed"
+        # signal emission, and unparenting the popover mid-emission can
+        # dispose the emitter out from under GTK. Guard so repeated fast
+        # right-clicks don't each queue a redundant unparent.
+        if self._unparenting:
+            return
+        self._unparenting = True
+
+        def _do_unparent():
+            if self.get_parent() is not None:
+                self.unparent()
+            return GLib.SOURCE_REMOVE
+
+        GLib.idle_add(_do_unparent)
+
     def on_open(self, *args, **kwargs):
         return

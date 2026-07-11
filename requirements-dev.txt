@@ -1,0 +1,16 @@
+# StreamController developer/build tooling — not needed to run the app.
+#
+# Install with: pip install -r requirements.txt -r requirements-dev.txt
+#
+# Pull in whatever these declare as their own transitive dependencies
+# (e.g. req2flatpak needs requirements-parser; meson-python needs
+# pyproject-metadata) -- pip resolves those automatically.
+
+memray==1.15.0            # memory profiler, invoked externally (`python -m memray run main.py`); see docs/memory-footprint-plan.md
+meson==1.7.0              # native-extension build backend (only needed when building a dep from sdist without a prebuilt wheel)
+meson-python==0.17.1
+patchelf==0.17.2.1         # used by meson-python builds on Linux
+pip-review==1.3.0         # interactive `pip list --outdated` helper
+req2flatpak==0.2.0        # generates the flatpak manifest's python-requirements module from requirements.txt
+PyGObject-stubs==2.12.0   # editor/type-checker stubs for gi.repository
+types-setuptools==75.8.0.20250225  # editor/type-checker stubs for setuptools

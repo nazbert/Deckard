@@ -12,10 +12,40 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
+import os
+import sys
+
+# Cap glibc's per-thread arena multiplication before any allocation-heavy
+# import runs (docs/memory-footprint-plan.md §4 D5). Re-exec (rather than
+# just setting os.environ) because glibc reads these at libc init, not on
+# demand -- setting them mid-process here would be too late for the arenas
+# already carved out by this interpreter's own startup. SC_REEXEC guards
+# against a loop; the MALLOC_ARENA_MAX check lets a packaged launcher
+# (flatpak/launch.sh) set the vars itself and skip this re-exec entirely.
+# sys.orig_argv (not sys.argv) preserves interpreter flags like -X/-O.
+# Must run before quit_running()/make_api_calls() in main() -- execve
+# replaces this process outright, so there is no double DBus send.
+if "MALLOC_ARENA_MAX" not in os.environ and "SC_REEXEC" not in os.environ:
+    os.environ["MALLOC_ARENA_MAX"] = "2"
+    os.environ["MALLOC_TRIM_THRESHOLD_"] = "131072"
+    os.environ["SC_REEXEC"] = "1"
+    os.execve(sys.executable, sys.orig_argv, os.environ)
+
 # Import Python modules
 import setproctitle
 
 setproctitle.setproctitle("StreamController")
+
+# Dump all-thread tracebacks on a fatal signal, or on demand via SIGQUIT.
+# stderr-only from time zero; main() re-points it at logs/faulthandler.log
+# via log_hooks.redirect_faulthandler() once gl.DATA_PATH is resolved (it
+# can come from --data or the static settings file, so not knowable here).
+import faulthandler, signal
+try:
+    faulthandler.enable()
+    faulthandler.register(signal.SIGQUIT)
+except (AttributeError, ValueError, OSError):
+    pass
 
 # "install" patches
 from src.patcher.patcher import Patcher
@@ -32,6 +62,15 @@ import threading
 import usb.core
 import usb.util
 from StreamDeck.DeviceManager import DeviceManager
+
+# Cap OpenCV's global parallel_for_ pool before the first cv2 call anywhere
+# in the app -- the pool is created lazily and sized to nproc by default,
+# which is where the 32 same-second "background_0"-named threads come from
+# on a 32-core box (docs/memory-footprint-plan.md §2). cvtColor is the only
+# parallel_for_ user in this app; PIL does all resizing and
+# VideoWriter/VideoCapture threading is FFmpeg-side, unaffected by this knob.
+import cv2
+cv2.setNumThreads(2)
 
 # Import globals first to get IS_MAC
 import globals as gl
@@ -63,6 +102,7 @@ from src.backend.Wayland.Wayland import Wayland
 from src.backend.LockScreenManager.LockScreenManager import LockScreenManager
 from src.tray import TrayIcon
 from src.backend.Logger import Logger, LoggerConfig, Loglevel
+from src.backend.log_hooks import install_exception_hooks, redirect_faulthandler
 
 # Migration
 from src.backend.Migration.MigrationManager import MigrationManager
@@ -81,7 +121,8 @@ main_path = os.path.abspath(os.path.dirname(__file__))
 gl.MAIN_PATH = main_path
 
 def write_logs(record):
-    gl.logs.append(record)
+    with gl.logs_lock:
+        gl.logs.append(record)
 
 @log.catch
 def config_logger():
@@ -535,12 +576,27 @@ def make_api_calls():
     
 @log.catch
 def main():
+    # Safety net first (issue #80): from here on, uncaught exceptions on the
+    # main thread, GLib callbacks, plain threads and GC-time finalizers all
+    # route through loguru. Until config_logger() below adds the file/ring
+    # sinks these land on loguru's default stderr sink; afterwards the same
+    # hooks hit all three -- no re-install needed.
+    install_exception_hooks()
+
     # Handle listing commands first (they don't need full initialization)
     if handle_listing_commands():
         return
-    
+
     if make_api_calls():
         return
+
+    # Sinks up before the dbus probe / deck reset / migrations, so the
+    # earliest startup phase reaches logs.log + the ring (deep-audit §4 App
+    # shell: this phase used to be stderr-only). Deliberately AFTER the two
+    # early returns above: a short-lived CLI invocation must not open (and
+    # possibly rotate) the running app's log files.
+    config_logger()
+    redirect_faulthandler(os.path.join(gl.DATA_PATH, "logs"))
 
     gsk_render_env_var = os.environ.get("GSK_RENDERER")
     if gsk_render_env_var != "ngl":
@@ -553,8 +609,6 @@ def main():
         quit_running()
 
     reset_all_decks()
-
-    config_logger()
 
     migration_manager = MigrationManager()
     # Add migrators
@@ -571,6 +625,14 @@ def main():
     
     create_cache_folder()
     threading.Thread(target=update_assets, name="update_assets").start()
+
+    from src.backend.DeckManagement.Subclasses.video_cache_sweeper import sweep_stale_video_caches
+    threading.Thread(target=sweep_stale_video_caches, args=(15,), name="video_cache_sweep", daemon=True).start()
+
+    # Diagnostic only -- no-ops unless SC_MEM_TELEMETRY=1 (docs/memory-footprint-plan.md Phase 0).
+    from src.backend.mem_telemetry import start_if_enabled as start_mem_telemetry
+    start_mem_telemetry()
+
     load()
 
 if __name__ == "__main__":

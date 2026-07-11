@@ -82,9 +82,7 @@ class IconChooserPage(ChooserPage):
         self.selected_icon = path
 
     def on_child_activated(self, flow_box, child):
-        self.asset_manager.callback_func(child.icon.path, *self.asset_manager.callback_args, **self.asset_manager.callback_kwargs)
-        self.asset_manager.close()
-        self.asset_manager.destroy()
+        self.asset_manager.deliver_selection(child.icon.path)
 
     def preview_factory(self, preview: IconPreview, icon):
         preview.set_icon(icon)

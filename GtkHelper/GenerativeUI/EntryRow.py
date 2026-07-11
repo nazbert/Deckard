@@ -43,16 +43,16 @@ class EntryRow(GenerativeUI[str]):
             can_reset (bool, optional): Whether the value can be reset. Defaults to True.
             auto_add (bool, optional): Whether to automatically add this entry to the UI. Defaults to True.
         """
-        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change)
+        def build():
+            self._widget: Adw.EntryRow = Adw.EntryRow(
+                title=self.get_translation(title, title),
+                text=self._default_value
+            )
 
-        self._widget: Adw.EntryRow = Adw.EntryRow(
-            title=self.get_translation(title, title),
-            text=self._default_value
-        )
-
-        self.filter_func = filter_func
-        self._handle_reset_button_creation()
-        self.connect_signals()
+            self.filter_func = filter_func
+            self._handle_reset_button_creation()
+            self.connect_signals()
+        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change, build=build)
 
     def connect_signals(self):
         """
@@ -86,11 +86,15 @@ class EntryRow(GenerativeUI[str]):
 
     def get_text(self) -> str:
         """
-        Retrieves the current text from the entry row widget.
+        Retrieves the current text from the entry row widget. Falls back to
+        the settings-backed value layer if the widget hasn't been built yet
+        -- reading the text is a value query and must not force a build.
 
         Returns:
             str: The current text in the entry row.
         """
+        if self._widget is None:
+            return self.get_value()
         return self.widget.get_text()
 
     def _text_reset(self, text):

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.backend.PluginManager.ActionCore import ActionCore
 
-from GtkHelper.GtkHelper import better_disconnect
+from GtkHelper.GtkHelper import better_disconnect, on_main
 
 
 class ComboRow(GenerativeUI[BaseComboRowItem]):
@@ -48,19 +48,19 @@ class ComboRow(GenerativeUI[BaseComboRowItem]):
             can_reset (bool, optional): Whether resetting is allowed. Defaults to True.
             auto_add (bool, optional): Whether to automatically add this UI element to the action. Defaults to True.
         """
-        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change)
+        def build():
+            self._widget: Combo = Combo(
+                title=self.get_translation(title, title),
+                subtitle=self.get_translation(subtitle, subtitle),
+                items=items,
+                enable_search=enable_search,
+                default_selection=self._default_value
+            )
+            self._handle_reset_button_creation()
+            self.connect_signals()
+        super().__init__(action_core, var_name, default_value, can_reset, auto_add, complex_var_name, on_change, build=build)
 
-        self._widget: Combo = Combo(
-            title=self.get_translation(title, title),
-            subtitle=self.get_translation(subtitle, subtitle),
-            items=items,
-            enable_search=enable_search,
-            default_selection=self._default_value
-        )
-
-        self._handle_reset_button_creation()
-        self.connect_signals()
-
+    @on_main
     def set_sensitive(self, sensitive: bool):
         self.widget.set_sensitive(sensitive)
 
@@ -90,10 +90,22 @@ class ComboRow(GenerativeUI[BaseComboRowItem]):
         if trigger_callback and self.on_change:
             old_value = self.get_item(old_value)
 
-            self.on_change(self.widget, item, old_value)
+            # Raw widget reference (may be None) -- see base class's
+            # _handle_value_changed for why this must not force a build.
+            self.on_change(self._widget, item, old_value)
+
+    def reset_value(self):
+        """Resets the selection to its default. An unbuilt row has no item
+        list to resolve old/new BaseComboRowItem values against, so it just
+        persists the default and skips the on_change callback -- it must
+        not force a build just to reset a setting."""
+        if self._widget is None:
+            self.set_value(self._default_value)
+            return
+        self._reset_value_on_widget()
 
     @GenerativeUI.signal_manager
-    def reset_value(self):
+    def _reset_value_on_widget(self):
         selected_item = self.widget.set_selected_item(self._default_value)
         self._handle_value_changed(selected_item)
 
@@ -119,13 +131,12 @@ class ComboRow(GenerativeUI[BaseComboRowItem]):
 
     # Widget Wrappers
 
+    @on_main
     def set_selected_item(self, item: BaseComboRowItem | str = "", update_setting: bool = False):
         """Sets the selected item and optionally updates the stored value."""
         selected_item = self.widget.set_selected_item(item)
-
         if update_setting:
             self.set_value(selected_item)
-
         return selected_item
 
     @GenerativeUI.signal_manager

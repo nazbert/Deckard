@@ -40,10 +40,12 @@ class DeckGroup(Adw.PreferencesGroup):
         self.deck_serial_number = settings_page.deck_serial_number
 
         self.brightness = Brightness(settings_page, self.deck_serial_number)
+        self.saturation = Saturation(settings_page, self.deck_serial_number)
         self.screensaver = Screensaver(settings_page, self.deck_serial_number)
         self.rotation = Rotation(settings_page, self.deck_serial_number)
 
         self.add(self.brightness)
+        self.add(self.saturation)
         self.add(self.screensaver)
         self.add(self.rotation)
 
@@ -176,6 +178,85 @@ class Brightness(Adw.PreferencesRow):
 
         # Update ui
         self.scale.set_value(brightness)
+
+
+class Saturation(Adw.PreferencesRow):
+    """Per-deck display saturation boost (PIL ImageEnhance.Color factor).
+
+    Stored as deck settings["display"]["saturation"] (default 1.0, a strict
+    no-op everywhere it's applied). Unlike Brightness there is no live
+    per-frame setter to call -- the factor is baked into media at load/cache-
+    build time -- so changing it reloads the active page instead
+    (DeckController.set_display_saturation), which re-enhances static media
+    immediately and, for background/key video, lazily rebuilds the video
+    cache under the new factor's cache filename on next playthrough.
+    """
+    def __init__(self, settings_page: "PageSettings", deck_serial_number, **kwargs):
+        super().__init__()
+        self.settings_page = settings_page
+        self.deck_serial_number = deck_serial_number
+        self.build()
+
+        self.on_map_tasks: list = []
+        self.connect("map", self.on_map)
+
+        self.load_default()
+        self.scale.connect("value-changed", self.on_value_changed)
+
+    def on_map(self, widget):
+        for f in self.on_map_tasks:
+            f()
+        self.on_map_tasks.clear()
+
+    def build(self):
+        self.main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True,
+                                margin_start=15, margin_end=15, margin_top=15, margin_bottom=15)
+        self.set_child(self.main_box)
+
+        self.label = Gtk.Label(label=gl.lm.get("deck.deck-group.saturation"), hexpand=True, xalign=0)
+        self.main_box.append(self.label)
+
+        self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, min=1.0, max=1.5, step=0.05)
+        self.scale.set_draw_value(True)
+        self.scale.set_digits(2)
+        self.main_box.append(self.scale)
+
+    def on_value_changed(self, scale):
+        # Trailing debounce: value-changed fires on every drag step, and
+        # applying saturation is a full page reload plus (for video
+        # backgrounds) a cache rebuild -- apply once, 300ms after the drag
+        # settles, instead of ~10 times across a 1.0->1.5 drag.
+        if getattr(self, "_apply_source", None) is not None:
+            GLib.source_remove(self._apply_source)
+        self._apply_source = GLib.timeout_add(300, self._apply_value)
+
+    def _apply_value(self):
+        self._apply_source = None
+        value = round(self.scale.get_value(), 2)
+
+        # Persists to deck settings, refreshes DeckController's cached value,
+        # and reloads the active page -- see DeckController.set_display_saturation.
+        self.settings_page.deck_controller.set_display_saturation(value)
+        return GLib.SOURCE_REMOVE
+
+    def load_default(self):
+        if not self.get_mapped():
+            self.on_map_tasks.clear()
+            self.on_map_tasks.append(lambda: self.load_default())
+            return
+
+        original_values = gl.settings_manager.get_deck_settings(self.deck_serial_number)
+
+        # Set default value
+        original_values.setdefault("display", {})
+        saturation = original_values["display"].setdefault("saturation", 1.0)
+
+        # Save if changed
+        if original_values != gl.settings_manager.get_deck_settings(self.deck_serial_number):
+            gl.settings_manager.save_deck_settings(self.deck_serial_number, original_values)
+
+        # Update ui
+        self.scale.set_value(saturation)
 
 
 class Screensaver(Adw.PreferencesRow):
@@ -316,6 +397,11 @@ class Screensaver(Adw.PreferencesRow):
 
         self.connect_signals()
 
+    def page_overwrites_screensaver(self) -> bool:
+        # Missing "screensaver"/"overwrite" keys mean "not overwritten".
+        active_page = self.settings_page.deck_controller.active_page
+        return bool(active_page.dict.get("screensaver", {}).get("overwrite", False))
+
     def on_toggle_enable(self, toggle_switch, state):
         config = gl.settings_manager.get_deck_settings(self.deck_serial_number)
         config.setdefault("screensaver", {})
@@ -323,9 +409,7 @@ class Screensaver(Adw.PreferencesRow):
         # Save
         gl.settings_manager.save_deck_settings(self.deck_serial_number, config)
         # Update enable if not overwritten by the active page
-        active_page = self.settings_page.deck_controller.active_page
-        active_page.dict.setdefault("screensaver", {})
-        if not active_page.dict.get("screensaver", {}).get("overwrite", False):
+        if not self.page_overwrites_screensaver():
             self.settings_page.deck_controller.screen_saver.set_enable(state)
 
         self.config_box.set_visible(state)
@@ -338,8 +422,7 @@ class Screensaver(Adw.PreferencesRow):
         gl.settings_manager.save_deck_settings(self.deck_serial_number, config)
 
         # Update loop if not overwritten by the active page
-        active_page = self.settings_page.deck_controller.active_page
-        if not active_page.dict["screensaver"]["overwrite"]:
+        if not self.page_overwrites_screensaver():
             self.settings_page.deck_controller.screen_saver.set_loop(state)
 
     def on_change_fps(self, spinner):
@@ -349,8 +432,7 @@ class Screensaver(Adw.PreferencesRow):
         # Save
         gl.settings_manager.save_deck_settings(self.deck_serial_number, config)
         # Update fps if not overwritten by the active page
-        active_page = self.settings_page.deck_controller.active_page
-        if not active_page.dict["screensaver"]["overwrite"]:
+        if not self.page_overwrites_screensaver():
             self.settings_page.deck_controller.screen_saver.set_fps(spinner.get_value_as_int())
 
     def on_change_time(self, spinner):
@@ -360,8 +442,7 @@ class Screensaver(Adw.PreferencesRow):
         # Save
         gl.settings_manager.save_deck_settings(self.deck_serial_number, config)
         # Update time if not overwritten by the active page
-        active_page = self.settings_page.deck_controller.active_page
-        if not active_page.dict["screensaver"]["overwrite"]:
+        if not self.page_overwrites_screensaver():
             self.settings_page.deck_controller.screen_saver.set_time(round(spinner.get_value_as_int()))
 
     def on_change_brightness(self, scale):
@@ -371,9 +452,7 @@ class Screensaver(Adw.PreferencesRow):
         # Save
         gl.settings_manager.save_deck_settings(self.deck_serial_number, config)
         # Update brightness if not overwritten by the active page
-        active_page = self.settings_page.deck_controller.active_page
-        active_page.dict.setdefault("screensaver", {})
-        if not active_page.dict["screensaver"]["overwrite"]:
+        if not self.page_overwrites_screensaver():
             self.settings_page.deck_controller.screen_saver.set_brightness(scale.get_value())
 
     def set_thumbnail(self, file_path):

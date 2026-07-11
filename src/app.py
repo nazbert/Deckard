@@ -13,7 +13,6 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import python modules
-from ast import main
 import multiprocessing
 import signal
 import sys
@@ -115,6 +114,7 @@ class App(Adw.Application):
         for task in gl.app_loading_finished_tasks:
             if callable(task):
                 task()
+        gl.app_loading_finished_tasks.clear()
         change_page_action = Gio.SimpleAction.new("change_page", GLib.VariantType("as")) # as = array of strings
         change_page_action.connect("activate", self.on_change_page)
         self.add_action(change_page_action)
@@ -136,8 +136,12 @@ class App(Adw.Application):
         self.show_donate(ignore_background_launch=True)
 
     def let_user_select_asset(self, default_path, callback_func=None, *callback_args, **callback_kwargs):
-        self.asset_manager = AssetManager(application=self, main_window=self.main_win)
-        gl.asset_manager = self.asset_manager
+        # Reuse the existing window instead of orphaning it with a new one (P4.2):
+        # on_close() nulls out both gl.asset_manager and self.asset_manager, so this
+        # only (re)constructs the window on first use or after it has been closed.
+        if getattr(self, "asset_manager", None) is None:
+            self.asset_manager = AssetManager(application=self, main_window=self.main_win)
+            gl.asset_manager = self.asset_manager
         self.asset_manager.show_for_path(default_path, callback_func, *callback_args, **callback_kwargs)
 
     def show_donate(self, ignore_background_launch: bool = False):
@@ -207,12 +211,30 @@ class App(Adw.Application):
         timer.setDaemon(True)
         timer.start()
 
+        # Must run BEFORE the delete() loop (plan §2.4): close_all() submits
+        # the terminal ClearAndClose control message and bounds a join on
+        # each media thread. delete()'s media_player.stop() would otherwise
+        # race a writer that never got the chance to clear+close the device.
+        # It also must run before the slow joins below: a deck still open
+        # when force_quit fires fails the next startup with TransportError(-1).
+        gl.deck_manager.close_all()
+
         for ctrl in gl.deck_manager.deck_controller:
-            ctrl.delete()
+            # app_quit=True (plan P1.3): skips action teardown (step 6),
+            # which can run plugin hooks via run_on_main -- on_quit is
+            # already running on main against the 6s force_quit timer above,
+            # and plugin notification doesn't matter when the process is
+            # about to os._exit() anyway. close_all() just above already
+            # drove each controller's writer through ClearAndCloseMsg, so
+            # close()'s own step 5 is a fast no-op here.
+            ctrl.close(remove_media=True, app_quit=True)
 
         gl.deck_manager.stop_usb_monitoring()
 
         gl.plugin_manager.loop_daemon = False
+
+        from GtkHelper.GtkHelper import shutdown_background_pool
+        shutdown_background_pool()
 
         for thread in threading.enumerate():
             if thread is not threading.current_thread() and not thread.daemon:
@@ -223,14 +245,17 @@ class App(Adw.Application):
         for child in multiprocessing.active_children():
             child.terminate()
 
+        # Terminate plugin/action backend subprocesses (plain subprocess.Popen
+        # children, not multiprocessing, so not covered by the loop above).
+        gl.plugin_manager.terminate_all_backends()
+
         gl.tray_icon.stop()
 
-        # Close all decks
-        gl.deck_manager.close_all()
-        # Stop timer
         log.success("Stopped StreamController. Have a nice day!")
         log.stop()
-        sys.exit(0)
+        # os._exit, not sys.exit: interpreter teardown aborts in libusb on the
+        # hidapi read thread during exit.
+        os._exit(0)
 
     def force_quit(self):
         log.info("Forcing quit...")

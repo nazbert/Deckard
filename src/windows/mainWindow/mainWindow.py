@@ -31,7 +31,6 @@ from loguru import logger as log
 from src.windows.mainWindow.elements.KeepRunningDialog import KeepRunningDialog
 from src.windows.mainWindow.elements.leftArea import LeftArea
 from src.windows.mainWindow.elements.Sidebar.Sidebar import Sidebar
-from src.windows.mainWindow.headerBar import HeaderBar
 from GtkHelper.GtkHelper import get_deepest_focused_widget, get_deepest_focused_widget_with_attr
 from src.windows.mainWindow.elements.NoPagesError import NoPagesError
 from src.windows.mainWindow.elements.NoDecksError import NoDecksError
@@ -330,47 +329,3 @@ class MainWindow(Adw.ApplicationWindow):
             return gl.page_manager.dummy_page
         if hasattr(controller, "active_page"):
             return controller.active_page
-
-
-class PageManagerNavPage(Adw.NavigationPage):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        self.build()
-
-    def build(self):
-        self.main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, margin_top=30)
-        self.set_child(self.main_box)
-
-        for i in range(10):
-            self.main_box.append(PageRow(window=None))
-
-
-class PageRow(Gtk.ListBoxRow):
-    def __init__(self, window: MainWindow):
-        self.window = window
-        super().__init__()
-        self.set_margin_bottom(4)
-        self.set_margin_start(50)
-        self.set_margin_end(50)
-
-        self.main_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, hexpand=True)
-        self.set_child(self.main_box)
-
-        self.main_button = Gtk.Button(hexpand=True, height_request=30,
-                                      label="Page Name",
-                                      css_classes=["no-round-right"])
-        self.main_box.append(self.main_button)
-
-        self.main_box.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
-
-        self.config_button = Gtk.Button(height_request=30,
-                                        icon_name="view-more",
-                                        css_classes=["no-round-left"])
-        self.config_button.connect("clicked", self.on_config)
-        self.main_box.append(self.config_button)
-
-    def on_config(self, button):
-        return
-        context = KeyButtonContextMenu(self, self.window)
-        context.popup()

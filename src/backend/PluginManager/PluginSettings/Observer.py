@@ -3,46 +3,32 @@ Author: G4PLS
 Year: 2024
 """
 
-import asyncio
-from loguru import logger as log
+from src.backend.PluginManager import event_dispatch
+from src.Signals.weak_callbacks import CallbackRegistry
 
 class Observer:
     def __init__(self):
-        self.observers: list = []
+        # CallbackRegistry (src/Signals/weak_callbacks.py, design doc bug
+        # 3/27): bound-method observers are held weakly, so a subscriber
+        # that never calls unsubscribe() on teardown doesn't keep this list
+        # (and the objects it points at) growing forever.
+        self.observers = CallbackRegistry()
 
     def subscribe(self, observer: callable):
-        if observer not in self.observers:
-            self.observers.append(observer)
+        self.observers.add(observer)
 
     def unsubscribe(self, observer: callable):
-        if observer in self.observers:
-            self.observers.remove(observer)
+        self.observers.remove(observer)
 
     def notify(self, *args, **kwargs):
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(self._notify(*args, **kwargs))  # Schedule _notify as a coroutine
-            else:
-                loop.run_until_complete(self._notify(*args, **kwargs))
-            return
-        except:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(self._notify(*args, **kwargs))
-        finally:
-            loop.close()
-
-    async def _notify(self, *args, **kwargs):
-        coroutines = [self._ensure_coroutine(observer, *args, **kwargs) for observer in self.observers]
-        await asyncio.gather(*coroutines)
-
-    async def _ensure_coroutine(self, callback: callable, *args, **kwargs):
-        if asyncio.iscoroutinefunction(callback):
-            return await callback(*args, **kwargs)
-        else:
-            try:
-                return await asyncio.to_thread(callback, *args, **kwargs)
-            except Exception as e:
-                log.error(f"Callback {callback.__name__} could not be called")
-                return await asyncio.sleep(0)
+        # Previously: pulled/created an asyncio event loop per call (with a
+        # bare `except:` around a call that could legitimately try to close
+        # a *running* loop it does not own -- design doc bug 27) and ran
+        # every observer through asyncio.gather/to_thread. Dispatch is now
+        # queued onto the same shared single-thread dispatcher EventHolder
+        # uses (event_dispatch.py): one persistent loop for the process's
+        # lifetime instead of one per notify() call, each observer isolated
+        # in its own try/except. notify() returns before observers
+        # necessarily run, same as it effectively already did for a caller
+        # racing a *running* loop via the `ensure_future` branch above.
+        event_dispatch.dispatch(self.observers.snapshot(), args, kwargs)

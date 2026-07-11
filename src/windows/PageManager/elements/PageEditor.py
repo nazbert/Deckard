@@ -416,6 +416,12 @@ class BackgroundGroup(PageEditorGroup):
         self.fps_spin.set_title("FPS")
         self.media_settings_box.append(self.fps_spin)
 
+        self.extend_touchscreen_toggle = Adw.SwitchRow(
+            title="Extend to Touchscreen",
+            subtitle="Continue the background onto the touch strip (Stream Deck +)"
+        )
+        self.media_settings_box.append(self.extend_touchscreen_toggle)
+
         self.button_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, valign=Gtk.Align.CENTER)
         self.media_main_box.append(self.button_box)
 
@@ -433,6 +439,7 @@ class BackgroundGroup(PageEditorGroup):
         self.show_background_toggle.connect("notify::active", self.on_show_background_changed)
         self.loop_toggle.connect("notify::active", self.on_loop_changed)
         self.fps_spin.connect("changed", self.on_fps_changed)
+        self.extend_touchscreen_toggle.connect("notify::active", self.on_extend_touchscreen_changed)
         self.media_selector_button.connect("clicked", self.on_media_selector_click)
 
     def disconnect_events(self):
@@ -440,6 +447,7 @@ class BackgroundGroup(PageEditorGroup):
         better_disconnect(self.show_background_toggle, self.on_show_background_changed)
         better_disconnect(self.loop_toggle, self.on_loop_changed)
         better_disconnect(self.fps_spin, self.on_fps_changed)
+        better_disconnect(self.extend_touchscreen_toggle, self.on_extend_touchscreen_changed)
         better_disconnect(self.media_selector_button, self.on_media_selector_click)
 
     def load_config_settings(self, page_path: str):
@@ -451,6 +459,7 @@ class BackgroundGroup(PageEditorGroup):
         self.show_background_toggle.set_active(background_settings.get("show", False))
         self.loop_toggle.set_active(background_settings.get("loop", False))
         self.fps_spin.set_value(background_settings.get("fps", 0))
+        self.extend_touchscreen_toggle.set_active(background_settings.get("extend-to-touchscreen", False))
         self.set_thumbnail(background_settings.get("media-path", None))
 
     def on_enable_changed(self, *args):
@@ -478,6 +487,13 @@ class BackgroundGroup(PageEditorGroup):
         gl.page_manager.overwrite_background_settings(
             path=self.page_editor.active_page_path,
             fps=int(self.fps_spin.get_value())
+        )
+        self.update_background()
+
+    def on_extend_touchscreen_changed(self, *args):
+        gl.page_manager.overwrite_background_settings(
+            path=self.page_editor.active_page_path,
+            extend_to_touchscreen=self.extend_touchscreen_toggle.get_active()
         )
         self.update_background()
 

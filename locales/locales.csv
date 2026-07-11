@@ -122,6 +122,7 @@ onboarding.ready.button;Start;Start;Commencez;Iniciar;Começar
 deck.deck-group.title;Deck Einstellungen;Deck Settings;Paramètres du Deck;Configuración del deck;Configurações do Deck
 deck.deck-group.description;Betreffen das ganze Deck, sofern nicht überschrieben;Applies to the whole deck unless overwritten;S'applique à tout le Deck sauf indication contraire;Se aplica a todo el deck a menos que se sobrescriba;Aplica-se a todo o deck a menos que seja substituído
 deck.deck-group.brightness;Helligkeit;Brightness;Luminosité;Brillo;Brilho
+deck.deck-group.saturation;Sättigung;Saturation;Saturation;Saturación;Saturação
 deck.deck-group.enable-screensaver;Bildschirmschoner;Enable Screensaver;Activer l'économiseur d'écran;Activar salvapantallas;Habilitar Protetor de Tela
 deck.deck-group.rotation;Ausrichtung;Rotation;Rotation;Rotación;Rotação
 deck.deck-group.screensaver-delay;Einschalten nach (min);Enable after (min);L'activer après (min);Activar después (min);Habilitar depois de (min)
