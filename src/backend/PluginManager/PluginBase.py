@@ -345,21 +345,26 @@ class PluginBase(rpyc.Service):
         else:
             plugin.connect_to_event(callback=callback, event_id=event_id)
 
-    def disconnect_from_event(self, event_id: str, callback: callable) -> None:
+    def disconnect_from_event(self, event_id: str = None, callback: callable = None, event_id_suffix: str = None) -> None:
         """
         Disconnects a Callback from the Event which gets specified by the event ID
 
         Args:
-            event_id (str): The ID of the Event.
+            event_id (str): The full ID of the Event. Alternatively pass
+                event_id_suffix to address this plugin's own
+                "<plugin_id>::<suffix>" events -- symmetric with
+                connect_to_event.
             callback (callable): The Callback that gets Removed
 
         Returns:
             None
         """
-        if event_id in self.event_holders:
-            self.event_holders[event_id].remove_listener(callback)
+        full_id = event_id or f"{self.get_plugin_id()}::{event_id_suffix}"
+
+        if full_id in self.event_holders:
+            self.event_holders[full_id].remove_listener(callback)
         else:
-            log.warning(f"{event_id} does not exist in {self.plugin_name}")
+            log.warning(f"{full_id} does not exist in {self.plugin_name}")
 
     def disconnect_from_event_directly(self, plugin_id: str, event_id: str, callback: callable) -> None:
         """
@@ -367,7 +372,7 @@ class PluginBase(rpyc.Service):
 
         Args:
             plugin_id (str): The ID of the Plugin
-            event_id (str): The ID of the Event.
+            event_id (str): The full ID of the Event.
             callback (callable): The Callback that gets Removed
 
         Returns:
@@ -377,7 +382,7 @@ class PluginBase(rpyc.Service):
         if plugin is None:
             log.warning(f"{plugin_id} does not exist")
         else:
-            plugin.disconnect_from_event(event_id, callback)
+            plugin.disconnect_from_event(event_id=event_id, callback=callback)
 
     def get_settings(self):
         """

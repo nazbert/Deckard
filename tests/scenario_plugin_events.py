@@ -15,8 +15,10 @@ Covers:
   (c) #36 -- the cross-plugin event APIs work: connect_to_event_directly
       attaches to the TARGET plugin's holder (and the callback really
       receives a trigger_event), suffix-based connect_to_event no longer
-      KeyErrors on None, and disconnect_from_event_directly detaches from
-      the target plugin -- not from the calling one.
+      KeyErrors on None, disconnect_from_event accepts the same
+      event_id_suffix as connect_to_event (symmetric, no leaked
+      subscription), and disconnect_from_event_directly detaches from the
+      target plugin -- not from the calling one.
 """
 import fixtures  # noqa: F401  (isolated data dir + sys.path, house convention)
 
@@ -296,6 +298,34 @@ def check_connect_to_event_suffix_path():
     )
 
 
+def check_disconnect_from_event_suffix_symmetry():
+    # connect_to_event grew an event_id_suffix path; disconnect_from_event
+    # must accept the same suffix so a plugin that suffix-connected to its
+    # own "<plugin_id>::<suffix>" event can symmetrically suffix-disconnect
+    # instead of leaking the subscription. Pre-fix disconnect_from_event took
+    # only event_id, so passing event_id_suffix landed full_id=None -> the
+    # holder was never found and the listener was never removed.
+    provider, consumer, holder = make_provider_and_consumer()
+
+    suffix_callback = lambda *args, **kwargs: None  # noqa: E731
+    provider.connect_to_event(callback=suffix_callback, event_id_suffix=EVENT_SUFFIX)
+    assert suffix_callback in holder.observers.snapshot()
+
+    provider.disconnect_from_event(callback=suffix_callback, event_id_suffix=EVENT_SUFFIX)
+    assert suffix_callback not in holder.observers.snapshot(), (
+        "suffix-based disconnect_from_event did not remove the subscription "
+        "-- suffix connect/disconnect are asymmetric (subscription leaks)"
+    )
+
+    # The pre-existing full-id positional call must keep working unchanged.
+    provider.connect_to_event(callback=suffix_callback, event_id=EVENT_ID)
+    assert suffix_callback in holder.observers.snapshot()
+    provider.disconnect_from_event(EVENT_ID, suffix_callback)
+    assert suffix_callback not in holder.observers.snapshot(), (
+        "positional full-id disconnect_from_event regressed"
+    )
+
+
 def check_disconnect_from_event_directly_targets_right_plugin():
     provider, consumer, holder = make_provider_and_consumer()
 
@@ -331,6 +361,7 @@ def main() -> None:
     check_base_handlers_are_callable_noops()
     check_connect_to_event_directly_reaches_target_plugin()
     check_connect_to_event_suffix_path()
+    check_disconnect_from_event_suffix_symmetry()
     check_disconnect_from_event_directly_targets_right_plugin()
     print("PASS: scenario_plugin_events")
 

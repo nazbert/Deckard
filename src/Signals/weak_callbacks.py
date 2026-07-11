@@ -152,14 +152,23 @@ class CallbackRegistry:
             for entry in self._entries:
                 live = _resolve_entry(entry)
                 if live is None:
-                    # prune: owner is gone
+                    # prune: owner is gone. Only a dead _WeakMethodEntry can
+                    # resolve to None (strong entries are the callable itself
+                    # and never die out from under us), so `.description` is
+                    # always present here; the getattr fallback is pure
+                    # belt-and-suspenders.
                     pruned.append(getattr(entry, "description", repr(entry)))
                     continue
                 kept.append(entry)
                 live_callbacks.append(live)
             self._entries = kept
         # Log outside the lock -- a sink must never be able to re-enter the
-        # registry while snapshot() holds it.
+        # registry while snapshot() holds it. A given dead entry is pruned
+        # from self._entries in the same pass, so it is logged at most once
+        # across the process; the only way to double-log is two threads
+        # racing snapshot() on the same still-dead entry (benign duplicate
+        # DEBUG line, no state corruption -- the locked _entries reassignment
+        # is last-write-wins).
         for description in pruned:
             log.debug(
                 f"CallbackRegistry: pruning dead callback {description} "
