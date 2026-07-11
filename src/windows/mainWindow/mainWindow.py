@@ -318,13 +318,19 @@ class MainWindow(Adw.ApplicationWindow):
 
     def show_error_toast(self, text: str) -> None:
         # Errors linger longer and jump the queue -- they explain missing
-        # functionality (e.g. plugins that failed to load).
-        toast = Adw.Toast(
-            title=text,
-            timeout=7,
-            priority=Adw.ToastPriority.HIGH
-        )
-        self.toast_overlay.add_toast(toast)
+        # functionality (e.g. plugins that failed to load). Callers reach this
+        # from background threads (plugin/store loads), so marshal onto the
+        # GTK main thread; NOTE: MR !12 also adds this method (with the same
+        # marshalling) -- whichever of !12/!14 merges second keeps one copy.
+        def _add() -> bool:
+            toast = Adw.Toast(
+                title=text,
+                timeout=7,
+                priority=Adw.ToastPriority.HIGH
+            )
+            self.toast_overlay.add_toast(toast)
+            return False
+        GLib.idle_add(_add)
 
     def get_active_controller(self) -> DeckController:
         if not recursive_hasattr(self, "leftArea.deck_stack"): return
