@@ -112,6 +112,12 @@ class WindowGrabber:
         notify_foreground_window_changed(window.title, window.wm_class)
 
         for deck_controller in gl.deck_manager.deck_controller:
+            # A closed/disabled deck must only be skipped -- this used to
+            # `return`, aborting auto page switching for every remaining
+            # deck as soon as one disabled deck's page regex matched (#104).
+            if deck_controller is None or not deck_controller.deck.is_open():
+                continue
+
             found_page = False
             for page_path in gl.page_manager.get_pages():
                 info = gl.page_manager.get_auto_change_settings(page_path)
@@ -123,8 +129,6 @@ class WindowGrabber:
                     continue
 
                 if self.get_is_window_matching(window, wm_regex, title_regex):
-                    if not deck_controller.deck.is_open():
-                        return
                     if deck_controller.serial_number() not in decks:
                         continue
 
@@ -139,12 +143,8 @@ class WindowGrabber:
                     break
 
             if not found_page:
-                if deck_controller is None:
-                    return
                 if not hasattr(deck_controller, "page_auto_loaded"):
-                    return
-                if not deck_controller.deck.is_open():
-                    return
+                    continue
 
                 if deck_controller.page_auto_loaded:
                     active_page_change_info = gl.page_manager.get_auto_change_settings(deck_controller.active_page.json_path)
