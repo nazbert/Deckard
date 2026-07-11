@@ -10,7 +10,6 @@ from gi.repository import GLib
 # Import own modules
 from src.backend.PluginManager.ActionHolder import ActionHolder
 from src.backend.PluginManager.PluginBase import PluginBase
-from src.backend.DeckManagement.HelperMethods import get_last_dir
 from streamcontroller_plugin_tools import BackendBase
 
 import globals as gl
@@ -62,7 +61,16 @@ class PluginManager:
         # Action dialog's empty state) so a broken plugin never fails
         # silently. Entries are pruned when the folder disappears or the
         # plugin later registers successfully.
+        #
+        # Cross-thread: a store install re-runs load_plugins()/init_plugins()
+        # on a background thread (StoreBackend.install_plugin), which rebuilds
+        # and writes this dict, while the GTK main thread reads it via
+        # get_load_health() (Add-Action empty state). _load_errors_lock keeps
+        # the rebuild atomic against those reads -- a plain dict is GIL-safe
+        # today but the mid-rebuild prune could otherwise expose a half-built
+        # dict on a future Python.
         self.load_errors: dict[str, str] = {}
+        self._load_errors_lock = threading.Lock()
 
     def terminate_all_backends(self) -> None:
         """Terminate every launched backend child process; called on app quit."""
@@ -82,7 +90,8 @@ class PluginManager:
             folders = []
 
         # Drop stale errors for plugins that no longer exist on disk (uninstalled).
-        self.load_errors = {folder: error for folder, error in self.load_errors.items() if folder in folders}
+        with self._load_errors_lock:
+            self.load_errors = {folder: error for folder, error in self.load_errors.items() if folder in folders}
 
         for folder in folders:
             if folder.startswith(".") or not os.path.isdir(os.path.join(gl.PLUGIN_DIR, folder)):
@@ -96,7 +105,8 @@ class PluginManager:
                     importlib.import_module(import_string)
                 except Exception as e:
                     log.opt(exception=e).error(f"Error importing plugin {folder}: {e}")
-                    self.load_errors[folder] = f"import failed: {e}"
+                    with self._load_errors_lock:
+                        self.load_errors[folder] = f"import failed: {e}"
 
         # Get all classes inheriting from PluginBase and generate objects for them
         self.init_plugins()
@@ -131,7 +141,8 @@ class PluginManager:
         exists the toast is deferred via gl.app_loading_finished_tasks (which
         on_activate drains on the main thread once the window is up),
         afterwards it is dispatched through GLib.idle_add."""
-        n_failed = len(self.load_errors)
+        with self._load_errors_lock:
+            n_failed = len(self.load_errors)
         if n_failed == 0:
             return
 
@@ -176,13 +187,15 @@ class PluginManager:
                 obj = subclass()
             except Exception as e:
                 log.opt(exception=e).error(f"Error initializing plugin {subclass} (folder: {folder}): {e}. Skipping...")
-                self.load_errors[folder] = f"crashed during initialization: {e}"
+                with self._load_errors_lock:
+                    self.load_errors[folder] = f"crashed during initialization: {e}"
                 continue
             self.initialized_plugin_classes.append(subclass)
 
             if getattr(obj, "registered", False):
                 # A previously recorded failure for this folder is obsolete.
-                self.load_errors.pop(folder, None)
+                with self._load_errors_lock:
+                    self.load_errors.pop(folder, None)
             elif not self._is_plugin_disabled(obj):
                 # register() bailed out (invalid manifest, duplicate name, ...)
                 # without even disabling the plugin -- without this record the
@@ -191,7 +204,8 @@ class PluginManager:
                     f"Plugin {subclass} (folder: {folder}) initialized but never registered successfully "
                     f"-- its actions will not be available. See the errors above for the reason."
                 )
-                self.load_errors[folder] = "did not register (invalid or incomplete manifest?)"
+                with self._load_errors_lock:
+                    self.load_errors[folder] = "did not register (invalid or incomplete manifest?)"
 
     def generate_action_index(self):
         self.action_index.clear()
@@ -199,21 +213,6 @@ class PluginManager:
         for plugin in plugins.values():
             plugin_base = plugin["object"]
             self.action_index.update(plugin_base.action_holders)
-
-        return
-        plugins = self.get_plugins()
-        for plugin in plugins.keys():
-            if plugin in self.action_index.keys():
-                continue
-            for action_id in plugins[plugin]["object"].ACTIONS.keys():
-                if action_id is None:
-                    log.warning(f"Plugin {plugin} has an action with id None, skipping...")
-                    continue
-
-                path = plugins[plugin]["folder-path"]
-                # Remove everything except the last folder
-                path = get_last_dir(path)
-                self.action_index[action_id] = plugins[plugin]["object"].ACTIONS[action_id]
 
     def get_plugins(self, include_disabled: bool = False) -> dict:
         # Copy: updating PluginBase.plugins (a class attribute) in place would
@@ -255,9 +254,13 @@ class PluginManager:
     
     def get_load_health(self) -> tuple[int, int]:
         """Returns (n_failed, n_disabled) -- how many plugins failed to load
-        and how many are disabled (version-gated). Used by the UI to explain
-        an empty action list instead of showing a blank page."""
-        return len(self.load_errors), len(PluginBase.disabled_plugins)
+        and how many are disabled (version-gated). Used by the UI (GTK main
+        thread) to explain an empty action list instead of showing a blank
+        page; the lock snapshots load_errors against a concurrent store-install
+        reload rebuilding it on a background thread."""
+        with self._load_errors_lock:
+            n_failed = len(self.load_errors)
+        return n_failed, len(PluginBase.disabled_plugins)
 
     def get_is_plugin_out_of_date(self, plugin_id: str) -> bool:
         plugin = PluginBase.disabled_plugins.get(plugin_id)

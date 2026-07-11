@@ -194,6 +194,72 @@ def main() -> None:
     assert n_failed == 3, f"expected 3 failed plugins, got {n_failed} ({pm.load_errors})"
     assert n_disabled == 2, f"expected 2 disabled plugins, got {n_disabled}"
 
+    # --- snapshot safety: get_load_health() must never observe a half-built
+    # load_errors while a store-install reload (background thread) rebuilds it.
+    # A store install runs load_plugins() off the GTK main thread; the main
+    # thread reads get_load_health() for the Add-Action empty state. The lock
+    # makes the rebuild atomic against that read. Hammer both concurrently and
+    # assert the reader never raises and never sees a nonsensical count. ---
+    import threading
+
+    stop = threading.Event()
+    reader_error: list[BaseException] = []
+
+    def reader() -> None:
+        try:
+            while not stop.is_set():
+                n_failed, n_disabled = pm.get_load_health()
+                # load_errors only ever holds the seeded broken folders; the
+                # count must stay within [0, seeded] -- never a torn/garbage
+                # value from a mid-rebuild dict.
+                assert 0 <= n_failed <= 8, f"torn load_errors read: {n_failed}"
+                assert n_disabled >= 0
+        except BaseException as e:  # noqa: BLE001 -- surface to the main thread
+            reader_error.append(e)
+
+    reader_thread = threading.Thread(target=reader, name="load_health_reader")
+    reader_thread.start()
+    try:
+        for _ in range(50):
+            pm.load_plugins()  # rebinds/rebuilds load_errors under the lock
+    finally:
+        stop.set()
+        reader_thread.join(timeout=10)
+    assert not reader_thread.is_alive(), "load_health reader thread hung"
+    assert not reader_error, f"get_load_health raced the reload rebuild: {reader_error[0]!r}"
+
+    health_before = pm.get_load_health()
+    assert health_before == pm.get_load_health(), "get_load_health must be stable at rest"
+
+    # get_load_health() must serialize its read against the load_errors
+    # rebuild via _load_errors_lock -- without it (the pre-fix code) a
+    # store-install reload on a background thread could rebuild the dict
+    # under a main-thread reader. Hold the lock and prove the reader blocks
+    # until it is released (a read that ran lock-free would return early).
+    assert hasattr(pm, "_load_errors_lock"), (
+        "load_errors reads/writes must be guarded by a lock (cross-thread "
+        "store-install reload vs main-thread get_load_health)"
+    )
+    blocked = threading.Event()
+    returned = threading.Event()
+
+    def blocked_reader() -> None:
+        blocked.set()
+        pm.get_load_health()  # must not complete until the lock is free
+        returned.set()
+
+    with pm._load_errors_lock:
+        t = threading.Thread(target=blocked_reader, name="blocked_health_reader")
+        t.start()
+        assert blocked.wait(timeout=5), "reader thread never started"
+        # While we hold the lock, the reader must NOT have returned.
+        assert not returned.wait(timeout=0.5), (
+            "get_load_health() returned while the load_errors lock was held "
+            "-- the read is not serialized against the rebuild"
+        )
+    assert returned.wait(timeout=5), "get_load_health() never completed after lock release"
+    t.join(timeout=5)
+
     # --- pruning: a removed (uninstalled) plugin's error is dropped. ---
     import shutil
     shutil.rmtree(os.path.join(gl.PLUGIN_DIR, "com_test_poison_import"))
