@@ -98,6 +98,27 @@ def main() -> None:
         "duplicate-name import must not add a selector row"
     )
 
+    # --- A dotted name typed in the rename dialog must be preserved, not
+    # truncated at the first dot. (splitext(basename("backup.v2"))[0] would
+    # have yielded "backup" -- silently renaming the user's page.)
+    fake_self3 = FakeMenuButtonSelf(FakeFile(src_path))
+    MenuButton.import_page_name_selected_callback(fake_self3, "backup.v2")
+
+    dotted_path = os.path.join(gl.page_manager.PAGE_PATH, "backup.v2.json")
+    assert os.path.isfile(dotted_path), (
+        f"dotted typed name was not preserved -- expected {dotted_path}, "
+        f"the name was truncated at the dot"
+    )
+    assert not os.path.exists(os.path.join(gl.page_manager.PAGE_PATH, "backup.json")), (
+        "the '.v2' suffix was stripped -- page saved as 'backup' instead of 'backup.v2'"
+    )
+    assert fake_self3.pageEditor.page_manager.page_selector.added_paths == [dotted_path], (
+        "the dotted-name page was not added to the selector under its full name"
+    )
+    assert gl.page_manager.find_matching_page_path("backup.v2") == dotted_path, (
+        "the dotted-name page is not findable under the name the user typed"
+    )
+
     print("PASS: scenario_page_import_name")
 
 
