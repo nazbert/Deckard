@@ -15,6 +15,8 @@ Covers:
       no live entry lost
   (e) SC_STRONG_CALLBACKS=1 keeps a bound method alive past its owner's
       death (checked in a subprocess, since the flag is read once at import)
+  (f) snapshot() logs a DEBUG record naming each dead entry it prunes
+      (issue #38 -- the silent-drop shape must at least leave a trace)
 """
 import gc
 import os
@@ -25,6 +27,8 @@ import time
 import weakref
 
 import fixtures  # noqa: F401  (isolated data dir + sys.path, house convention)
+
+from loguru import logger as log
 
 from src.Signals.weak_callbacks import CallbackRegistry
 
@@ -191,12 +195,52 @@ def check_strong_callbacks_env_escape_hatch():
     assert "OK" in result.stdout, result.stdout
 
 
+def check_prune_logs_debug():
+    # Issue #38: dropping a subscription because its owner died is a
+    # deliberate D2 tradeoff, but it must leave a trace -- a DEBUG record
+    # naming the pruned callback -- or ecosystem regressions ("my plugin's
+    # events just stopped") are undiagnosable.
+    records: list[str] = []
+    handle = log.add(lambda message: records.append(str(message)), level="DEBUG")
+    try:
+        registry = CallbackRegistry()
+        owner = _Owner()
+        assert registry.add(owner.method) is True
+
+        del owner
+        gc.collect()
+
+        assert registry.snapshot() == []
+        prune_lines = [r for r in records if "pruning dead callback" in r]
+        assert prune_lines, "snapshot() pruned a dead entry without logging it (issue #38)"
+        assert any("_Owner.method" in line for line in prune_lines), (
+            f"prune log does not name the dropped callback: {prune_lines!r}"
+        )
+    finally:
+        log.remove(handle)
+
+    # A live registry must not spam the prune log: a snapshot with only
+    # live entries logs nothing.
+    records2: list[str] = []
+    handle2 = log.add(lambda message: records2.append(str(message)), level="DEBUG")
+    try:
+        registry = CallbackRegistry()
+        owner = _Owner()
+        registry.add(owner.method)
+        assert len(registry.snapshot()) == 1
+        assert not any("pruning dead callback" in r for r in records2), records2
+        owner.method  # keep the owner referenced past the snapshot above
+    finally:
+        log.remove(handle2)
+
+
 def main() -> None:
     check_bound_method_dies_with_owner()
     check_lambda_stays()
     check_dedupe_same_bound_method()
     check_concurrent_add_remove_snapshot()
     check_strong_callbacks_env_escape_hatch()
+    check_prune_logs_debug()
     print("PASS: scenario_weak_registry")
 
 
