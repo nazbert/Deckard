@@ -7,14 +7,20 @@ AddActionButtonRow from an Adw.PreferencesRow subclass into a plain wrapper
 whose `.button` instance attribute is the real Adw.ButtonRow, and mechanically
 rewrote ActionRow.on_click_up/on_click_down to reference
 `AddActionButtonRow.button` (a class attribute that does not exist) and
-`one_up_child.button` (ActionRow has no `.button` either). Every click on the
-up/down buttons raised AttributeError inside the GTK signal handler --
-swallowed by PyGObject, so the buttons just appeared dead.
+`one_up_child.button` (ActionRow lost its overlay `.button` in 6055cb40).
+Every click on the up/down buttons raised AttributeError inside the GTK
+signal handler -- swallowed by PyGObject, so the buttons just appeared dead.
+
+Un-breaking the buttons also re-activated reorder_actions, dead since
+beta.14, which carried two latent defects of its own (review round 1):
+"background-control-action" was never remapped after a move, and a page dict
+without "label-control-actions" raised TypeError mid-write (after the page
+dict and action_objects were reordered, before save()).
 
 The handlers and reorder_actions are exercised here as plain functions on
 duck-typed stand-ins (no GTK widget is instantiated; the module import brings
 in Gtk/Adw class definitions only). That is a faithful discriminator: the
-broken code raises AttributeError at the `AddActionButtonRow.button` class
+broken wiring raises AttributeError at the `AddActionButtonRow.button` class
 attribute access no matter what the fakes look like.
 
 Checks:
@@ -25,14 +31,20 @@ Checks:
   (b) Guards: up on the top row and down on the bottom action row are no-ops
       (the neighbour is the add-action button row).
   (c) Data round-trip through the REAL ActionExpanderRow.reorder_actions:
-      page dict "actions" order, action_objects order, image-control-action
-      and label-control-actions remapping, page.save() and
-      controller.load_page() all happen; a save->reload of the dict yields
-      the new order.
+      page dict "actions" order, action_objects order, and the remapping of
+      ALL THREE control keys -- image-control-action,
+      background-control-action, label-control-actions -- plus page.save()
+      and controller.load_page(). Control values are chosen distinct from
+      each other to catch cross-wiring between the remaps.
   (d) Stale-index hardening: two consecutive "up" clicks on the same row
       (dispatched before any sidebar rebuild) move it up twice -- requires
       update_indices() after each move, otherwise the second click undoes
       the first.
+  (e) Missing control keys: a page dict carrying only "actions" (no
+      image/background/label control keys -- hand-edited/imported/legacy
+      pages) reorders without raising and the write COMPLETES (save +
+      load_page), with the control keys defaulted the same way
+      ActionPermissionManager reads them.
 """
 import copy
 import sys
@@ -56,8 +68,19 @@ def check(name: str, condition: bool, detail: str = ""):
         FAILURES.append(name)
 
 
+def click(handler, row):
+    """Invoke a click handler, returning the exception instead of letting it
+    escape -- mirrors PyGObject swallowing handler exceptions, and keeps a
+    run against broken code failing orderly instead of dying mid-scenario."""
+    try:
+        handler(row, None)
+        return None
+    except Exception as e:
+        return e
+
+
 # --------------------------------------------------------------------- #
-# Duck-typed stand-ins. ExpanderLogic borrows the REAL reorder methods
+# Duck-typed stand-ins. FakeExpander borrows the REAL reorder methods
 # from ActionExpanderRow (they are plain functions in the class dict) so
 # the data path under test is the production code, while the widget-tree
 # plumbing (get_rows/reorder_child_after) is emulated with lists.
@@ -105,28 +128,18 @@ class FakeRow:
         return f"<FakeRow {self.name}@{self.index}>"
 
 
-def make_page_state(actions, image_control, label_controls):
-    return {
-        "keys": {
-            "0x0": {
-                "states": {
-                    "0": {
-                        "actions": copy.deepcopy(actions),
-                        "image-control-action": image_control,
-                        "label-control-actions": list(label_controls),
-                    }
-                }
-            }
-        }
-    }
-
-
-def make_world(action_ids, image_control=0, label_controls=(0, 0, 0)):
+def make_world(action_ids, image_control=0, background_control=0,
+               label_controls=(0, 0, 0), include_control_keys=True):
     """A fake controller/page pair wired into gl.app, plus a FakeExpander
     holding one FakeRow per action and the add button last."""
-    actions = [{"id": a, "settings": {}} for a in action_ids]
+    state = {"actions": [{"id": a, "settings": {}} for a in action_ids]}
+    if include_control_keys:
+        state["image-control-action"] = image_control
+        state["background-control-action"] = background_control
+        state["label-control-actions"] = list(label_controls)
+
     page = SimpleNamespace(
-        dict=make_page_state(actions, image_control, label_controls),
+        dict={"keys": {"0x0": {"states": {"0": copy.deepcopy(state)}}}},
         action_objects={
             "keys": {"0x0": {0: {i: f"obj_{a}" for i, a in enumerate(action_ids)}}}
         },
@@ -166,12 +179,9 @@ def object_order(page):
 # --------------------------------------------------------------------- #
 print("(a)/(c) middle row up: wiring fires and data round-trips")
 controller, page, expander, rows = make_world(["A", "B", "C"], image_control=1,
+                                              background_control=0,
                                               label_controls=[0, 1, 2])
-try:
-    ActionRow.on_click_up(rows[1], None)  # B moves up
-    raised = None
-except Exception as e:  # the beta.14 code lands here with AttributeError
-    raised = e
+raised = click(ActionRow.on_click_up, rows[1])  # B moves up
 
 check("on_click_up does not raise", raised is None, repr(raised))
 if raised is None:
@@ -188,6 +198,9 @@ if raised is None:
     check("image-control-action follows its action (1 -> 0)",
           state_dict(page)["image-control-action"] == 0,
           str(state_dict(page)["image-control-action"]))
+    check("background-control-action follows its action (0 -> 1)",
+          state_dict(page).get("background-control-action") == 1,
+          str(state_dict(page).get("background-control-action")))
     check("label-control-actions remapped ([0,1,2] -> [1,0,2])",
           state_dict(page)["label-control-actions"] == [1, 0, 2],
           str(state_dict(page)["label-control-actions"]))
@@ -202,12 +215,9 @@ if raised is None:
 # --------------------------------------------------------------------- #
 print("(a) middle row down")
 controller, page, expander, rows = make_world(["A", "B", "C"], image_control=1,
+                                              background_control=2,
                                               label_controls=[2, 2, 2])
-try:
-    ActionRow.on_click_down(rows[1], None)  # B moves down
-    raised = None
-except Exception as e:
-    raised = e
+raised = click(ActionRow.on_click_down, rows[1])  # B moves down
 
 check("on_click_down does not raise", raised is None, repr(raised))
 if raised is None:
@@ -219,6 +229,9 @@ if raised is None:
     check("image-control-action follows its action (1 -> 2)",
           state_dict(page)["image-control-action"] == 2,
           str(state_dict(page)["image-control-action"]))
+    check("background-control-action follows its action (2 -> 1)",
+          state_dict(page).get("background-control-action") == 1,
+          str(state_dict(page).get("background-control-action")))
     check("label-control-actions remapped ([2,2,2] -> [1,1,1])",
           state_dict(page)["label-control-actions"] == [1, 1, 1],
           str(state_dict(page)["label-control-actions"]))
@@ -228,13 +241,15 @@ if raised is None:
 # --------------------------------------------------------------------- #
 print("(b) edge guards")
 controller, page, expander, rows = make_world(["A", "B"])
-ActionRow.on_click_up(rows[0], None)   # rows[-1] is the add button -> no-op
+raised = click(ActionRow.on_click_up, rows[0])  # rows[-1] is the add button
+check("top row up does not raise", raised is None, repr(raised))
 check("top row up is a no-op (no visual reorder)",
       expander.reorder_child_after_calls == [] and action_order(page) == ["A", "B"],
       f"{expander.reorder_child_after_calls} / {action_order(page)}")
 check("top row up saves nothing", page.save_calls == 0, str(page.save_calls))
 
-ActionRow.on_click_down(rows[1], None)  # rows[2] is the add button -> no-op
+raised = click(ActionRow.on_click_down, rows[1])  # rows[2] is the add button
+check("bottom row down does not raise", raised is None, repr(raised))
 check("bottom row down is a no-op",
       expander.reorder_child_after_calls == [] and action_order(page) == ["A", "B"],
       f"{expander.reorder_child_after_calls} / {action_order(page)}")
@@ -244,10 +259,12 @@ check("bottom row down is a no-op",
 # --------------------------------------------------------------------- #
 print("(d) consecutive clicks between rebuilds")
 controller, page, expander, rows = make_world(["A", "B", "C"], image_control=2,
+                                              background_control=0,
                                               label_controls=[2, 0, 1])
 c_row = rows[2]
-ActionRow.on_click_up(c_row, None)
-ActionRow.on_click_up(c_row, None)
+raised = click(ActionRow.on_click_up, c_row)
+raised = raised or click(ActionRow.on_click_up, c_row)
+check("two ups do not raise", raised is None, repr(raised))
 check("two ups move C to the top", action_order(page) == ["C", "A", "B"],
       str(action_order(page)))
 check("objects follow", object_order(page) == ["obj_C", "obj_A", "obj_B"],
@@ -255,9 +272,39 @@ check("objects follow", object_order(page) == ["obj_C", "obj_A", "obj_B"],
 check("image-control-action follows across both moves (2 -> 0)",
       state_dict(page)["image-control-action"] == 0,
       str(state_dict(page)["image-control-action"]))
+check("background-control-action follows across both moves (0 -> 1)",
+      state_dict(page).get("background-control-action") == 1,
+      str(state_dict(page).get("background-control-action")))
+raised = click(ActionRow.on_click_up, c_row)
 check("third up is a no-op (C now at top)",
-      (ActionRow.on_click_up(c_row, None), action_order(page))[1] == ["C", "A", "B"],
+      raised is None and action_order(page) == ["C", "A", "B"],
+      f"{raised!r} / {action_order(page)}")
+
+# --------------------------------------------------------------------- #
+# (e) page dict without any control keys (hand-edited/imported/legacy):
+#     the reorder must complete its write instead of raising mid-write.
+# --------------------------------------------------------------------- #
+print("(e) missing control keys")
+controller, page, expander, rows = make_world(["A", "B", "C"],
+                                              include_control_keys=False)
+raised = click(ActionRow.on_click_up, rows[1])  # B moves up
+check("reorder without control keys does not raise", raised is None, repr(raised))
+check("actions still reordered", action_order(page) == ["B", "A", "C"],
       str(action_order(page)))
+check("objects still reordered", object_order(page) == ["obj_B", "obj_A", "obj_C"],
+      str(object_order(page)))
+check("write completed: page saved", page.save_calls == 1, str(page.save_calls))
+check("write completed: page reloaded", controller.load_page_calls == [page],
+      str(controller.load_page_calls))
+check("absent image-control-action stays None",
+      state_dict(page).get("image-control-action") is None,
+      str(state_dict(page).get("image-control-action")))
+check("absent background-control-action stays None",
+      state_dict(page).get("background-control-action") is None,
+      str(state_dict(page).get("background-control-action")))
+check("absent label-control-actions defaults like ActionPermissionManager",
+      state_dict(page).get("label-control-actions") == [None, None, None],
+      str(state_dict(page).get("label-control-actions")))
 
 # --------------------------------------------------------------------- #
 print()
