@@ -2389,6 +2389,15 @@ class KeyGIF(SingleKeyAsset):
         tile_w, tile_h = self.deck_controller.get_key_image_size()
         fit_size = (max(1, tile_w * 2), max(1, tile_h * 2))
 
+        # Saturation is baked into the retained frames once, here, at decode
+        # time -- the frame list IS this asset's per-frame memo (get_next_frame
+        # only indexes it), so enhancing there instead would re-pay
+        # ImageEnhance on every media tick. A saturation change reloads the
+        # page, which rebuilds this object under the new factor (see
+        # set_display_saturation) -- the same contract as InputImage/
+        # BackgroundImage. Skipped entirely at the default factor.
+        saturation = self.deck_controller.get_display_saturation()
+
         # Extract frames and their delays. The source file is only needed for
         # the duration of this loop -- close it immediately after so the app
         # doesn't hold a dangling fd + full-res frame cache alive underneath
@@ -2402,6 +2411,8 @@ class KeyGIF(SingleKeyAsset):
                 # source already within budget composites fine as-is.
                 if fitted.width > fit_size[0] or fitted.height > fit_size[1]:
                     fitted = ImageOps.contain(fitted, fit_size)
+                if abs(saturation - 1.0) > 0.001:
+                    fitted = ImageEnhance.Color(fitted).enhance(saturation)
                 self.frames.append(fitted)
                 # Get frame delay from GIF metadata (in milliseconds)
                 # Default to 100ms (10fps) if no delay specified
