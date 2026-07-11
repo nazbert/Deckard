@@ -70,10 +70,13 @@ class Migrator_1_5_0_beta_5(Migrator):
                 continue
 
             new_settings_path = os.path.join(gl.DATA_PATH, "settings", "plugins", plugin_dir_name, "settings.json")
-            if os.path.exists(new_settings_path):
+            if not os.path.exists(new_settings_path):
+                os.makedirs(os.path.dirname(new_settings_path), exist_ok=True)
                 with open(new_settings_path, "w") as f:
                     json.dump(settings, f, indent=4)
-            
-            # Remove old settings
+            # If the new path already exists it holds the current settings --
+            # leave it alone instead of clobbering it with the stale old copy.
+
+            # Remove old settings -- a copy now always exists at the new path
             os.remove(old_settings_path)
             
