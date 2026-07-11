@@ -49,12 +49,27 @@ ELGATO_VENDOR_ID = "0fd9"
 
 
 class DeckManager:
+    # Backoff schedule for the startup re-enumeration (issue #106): ~60s
+    # total window. Instance-overridable so the harness can shrink it.
+    BOOT_RESCAN_DELAYS: tuple[float, ...] = (2.0, 3.0, 5.0, 10.0, 15.0, 25.0)
+
     def __init__(self):
         #TODO: Maybe outsource some objects
         self.deck_controller: list[DeckController] = []
         # Guards concurrent add/remove of deck_controller (called from the USB
         # monitor, resume, Flatpak poll and media-thread error paths).
         self._controllers_lock = threading.Lock()
+        # Serializes connect_new_decks() callers (USB hotplug monitor vs the
+        # boot rescan below): the already-loaded check and the controller
+        # registration must be atomic against each other, or two concurrent
+        # enumerations of the same freshly-arrived deck both pass the check
+        # and register it twice.
+        self._connect_decks_lock = threading.Lock()
+        # Startup re-enumeration (issue #106): armed by load_hardware_decks()
+        # when the boot enumeration comes back empty (autostart racing USB
+        # device init); stopped by deck arrival, exhausted backoff, or quit.
+        self._boot_rescan_thread: threading.Thread | None = None
+        self._boot_rescan_stop = threading.Event()
         self.fake_deck_controller = []
         self.settings_manager = SettingsManager()
         self.page_manager = gl.page_manager
@@ -116,6 +131,62 @@ class DeckManager:
         decks=DeviceManager().enumerate()
         for deck in decks:
             self.load_hardware_deck(deck)
+        if not decks:
+            # Autostart can race USB device init at boot: the deck isn't
+            # enumerable yet, and the USB monitor only reports *future*
+            # hotplug events -- without a re-scan the user must replug the
+            # deck and restart the app (issue #106).
+            log.warning("No decks enumerable at startup; starting bounded re-enumeration")
+            self.start_boot_rescan()
+
+    def start_boot_rescan(self) -> None:
+        """Re-enumerate decks in the background with bounded backoff
+        (BOOT_RESCAN_DELAYS, ~60s total) after an empty startup enumeration.
+
+        Never blocks startup (daemon thread) and stops on the first
+        successful enumeration, on exhausted backoff, or promptly on app
+        quit (stop_boot_rescan). Registration goes through
+        connect_new_decks(), whose lock + already-loaded check guarantee a
+        deck that arrives via the USB hotplug monitor mid-backoff is not
+        registered a second time. Only ever *adds* fresh controllers -- it
+        never touches (or resurrects) existing/closed ones.
+        """
+        if self._boot_rescan_thread is not None and self._boot_rescan_thread.is_alive():
+            return
+        self._boot_rescan_stop.clear()
+        self._boot_rescan_thread = threading.Thread(
+            target=self._boot_rescan_loop,
+            name="BootDeckRescan",
+            daemon=True,
+        )
+        self._boot_rescan_thread.start()
+
+    def _boot_rescan_loop(self) -> None:
+        for attempt, delay in enumerate(self.BOOT_RESCAN_DELAYS, start=1):
+            if self._boot_rescan_stop.wait(delay):
+                return
+            if not gl.threads_running:
+                return
+            try:
+                n_visible = self.connect_new_decks()
+            except Exception as e:
+                log.error(f"Boot deck rescan attempt {attempt} failed: {e}")
+                continue
+            if n_visible > 0:
+                log.info(f"Boot deck rescan attempt {attempt}: {n_visible} deck(s) enumerable")
+                return
+        log.info(
+            "Boot deck rescan exhausted its backoff window without finding a deck; "
+            "USB hotplug monitoring remains active"
+        )
+
+    def stop_boot_rescan(self) -> None:
+        """Stop a pending boot rescan promptly (called on app quit). Safe to
+        call when no rescan is running."""
+        self._boot_rescan_stop.set()
+        thread = self._boot_rescan_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2)
 
     def load_hardware_deck(self, deck, attempts: int = 3, retry_delay: float = 0.5):
         # Opening a deck and reading its serial right after open is occasionally
@@ -189,19 +260,40 @@ class DeckManager:
 
         self.connect_new_decks()
 
-    def connect_new_decks(self):
-        # Get already loaded deck serial ids
-        loaded_deck_ids = []
-        for controller in self.deck_controller:
-            loaded_deck_ids.append(controller.deck.id())
+    def connect_new_decks(self) -> int:
+        """Register every enumerable deck that isn't already loaded.
 
-        for deck in DeviceManager().enumerate():
-            if deck.id() in loaded_deck_ids:
-                continue
-            # Add deck
-            self.add_newly_connected_deck(deck)
+        Serialized by _connect_decks_lock: the USB hotplug monitor and the
+        boot rescan (start_boot_rescan) can call this concurrently, and the
+        already-loaded check plus the registration below must be atomic
+        against each other or the same deck registers twice.
 
-        gl.app.main_win.check_for_errors()
+        Returns the number of decks the enumeration reported (whether or not
+        they were already loaded) -- the boot rescan uses this to detect the
+        bus becoming visible.
+        """
+        with self._connect_decks_lock:
+            decks = DeviceManager().enumerate()
+
+            # Get already loaded deck serial ids
+            loaded_deck_ids = []
+            for controller in self.deck_controller:
+                loaded_deck_ids.append(controller.deck.id())
+
+            for deck in decks:
+                if deck.id() in loaded_deck_ids:
+                    continue
+                # Add deck
+                self.add_newly_connected_deck(deck)
+
+        # Guarded: the boot rescan (or an early hotplug event) can fire
+        # before the main window exists. idle_add: this method runs on the
+        # USB monitor thread or the boot rescan thread, and
+        # check_for_errors() is pure GTK work.
+        if recursive_hasattr(gl, "app.main_win"):
+            GLib.idle_add(gl.app.main_win.check_for_errors)
+
+        return len(decks)
 
 
     def on_disconnect(self, device_id, device_info):

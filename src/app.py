@@ -205,6 +205,14 @@ class App(Adw.Application):
 
         gl.threads_running = False
 
+        # Stop a pending boot re-enumeration (issue #106) before close_all()
+        # below: the stop event wakes a rescan parked in backoff immediately,
+        # and the bounded join covers an in-flight enumeration -- so the
+        # rescan can't register a fresh controller while the quit path tears
+        # the existing ones down (same residual window as a hotplug event
+        # arriving mid-quit, which the USB monitor has always had).
+        gl.deck_manager.stop_boot_rescan()
+
         # Force quit if normal quit is not possible
         timer = threading.Timer(6, self.force_quit)
         timer.name = "force_quit_timer"
