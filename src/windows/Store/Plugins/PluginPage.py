@@ -110,18 +110,39 @@ class PluginPreview(StorePreview):
             description = self.plugin_data.description
         self.set_description(description)
 
-    def install(self):
-        asyncio.run(self.store.backend.install_plugin(plugin_data=self.plugin_data))
-        self.set_install_state(1)
+    def install(self) -> bool:
+        """Runs on the store's download worker thread; returns whether the
+        install actually succeeded. Success is `result is True` -- failure
+        returns (404/400 ints, NoConnectionError) used to be discarded and
+        the button flipped to 'installed' anyway."""
+        result = asyncio.run(self.store.backend.install_plugin(plugin_data=self.plugin_data))
+        if result is not True:
+            log.error(f"Failed to install plugin {self.plugin_data.plugin_id}: {result!r}")
+            self.notify_install_failure()
+            # Leave the button in its previous state so the user can retry.
+            return False
+        GLib.idle_add(self.set_install_state, 1)
+        return True
 
     def uninstall(self):
         self.store.backend.uninstall_plugin(plugin_id=self.plugin_data.plugin_id)
-        self.set_install_state(0)
+        GLib.idle_add(self.set_install_state, 0)
 
     def update(self):
         self.store.backend.uninstall_plugin(plugin_id=self.plugin_data.plugin_id, remove_from_pages=False,
                                             remove_files=False)
-        self.install()
+        if not self.install():
+            # The failed install left the still-on-disk old version
+            # deregistered -- re-register it so it keeps working instead of
+            # vanishing until restart.
+            self.store.backend.reload_installed_plugins()
+
+    def notify_install_failure(self):
+        if gl.app is None:
+            return
+        name = self.plugin_data.plugin_name or self.plugin_data.plugin_id
+        gl.app.send_notification("dialog-information-symbolic", "Plugin install failed",
+                                 f"The plugin {name} could not be installed")
 
     def on_click_main(self, button: Gtk.Button):
         self.plugin_page.set_info_visible(True)

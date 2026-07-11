@@ -21,6 +21,7 @@ import gi
 import subprocess
 from packaging import version
 import webbrowser as web
+from loguru import logger as log
 
 from GtkHelper.GtkHelper import LoadingScreen
 from autostart import is_flatpak
@@ -338,7 +339,11 @@ class OnboardingScreen5(Gtk.Box):
             plugin = asyncio.run(gl.store_backend.get_plugin_for_id(plugin_data.plugin_id))
             if plugin is None:
                 continue
-            asyncio.run(gl.store_backend.install_plugin(plugin))
+            result = asyncio.run(gl.store_backend.install_plugin(plugin))
+            if result is not True:
+                log.error(f"Onboarding: failed to install {plugin_data.plugin_name}: {result!r}")
+                GLib.idle_add(self.onboarding_window.loading_box.progress_bar.set_text,
+                              f"Failed to install {plugin_data.plugin_name}")
 
         GLib.idle_add(self.onboarding_window.loading_box.set_spinning, False)
         GLib.idle_add(self.onboarding_window.close)

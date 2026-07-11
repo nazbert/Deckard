@@ -859,9 +859,10 @@ class StoreBackend:
         return extracted_folder_name
     
     async def download_repo(self, repo_url:str, directory:str, commit_sha:str = None, branch_name:str = None):
+        """Returns 200 on success, 404 for a hard failure (e.g. git missing
+        on the devel clone path), or NoConnectionError."""
         if not is_flatpak() and gl.argparser.parse_args().devel:
-            await self.clone_repo(repo_url, directory, commit_sha, branch_name)
-            return
+            return await self.clone_repo(repo_url, directory, commit_sha, branch_name)
 
 
         username = self.get_user_name(repo_url)
@@ -969,13 +970,14 @@ class StoreBackend:
         # Set repository to the given commit_sha
         if commit_sha is not None:
             await self.os_sys(f"cd '{local_path}' && git reset --hard {commit_sha}")
-            return
-        
+            return 200
+
         if branch_name is not None:
             await self.os_sys(f"cd '{local_path}' && git switch {branch_name}")
-            return
-        
-        
+            return 200
+
+        return 200
+
     async def install_plugin(self, plugin_data:PluginData, auto_update: bool = False):
         url = plugin_data.github
 
@@ -991,10 +993,10 @@ class StoreBackend:
 
         # Bail before running install scripts or reloading plugins over a
         # missing or partial tree.
-        if response == 404:
-            return 404
         if isinstance(response, NoConnectionError):
             return response
+        if response != 200:
+            return 404
 
         # Run install script if present. Make sure to use python binary used to run this process to not break venv dependency installations.
         # List form without a shell: an f-string command both broke on spaces
@@ -1112,7 +1114,7 @@ class StoreBackend:
 
         await self.uninstall_icon(icon_data)
 
-        await self.download_repo(repo_url=icon_data.github, directory=icon_path, commit_sha=icon_data.commit_sha)
+        return await self.download_repo(repo_url=icon_data.github, directory=icon_path, commit_sha=icon_data.commit_sha)
 
     async def uninstall_icon(self, icon_data:IconData):
         folder_name = icon_data.icon_id
@@ -1131,7 +1133,7 @@ class StoreBackend:
 
         await self.uninstall_wallpaper(wallpaper_data)
 
-        await self.download_repo(repo_url=wallpaper_data.github, directory=wallpaper_path, commit_sha=wallpaper_data.commit_sha)
+        return await self.download_repo(repo_url=wallpaper_data.github, directory=wallpaper_path, commit_sha=wallpaper_data.commit_sha)
 
     async def uninstall_wallpaper(self, wallpaper_data:WallpaperData):
         folder_name = wallpaper_data.wallpaper_id
@@ -1150,7 +1152,7 @@ class StoreBackend:
 
         await self.uninstall_sd_plus_bar_wallpaper(sd_plus_bar_wallpaper_data)
 
-        await self.download_repo(repo_url=sd_plus_bar_wallpaper_data.github, directory=wallpaper_path, commit_sha=sd_plus_bar_wallpaper_data.commit_sha)
+        return await self.download_repo(repo_url=sd_plus_bar_wallpaper_data.github, directory=wallpaper_path, commit_sha=sd_plus_bar_wallpaper_data.commit_sha)
 
     async def uninstall_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper_data:SDPlusBarWallpaperData):
         folder_name = sd_plus_bar_wallpaper_data.id
@@ -1159,6 +1161,25 @@ class StoreBackend:
             return 400
         if os.path.exists(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", folder_name)):
             shutil.rmtree(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", folder_name))
+
+    def reload_installed_plugins(self) -> None:
+        """Re-register whatever plugins are on disk and refresh UI/pages --
+        the same post-install plumbing install_plugin runs. Recovery path
+        for a failed UPDATE: update flows deregister the old version
+        (uninstall_plugin(remove_files=False)) before the fallible download,
+        and a failure used to leave the plugin unregistered until restart
+        even though its files were untouched."""
+        gl.plugin_manager.load_plugins()
+        gl.plugin_manager.init_plugins()
+        gl.plugin_manager.generate_action_index()
+
+        if recursive_hasattr(gl, "app.main_win.sidebar.action_chooser"):
+            GLib.idle_add(gl.app.main_win.sidebar.action_chooser.plugin_group.update)
+
+        for controller in gl.deck_manager.deck_controller:
+            if getattr(controller, "active_page", None) is not None:
+                controller.active_page.load_action_objects()
+                controller.load_page(controller.active_page)
 
     async def get_plugin_for_id(self, plugin_id):
         plugins = await self.get_all_plugins_async()
@@ -1185,19 +1206,32 @@ class StoreBackend:
     
     async def update_all_plugins(self) -> int:
         """
-        Returns number of updated plugins
+        Returns number of SUCCESSFULLY updated plugins
         """
         plugins_to_update = await self.get_plugins_to_update()
         if isinstance(plugins_to_update, NoConnectionError):
             return plugins_to_update
+        n_updated = 0
+        any_failed = False
         for plugin in plugins_to_update:
             try:
                 self.uninstall_plugin(plugin.plugin_id, remove_from_pages=False, remove_files=False)
             except Exception as e:
                 log.error(e)
-            await self.install_plugin(plugin)
-        
-        return len(plugins_to_update)
+            result = await self.install_plugin(plugin)
+            if result is True:
+                n_updated += 1
+            else:
+                log.error(f"Failed to update plugin {plugin.plugin_id}: {result!r}")
+                any_failed = True
+
+        if any_failed:
+            # The failed installs happened AFTER their uninstall_plugin
+            # deregistered the (still on-disk) old versions -- re-register
+            # them so they keep working instead of vanishing until restart.
+            self.reload_installed_plugins()
+
+        return n_updated
 
     async def get_icons_to_update(self):
         icons = await self.get_all_icons()
@@ -1217,15 +1251,20 @@ class StoreBackend:
     
     async def update_all_icons(self) -> int:
         """
-        Returns number of updated icons
+        Returns number of SUCCESSFULLY updated icons
         """
         icons_to_update = await self.get_icons_to_update()
         if isinstance(icons_to_update, NoConnectionError):
             return icons_to_update
+        n_updated = 0
         for icon in icons_to_update:
-            await self.install_icon(icon)
+            result = await self.install_icon(icon)
+            if result == 200:
+                n_updated += 1
+            else:
+                log.error(f"Failed to update icon pack {icon.icon_id}: {result!r}")
 
-        return len(icons_to_update)
+        return n_updated
     
     async def get_wallpapers_to_update(self):
         wallpapers = await self.get_all_wallpapers()
@@ -1245,25 +1284,33 @@ class StoreBackend:
     
     async def update_all_wallpapers(self) -> int:
         """
-        Returns number of updated wallpapers
+        Returns number of SUCCESSFULLY updated wallpapers
         """
         wallpapers_to_update = await self.get_wallpapers_to_update()
         if isinstance(wallpapers_to_update, NoConnectionError):
             return wallpapers_to_update
+        n_updated = 0
         for wallpaper in wallpapers_to_update:
-            await self.install_wallpaper(wallpaper)
+            result = await self.install_wallpaper(wallpaper)
+            if result == 200:
+                n_updated += 1
+            else:
+                log.error(f"Failed to update wallpaper {wallpaper.wallpaper_id}: {result!r}")
 
-        return len(wallpapers_to_update)
+        return n_updated
 
     async def update_everything(self) -> int:
         """
-        Returns number of updated assets
+        Returns number of SUCCESSFULLY updated assets, or NoConnectionError
         """
         n_plugins = await self.update_all_plugins()
         n_icons = await self.update_all_icons()
         n_wallpapers = await self.update_all_wallpapers()
 
-        if isinstance(n_plugins, NoConnectionError) or isinstance(n_icons, NoConnectionError):
+        # All three legs must be checked -- a NoConnectionError leaking into
+        # the sum below used to raise TypeError (and n_wallpapers wasn't
+        # checked at all).
+        if any(isinstance(n, NoConnectionError) for n in (n_plugins, n_icons, n_wallpapers)):
             return NoConnectionError()
 
         return n_plugins + n_icons + n_wallpapers

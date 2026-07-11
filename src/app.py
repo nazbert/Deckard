@@ -280,11 +280,18 @@ class App(Adw.Application):
     def _update_all_assets(self):
         self.set_working(True)
 
-        asyncio.run(gl.store_backend.update_everything())
+        result = asyncio.run(gl.store_backend.update_everything())
 
         self.set_working(False)
 
-        gl.app.send_notification("dialog-information-symbolic", "All assets updated", "All assets have been updated")
+        # update_everything returns the number of successfully updated
+        # assets, or NoConnectionError -- don't toast success on failure.
+        if isinstance(result, int):
+            gl.app.send_notification("dialog-information-symbolic", "Assets updated",
+                                     f"{result} assets have been updated")
+        else:
+            gl.app.send_notification("dialog-information-symbolic", "Asset update failed",
+                                     "Could not reach the store to update assets")
 
     def install_plugin(self, action, plugin_id: GLib.Variant):
         plugin_id = plugin_id.unpack()
@@ -303,7 +310,9 @@ class App(Adw.Application):
             return
         
         success = asyncio.run(gl.store_backend.install_plugin(plugin))
-        if not success:
+        # Success is exactly True -- failure returns include truthy ints
+        # (404/400), which "if not success" misread as installed.
+        if success is not True:
             gl.app.send_notification("dialog-information-symbolic", "Failed to install plugin",
                                      f"The plugin {plugin_id} could not be installed")
         else:
