@@ -714,7 +714,10 @@ class StoreBackend:
             self.api_cache[api_call_url] = {}
             self.api_cache[api_call_url]["answer"] = resp.json()
             self.api_cache[api_call_url]["time-code"] = datetime.now().strftime("%d-%m-%y-%H-%M")
-            atomic_write_json(os.path.join(gl.DATA_PATH, self.STORE_CACHE_PATH, "api.json"), self.api_cache)
+            # Snapshot: parallel store loads mutate api_cache while this
+            # serializes; handing json.dump the live dict can raise
+            # "dictionary changed size during iteration" and fail the fetch.
+            atomic_write_json(os.path.join(gl.DATA_PATH, self.STORE_CACHE_PATH, "api.json"), dict(self.api_cache))
             return resp.json()
 
         if api_call_url not in self.api_cache:

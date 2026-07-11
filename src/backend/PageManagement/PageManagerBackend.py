@@ -402,6 +402,8 @@ class PageManagerBackend:
             controller.load_page(controller.active_page, allow_reload=True)
 
     def update_dict_of_pages_with_path(self, path: str) -> None:
+        # Re-reading from disk can't lose unsaved in-memory edits: every
+        # in-tree Page.dict mutator persists via save() in the same call.
         pages = self.get_pages_with_path(path)
         for page in pages:
             page.update_dict()
