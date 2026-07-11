@@ -54,6 +54,12 @@ class PluginManager:
         self.backends:list[BackendBase] = []
         # subprocess.Popen handles for launched backends, terminated on teardown.
         self.backend_processes: list = []
+        # Set by the first warm_up_plugins() call (App.on_activate). Once
+        # true, load_plugins() re-runs the warm-up so hot-installed plugins
+        # (store installs call load_plugins long after activation) get their
+        # on_app_ready too; the per-plugin fired marker keeps every hook
+        # at-most-once.
+        self._app_ready: bool = False
 
     def terminate_all_backends(self) -> None:
         """Terminate every launched backend child process; called on app quit."""
@@ -65,17 +71,22 @@ class PluginManager:
         """Eagerly initialize plugin backends without blocking the caller
         (issue #117).
 
-        Invokes every registered plugin's on_app_ready() hook on a single
-        background daemon thread, one plugin at a time, each call
-        exception-isolated. This is the supported eager-init point for
-        backend launches: in background/autostart mode (-b) no config UI is
-        ever opened, and if no deck was enumerable at startup no page load
-        fires action on_ready either -- so a lazily-launched backend would
-        otherwise stay down until the first user interaction that happens to
-        force it, leaving the first hardware presses inert. Backend launches
-        spawn subprocesses, so this must never run on (or block) the GTK
-        main thread.
+        Invokes every registered plugin's not-yet-fired on_app_ready() hook
+        on a single background daemon thread, one plugin at a time, each
+        call exception-isolated; each plugin's hook fires at most once per
+        process (per-instance fired marker). This is the supported
+        eager-init point for backend launches: in background/autostart mode
+        (-b) no config UI is ever opened, and if no deck was enumerable at
+        startup no page load fires action on_ready either -- so a
+        lazily-launched backend would otherwise stay down until the first
+        user interaction that happens to force it, leaving the first
+        hardware presses inert. Backend launches spawn subprocesses, so
+        this must never run on (or block) the GTK main thread.
+
+        Called from App.on_activate at startup, and again from
+        load_plugins() for plugins hot-installed after activation.
         """
+        self._app_ready = True
         threading.Thread(
             target=self._warm_up_plugins,
             name="plugin_warm_up",
@@ -87,6 +98,11 @@ class PluginManager:
             plugin_base = plugin.get("object")
             if plugin_base is None:
                 continue
+            # At-most-once per plugin instance: startup warm-up and the
+            # late-load warm-ups (store installs) overlap over the same dict.
+            if getattr(plugin_base, "_on_app_ready_fired", False):
+                continue
+            plugin_base._on_app_ready_fired = True
             try:
                 plugin_base.on_app_ready()
             except Exception as e:
@@ -109,6 +125,13 @@ class PluginManager:
 
         # Get all classes inheriting from PluginBase and generate objects for them
         self.init_plugins()
+
+        # Hot-installed plugins (store installs re-run load_plugins after
+        # startup) must get their on_app_ready like startup-loaded ones --
+        # the on_activate warm-up has already come and gone by then (#117
+        # review round 1). No-op for already-warmed plugins.
+        if self._app_ready:
+            self.warm_up_plugins()
 
         if show_notification:
             self.show_n_disabled_plugins_notification()

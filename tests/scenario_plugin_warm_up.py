@@ -5,6 +5,15 @@ calling (GTK main) thread, returning immediately even when a plugin's hook
 is slow -- and one raising plugin must not prevent the others from being
 warmed. Also checks the hook exists as an inherited no-op on PluginBase, so
 unmodified plugins are unaffected.
+
+Review round 1 additions:
+  * at-most-once -- a second warm_up_plugins() must NOT re-fire hooks that
+    already ran (per-plugin fired marker).
+  * late load -- plugins hot-installed after activation (store installs
+    re-run load_plugins()) must get their on_app_ready too, without
+    re-firing already-warmed plugins; and load_plugins() BEFORE activation
+    must not warm anything (startup order is load_plugins -> on_activate's
+    warm-up).
 """
 import threading
 import time
@@ -80,6 +89,15 @@ def main() -> None:
     })
 
     try:
+        # --- Pre-activation load_plugins must NOT warm anything: at startup
+        # load_plugins runs during create_global_objects, long before
+        # on_activate's warm-up establishes app-readiness.
+        manager.load_plugins()
+        time.sleep(0.3)
+        assert recording.calls == 0, "load_plugins warmed plugins before app-ready"
+
+        # --- Startup warm-up: non-blocking, all hooks fire, off-main-thread,
+        # exception-isolated.
         start = time.monotonic()
         manager.warm_up_plugins()
         elapsed = time.monotonic() - start
@@ -100,13 +118,24 @@ def main() -> None:
             assert plugin.called_on_thread is not threading.main_thread(), \
                 f"{name} plugin's on_app_ready ran on the main thread"
 
-        # Warm-up is a startup one-shot; a second invocation calls hooks
-        # again by design (nothing re-invokes it in the app), so just check
-        # it stays non-blocking and isolated.
-        recording.called_event.clear()
+        # --- At-most-once: a second warm-up must not re-fire anyone.
         manager.warm_up_plugins()
-        assert recording.called_event.wait(timeout=10)
-        assert recording.calls == 2
+        time.sleep(0.5)
+        assert recording.calls == 1, "second warm_up_plugins re-fired on_app_ready"
+        assert slow.calls == 1 and raising.calls == 1
+
+        # --- Late load (review round 1 finding 3): a plugin hot-installed
+        # after activation gets its hook when load_plugins re-runs (store
+        # install path), and already-warmed plugins are not re-fired.
+        late = RecordingPlugin()
+        PluginBase.plugins["test_late"] = {"object": late}
+        manager.load_plugins()
+        assert late.called_event.wait(timeout=10), \
+            "hot-installed plugin's on_app_ready never ran after load_plugins"
+        assert late.calls == 1
+        assert late.called_on_thread is not threading.main_thread()
+        time.sleep(0.3)
+        assert recording.calls == 1, "late-load warm-up re-fired an already-warmed plugin"
     finally:
         PluginBase.plugins.clear()
 
