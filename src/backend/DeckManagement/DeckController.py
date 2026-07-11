@@ -3792,8 +3792,8 @@ class ControllerKey(ControllerInput):
 
         self.down_start_time: float = None
 
-        # DOWN-time gesture snapshot (#107): the state and its resolved
-        # action objects captured when the key went down. The rest of the
+        # DOWN-time gesture snapshot (#107): a (state, actions) pair captured
+        # when the key went down, or None outside a gesture. The rest of the
         # gesture (HOLD_START, HOLD_STOP/SHORT_UP, UP) dispatches to this
         # snapshot, NOT to whatever the key resolves to at release time --
         # a ChangePage action on this key swaps active_page (and rebuilds
@@ -3802,18 +3802,40 @@ class ControllerKey(ControllerInput):
         # actions never saw their release (RunCommand's registered_down
         # latch then jammed shut, upstream #475) while the new page's
         # actions got a spurious SHORT_UP for a press that wasn't theirs.
-        # Written only from the deck's serialized input-callback path.
-        self._gesture_state: "ControllerKeyState" = None
-        self._gesture_actions: list = None
+        # A single attribute (not one per field) so writers clear it in one
+        # atomic store and the hold-timer callback -- which can race the UP
+        # branch past its cancel() -- reads a coherent pair or None, never a
+        # torn half. Written from the deck's serialized input-callback path
+        # and from ScreenSaver.show()'s cancel_gesture sweep (under
+        # _load_page_lock, after this key was swapped out of the live input
+        # set and can receive no further events).
+        self._gesture: tuple = None
+
+    def cancel_gesture(self) -> None:
+        """Ends an in-flight gesture without dispatching its release events:
+        drops the DOWN-time snapshot, the gesture clock, and the pending
+        hold timer. For paths where the physical release can never reach
+        this key -- ScreenSaver.show() confiscates the whole input set
+        mid-hold (the release then lands on the replacement key and is
+        swallowed), which otherwise left this key's hold timer armed to
+        fire HOLD_START into the pinned snapshot after the finger already
+        left, and kept that snapshot's action objects pinned forever."""
+        self.down_start_time = None
+        self.stop_hold_timer()
+        self._gesture = None
 
     def on_hold_timer_end(self):
-        # Part of an in-flight gesture: route to the DOWN-time snapshot (see
-        # __init__). Fall back to live resolution only if there is no
-        # snapshot (timer raced a teardown path that cleared it).
-        state = self._gesture_state or self.get_active_state()
-        state.own_actions_event_callback_threaded(
+        gesture = self._gesture
+        if gesture is None:
+            # The gesture already ended: the UP branch or a cancel_gesture()
+            # raced this callback past the timer's cancel(). A late
+            # HOLD_START must not fire at all -- and especially must not
+            # live-resolve onto whatever page happens to be active now.
+            return
+        gesture_state, gesture_actions = gesture
+        gesture_state.own_actions_event_callback_threaded(
             event=Input.Key.Events.HOLD_START,
-            actions=self._gesture_actions,
+            actions=gesture_actions,
         )
 
     @staticmethod
@@ -3921,8 +3943,18 @@ class ControllerKey(ControllerInput):
             # Only on key down this allows plugins to control screen saver without directly deactivating it
             self.deck_controller.screen_saver.on_key_change()
         if screensaver_was_showing:
+            if not press_state:
+                # A release swallowed by the screensaver still ends the
+                # physical gesture: without this, a snapshot pinned by a
+                # pre-screensaver DOWN would never be dropped and its hold
+                # timer would keep running -- firing HOLD_START after the
+                # finger already left. (Belt-and-braces: show() already
+                # cancels gestures on the input set it stashes, so a live
+                # gesture on THIS key here means the screensaver engaged
+                # without the swap -- keep the two paths independent.)
+                self.cancel_gesture()
             return
-        
+
         pressed_page = self.deck_controller.mark_page_ready_to_clear(False)
         self.press_state = press_state
 
@@ -3936,18 +3968,21 @@ class ControllerKey(ControllerInput):
             # which otherwise resolves actions only when the pool worker
             # runs -- goes to the actions that were on the key when the
             # finger landed, regardless of page swaps in between.
-            self._gesture_state = active_state
-            self._gesture_actions = active_state.get_own_actions()
+            gesture_actions = active_state.get_own_actions()
+            self._gesture = (active_state, gesture_actions)
             self.start_hold_timer()
             active_state.own_actions_event_callback_threaded(
                 event=Input.Key.Events.DOWN,
                 show_notifications=True,
-                actions=self._gesture_actions
+                actions=gesture_actions
             )
 
         elif self.down_start_time is not None: # Key up
-            gesture_state = self._gesture_state or active_state
-            gesture_actions = self._gesture_actions
+            gesture = self._gesture
+            if gesture is not None:
+                gesture_state, gesture_actions = gesture
+            else:
+                gesture_state, gesture_actions = active_state, None
             if time.time() - self.down_start_time >= self.deck_controller.hold_time:
                 gesture_state.own_actions_event_callback_threaded(
                     event=Input.Key.Events.HOLD_STOP,
@@ -3965,10 +4000,18 @@ class ControllerKey(ControllerInput):
                 show_notifications=False,
                 actions=gesture_actions
             )
-            # Gesture complete: drop the snapshot so a superseded page's
-            # action objects aren't pinned past their last event.
-            self._gesture_state = None
-            self._gesture_actions = None
+            # Gesture complete: drop the snapshot (single atomic store, see
+            # __init__) so a superseded page's action objects aren't pinned
+            # past their last event.
+            self._gesture = None
+
+        else: # Key up with no gesture clock
+            # The matching DOWN was swallowed or its bookkeeping already
+            # cleared (e.g. a screensaver show/hide cycle mid-hold resets
+            # down_start_time on the live keys). Nothing to dispatch, but a
+            # still-armed hold timer or pinned snapshot from that orphaned
+            # DOWN must not outlive the physical release.
+            self.cancel_gesture()
         # Reset the SAME page the False-call marked (issue #16) -- a press
         # that triggers a page change would otherwise pin the old page.
         self.deck_controller.mark_page_ready_to_clear(True, pressed_page)

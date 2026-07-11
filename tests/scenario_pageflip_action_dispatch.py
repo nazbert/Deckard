@@ -30,6 +30,8 @@ key of page A, plus a recorder on page B's same key to catch bleed. Without
 the fix the gesture tail lands on page B's recorder, the latch never clears,
 and the second press runs nothing.
 """
+import os
+
 import fixtures
 import globals as gl
 
@@ -39,6 +41,7 @@ from src.backend.PluginManager.ActionCore import ActionCore
 DOWN = Input.Key.Events.DOWN
 SHORT_UP = Input.Key.Events.SHORT_UP
 UP = Input.Key.Events.UP
+HOLD_START = Input.Key.Events.HOLD_START
 
 
 class RecordingAction(ActionCore):
@@ -245,6 +248,42 @@ def main() -> None:
         )
         assert SHORT_UP in survivor.received
         assert UP in raiser.received  # the raiser itself was still dispatched
+
+        # ---- Screensaver engages MID-HOLD: the gesture dies with the stash ---- #
+        # show() confiscates the whole input set (stash + init_inputs), so
+        # the physical release lands on the REPLACEMENT key and is swallowed
+        # -- the stashed key's hold timer must not stay armed and fire
+        # HOLD_START into its pinned snapshot after the finger already left.
+        controller.hold_time = 0.5
+        ident_ss = Input.Key("2x0")
+        ss_recorder = RecordingAction(
+            tag="ss_recorder",
+            deck_controller=controller, page=page_b, input_ident=ident_ss)
+        inject(page_b, ident_ss, [ss_recorder])
+
+        key_held = controller.get_input(ident_ss)
+        deck.fire_key_event(2, True)  # physical 2 -> "2x0" on the 2x4 layout
+        assert fixtures.wait_until(lambda: DOWN in ss_recorder.received)
+        assert key_held.hold_start_timer is not None
+
+        controller.screen_saver.set_media_path(
+            fixtures.make_test_png(os.path.join(fixtures.DATA_DIR, "ss.png")))
+        controller.screen_saver.show()
+
+        assert key_held.hold_start_timer is None, \
+            "show() must cancel the stashed key's armed hold timer"
+        assert getattr(key_held, "_gesture", None) is None, \
+            "show() must drop the stashed key's pinned gesture snapshot"
+        assert key_held.down_start_time is None
+
+        deck.fire_key_event(2, False)  # swallowed by the showing screensaver
+        fired = fixtures.wait_until(
+            lambda: HOLD_START in ss_recorder.received, timeout=controller.hold_time + 0.7)
+        assert not fired, (
+            "HOLD_START fired into the snapshot after the physical release, "
+            f"mid-screensaver: {ss_recorder.received}"
+        )
+        assert UP not in ss_recorder.received  # the swallowed release dispatches nothing
 
         print("PASS: gesture events route to the DOWN-time action snapshot across page flips")
     finally:
