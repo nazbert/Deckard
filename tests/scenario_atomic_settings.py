@@ -132,6 +132,27 @@ def check_page_save(controller) -> None:
     print("PASS: Page.save() survives a mid-write fault")
 
 
+def check_font_defaults_merge() -> None:
+    """save_font_defaults must merge into the general section, not replace
+    it -- it used to wipe hold-time/rolling-labels/app-launches/... whenever
+    a font default was changed (#102)."""
+    app_settings = gl.settings_manager.get_app_settings()
+    app_settings.setdefault("general", {})
+    app_settings["general"]["hold-time"] = 0.7
+    app_settings["general"]["rolling-labels"] = False
+    gl.settings_manager.save_app_settings(app_settings)
+
+    gl.settings_manager.font_defaults = {"font-color": [10, 20, 30, 255]}
+    gl.settings_manager.save_font_defaults()
+
+    general = gl.settings_manager.get_app_settings().get("general", {})
+    assert general.get("default-font", {}).get("font-color") == [10, 20, 30, 255]
+    assert general.get("hold-time") == 0.7 and general.get("rolling-labels") is False, (
+        f"save_font_defaults wiped sibling general.* settings: {general}"
+    )
+    print("PASS: save_font_defaults preserves the rest of the general section")
+
+
 def check_kill_before_replace() -> None:
     """Simulates dying (power loss / SIGKILL) after the temp file is written
     but before it's renamed over the destination: the destination must keep
@@ -179,6 +200,7 @@ def main() -> None:
         check_plugin_base()
         check_add_page()
         check_page_save(controller)
+        check_font_defaults_merge()
         check_kill_before_replace()
     finally:
         fixtures.teardown(controller)

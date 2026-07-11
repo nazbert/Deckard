@@ -119,6 +119,10 @@ class SettingsManager:
 
     def save_font_defaults(self) -> None:
         app_settings = self.get_app_settings()
-        app_settings["general"] = {}
+        # Merge into the existing general section -- replacing it wholesale
+        # silently destroyed every other general.* setting (hold-time,
+        # rolling-labels, app-launches, show-donate-window) whenever a font
+        # default was changed (#102).
+        app_settings.setdefault("general", {})
         app_settings["general"]["default-font"] = self.font_defaults
         self.save_app_settings(app_settings)
