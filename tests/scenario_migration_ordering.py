@@ -15,7 +15,10 @@ Covers:
       asset-id renames and label normalizations applied INSIDE the
       states.0-nested shape;
   (b) legacy flat shape: Migrator_1_5_0.migrate_pages alone still applies
-      its rewrites to a page whose keys were never nested.
+      its rewrites to a page whose keys were never nested;
+  (c) scope: the rename/normalize pass touches ONLY labels/media -- the other
+      state fields (actions, image-control-action, ...) survive verbatim; and
+      a states-shaped key's stray top-level media is renamed too (Fix 4).
 """
 import json
 import os
@@ -144,9 +147,53 @@ def check_flat_shape_still_rewritten() -> None:
     print("PASS: 1.5.0 migrator still rewrites the legacy flat key shape")
 
 
+def check_non_label_media_state_fields_untouched() -> None:
+    """(c) The rename/normalize pass must touch ONLY labels/media -- the other
+    state fields (actions, image-control-action, label-control-actions) must
+    survive verbatim. Also pins Fix 4 (MR !11 review): a key that is already
+    states-shaped AND carries a stray top-level media has that top-level media
+    renamed too, instead of dangling."""
+    _reset()
+    page_path = _write_page("StatesShaped", {"keys": {"2x2": {
+        "states": {"0": {
+            "labels": {"bottom": {"text": "", "font-size": 15}},
+            "media": {"path": OLD_ICON_PATH},
+            "actions": [{"id": "com_core447_OSPlugin::Launch", "settings": {"x": 1}}],
+            "image-control-action": 2,
+            "label-control-actions": [0, 1, 0],
+        }},
+        # stray top-level media next to states -- beta_5 skips (won't nest) a
+        # key that already has states, so without Fix 4 this would dangle.
+        "media": {"path": "Core447::Material Icons/stray.png"},
+    }}})
+
+    Migrator_1_5_0().migrate_pages()
+
+    key = _read_page(page_path)["keys"]["2x2"]
+    state = key["states"]["0"]
+    # rewrites applied inside the state
+    assert state["media"]["path"] == NEW_ICON_PATH, "nested media not renamed"
+    assert state["labels"]["bottom"]["text"] is None
+    assert state["labels"]["bottom"]["font-size"] is None
+    # non-label/media fields untouched, byte-for-byte
+    assert state["actions"] == [{"id": "com_core447_OSPlugin::Launch", "settings": {"x": 1}}], (
+        f"actions were mutated by the rename pass: {state['actions']!r}"
+    )
+    assert state["image-control-action"] == 2, "image-control-action mutated"
+    assert state["label-control-actions"] == [0, 1, 0], "label-control-actions mutated"
+    # Fix 4: stray top-level media on a states-shaped key is also renamed
+    assert key["media"]["path"] == "com_core447_MaterialIcons/stray.png", (
+        f"stray top-level media on a states-shaped key was not renamed -- "
+        f"still {key['media']['path']!r}; it would dangle (MR !11 review Fix 4)"
+    )
+    print("PASS: rename pass leaves non-label/media state fields intact; "
+          "stray top-level media also renamed")
+
+
 def main() -> None:
     check_full_chain_rewrites_nested_shape()
     check_flat_shape_still_rewritten()
+    check_non_label_media_state_fields_untouched()
     print("PASS: scenario_migration_ordering")
 
 

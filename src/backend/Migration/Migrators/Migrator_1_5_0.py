@@ -100,12 +100,23 @@ class Migrator_1_5_0(Migrator):
                 # under states.0, so a pre-beta.5 page is already
                 # states-shaped by the time this walker runs. Handle both
                 # that nested shape and the legacy flat one.
-                if "states" in key_dict:
-                    state_dicts = list(key_dict["states"].values())
-                else:
-                    state_dicts = [key_dict]
+                #
+                # Also rewrite the key dict's OWN labels/media even when
+                # states are present: a hand-edited or partially-migrated key
+                # can carry stray top-level labels/media alongside states, and
+                # beta_5 skips (does not nest) any key that already has states,
+                # so those would otherwise dangle. The `id()` set guards
+                # against processing the same dict twice (a flat key IS its own
+                # only "state").
+                rewrite_dicts = []
+                seen_ids = set()
+                for candidate in ([key_dict] + list(key_dict.get("states", {}).values())):
+                    if not isinstance(candidate, dict) or id(candidate) in seen_ids:
+                        continue
+                    seen_ids.add(id(candidate))
+                    rewrite_dicts.append(candidate)
 
-                for state_dict in state_dicts:
+                for state_dict in rewrite_dicts:
                     for label in state_dict.get("labels", {}):
                         if state_dict["labels"][label].get("text") == "":
                             state_dict["labels"][label]["text"] = None
