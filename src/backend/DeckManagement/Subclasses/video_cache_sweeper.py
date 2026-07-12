@@ -7,6 +7,7 @@ along with legacy pickle caches (pre canvas-mp4 format) and abandoned
 writer temp files.
 """
 import hashlib
+import math
 import os
 import re
 import shutil
@@ -23,6 +24,32 @@ VID_CACHE = os.path.join(gl.DATA_PATH, "cache", "videos")
 # A .tmp.mp4 younger than this may be a build in progress; older ones are
 # leftovers from a crash.
 TMP_MAX_AGE_S = 24 * 60 * 60
+
+# Valid saturation-factor range -- mirrors DeckController's UI scale
+# (DeckGroup.Saturation min=1.0/max=1.5) and its runtime
+# _read_display_saturation clamp. The sweep must produce the SAME suffix the
+# runtime writes on disk: the runtime clamps a persisted out-of-range /
+# non-finite factor before deriving the cache filename, so a raw read here
+# would protect a variant (e.g. ".sat200" for a hand-edited 2.0) that
+# playback never writes -- and sweep away the ".sat150" it actually does.
+MIN_DISPLAY_SATURATION = 1.0
+MAX_DISPLAY_SATURATION = 1.5
+DEFAULT_DISPLAY_SATURATION = 1.0
+
+
+def _clamp_saturation(raw) -> float:
+    """Persisted saturation -> the factor the runtime actually applies:
+    non-numeric or non-finite (NaN/inf) falls back to the default, then the
+    value is clamped to [MIN, MAX]. Matches DeckController._read_display_
+    saturation so the sweep and playback agree on the cache filename."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_DISPLAY_SATURATION
+    if not math.isfinite(value):
+        return DEFAULT_DISPLAY_SATURATION
+    return min(MAX_DISPLAY_SATURATION, max(MIN_DISPLAY_SATURATION, value))
+
 
 # Current cache-file naming: "<md5>.mp4" (default saturation) or
 # "<md5>.satNNN.mp4" (a baked-in saturation variant, see
@@ -145,9 +172,13 @@ def collect_active_sat_suffixes() -> set[str]:
     upstream-format file and becomes live again the moment a deck resets to
     1.0). Any other .satNNN variant of a referenced video is a leftover
     from a factor tried and abandoned -- bounded but permanent disk growth
-    unless swept. An unreadable deck file contributes nothing (its variant
-    may be wrongly swept, but a reader that then finds its ready cache
-    missing invalidates the registry entry and rebuilds -- see
+    unless swept. The persisted factor is clamped exactly as the runtime
+    clamps it (see _clamp_saturation), so the suffix collected here is the
+    one playback actually writes -- an out-of-range/hand-edited value can't
+    make the sweep protect a variant name the runtime never produces. An
+    unreadable deck file contributes nothing (its variant may be wrongly
+    swept, but a reader that then finds its ready cache missing invalidates
+    the registry entry and rebuilds -- see
     mp4_tile_cache._maybe_adopt_shared_cache)."""
     suffixes = {""}
     decks_dir = os.path.join(gl.DATA_PATH, "settings", "decks")
@@ -160,7 +191,8 @@ def collect_active_sat_suffixes() -> set[str]:
             settings = gl.settings_manager.load_settings_from_file(
                 os.path.join(decks_dir, name)
             ) or {}
-            suffixes.add(sat_suffix(float(settings.get("display", {}).get("saturation", 1.0))))
+            raw = settings.get("display", {}).get("saturation", 1.0)
+            suffixes.add(sat_suffix(_clamp_saturation(raw)))
         except Exception:
             log.opt(exception=True).warning(f"Could not read display saturation from {name}")
     return suffixes

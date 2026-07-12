@@ -134,6 +134,42 @@ def check_stale_sat_variants_swept() -> None:
     print("PASS: stale saturation variants of referenced videos are swept, current+default kept")
 
 
+def check_out_of_range_saturation_protects_clamped_variant() -> None:
+    """Issue #53 item 8 (round 1): a persisted display.saturation outside the
+    valid [1.0, 1.5] range (corruption or a hand-edit) is clamped by the
+    runtime before it derives a cache filename, so playback writes the
+    CLAMPED variant. The sweep must protect that same clamped variant -- a
+    raw read would protect a name (e.g. ".sat200" for 2.0) the runtime never
+    writes while sweeping away the ".sat150" it actually does."""
+    video_path = os.path.join(gl.DATA_PATH, "over_saturated_video.mp4")
+    _make_test_video(video_path)
+    md5 = video_cache_sweeper._md5_of_file(video_path)
+
+    fixtures.seed_page_with_background("OverSatPage", video_path)
+
+    # One deck persisted at an out-of-range 2.0 (clamps to 1.5 -> ".sat150").
+    decks_dir = os.path.join(gl.DATA_PATH, "settings", "decks")
+    os.makedirs(decks_dir, exist_ok=True)
+    with open(os.path.join(decks_dir, "OVERSATDECK.json"), "w") as f:
+        json.dump({"display": {"saturation": 2.0}}, f)
+
+    clamped = _seed_cache_file("keys_80x80", f"{md5}.sat150.mp4")  # what runtime writes
+    raw = _seed_cache_file("keys_80x80", f"{md5}.sat200.mp4")      # never written
+
+    video_cache_sweeper.sweep_stale_video_caches()
+
+    assert os.path.isfile(clamped), (
+        "the sweep must protect the CLAMPED saturation variant the runtime "
+        "actually writes for an out-of-range persisted factor"
+    )
+    assert not os.path.isfile(raw), (
+        "the raw out-of-range variant is never written by playback and must "
+        "be swept, not protected"
+    )
+
+    print("PASS: out-of-range persisted saturation protects the clamped variant, not the raw one")
+
+
 def main() -> None:
     fixtures.start_watchdog(WATCHDOG_SECONDS, label="scenario_video_cache_sweeper")
     fixtures._install_integration_globals()  # real SettingsManager + PageManagerBackend
@@ -142,6 +178,7 @@ def main() -> None:
     check_plugin_settings_reference_protects_cache()
     check_live_registry_entry_protects_cache()
     check_stale_sat_variants_swept()
+    check_out_of_range_saturation_protects_clamped_variant()
 
     print("PASS: scenario_video_cache_sweeper")
 
