@@ -13,7 +13,9 @@ ran clear_action_objects() + pop OUTSIDE it, with three windows:
      deterministic here: the first eviction's clear_action_objects hook
      activates the second candidate).
   3. Gut-then-pop meant a concurrent get_page() could still be handed the
-     gutted object before the pop.
+     gutted object before the pop. Post-fix the pop is INSIDE the lock and
+     BEFORE the teardown, so a get_page() during the teardown gap mints a
+     fresh Page (via #28's single-flight builder) instead of the corpse.
 
 Post-fix: per-item re-validation under _pages_lock (skip if replaced,
 re-marked, active anywhere, or screensaver-pending) and pop-before-teardown.
@@ -113,6 +115,51 @@ def main() -> int:
               "ACTIVE (snapshot TOCTOU)")
         return 1
     print("PASS: page activated mid-eviction is skipped by re-validation")
+
+    # --- 3) pop-before-teardown: a get_page() during the teardown gap gets
+    # a FRESH Page, not the gutted corpse (window 3, deterministic) ---
+    # The pop happens INSIDE the lock BEFORE clear_action_objects(), so while
+    # the corpse is being torn down (outside the lock) the cache slot is
+    # already empty -- a concurrent get_page() must mint a new Page via #28's
+    # single-flight builder rather than hand back the object being gutted.
+    # Made deterministic by having the victim's teardown itself perform that
+    # get_page() and capture what it receives.
+    controller3 = StubController("evict-3")
+    gl.deck_manager.deck_controller.append(controller3)
+    pages3 = fill_cache(controller3, 6, "Refetch")
+    victim = pages3[0]  # oldest -> first eviction candidate
+    victim_path = victim.json_path
+    controller3.active_page = pages3[-1]
+
+    captured = {}
+    real_clear3 = victim.clear_action_objects
+
+    def clear_and_refetch():
+        # Runs during the eviction loop, outside the lock, AFTER the pop: a
+        # concurrent get_page() for the same (controller, path) lands here.
+        captured["page"] = gl.page_manager.get_page(victim_path, controller3)
+        real_clear3()
+
+    victim.clear_action_objects = clear_and_refetch
+
+    gl.page_manager.clear_old_cached_pages()
+
+    refetched = captured.get("page")
+    if refetched is None:
+        print("FAIL(3): the teardown-gap get_page() never ran")
+        return 1
+    if refetched is victim:
+        print("FAIL(3): a get_page() during the teardown gap was handed the "
+              "gutted corpse -- pop must precede clear_action_objects()")
+        return 1
+    # And the fresh object is usable (not itself gutted): a newly minted Page
+    # has its own action_objects dict, untouched by the victim's teardown.
+    arm(refetched)
+    if not actions_alive(refetched):
+        print("FAIL(3): the freshly minted Page is not usable")
+        return 1
+    print("PASS: get_page() during the teardown gap mints a fresh Page, "
+          "not the gutted corpse")
     return 0
 
 
