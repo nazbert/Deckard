@@ -200,4 +200,11 @@ class WatchForActiveWindowChange(threading.Thread):
                 self.last_active_window = new_active_window
                 self.x11.window_grabber.on_active_window_changed(new_active_window)
             except Exception as e:
-                log.error(f"Unexpected error in X11 active window watcher: {e}")
+                # Full traceback: this coarse backstop catches errors from
+                # deep in the poll plumbing (get_active_window -> xprop /
+                # subprocess) that would otherwise be invisible; a bare
+                # message is not enough to diagnose them. Matches the
+                # per-deck catch in WindowGrabber.on_active_window_changed.
+                log.opt(exception=True).error(
+                    f"Unexpected error in X11 active window watcher: {e}"
+                )

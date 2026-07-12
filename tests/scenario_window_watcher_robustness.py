@@ -128,6 +128,55 @@ def check_pageless_deck_routing() -> None:
 
 
 # ===================================================================== #
+# Part 1b: the None-guard itself, isolated from the per-deck try/except
+# ===================================================================== #
+
+def check_pageless_guard_is_a_clean_noop() -> None:
+    """Part 1 routes through on_active_window_changed, whose per-deck
+    try/except (the #104 restructure) also swallows the pre-fix
+    active_page.json_path deref -- so Part 1 alone stays green even if the
+    None-guard is deleted, and cannot red-test the guard on its own.
+
+    This calls _apply_auto_change directly (the isolated per-deck body, with
+    no surrounding try/except) so the guard's own effect is what is under
+    test: with the guard, a pageless deck is a clean no-op; without it the
+    deref raises straight out to here. Flips red iff the None-guard
+    specifically is removed, independent of #104's isolation."""
+    deck_manager = fixtures.install_stub_globals()
+
+    pageless = StubWGDeckController("HOTPLUG", active_page=None,
+                                    page_auto_loaded=True)
+    deck_manager.deck_controller.append(pageless)
+
+    gl.page_manager = StubPageManager({
+        "/pages/match.json": {
+            "wm-class": "firefox",
+            "title": ".*",
+            "enable": True,
+            "decks": ["HOTPLUG"],
+        },
+    })
+
+    grabber = WindowGrabber.__new__(WindowGrabber)
+
+    try:
+        # No try/except around this: only the None-guard can keep it from
+        # raising AttributeError: 'NoneType' object has no attribute
+        # 'json_path' (both at the match branch's active_page.json_path and
+        # in the stay-on-page restore branch reached via page_auto_loaded).
+        grabber._apply_auto_change(pageless, Window("firefox", "Mozilla Firefox"))
+    except Exception as e:
+        raise AssertionError(
+            f"_apply_auto_change must skip a pageless deck without the "
+            f"None-guard's protection, not raise: {e!r}"
+        )
+
+    assert pageless.loaded_pages == [], (
+        "the None-guard must make a pageless deck a no-op, loading nothing"
+    )
+
+
+# ===================================================================== #
 # Part 2: the X11 watch loop must survive raising iterations
 # ===================================================================== #
 
@@ -202,6 +251,7 @@ def check_x11_watcher_survives() -> None:
 
 def main() -> None:
     check_pageless_deck_routing()
+    check_pageless_guard_is_a_clean_noop()
     check_x11_watcher_survives()
     print("PASS: scenario_window_watcher_robustness")
 
