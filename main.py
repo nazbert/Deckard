@@ -287,7 +287,8 @@ def quit_running():
         action_interface = dbus.Interface(obj, "org.gtk.Actions")
     except dbus.exceptions.DBusException as e:
         log.info("No other instance running, continuing")
-        log.error(e)
+        # Expected path on every normal launch -- not an error.
+        log.debug(e)
     except ValueError as e:
         log.info("The last instance has not been properly closed, continuing... This may cause issues")
 

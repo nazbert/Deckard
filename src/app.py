@@ -92,8 +92,12 @@ class App(Adw.Application):
             self.main_win.present()
 
         self.show_onboarding()
-        # self.show_donate()
-        self.main_win.on_finished.append(self.show_donate())
+        # Called directly: MainWindow.do_after_build_tasks() drains
+        # on_finished synchronously during the constructor above, so anything
+        # added to that list here would never run. The old form appended
+        # show_donate()'s None result -- it only worked because the call
+        # happened while building the argument.
+        self.show_donate()
         # self.show_permissions()
 
         self.shortcuts = ShortcutsWindow(app=app, application=app)
