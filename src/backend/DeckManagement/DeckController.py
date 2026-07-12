@@ -1731,7 +1731,7 @@ class DeckController:
         self._tick_stop_event.wait(self.TICK_DELAY)
         while self.keep_actions_ticking:
             start = time.time()
-            self.mark_page_ready_to_clear(False)
+            ticked_page = self.mark_page_ready_to_clear(False)
             if not self.screen_saver.showing and True:
                 for t in self.inputs:
                     for i in self.inputs[t]:
@@ -1741,7 +1741,8 @@ class DeckController:
                     for i in self.inputs[t]:
                         i.update()
 
-            self.mark_page_ready_to_clear(True)
+            # Reset the SAME page the False-call marked (issue #16).
+            self.mark_page_ready_to_clear(True, ticked_page)
 
             end = time.time()
             wait = max(0.1, self.TICK_DELAY - (end - start))
@@ -1767,9 +1768,19 @@ class DeckController:
             return
         return keys[index]
 
-    def mark_page_ready_to_clear(self, ready_to_clear: bool):
-        if self.active_page is not None:
-            self.active_page.ready_to_clear = ready_to_clear
+    def mark_page_ready_to_clear(self, ready_to_clear: bool, page: "Page" = None):
+        """Marks (and returns) the page whose eviction-safety flag was set.
+        Callers that bracket work between a False-call and a True-call MUST
+        pass the page captured from the False-call back to the True-call:
+        re-dereferencing active_page after the work marked whatever page a
+        concurrent switch had installed, leaving the OLD page pinned
+        ready_to_clear=False forever -- unevictable, silently shrinking the
+        eviction budget (issue #16)."""
+        if page is None:
+            page = self.active_page
+        if page is not None:
+            page.ready_to_clear = ready_to_clear
+        return page
     
     def get_deck_settings(self):
         if not self.get_alive():
@@ -3692,7 +3703,7 @@ class ControllerKey(ControllerInput):
         if screensaver_was_showing:
             return
         
-        self.deck_controller.mark_page_ready_to_clear(False)
+        pressed_page = self.deck_controller.mark_page_ready_to_clear(False)
         self.press_state = press_state
 
         self.update()
@@ -3721,7 +3732,9 @@ class ControllerKey(ControllerInput):
                 event=Input.Key.Events.UP,
                 show_notifications=False
             )
-        self.deck_controller.mark_page_ready_to_clear(True)
+        # Reset the SAME page the False-call marked (issue #16) -- a press
+        # that triggers a page change would otherwise pin the old page.
+        self.deck_controller.mark_page_ready_to_clear(True, pressed_page)
 
     def get_current_image(self) -> Image.Image:
         state = self.get_active_state()
