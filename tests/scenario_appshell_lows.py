@@ -184,7 +184,14 @@ def check_deck_manager_usb_callback_guards() -> None:
     saved_ctor = dm_mod.DeckController
     dm_mod.DeckController = lambda manager, deck: Obj(deck=deck)
     try:
-        stub = Obj(deck_controller=[], fake_deck_controller=[])
+        # !8 (fix/boot-lifecycle) wraps the controller construction in
+        # _init_deck_controller_with_retry(); stub it so the method reaches
+        # the check_for_errors() call this test verifies.
+        stub = Obj(
+            deck_controller=[],
+            fake_deck_controller=[],
+            _init_deck_controller_with_retry=lambda deck: Obj(deck=deck),
+        )
         dm_mod.DeckManager.add_newly_connected_deck(stub, deck=Obj())
     finally:
         dm_mod.DeckController = saved_ctor
