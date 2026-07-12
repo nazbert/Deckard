@@ -35,6 +35,11 @@ EXPECTED_FAIL_UNTIL_M1: dict[str, str] = {
         "pins the open wipe-without-restore bug (issue #131): create_n_states "
         "discards the action-owned image and a deduping on_update never "
         "restores it -- remove from this dict when #131 is fixed",
+    "scenario_store_b06_pack_survival.py": (
+        "B-06 unfixed: install_icon/wallpaper/sd_plus rmtree the installed "
+        "pack before the fallible download and never restore it on failure "
+        "(gl#62 / transactional-install gl#82). Flips to PASS once fixed."
+    ),
 }
 
 
