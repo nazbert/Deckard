@@ -68,6 +68,42 @@ def _reap_stale_tmp_siblings(dir_path: str, target_basename: str) -> None:
             pass
 
 
+def quarantine_corrupt_file(file_path: str) -> tuple[bool, str]:
+    """Move a corrupt file aside instead of leaving it where the next save
+    would overwrite the only surviving copy of the user's data.
+
+    Returns ``(moved, dest)``:
+      * ``moved`` -- True if the file was renamed aside, False if the rename
+        failed (read-only fs, permissions, a concurrent quarantine that
+        already moved it, ...). Callers must NOT gate recovery on this: a
+        corrupt primary is corrupt whether or not the rename succeeded.
+      * ``dest`` -- where the file now lives (the ``.corrupt*`` sidecar on
+        success, the untouched original path on failure).
+
+    A pre-existing ``<path>.corrupt`` is never clobbered -- a second
+    corruption would otherwise destroy the first forensic copy. The first
+    free ``.corrupt`` / ``.corrupt.1`` / ``.corrupt.2`` ... slot is used.
+    os.replace of the chosen name is still atomic; the only race is two
+    threads picking the same free slot, in which case the loser's replace
+    overwrites an identical-fate corrupt file (harmless) or finds the source
+    already gone (reported as not-moved).
+    """
+    candidate = file_path + ".corrupt"
+    n = 0
+    # Bounded probe for a free sidecar name; fall back to the plain name if
+    # somehow every slot is taken (then os.replace overwrites the oldest).
+    while os.path.exists(candidate) and n < 10000:
+        n += 1
+        candidate = f"{file_path}.corrupt.{n}"
+    try:
+        os.replace(file_path, candidate)
+        return True, candidate
+    except OSError:
+        # Rename failed (or the source vanished under a concurrent
+        # quarantine). Leave the caller to recover from a backup regardless.
+        return False, file_path
+
+
 def atomic_write_json(file_path: str, data, indent: int | None = 4) -> None:
     """
     Write ``data`` as JSON to ``file_path`` atomically and durably.
