@@ -128,6 +128,13 @@ class CustomAssetChooserFlowBox(DynamicFlowBox):
         callback_args = self.asset_chooser.asset_manager.callback_args
         callback_kwargs = self.asset_chooser.asset_manager.callback_kwargs
 
+        # Captured -- drop the manager's own refs so the hidden singleton
+        # doesn't keep pinning the opener's bound callback (and through it
+        # the action/page graph) until the next show_for_path.
+        self.asset_chooser.asset_manager.callback_func = None
+        self.asset_chooser.asset_manager.callback_args = ()
+        self.asset_chooser.asset_manager.callback_kwargs = {}
+
         if callable(callback):
             callback_thread = threading.Thread(
                 target=self.callback_thread,
