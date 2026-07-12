@@ -1326,6 +1326,11 @@ class StoreBackend:
             if plugin.local_sha == plugin.commit_sha:
                 # Up to date
                 continue
+            if plugin.commit_sha is None:
+                # Unresolved remote tip (branch-pinned plugin whose
+                # get_last_commit returned None -- 429/empty). There is no
+                # known sha to update to; auto-updating would only hard-404.
+                continue
             if plugin.is_compatible is False:
                 # When no compatible version exists, prepare_plugin pins the
                 # newest INCOMPATIBLE commit (so the store can still list the
@@ -1380,11 +1385,24 @@ class StoreBackend:
 
         for icon in icons:
             if icon.local_sha is None:
-                # Plugin is not installed
+                # Icon pack is not installed
                 continue
-            if icon.local_sha != icon.commit_sha:
-                icons_to_update.append(icon)
-                
+            if icon.local_sha == icon.commit_sha:
+                # Up to date
+                continue
+            if icon.is_compatible is False:
+                # prepare_icon pins the newest INCOMPATIBLE commit when no
+                # compatible version exists (so the store can still list it).
+                # Auto-updating onto it would replace a working pack with a
+                # build for a different app major -- skip and report, exactly
+                # like the plugin update path.
+                log.warning(
+                    f"Skipping update of icon pack {icon.icon_id}: pinned version "
+                    f"{icon.commit_sha} is not compatible with app version {gl.app_version}"
+                )
+                continue
+            icons_to_update.append(icon)
+
         return icons_to_update
     
     async def update_all_icons(self) -> int:
@@ -1413,13 +1431,26 @@ class StoreBackend:
 
         for wallpaper in wallpapers:
             if wallpaper.local_sha is None:
-                # Plugin is not installed
+                # Wallpaper is not installed
                 continue
-            if wallpaper.local_sha != wallpaper.commit_sha:
-                wallpapers_to_update.append(wallpaper)
+            if wallpaper.local_sha == wallpaper.commit_sha:
+                # Up to date
+                continue
+            if wallpaper.is_compatible is False:
+                # prepare_wallpaper pins the newest INCOMPATIBLE commit when
+                # no compatible version exists (so the store can still list
+                # it). Auto-updating onto it would replace a working pack
+                # with a build for a different app major -- skip and report,
+                # exactly like the plugin update path.
+                log.warning(
+                    f"Skipping update of wallpaper {wallpaper.wallpaper_id}: pinned version "
+                    f"{wallpaper.commit_sha} is not compatible with app version {gl.app_version}"
+                )
+                continue
+            wallpapers_to_update.append(wallpaper)
 
         return wallpapers_to_update
-    
+
     async def update_all_wallpapers(self) -> int:
         """
         Returns number of SUCCESSFULLY updated wallpapers
@@ -1448,8 +1479,21 @@ class StoreBackend:
             if wallpaper.local_sha is None:
                 # Wallpaper is not installed
                 continue
-            if wallpaper.local_sha != wallpaper.commit_sha:
-                wallpapers_to_update.append(wallpaper)
+            if wallpaper.local_sha == wallpaper.commit_sha:
+                # Up to date
+                continue
+            if wallpaper.is_compatible is False:
+                # prepare_sd_plus_bar_wallpaper pins the newest INCOMPATIBLE
+                # commit when no compatible version exists (so the store can
+                # still list it). Auto-updating onto it would replace a
+                # working pack with a build for a different app major -- skip
+                # and report, exactly like the plugin update path.
+                log.warning(
+                    f"Skipping update of SD+ bar wallpaper {wallpaper.id}: pinned version "
+                    f"{wallpaper.commit_sha} is not compatible with app version {gl.app_version}"
+                )
+                continue
+            wallpapers_to_update.append(wallpaper)
 
         return wallpapers_to_update
 

@@ -118,6 +118,12 @@ class PluginPreview(StorePreview):
             return 0
         if plugin_data.local_sha == plugin_data.commit_sha:
             return 1
+        if plugin_data.commit_sha is None:
+            # Unresolved remote tip (branch-pinned plugin whose get_last_commit
+            # returned None -- 429/empty). commit_sha None != local_sha would
+            # otherwise flash a spurious "update available" badge whose install
+            # can only hard-404. There is no known target to update to.
+            return 1
         if plugin_data.is_compatible is False:
             return 1
         return 2
