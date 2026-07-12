@@ -220,7 +220,10 @@ def download_file(url: str, path: str = "", file_name: str = None) -> str:
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
     with open(path, "wb") as f:
-        f.write(requests.get(url).content)
+        # timeout: never block indefinitely on a black-holed/hung connection
+        # (same anti-pattern the About-dialog fetch had -- a timeout-less
+        # network call that could hang the caller forever).
+        f.write(requests.get(url, timeout=10).content)
 
     return path
 
