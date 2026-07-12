@@ -295,6 +295,12 @@ class DataPathGroup(Adw.PreferencesGroup):
         self.data_path.remove_css_class("error")
         self.data_path.set_tooltip_text(None)
 
+        # Reflect the expanded path back into the row so what the user sees
+        # matches what is persisted and adopted at boot (we store the
+        # expanduser'd value, not the literal "~/..." they may have typed).
+        if self.data_path.get_text() != new_path:
+            self.data_path.set_text(new_path)
+
         static_settings = gl.settings_manager.get_static_settings()
         old_path = static_settings.get("data-path")
         if old_path and old_path != new_path:
@@ -309,7 +315,12 @@ class DataPathGroup(Adw.PreferencesGroup):
         """A data path is only persisted if it is absolute and actually
         usable: an existing writable directory, or one we can create right
         now (globals.py would makedirs it at boot anyway -- doing it here
-        surfaces the failure while the user is still looking at the row)."""
+        surfaces the failure while the user is still looking at the row).
+
+        Runs on the GTK main thread (only on an explicit apply, not per
+        keystroke): the stat/makedirs could briefly stall the UI if the path
+        is on a hung network mount, but that is a deliberate, rare, one-shot
+        cost paid only when the user commits -- not worth an async detour."""
         if not path or not os.path.isabs(path):
             return False
         if os.path.isdir(path):
