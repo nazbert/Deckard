@@ -37,7 +37,7 @@ import threading
 from src.windows.Store.StorePage import StorePage
 from src.backend.DeckManagement.ImageHelpers import image2pixbuf
 from src.windows.Store.Badges import Badge
-from packaging import version
+from src.windows.Store.StoreData import is_min_app_version_satisfied
 
 class StorePreview(Gtk.FlowBoxChild):
     def __init__(self, store_page: StorePage):
@@ -264,9 +264,5 @@ class StorePreview(Gtk.FlowBoxChild):
         self.description_label.set_label(description)
 
     def check_required_version(self, app_version_to_check: str):
-        if app_version_to_check is None:
-            return True
-        min_version = version.parse(app_version_to_check)
-        app_version = version.parse(gl.app_version)
-
-        return min_version < app_version
+        # Single shared gate -- see StoreData.is_min_app_version_satisfied.
+        return is_min_app_version_satisfied(app_version_to_check)

@@ -1,6 +1,37 @@
 from dataclasses import dataclass, field
 from PIL import Image
 
+from loguru import logger as log
+from packaging import version
+from packaging.version import InvalidVersion
+
+
+def is_min_app_version_satisfied(minimum_app_version: str | None) -> bool:
+    """THE minimum-app-version gate for store assets -- the single
+    implementation behind StorePreview.check_required_version.
+
+    It used to exist as four drifting copies (StorePage, PluginPage,
+    StorePreview, PluginPreview), each comparing with a strict `<` that
+    flagged an asset requiring EXACTLY the running version incompatible.
+    Inclusive by design: requiring the running version is satisfied.
+
+    Fails open (True, with a warning) on an unparseable version string --
+    consistent with the None case; a malformed remote catalog entry must
+    not raise out of a store page build.
+    """
+    import globals as gl  # deferred: keep this leaf module cycle-free
+
+    if minimum_app_version is None:
+        return True
+    try:
+        return version.parse(minimum_app_version) <= version.parse(gl.app_version)
+    except InvalidVersion:
+        log.warning(
+            f"Unparseable minimum app version {minimum_app_version!r}; assuming compatible"
+        )
+        return True
+
+
 @dataclass
 class StoreData:
     github: str | None = None # Link to the github repository

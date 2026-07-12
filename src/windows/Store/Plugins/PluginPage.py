@@ -23,7 +23,6 @@ from gi.repository import Gtk, Adw, GLib, Gio, Gdk, GObject, GdkPixbuf
 # Import python modules
 import webbrowser as web
 import asyncio
-from packaging import version
 from loguru import logger as log
 
 # Import own modules
@@ -68,15 +67,6 @@ class PluginPage(StorePage):
             GLib.idle_add(section.append_child, PluginPreview(plugin_page=self, plugin_data=plugin))
 
         self.set_loaded()
-
-    def check_required_version(self, app_version_to_check: str, is_min_app_version: bool = False):
-        if is_min_app_version:
-            if app_version_to_check is None:
-                return True
-            min_version = version.parse(app_version_to_check)
-            app_version = version.parse(gl.app_version)
-
-            return min_version < app_version
 
 
 class PluginPreview(StorePreview):
@@ -177,10 +167,5 @@ class PluginPreview(StorePreview):
         self.plugin_page.info_page.set_original_url(self.plugin_data.original_url)
         self.plugin_page.info_page.set_license_description(gl.lm.get_custom_translation(self.plugin_data.license_descriptions))
 
-    def check_required_version(self, app_version_to_check: str):
-        if app_version_to_check is None:
-            return True
-        min_version = version.parse(app_version_to_check)
-        app_version = version.parse(gl.app_version)
-
-        return min_version < app_version
+    # check_required_version is inherited from StorePreview -- one shared
+    # implementation (StoreData.is_min_app_version_satisfied), no copies.
