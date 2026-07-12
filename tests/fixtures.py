@@ -573,3 +573,150 @@ def teardown(controller) -> None:
     tick_thread = getattr(controller, "tick_thread", None)
     if tick_thread is not None:
         tick_thread.join(timeout=2.0)
+
+
+# ===================================================================== #
+# Stub plugin manager + latch action (wipe-restore scenarios, issue #131)
+# ===================================================================== #
+#
+# These drive the REAL DeckController/Page/ControllerKey/ActionCore state
+# lifecycle with a minimal action injected via a stub gl.plugin_manager --
+# the harness otherwise never installs a plugin_manager, so load_page over a
+# page whose keys carry actions needs this shim. Promoted out of the
+# graduated diag_wipe_contract.py (issue #70) so more than one scenario can
+# reuse the pattern.
+
+STUB_ACTION_ID = "dev_test_LatchAction"
+
+
+def make_latch_action_class():
+    """Returns a fresh LatchAction subclass of the REAL ActionCore.
+
+    LatchAction is a *non-resetting deduping* action: it paints state 1 once
+    (in on_ready/on_tick) and never calls set_media again. That is the worst
+    case the state-wipe robustness gap (issue #131) relies on the plugin to
+    cover -- a plugin whose on_update short-circuits without resetting never
+    repaints after the framework wipes its key_image, so the key settles
+    permanently blank.
+
+    ActionCore is imported lazily (it pulls in GTK) so importing `fixtures`
+    stays cheap for unit-tier scenarios that never touch this path. A fresh
+    subclass per call keeps the injected `icon_path` closed over per test
+    rather than smeared across a module global.
+    """
+    from src.backend.PluginManager.ActionCore import ActionCore
+
+    class LatchAction(ActionCore):
+        # Set by make_stub_plugin_manager's factory before construction.
+        icon_path = None
+
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.current_state = -1
+
+        def load_event_overrides(self):
+            pass
+
+        def load_initial_generative_ui(self):
+            pass
+
+        def has_image_control(self):
+            return True
+
+        def on_ready(self):
+            self.on_tick()
+
+        def on_tick(self):
+            if self.current_state == 1:
+                return
+            self.current_state = 1
+            self.set_media(media_path=type(self).icon_path, size=0.8)
+
+    return LatchAction
+
+
+class _StubActionHolder:
+    """Minimal ActionHolder stand-in: the loader only calls
+    get_is_compatible() and init_and_get_action() on it."""
+
+    def __init__(self, action_cls, action_id: str, icon_path):
+        self._action_cls = action_cls
+        self._action_id = action_id
+        self._icon_path = icon_path
+
+    def get_is_compatible(self):
+        return True
+
+    def init_and_get_action(self, deck_controller, page, state, input_ident):
+        self._action_cls.icon_path = self._icon_path
+        return self._action_cls(
+            action_id=self._action_id, action_name="LatchAction",
+            deck_controller=deck_controller, page=page,
+            plugin_base=_FAKE_PLUGIN_BASE, state=state, input_ident=input_ident,
+        )
+
+
+class _StubPluginManager:
+    """Minimal gl.plugin_manager stand-in for action-loading scenarios: only
+    the three methods Page.load_action_objects() dereferences are
+    implemented."""
+
+    def __init__(self, action_holder, action_id: str):
+        self._holder = action_holder
+        self._action_id = action_id
+
+    def get_action_holder_from_id(self, action_id):
+        return self._holder if action_id == self._action_id else None
+
+    def get_plugin_id_from_action_id(self, action_id):
+        return "dev_test"
+
+    def get_is_plugin_out_of_date(self, plugin_id):
+        return False
+
+
+import types as _types  # noqa: E402  (local to this additive section)
+
+_FAKE_PLUGIN_BASE = _types.SimpleNamespace(PATH="/tmp", backend=None)
+
+
+def install_stub_plugin_manager(action_cls, icon_path, action_id: str = STUB_ACTION_ID):
+    """Installs a stub gl.plugin_manager that resolves `action_id` to
+    `action_cls` (a real ActionCore subclass, e.g. from
+    make_latch_action_class()), painting `icon_path`. Returns the stub.
+
+    Call BEFORE make_headless_controller() -- load_default_page() runs at the
+    end of DeckController.__init__ and would otherwise hit the (unset)
+    plugin_manager if a seeded page carried an action."""
+    holder = _StubActionHolder(action_cls, action_id, icon_path)
+    gl.plugin_manager = _StubPluginManager(holder, action_id)
+    return gl.plugin_manager
+
+
+def seed_action_page(page_name: str, key_ident: str, action_id: str = STUB_ACTION_ID,
+                     data_dir: str = None) -> str:
+    """Seeds a page whose single key carries `action_id` as its
+    image-control action (state 0). Companion to seed_page() /
+    seed_empty_action_page()."""
+    data_dir = data_dir if data_dir is not None else gl.DATA_PATH
+    pages_dir = os.path.join(data_dir, "pages")
+    os.makedirs(pages_dir, exist_ok=True)
+    path = os.path.join(pages_dir, f"{page_name}.json")
+    with open(path, "w") as f:
+        json.dump({"keys": {key_ident: {"states": {"0": {
+            "actions": [{"id": action_id, "settings": {}}],
+            "image-control-action": 0,
+        }}}}}, f)
+    return path
+
+
+def seed_empty_action_page(page_name: str, key_ident: str, data_dir: str = None) -> str:
+    """Seeds a page whose same key has NO action and NO image-control-action
+    -- loading it must CLEAR the slot (the no-bleed contract)."""
+    data_dir = data_dir if data_dir is not None else gl.DATA_PATH
+    pages_dir = os.path.join(data_dir, "pages")
+    os.makedirs(pages_dir, exist_ok=True)
+    path = os.path.join(pages_dir, f"{page_name}.json")
+    with open(path, "w") as f:
+        json.dump({"keys": {key_ident: {"states": {"0": {"actions": []}}}}}, f)
+    return path
