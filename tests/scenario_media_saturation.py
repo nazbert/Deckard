@@ -35,6 +35,11 @@ Covers:
   (e) the fitted-image cache key includes the factor: flipping the
       controller's saturation between calls (same path/mtime/size) must
       return a differently-enhanced image, not the cached previous one.
+  (f) _read_display_saturation validates the persisted factor: a non-finite
+      value ("nan"/"inf", which float() accepts without raising) or an
+      out-of-range value must not reach an ImageEnhance factor / cache key --
+      non-finite falls back to the default, out-of-range clamps to the UI
+      range.
 """
 import os
 
@@ -43,7 +48,11 @@ import fixtures  # noqa: F401  (isolated data dir + sys.path, house convention)
 from PIL import Image, ImageDraw
 
 import globals as gl
-from src.backend.DeckManagement.DeckController import KeyGIF, ControllerTouchScreenState
+from src.backend.DeckManagement.DeckController import (
+    DeckController,
+    KeyGIF,
+    ControllerTouchScreenState,
+)
 
 
 def _mean_hsv_saturation(image: Image.Image) -> float:
@@ -225,9 +234,62 @@ def check_touchscreen_background_saturation() -> None:
     print("PASS: touchscreen background image carries the saturation boost (cache keyed on factor)")
 
 
+# ===================================================================== #
+# (f): _read_display_saturation validates the persisted factor
+# ===================================================================== #
+
+class _StubSettingsController:
+    """Exactly what DeckController._read_display_saturation reads:
+    get_deck_settings() plus the DEFAULT/MIN/MAX_DISPLAY_SATURATION class
+    constants it references through self (unbound-method call, house
+    pattern)."""
+
+    DEFAULT_DISPLAY_SATURATION = DeckController.DEFAULT_DISPLAY_SATURATION
+    MIN_DISPLAY_SATURATION = DeckController.MIN_DISPLAY_SATURATION
+    MAX_DISPLAY_SATURATION = DeckController.MAX_DISPLAY_SATURATION
+
+    def __init__(self, settings: dict):
+        self._settings = settings
+
+    def get_deck_settings(self) -> dict:
+        return self._settings
+
+
+def _read_sat(settings: dict) -> float:
+    return DeckController._read_display_saturation(_StubSettingsController(settings))
+
+
+def check_read_saturation_validates() -> None:
+    default = DeckController.DEFAULT_DISPLAY_SATURATION
+    lo = DeckController.MIN_DISPLAY_SATURATION
+    hi = DeckController.MAX_DISPLAY_SATURATION
+
+    # A "nan"/"inf" string parses through float() without raising -- it must
+    # NOT reach an ImageEnhance factor or a cache key (a non-finite key never
+    # matches -> a cache that never hits and re-enhances every composite).
+    for poison in ("nan", "inf", "-inf"):
+        got = _read_sat({"display": {"saturation": poison}})
+        assert got == default, f"{poison!r} setting must fall back to default {default}, got {got}"
+
+    # Garbage / missing -> default (existing contract, still holds).
+    assert _read_sat({"display": {"saturation": "not-a-number"}}) == default
+    assert _read_sat({}) == default
+
+    # Out-of-range persisted values are clamped to the UI range, not trusted.
+    assert _read_sat({"display": {"saturation": 9.0}}) == hi
+    assert _read_sat({"display": {"saturation": 0.0}}) == lo
+    assert _read_sat({"display": {"saturation": -5.0}}) == lo
+
+    # In-range values pass through unchanged.
+    assert _read_sat({"display": {"saturation": 1.3}}) == 1.3
+
+    print("PASS: _read_display_saturation rejects non-finite and clamps out-of-range factors")
+
+
 def main() -> None:
     check_keygif_saturation()
     check_touchscreen_background_saturation()
+    check_read_saturation_validates()
     print("PASS: scenario_media_saturation")
 
 

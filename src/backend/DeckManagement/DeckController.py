@@ -16,6 +16,7 @@ import bisect
 import collections
 import gc
 import itertools
+import math
 import os
 import statistics
 import threading
@@ -1619,6 +1620,14 @@ class DeckController:
     # touching a cache filename, so the on-disk/behavioral footprint at the
     # default is byte-identical to a build without this feature.
     DEFAULT_DISPLAY_SATURATION = 1.0
+    # Valid range for the saturation factor -- matches the UI scale
+    # (DeckGroup.Saturation, min=1.0/max=1.5). A persisted value outside this
+    # is corruption (or a hand-edit): clamp rather than trust it, because the
+    # factor also becomes part of the fitted-bg / tile-cache key and a poison
+    # value (NaN, inf) there is a key that never matches -> a cache that never
+    # hits and re-enhances every composite.
+    MIN_DISPLAY_SATURATION = 1.0
+    MAX_DISPLAY_SATURATION = 1.5
 
     def _read_display_saturation(self) -> float:
         try:
@@ -1628,8 +1637,12 @@ class DeckController:
                 )
             )
         except (TypeError, ValueError):
-            value = self.DEFAULT_DISPLAY_SATURATION
-        return value
+            return self.DEFAULT_DISPLAY_SATURATION
+        # float() accepts "nan"/"inf" without raising: reject non-finite so a
+        # poison value can't reach an ImageEnhance factor or a cache key.
+        if not math.isfinite(value):
+            return self.DEFAULT_DISPLAY_SATURATION
+        return min(self.MAX_DISPLAY_SATURATION, max(self.MIN_DISPLAY_SATURATION, value))
 
     def get_display_saturation(self) -> float:
         return self.display_saturation
@@ -4234,8 +4247,11 @@ class ControllerTouchScreenState(ControllerInputState):
         # The saturation boost is baked into the cached fitted image (same
         # one-time contract as BackgroundImage for the key grid), so the
         # factor is part of the cache key -- a saturation change must not
-        # keep serving the stale enhancement from before it.
-        saturation = self.controller_touch.deck_controller.get_display_saturation()
+        # keep serving the stale enhancement from before it. Rounded to the
+        # persisted 2-decimal precision (set_display_saturation stores
+        # round(v, 2)) so a future unrounded caller can't mint a near-
+        # duplicate float key that misses the cache every composite.
+        saturation = round(self.controller_touch.deck_controller.get_display_saturation(), 2)
 
         key = (path, mtime, size, saturation)
         cached_key, cached_image = self._fitted_background_cache
