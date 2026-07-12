@@ -1155,8 +1155,13 @@ class DeckController:
                 available_pages = [os.path.splitext(os.path.basename(p))[0] for p in gl.page_manager.get_pages()]
                 log.error(f"State change failed: Page '{page_name}' not found for device {self.serial_number()}. Available pages: {', '.join(available_pages)}")
             else:
-                # Load the requested page if it's different from the current one
-                if os.path.abspath(requested_page_path) != os.path.abspath(self.active_page.json_path):
+                # Load the requested page if it's different from the current
+                # one. Snapshot + None-guard: active_page can be None here (a
+                # racing close()/clear, or the load above deferred by a
+                # showing screensaver) -- no current page means the requested
+                # one is trivially "different", so proceed with the load.
+                active_page = self.active_page
+                if active_page is None or os.path.abspath(requested_page_path) != os.path.abspath(active_page.json_path):
                     requested_page = gl.page_manager.get_page(requested_page_path, self)
                     self.load_page(requested_page)
                 
@@ -1495,8 +1500,12 @@ class DeckController:
         # initializing a superseded page is harmless (on_ready_called de-dupes).
         page.initialize_actions()
 
-        # Notify plugin actions
-        gl.signal_manager.trigger_signal(Signals.ChangePage, self, old_path, self.active_page.json_path)
+        # Notify plugin actions. `page.json_path`, not active_page (same
+        # rationale as initialize_actions above): a racing switch or close()
+        # can swap/null active_page after the lock released, and the deref
+        # would AttributeError into @log.catch -- silently skipping this
+        # signal and the DBus notify for a switch that DID happen.
+        gl.signal_manager.trigger_signal(Signals.ChangePage, self, old_path, page.json_path)
 
         # Notify DBus API of the page change
         notify_active_page_changed(self.serial_number(), page.get_name())
@@ -1856,6 +1865,11 @@ class DeckController:
         if gl.page_manager is not None:
             gl.page_manager.discard_controller(self)
         self.active_page = None
+        # A page change deferred while the screensaver was showing would
+        # otherwise keep its whole page object graph pinned on this dead
+        # controller. Teardown-only: the pending mechanism itself (and
+        # active_page while a screensaver shows) is deliberately untouched.
+        self._screensaver_pending_page = None
 
         # Step 9: shut down the per-deck thread pools. The object graph here
         # is cyclic (actions <-> pages <-> controller), so an explicit
@@ -3018,13 +3032,16 @@ class ControllerInputState:
 
     def get_own_actions(self) -> list["ActionCore"]:
         if not self.deck_controller.get_alive(): return []
+        # Snapshot once and use the snapshot throughout: active_page is
+        # nulled/swapped from other threads (close() step 8, load_page), and
+        # re-reading the live attribute after the None check raced exactly
+        # that window (AttributeError out of every own_actions_* caller).
         active_page = self.deck_controller.active_page
-        active_page = self.controller_input.deck_controller.active_page
         if active_page is None:
             return []
         if active_page.action_objects is None:
             return []
-        actions = self.deck_controller.active_page.get_all_actions_for_input(self.controller_input.identifier, self.state)
+        actions = active_page.get_all_actions_for_input(self.controller_input.identifier, self.state)
 
         return actions
 
