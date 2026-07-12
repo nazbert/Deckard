@@ -510,7 +510,10 @@ class MediaPlayerThread(threading.Thread):
             media_prof.add("tick", end - start)
             media_prof.maybe_report()
 
-        # Use low FPS when idle (no animated content, no pending tasks)
+        # Use low FPS when idle (no animated content, no pending tasks).
+        # These slot reads are intentionally unlocked (no _slot_lock): a torn
+        # read only mis-picks the target FPS for a single tick, never affects
+        # correctness -- the next tick re-reads and self-corrects.
         has_pending = bool(self.tasks or self.image_tasks or self.touchscreen_task)
         if has_pending or has_bg_video or getattr(self, '_cached_needs_ticks', False):
             target_fps = self.FPS
