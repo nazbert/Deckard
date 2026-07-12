@@ -1122,10 +1122,13 @@ class DeckController:
                     # switching onto a bg-video page: the device kept showing
                     # the previous page's content there until a keypress. An
                     # opaque tile hides the video, so this write cannot
-                    # disturb it.
+                    # disturb it. update() paints BOTH the device and the app
+                    # preview, so opaque keys don't also need the UI-only
+                    # mirror below (which would be a redundant second push).
                     state = i.get_active_state()
                     if state is not None and state.background_manager.get_composed_color()[-1] >= 255:
                         i.update()
+                        continue
                 except Exception:
                     log.exception(f"Opaque-key initial paint failed for {i.identifier}")
                 try:
@@ -1551,12 +1554,22 @@ class DeckController:
             for i in self.inputs[t]:
                 i.close_resources()
 
-        if self.background.video is not None:
-            self.background.video.close()
-            self.background.video = None
-        if self.background.image is not None:
-            self.background.image.close()
-            self.background.image = None
+        # Sweep the background under _background_load_lock (issue #15,
+        # residual): a load_background already inside set_from_path holds this
+        # lock while it attaches a fresh BackgroundVideo. Without taking it
+        # here, the sweep could run BETWEEN that load's gen-gate and its
+        # attach, leaving the fresh cv2 capture on self.background.video after
+        # the sweep -- leaked until process exit. Taking it makes the sweep
+        # wait for any in-flight attach; that attach is itself now suppressed
+        # (apply_prebuilt's _closing re-check), so the lock guarantees we
+        # observe and release the FINAL background object, not a stale None.
+        with self._background_load_lock:
+            if self.background.video is not None:
+                self.background.video.close()
+                self.background.video = None
+            if self.background.image is not None:
+                self.background.image.close()
+                self.background.image = None
 
     @log.catch
     def load_page(self, page: Page, load_brightness: bool = True, load_screensaver: bool = True, load_background: bool = True, load_inputs: bool = True, allow_reload: bool = True):
@@ -2046,6 +2059,19 @@ class DeckController:
         # permanent no-op. On timeout the daemon hook thread is deliberately
         # abandoned: completing device/registration teardown matters more
         # than waiting out a hook that may never return.
+        #
+        # The abandoned-thread residual is inherent to abandon-on-timeout: a
+        # thread we stop join()ing may still be running when steps 7-9 (and a
+        # later GC) proceed. The surface is narrow by construction -- the wedge
+        # is a plugin hook, and plugin hooks run in _teardown_actions's FIRST
+        # step, clear_action_objects (ActionCore.teardown), which is BEFORE its
+        # screensaver-input/background cleanup. So an abandoned thread is
+        # parked in clear_action_objects; it has not reached (and will not
+        # reach, while wedged) the close_resources()/original_inputs.clear()
+        # that step 7 also touches. The only state it can still mutate is the
+        # action_objects step 8's discard_controller drops anyway. Not worth a
+        # guard; documented so a future change to _teardown_actions's ordering
+        # (moving resource cleanup ahead of the hooks) knows it would widen it.
         if not app_quit:
             teardown_thread = threading.Thread(
                 target=self._teardown_actions,
@@ -2299,6 +2325,21 @@ class Background:
         with Image.open(path) as image:
             return ("image", BackgroundImage(self.deck_controller, image.copy(), path=path))
 
+    def _discard_prebuilt(self, kind: str, payload) -> None:
+        """Release the resources a prebuilt-but-never-applied payload holds
+        (issue #15, residual): a "video"/"image" payload already opened its
+        cv2 capture / retained its PIL image in prebuild_from_path. Dropping
+        the object without closing it leaks that handle. "keep"/"noop"/"blank"
+        carry no fresh resource, so they are no-ops here."""
+        if kind not in ("video", "image") or payload is None:
+            return
+        try:
+            payload.close()
+        except Exception:
+            log.opt(exception=True).warning(
+                "Failed to close an orphaned prebuilt background payload during close()"
+            )
+
     def apply_prebuilt(self, kind: str, payload, fps: int = 30, loop: bool = True, update: bool = True) -> None:
         """Phase-2 counterpart to prebuild_from_path(): performs the actual
         swap. Callers that need the lock-free/locked split (the screensaver
@@ -2306,6 +2347,20 @@ class Background:
         generation re-check already done; no file I/O happens here, only
         object assignment + the same update_all_inputs() fan-out set_video/
         set_image already trigger."""
+        # Authoritative close-vs-load guard (issue #15, residual): a
+        # load_background that already passed load_background's
+        # _page_is_current(gen) gate before close() bumped the generation is
+        # in-flight HERE with a freshly prebuilt payload -- prebuild_from_path
+        # already opened its cv2 capture / retained its image. If it attached
+        # now, close()'s step-7 sweep (which already ran, or is blocked on
+        # _background_load_lock waiting for us) would never see it and it would
+        # leak until process exit. _closing is set at the very top of close(),
+        # before the sweep, so re-checking it here catches every ordering.
+        # Release the orphaned payload's resources instead of dropping it on
+        # the floor.
+        if getattr(self.deck_controller, "_closing", False):
+            self._discard_prebuilt(kind, payload)
+            return
         if kind == "noop":
             return
         if kind == "keep":
