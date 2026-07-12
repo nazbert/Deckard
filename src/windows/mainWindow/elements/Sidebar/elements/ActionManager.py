@@ -454,7 +454,6 @@ class ActionRow(Adw.ActionRow):
         self.down_button.connect("clicked", self.on_click_down)
         self.button_box.append(self.down_button)
 
-
     def update_allow_box_visibility(self):
         self.allow_box.set_visible(True) #TODO
         return
@@ -595,8 +594,6 @@ class ActionRow(Adw.ActionRow):
 
         self.expander.update_indices()
 
-            
-        
     def init_dnd(self):
         if self.index == None:
             return
