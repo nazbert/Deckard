@@ -62,6 +62,22 @@ class FaultyFakeDeck(FakeDeck):
 
         self._write_latency: float = 0.0
 
+        # ---- Lifecycle state (issue #59) --------------------------------- #
+        # The stock FakeDeck's is_open()/connected() are hard-wired True, so a
+        # post-close write silently succeeds and an unplug is inexpressible.
+        # Model it explicitly:
+        #   _open       -- False after close() (device handle released).
+        #   _connected  -- False after simulate_unplug() (USB gone). Unplug
+        #                  implies not-open too, matching a yanked cable.
+        # These are only *enforced* (writes made to raise) when strict
+        # lifecycle is on. Strict is the default so new scenarios get the real
+        # semantics; a scenario that legitimately needs the old lenient
+        # behaviour opts out with set_strict_lifecycle(False).
+        self._lifecycle_lock = threading.Lock()
+        self._open = True
+        self._connected = True
+        self._strict_lifecycle = True
+
         # Registered by DeckController.__init__ via BetterDeck.set_*_callback;
         # stored here so fire_*_event() can invoke them like the real reader
         # thread would.
@@ -112,6 +128,43 @@ class FaultyFakeDeck(FakeDeck):
                     raise TransportError(f"FaultyFakeDeck: injected failure for {op}")
 
     # ---------------------------------------------------------------- #
+    # Lifecycle (issue #59): closed/unplugged states
+    # ---------------------------------------------------------------- #
+    def set_strict_lifecycle(self, strict: bool) -> None:
+        """When True (the default), writes made after close()/simulate_unplug()
+        raise TransportError -- the real transport's behaviour once the handle
+        is gone. When False, the old lenient behaviour (post-close writes
+        silently journal) is restored for scenarios that legitimately drive
+        writes past a close()."""
+        with self._lifecycle_lock:
+            self._strict_lifecycle = strict
+
+    def simulate_unplug(self) -> None:
+        """Model a yanked USB cable: connected() flips False and every
+        subsequent write fails (strict mode). Unplug implies the handle is
+        no longer usable, so is_open() reads False too."""
+        with self._lifecycle_lock:
+            self._connected = False
+            self._open = False
+
+    def _lifecycle_reject(self, op: str) -> None:
+        """Raise TransportError if a write is attempted after the device was
+        closed or unplugged (strict mode only). `close` itself is exempt so a
+        double-close / fallback-close is a safe no-op, matching the real
+        Transport.close() being idempotent."""
+        if op == "close":
+            return
+        with self._lifecycle_lock:
+            if not self._strict_lifecycle:
+                return
+            if not self._connected:
+                raise TransportError(
+                    f"FaultyFakeDeck: {op} on an unplugged device")
+            if not self._open:
+                raise TransportError(
+                    f"FaultyFakeDeck: {op} on a closed device")
+
+    # ---------------------------------------------------------------- #
     # Journal
     # ---------------------------------------------------------------- #
     def _record(self, op: str, slot, data) -> None:
@@ -128,7 +181,9 @@ class FaultyFakeDeck(FakeDeck):
 
     def _do_write(self, op: str, slot, data) -> None:
         # Fail (or sleep) BEFORE journaling: a failed write must not appear as
-        # a landed entry.
+        # a landed entry. Lifecycle rejection (closed/unplugged) is checked
+        # first: it's the most fundamental "this write cannot land" reason.
+        self._lifecycle_reject(op)
         self._maybe_fail(op)
         if self._write_latency:
             time.sleep(self._write_latency)
@@ -180,7 +235,31 @@ class FaultyFakeDeck(FakeDeck):
         self._do_write("reset", "device", None)
 
     def close(self):
+        # Journal the close first (the op is lifecycle-exempt, so a double- or
+        # post-unplug close is a safe no-op that still records), THEN release
+        # the handle so any LATER write raises. Idempotent.
         self._do_write("close", "device", None)
+        with self._lifecycle_lock:
+            self._open = False
+
+    # ---------------------------------------------------------------- #
+    # Lifecycle queries -- FakeDeck hard-wired both to True; reflect state.
+    # ---------------------------------------------------------------- #
+    def is_open(self) -> bool:
+        with self._lifecycle_lock:
+            return self._open
+
+    def connected(self) -> bool:
+        with self._lifecycle_lock:
+            return self._connected
+
+    def open(self, *args, **kwargs):
+        # Re-opening a device (replug) clears the closed state. Unplug leaves
+        # _connected False -- only a real reconnection would flip that, which
+        # a scenario models by constructing a fresh deck.
+        with self._lifecycle_lock:
+            if self._connected:
+                self._open = True
 
     # ---------------------------------------------------------------- #
     # Input event injection -- fires callbacks the way the real reader
