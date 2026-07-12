@@ -125,6 +125,19 @@ class PageManagerBackend:
             cached = self.pages.get(deck_controller, {})
             return [entry["page"] for entry in cached.values() if entry.get("page") is not None]
 
+    def all_cached_pages(self) -> list["Page"]:
+        """Snapshot of every cached Page object across ALL controllers,
+        taken under `_pages_lock` -- the all-controllers sibling of
+        pages_for_controller(). Callers iterate the snapshot without
+        holding the lock (page teardown may invoke plugin hooks)."""
+        with self._pages_lock:
+            return [
+                entry["page"]
+                for controller_pages in self.pages.values()
+                for entry in controller_pages.values()
+                if entry.get("page") is not None
+            ]
+
     def get_pages(self, add_custom_pages: bool = True, sort: bool = True) -> list[str]:
         pages = []
 

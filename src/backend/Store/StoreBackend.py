@@ -1118,16 +1118,15 @@ class StoreBackend:
         ## 1. Remove all action objects in every cached page of every
         ## controller -- not just each controller's currently active page.
         ## A page that was previously visited and is still sitting in the
-        ## page cache (`gl.page_manager.pages`) would otherwise keep dead
-        ## plugin action objects alive with no teardown.
-        for controller, controller_pages in list(gl.page_manager.pages.items()):
-            for page_entry in list(controller_pages.values()):
-                page = page_entry.get("page")
-                if page is None:
-                    continue
-                page.remove_plugin_action_objects(plugin_id=plugin_id)
-                if remove_from_pages:
-                    page.remove_plugin_actions_from_json(plugin_id=plugin_id)
+        ## page cache would otherwise keep dead plugin action objects alive
+        ## with no teardown. Snapshot via the _pages_lock accessor: iterating
+        ## gl.page_manager.pages directly raced load_page /
+        ## discard_controller / clear_old_cached_pages mutating the dict
+        ## from other threads.
+        for page in gl.page_manager.all_cached_pages():
+            page.remove_plugin_action_objects(plugin_id=plugin_id)
+            if remove_from_pages:
+                page.remove_plugin_actions_from_json(plugin_id=plugin_id)
 
         ## 2. Inform plugin base
         plugins = gl.plugin_manager.get_plugins()
