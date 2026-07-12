@@ -242,9 +242,41 @@ class PageManagerBackend:
         # is still the same (now possibly orphaned) dict object, so the pop
         # below is a harmless no-op in that case rather than a KeyError.
         for _, controller_pages, path, page_obj in to_evict:
+            # Re-validate under the lock immediately before teardown (issue
+            # #4): between the snapshot and this point the page may have
+            # become live -- activated by a load_page (WindowGrabber cycling
+            # generates exactly this cache pressure), stashed as a
+            # controller's screensaver-pending page, or re-marked mid-tick.
+            # Pop INSIDE the lock and BEFORE the teardown, so a concurrent
+            # get_page() mints a fresh Page instead of receiving this gutted
+            # one.
+            with self._pages_lock:
+                page_data = controller_pages.get(path)
+                if page_data is None or page_data.get("page") is not page_obj:
+                    continue  # already discarded/replaced
+                if not page_obj.ready_to_clear:
+                    continue
+                if self._page_is_live(page_obj):
+                    continue
+                controller_pages.pop(path, None)
             log.info(f"Evicting cached page {path}")
+            # Teardown stays OUTSIDE the lock: it can run plugin hooks (D1),
+            # and a wedged one must not stall close()/get_page() waiting on
+            # this lock.
             page_obj.clear_action_objects()
-            controller_pages.pop(path, None)
+
+    def _page_is_live(self, page_obj) -> bool:
+        """True when any controller currently depends on this Page object:
+        active, or stashed as the screensaver-pending page (held for the
+        whole screensaver duration and invisible to the snapshot guards --
+        evicting it made ScreenSaver.hide() load a page whose every action
+        was dead; issue #4 window 1)."""
+        for controller in gl.deck_manager.deck_controller:
+            if controller.active_page is page_obj:
+                return True
+            if getattr(controller, "_screensaver_pending_page", None) is page_obj:
+                return True
+        return False
 
     def get_default_page(self, deck_serial_number: str):
         page_settings = self.settings_manager.load_settings_from_file(self.PAGE_SETTINGS_PATH)
