@@ -2957,9 +2957,11 @@ class LayoutManager:
         self.page_layout = ImageLayout()
 
         # (token, layout key, resized image): the resized foreground for a
-        # static asset, valid while the caller passes the same asset object
-        # and the layout/geometry is unchanged. Single tuple so concurrent
-        # updates swap it atomically.
+        # static asset, valid while the caller passes the same asset object,
+        # the same backing source image (an in-place re-decode swap changes
+        # it -- see add_image_to_background's fg_key), and unchanged
+        # layout/geometry. Single tuple so concurrent updates swap it
+        # atomically.
         self._fg_cache: tuple = None
 
     def clear(self):
@@ -3050,9 +3052,24 @@ class LayoutManager:
 
         # The resized foreground depends only on the source asset and layout,
         # not on the (possibly animated) background. cache_token is the asset
-        # object itself: assets are replaced, never mutated, so a held
-        # reference can't go stale (and can't collide, unlike a freed id()).
-        fg_key = (layout.fill_mode, layout.halign, layout.valign, image_size)
+        # object itself (the InputImage/InputVideo), pinned alive by the
+        # `cached[0] is cache_token` identity check below -- a held reference
+        # can't collide, unlike a freed id().
+        #
+        # cache_token alone is NOT enough to key the resized foreground:
+        # InputImage._ensure_fits_composed() re-decodes and swaps its backing
+        # `image` IN PLACE (B-03 -- the asset object stays identical while its
+        # pixels change to a higher resolution). fg_key must therefore also
+        # track WHICH source image was resized, or a post-swap composite would
+        # be served the stale low-res entry cached from before the swap. Today
+        # a swap only ever grows the image, so image_size (driven by
+        # layout.size) already differs across a swap; but that coupling is
+        # implicit -- a future same-size re-decode (e.g. a saturation change)
+        # would not change image_size. id(image) closes that gap explicitly:
+        # while cache_token is alive it holds a strong ref to `image`, so this
+        # id cannot be reused by another object under us.
+        fg_key = (layout.fill_mode, layout.halign, layout.valign, image_size,
+                  id(image), image.size)
         image_resized = None
         if cache_token is not None:
             cached = self._fg_cache
