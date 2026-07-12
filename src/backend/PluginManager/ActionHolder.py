@@ -66,7 +66,14 @@ class ActionHolder:
             raise ValueError("Please specify an action id or an action id suffix")
         
         if icon is None:
-            icon = Gtk.Image(icon_name="insert-image-symbolic")
+            # ActionHolders are built in plugin __init__, which runs on a
+            # store worker thread on the install path (issue #35). GTK4 is
+            # main-thread-only -- off-main widget construction is the
+            # segfault/abort class -- so the default icon is marshalled onto
+            # the main loop. Inline (zero-cost) on the normal startup path,
+            # which already runs on main.
+            from GtkHelper.GtkHelper import run_on_main
+            icon = run_on_main(lambda: Gtk.Image(icon_name="insert-image-symbolic"))
 
         self.plugin_base = plugin_base
         self.action_core = action_core if action_core else action_base #backwards compatibility
