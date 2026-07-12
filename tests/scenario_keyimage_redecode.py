@@ -15,10 +15,20 @@ Checks (real InputImage against a stub input):
      most once (the memoized native-size clamp); pre-fix: once per call.
   2. A reference handed out by get_raw_image() stays usable after a
      re-decode swap; pre-fix: ValueError on any operation.
+  3. Under the REAL cross-thread race -- one thread compositing (reading
+     pixels off) get_raw_image()'s reference while another drives re-decode
+     swaps on the same InputImage -- no composite ever operates on a closed
+     image. This is the media-thread-composite vs UI-sync-re-decode hazard
+     the fix targets (get_current_image at DeckController.py:3782/4024 on the
+     media thread vs update_all_inputs' preview sync at :1113 on another
+     thread, on a background-video page). Checks 1/2 prove the policy
+     single-threaded; this proves it holds under contention. Pre-fix:
+     'Operation on closed image' from the compositor mid-read.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
 import os
+import threading
 import types
 
 from PIL import Image
@@ -47,6 +57,87 @@ class StubInput:
 
     def get_image_size(self):
         return (72, 72)
+
+
+def leg_concurrent_swap() -> int:
+    """Two threads on ONE InputImage: a compositor that reads pixels off the
+    reference get_raw_image() hands it (as add_image_to_background's resize
+    does), and a resizer that keeps forcing genuine re-decode swaps. Pre-fix
+    the resizer's swap closed the image the compositor was mid-read on
+    ('Operation on closed image'); post-fix the swapped-out image is dropped,
+    not closed, so an in-flight composite always completes."""
+    big_path = os.path.join(gl.DATA_PATH, "concurrent_src.png")
+    # A large source so every re-decode yields a fresh, still-open image the
+    # compositor can be caught reading.
+    Image.new("RGBA", (512, 512), (40, 90, 160, 255)).save(big_path)
+
+    stub = StubInput(layout_size=1.0)
+    with Image.open(big_path) as im:
+        key_image = InputImage(stub, im.convert("RGBA").resize((64, 64)),
+                               path=big_path)
+
+    errors: list[str] = []
+    stop = threading.Event()
+
+    def reseed_for_next_swap():
+        # Re-arm the swap path: shrink the retained copy and forget the
+        # memoized native size so the next get_raw_image() re-decodes and
+        # swaps again (the clamp would otherwise settle after one decode).
+        key_image.image = key_image.image.resize((64, 64))
+        key_image._source_native_size = None
+
+    def compositor():
+        try:
+            while not stop.is_set():
+                img = key_image.get_raw_image()
+                if img is None:
+                    continue
+                # Touch the pixels the same way the real composite does; on a
+                # closed image this raises ValueError.
+                img.tobytes()
+                img.resize((32, 32))
+        except Exception as e:  # noqa: BLE001 -- the point is to catch it
+            errors.append(f"compositor: {type(e).__name__}: {e}")
+
+    def resizer():
+        try:
+            for _ in range(400):
+                if stop.is_set():
+                    break
+                stub._layout.size = 6.0        # ask for more than the 64px copy
+                key_image.get_raw_image()      # triggers the re-decode swap
+                stub._layout.size = 1.0
+                reseed_for_next_swap()
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"resizer: {type(e).__name__}: {e}")
+        finally:
+            stop.set()
+
+    threads = [threading.Thread(target=compositor, name="compositor"),
+               threading.Thread(target=resizer, name="resizer")]
+    for t in threads:
+        t.start()
+    # The resizer sets stop after its 400 swaps; bound the join defensively.
+    for t in threads:
+        t.join(timeout=20)
+    stop.set()
+    for t in threads:
+        t.join(timeout=5)
+
+    alive = [t.name for t in threads if t.is_alive()]
+    if alive:
+        print(f"FAIL(3): threads did not finish (deadlock/hang?): {alive}")
+        return 1
+    closed_use = [e for e in errors if "closed image" in e]
+    if closed_use:
+        print(f"FAIL(3): a composite operated on a closed image under the "
+              f"concurrent swap: {closed_use[0]}")
+        return 1
+    if errors:
+        print(f"FAIL(3): unexpected error under the concurrent swap: {errors[0]}")
+        return 1
+    print("PASS: concurrent composite + re-decode swap never touches a closed image")
+    return 0
 
 
 def main() -> int:
@@ -104,7 +195,9 @@ def main() -> int:
         print(f"FAIL(2): swapped-out image was closed under the reader: {e}")
         return 1
     print("PASS: swapped-out image stays usable for in-flight composites")
-    return 0
+
+    # 3) the real cross-thread hazard (checks 1/2 are single-threaded).
+    return leg_concurrent_swap()
 
 
 if __name__ == "__main__":

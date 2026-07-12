@@ -131,6 +131,15 @@ class InputImage(SingleKeyAsset):
         # can ever satisfy it -- without the clamp every composite re-ran
         # Image.open + convert + enhance from disk (per-frame disk I/O on
         # background-video pages, B-03).
+        #
+        # Edge: the native size is memoized from the first re-decode, so if
+        # the file at self.path is later REPLACED with a larger image, this
+        # clamp keeps serving the old resolution and never picks the new one
+        # up. That is consistent with the pre-existing assumption that a given
+        # `path` is a stable source (the whole re-decode-from-path fallback
+        # already relies on the file not changing under it); a genuine media
+        # change goes through a full asset rebuild (new InputImage), not an
+        # in-place file swap.
         if self._source_native_size is not None:
             needed_w = min(needed_w, self._source_native_size[0])
             needed_h = min(needed_h, self._source_native_size[1])
