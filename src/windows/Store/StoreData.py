@@ -15,6 +15,13 @@ def is_min_app_version_satisfied(minimum_app_version: str | None) -> bool:
     flagged an asset requiring EXACTLY the running version incompatible.
     Inclusive by design: requiring the running version is satisfied.
 
+    Compares BASE versions (pre-release/post/local suffixes stripped),
+    matching what the runtime plugin loader actually decides
+    (PluginBase.is_minimum_version_ok via _get_parsed_base_version). Without
+    this, running a pre-release like 1.5.0-beta.15 made the store badge an
+    asset requiring 1.5.0 as incompatible while the loader would load it
+    fine -- the displayed verdict must match the install-time verdict.
+
     Fails open (True, with a warning) on an unparseable version string --
     consistent with the None case; a malformed remote catalog entry must
     not raise out of a store page build.
@@ -24,7 +31,12 @@ def is_min_app_version_satisfied(minimum_app_version: str | None) -> bool:
     if minimum_app_version is None:
         return True
     try:
-        return version.parse(minimum_app_version) <= version.parse(gl.app_version)
+        # .base_version drops pre/post/dev/local segments the same way the
+        # runtime gate does; re-parse so the comparison is version-aware,
+        # not a string compare.
+        minimum = version.parse(version.parse(minimum_app_version).base_version)
+        running = version.parse(version.parse(gl.app_version).base_version)
+        return minimum <= running
     except InvalidVersion:
         log.warning(
             f"Unparseable minimum app version {minimum_app_version!r}; assuming compatible"
