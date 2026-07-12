@@ -31,6 +31,7 @@ composite.
   (d) `.widget` access builds the widget exactly once, no matter how many
       times it's read afterwards.
 """
+import threading
 import time
 
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
@@ -171,6 +172,145 @@ def check_widget_builds_exactly_once(page) -> None:
     print("PASS: .widget builds exactly once across repeated access")
 
 
+def _all_concrete_subclass_factories():
+    """#71 (d): every concrete GenerativeUI subclass paired with a
+    zero-config factory (action, var_name) -> instance. Titles are left None
+    so build() -> get_translation(None) short-circuits to "" without needing a
+    plugin_base/locale_manager (the value-layer _FakeAction has none) -- this
+    keeps the forced build a pure widget-plumbing exercise, which is exactly
+    what laziness is a property of.
+
+    FileDialogRow is intentionally absent: it is an abstract GenerativeUI
+    subclass (it does not implement connect_signals/disconnect_signals) and
+    cannot be instantiated directly -- it is only ever subclassed further.
+    Documented here so the omission is a known, reasoned gap, not an
+    oversight."""
+    from gi.repository import Adw
+    from GtkHelper.GenerativeUI.SwitchRow import SwitchRow
+    from GtkHelper.GenerativeUI.ToggleRow import ToggleRow
+    from GtkHelper.GenerativeUI.EntryRow import EntryRow
+    from GtkHelper.GenerativeUI.PasswordEntryRow import PasswordEntryRow
+    from GtkHelper.GenerativeUI.SpinRow import SpinRow
+    from GtkHelper.GenerativeUI.ScaleRow import ScaleRow
+    from GtkHelper.GenerativeUI.ComboRow import ComboRow
+    from GtkHelper.GenerativeUI.ExpanderRow import ExpanderRow
+    from GtkHelper.GenerativeUI.ColorButtonRow import ColorButtonRow
+
+    return [
+        ("SwitchRow", lambda a, v: SwitchRow(a, v, True)),
+        ("ToggleRow", lambda a, v: ToggleRow(a, v, 0, toggles=[Adw.Toggle(label="a"), Adw.Toggle(label="b")])),
+        ("EntryRow", lambda a, v: EntryRow(a, v, "x")),
+        ("PasswordEntryRow", lambda a, v: PasswordEntryRow(a, v, "x")),
+        ("SpinRow", lambda a, v: SpinRow(a, v, 1.0, 0.0, 10.0)),
+        ("ScaleRow", lambda a, v: ScaleRow(a, v, 1.0, 0.0, 10.0)),
+        ("ComboRow", lambda a, v: ComboRow(a, v, "a", items=["a", "b", "c"])),
+        ("ExpanderRow", lambda a, v: ExpanderRow(a, v, False)),
+        ("ColorButtonRow", lambda a, v: ColorButtonRow(a, v, (0, 0, 0, 255))),
+    ]
+
+
+def check_all_subclasses_lazy_and_build_once(page) -> None:
+    """#71 (d): the scenario tested laziness on ONE subclass (SwitchRow), but
+    laziness has to hold for EVERY concrete subclass -- a subclass whose
+    build() closure accidentally ran widget work at construction time (e.g. a
+    stray super().__init__ ordering bug) would regress silently. Iterate all
+    concrete subclasses: each must be unbuilt + registered at construction,
+    and a single `.widget` access must build exactly once (a second access
+    returns the same object)."""
+    for name, factory in _all_concrete_subclass_factories():
+        action = _FakeAction(page)
+        row = factory(action, f"{name}_var")
+
+        assert row._widget is None, f"{name} built its widget eagerly at construction"
+        assert row in action.generative_ui_objects, f"{name} did not register on the action"
+        assert row.is_built is False, f"{name}.is_built must be False before any .widget access"
+
+        first = row.widget
+        assert first is not None, f"{name}.widget did not build a widget"
+        assert row.is_built is True, f"{name}.is_built must flip True once built"
+        second = row.widget
+        assert second is first, f"{name}.widget returned a different object on a second access"
+
+    print(f"PASS: all {len(_all_concrete_subclass_factories())} concrete subclasses are lazy and build once")
+
+
+def check_ensure_built_double_build_race(page) -> None:
+    """#71 (d): two threads reading `.widget` (calling _ensure_built)
+    concurrently must build the widget EXACTLY once. _ensure_built guards the
+    flag transition with _build_flag_lock and flips _built True BEFORE running
+    the build, so whichever thread loses the lock sees _built and returns
+    without queuing a second build.
+
+    Headless detail: a worker thread's build is marshalled through
+    run_on_main -> GLib.idle_add, which only fires when something pumps the
+    default main context. So both worker threads contend on _ensure_built's
+    flag lock (only one queues a build), and THIS (main) thread pumps the
+    context until the single queued build runs. The single-build property is
+    a property of the flag lock, independent of when the pump lets the build
+    land -- which is exactly what we assert.
+
+    Determinism: a barrier releases both readers at once to force real
+    contention on the flag lock; a bounded pump loop then drives the queued
+    build to completion. No bare sleep is used for synchronization."""
+    from gi.repository import GLib
+
+    action = _FakeAction(page)
+    obj = _CountingGenUI(action, "race_counting")
+
+    barrier = threading.Barrier(2)
+    results = {}
+    errors = []
+
+    def reader(tag):
+        try:
+            barrier.wait(timeout=5)
+            # .widget -> _ensure_built: exactly one worker wins the flag lock
+            # and queues the build via run_on_main; the other short-circuits
+            # on _built. This blocks until the main-context pump below runs
+            # the queued build.
+            results[tag] = obj.widget
+        except Exception as e:
+            errors.append((tag, e))
+
+    t1 = threading.Thread(target=reader, args=("a",), name="genui-race-a")
+    t2 = threading.Thread(target=reader, args=("b",), name="genui-race-b")
+    t1.start()
+    t2.start()
+
+    # Pump the default main context so the single marshalled build actually
+    # runs, until both readers have returned (or a bounded deadline).
+    ctx = GLib.MainContext.default()
+    deadline = time.monotonic() + 10
+    while (t1.is_alive() or t2.is_alive()) and time.monotonic() < deadline:
+        ctx.iteration(False)
+
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    assert not t1.is_alive() and not t2.is_alive(), "a genui race reader wedged"
+    assert not errors, f"genui race readers raised: {errors!r}"
+
+    # THE invariant: exactly one build, no matter which thread won the flag
+    # lock. This is what a double-build regression (dropping the _built flip
+    # or the flag lock) would break.
+    assert obj.build_count == 1, (
+        f"_ensure_built must build exactly once under a concurrent double read, "
+        f"built {obj.build_count} times"
+    )
+    # The loser of the flag-lock race may observe the documented transient
+    # (_built True, _widget still None -- issue #56, an accepted residual the
+    # base class comments call out), so a racing reader's result can be None.
+    # But every result that IS non-None must be the one built widget, and once
+    # the build has landed a fresh read must converge on it for both.
+    assert obj._widget is not None, "the single build must have produced a widget"
+    for tag, w in results.items():
+        assert w is None or w is obj._widget, (
+            f"reader {tag} saw a widget other than the single built one"
+        )
+    assert obj.widget is obj._widget, "a post-build read must return the single built widget"
+    assert obj.build_count == 1, "a post-race read must not trigger another build"
+    print("PASS: _ensure_built builds exactly once under a concurrent double read")
+
+
 def main() -> None:
     fixtures.start_watchdog(30, label="scenario_genui_lazy")
     controller = fixtures.make_headless_controller(serial="genui-lazy-1")
@@ -180,6 +320,8 @@ def main() -> None:
     check_value_layer_unbuilt(page)
     check_teardown_never_built_is_noop(page)
     check_widget_builds_exactly_once(page)
+    check_all_subclasses_lazy_and_build_once(page)
+    check_ensure_built_double_build_race(page)
 
     fixtures.teardown(controller)
     print("PASS: scenario_genui_lazy")
