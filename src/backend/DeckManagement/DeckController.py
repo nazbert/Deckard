@@ -341,10 +341,13 @@ class MediaPlayerThread(threading.Thread):
         # clear) never wait behind ticker/task work.
         self.control_q: collections.deque = collections.deque()
         # Per-writer monotonic stamp counter: image/touchscreen tasks are
-        # stamped with next(self._submit_seq) at submission (add_image_task/
-        # add_touchscreen_task), and a Clear captures the counter at its own
-        # submission (next_submit_seq()) so it can tell which already-queued
-        # frames predate it (plan §2.1/§2.2).
+        # stamped with next(self._submit_seq) under _slot_lock, atomically
+        # with their slot assignment (add_image_task/add_touchscreen_task --
+        # issue #130: stamping before the lock let racing producers assign
+        # out of seq order, leaving a slot holding an older frame), and a
+        # Clear captures the counter at its own submission (next_submit_seq())
+        # so it can tell which already-queued frames predate it (plan
+        # §2.1/§2.2).
         self._submit_seq = itertools.count()
 
         # Wall-clock gap detection (plan §4 M2): a gap much larger than the
@@ -765,11 +768,19 @@ class MediaPlayerThread(threading.Thread):
             page=page if page is not None else self.deck_controller.active_page,
             native_image=native_image,
             config_gen=config_gen,
-            submit_seq=self.next_submit_seq(),
             controller_touchscreen=controller_touchscreen,
             img_hash=img_hash
         )
+        # Stamp INSIDE the slot lock (issue #130): allocating the seq before
+        # taking the lock let two racing producers (media tick vs. a dial
+        # update on another thread) allocate in one order and assign in the
+        # other, leaving the single slot holding the LOWER-seq (older) frame.
+        # With stamp+assign atomic, seq order is assignment order, so the
+        # slot always ends up with the newest frame -- and a Clear's
+        # "survives if submitted after" comparison stays consistent with
+        # what the slot actually holds.
         with self._slot_lock:
+            task.submit_seq = self.next_submit_seq()
             self.touchscreen_task = task
         self._wake_event.set()
 
@@ -781,10 +792,12 @@ class MediaPlayerThread(threading.Thread):
             native_image=native_image,
             config_gen=config_gen,
             controller_key=controller_key,
-            img_hash=img_hash,
-            submit_seq=self.next_submit_seq()
+            img_hash=img_hash
         )
+        # Same stamp-inside-the-lock as add_touchscreen_task (issue #130):
+        # the per-key slots have the identical producer-vs-producer shape.
         with self._slot_lock:
+            task.submit_seq = self.next_submit_seq()
             self.image_tasks[key_index] = task
         self._wake_event.set()
 
