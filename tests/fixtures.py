@@ -133,12 +133,38 @@ class StubDeckManager:
         close_all_controllers(self.deck_controller)
 
 
+# Tier-mixing guard (#69): the unit and integration tiers install different,
+# incompatible gl.* graphs (stub SettingsManager/DeckManager vs the real
+# SettingsManager + PageManagerBackend + SignalManager). Mixing them in one
+# process is silently order-dependent -- e.g. a real DeckController built after
+# install_stub_globals() would dereference stub collaborators that don't
+# implement what it needs. These flags let each installer refuse loudly if the
+# other tier is already live, turning a subtle wrong-tier bug into an
+# immediate, explanatory failure.
+_stub_globals_installed = False
+_integration_globals_installed = False
+
+
 def install_stub_globals(app_settings: dict = None) -> StubDeckManager:
     """Unit tier: installs a StubSettingsManager + StubDeckManager on `gl`.
-    Returns the StubDeckManager for assertions (e.g. `.remove_calls`)."""
+    Returns the StubDeckManager for assertions (e.g. `.remove_calls`).
+
+    Refuses if the integration tier is already installed in this process
+    (#69 tier-mixing): the two gl.* graphs are incompatible, and mixing them
+    was previously silent and order-dependent."""
+    global _stub_globals_installed
+    if _integration_globals_installed:
+        raise RuntimeError(
+            "install_stub_globals() called after the INTEGRATION tier is already "
+            "installed in this process. The unit and integration gl.* graphs are "
+            "incompatible -- a scenario must use exactly one tier. Split the mixed "
+            "assertions into separate scenario_*.py files (each runs in its own "
+            "subprocess) instead of calling both installers here."
+        )
     gl.settings_manager = StubSettingsManager(app_settings=app_settings)
     deck_manager = StubDeckManager()
     gl.deck_manager = deck_manager
+    _stub_globals_installed = True
     return deck_manager
 
 
@@ -446,16 +472,25 @@ def seed_page(page_name: str = "Main", data_dir: str = None) -> str:
     return path
 
 
-_integration_globals_installed = False
-
-
 def _install_integration_globals() -> None:
     """Populates the minimum gl.* graph DeckController.__init__/load_page
     dereference. Idempotent -- safe across multiple headless controllers in
-    one process (see scenario_two_decks)."""
+    one process (see scenario_two_decks).
+
+    Refuses if the unit tier is already installed (#69 tier-mixing): the two
+    gl.* graphs are incompatible -- see install_stub_globals()."""
     global _integration_globals_installed
     if _integration_globals_installed:
         return
+    if _stub_globals_installed:
+        raise RuntimeError(
+            "make_headless_controller()/_install_integration_globals() called "
+            "after the UNIT tier (install_stub_globals / make_stub_controller) is "
+            "already installed in this process. The unit and integration gl.* "
+            "graphs are incompatible -- a scenario must use exactly one tier. "
+            "Split the mixed assertions into separate scenario_*.py files (each "
+            "runs in its own subprocess) instead of calling both installers here."
+        )
 
     from src.backend.SettingsManager import SettingsManager
     from src.backend.PageManagement.PageManagerBackend import PageManagerBackend

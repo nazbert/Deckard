@@ -2,7 +2,7 @@
 Integration scenario (docs/memory-footprint-impl-plan.md P1.3):
 DeckController.close()/DeckManager.remove_controller's teardown sweep.
 
-Four checks, each a small self-contained sub-test:
+Three checks, each a small self-contained sub-test:
 
   (a) close() called twice is safe (idempotent, second call is an
       immediate no-op -- the `_closing` guard).
@@ -18,10 +18,11 @@ Four checks, each a small self-contained sub-test:
       (the real page's inputs, swapped out by show()) gets close_resources()
       called on it -- not just discarded -- and the stash containers end up
       empty/cleared.
-  (d) MediaPlayerThread.submit_control() rejects messages once the writer
-      has processed its terminal ClearAndCloseMsg (bug 12): further
-      submissions are silently dropped instead of piling up in a queue
-      nothing will ever drain again.
+
+(A fourth check -- submit_control() rejecting messages after the terminal
+ClearAndCloseMsg, bug 12 -- lived here but was unit-tier; it moved to
+scenario_submit_control_reject.py so this integration-tier scenario doesn't
+mix tiers, which the #69 tier-mixing guard now refuses.)
 """
 import gc
 import time
@@ -174,40 +175,14 @@ def test_close_sweeps_screensaver_stash() -> None:
     print("PASS: close() sweeps the screensaver stash while showing")
 
 
-def test_submit_control_rejected_after_stop() -> None:
-    from src.backend.DeckManagement.DeckController import ClearAndCloseMsg, SetBrightnessMsg
-
-    controller, media_player, _ = fixtures.make_stub_controller(serial="submit-reject-1")
-
-    # Sanity: a normal submission enqueues (the thread is never started at
-    # the unit tier -- see fixtures.make_stub_controller -- so nothing
-    # drains this automatically).
-    media_player.submit_control(SetBrightnessMsg(50))
-    assert len(media_player.control_q) == 1, "fixture sanity: submit_control should enqueue before stop"
-    media_player.control_q.clear()
-
-    # Drive the terminal message through drain_control_queue directly (unit
-    # tier convention: the thread is never started, so we call the loop body
-    # by hand -- see fixtures.py's docstring and drain_control_queue's own).
-    media_player.submit_control(ClearAndCloseMsg())
-    still_running = media_player.drain_control_queue()
-    assert still_running is False, "ClearAndCloseMsg must signal the caller to stop the loop"
-    assert media_player._stop is True, "_exec_clear_and_close must set _stop itself (not just rely on stop())"
-
-    # Post-stop: further submissions must be silently rejected (bug 12) --
-    # nothing will ever drain this queue again, so accepting more would grow
-    # it unbounded for the rest of the process's life.
-    media_player.submit_control(SetBrightnessMsg(75))
-    assert len(media_player.control_q) == 0, "submit_control after stop must be a no-op"
-
-    print("PASS: submit_control rejects messages once the writer is stopped")
-
-
 def main() -> None:
     test_double_close_is_safe()
     test_remove_controller_frees_everything()
     test_close_sweeps_screensaver_stash()
-    test_submit_control_rejected_after_stop()
+    # test_submit_control_rejected_after_stop moved to
+    # scenario_submit_control_reject.py: it is unit-tier and this scenario is
+    # integration-tier -- mixing the two in one process is now refused by the
+    # tier-mixing guard (#69).
     print("PASS: scenario_deck_close")
 
 
