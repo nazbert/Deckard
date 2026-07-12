@@ -124,30 +124,13 @@ class StubDeckManager:
         self.connect_calls += 1
 
     def close_all(self) -> None:
-        """Mirrors the real DeckManager.close_all() (M1: submits a terminal
-        ClearAndCloseMsg per controller, then joins each media thread with a
-        bounded timeout) -- see DeckManager.py's close_all for the
-        authoritative version this must stay in sync with."""
-        from src.backend.DeckManagement.DeckController import ClearAndCloseMsg
+        """Delegates to the REAL close protocol (#69): both this stub and the
+        real DeckManager.close_all now call close_all_controllers() in
+        DeckManager.py, so scenarios that go through the stub exercise
+        production code instead of a copy that could drift."""
+        from src.backend.DeckManagement.DeckManager import close_all_controllers
 
-        pending_joins = []
-        for controller in list(self.deck_controller):
-            if controller.deck is None:
-                continue
-            if not controller.deck.is_open():
-                continue
-            media_player = getattr(controller, "media_player", None)
-            if media_player is None:
-                try:
-                    controller.deck.close()
-                except Exception:
-                    pass
-                continue
-            media_player.submit_control(ClearAndCloseMsg())
-            pending_joins.append(controller)
-
-        for controller in pending_joins:
-            controller.media_player.stop(timeout=2.0)
+        close_all_controllers(self.deck_controller)
 
 
 def install_stub_globals(app_settings: dict = None) -> StubDeckManager:
