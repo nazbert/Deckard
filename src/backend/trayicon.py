@@ -87,10 +87,16 @@ class DBusService:
 
     def register(self):
         if self.registration_id is not None:
-            # Re-registering without an intervening unregister() orphaned the
-            # previous object registration on the connection (double-register
-            # path: TrayIcon.initialize() + the Settings-panel start()).
-            self.unregister()
+            # Already registered: a second register() with no intervening
+            # unregister() (double-register path: TrayIcon.initialize() +
+            # the Settings-panel start()) would otherwise orphan the prior
+            # object registration on the connection. Early-return so the
+            # existing registration is kept as-is. NOTE: do NOT unregister-
+            # then-reregister here -- self.unregister() dispatches virtually
+            # to StatusNotifierItemService.unregister(), which cascades
+            # self._menu.unregister() and would leave the tray menu object
+            # dead (the base register() only re-registers the SNI object).
+            return
         self.registration_id = self.bus.register_object(
             object_path=self.object_path,
             interface_info=self.interface_info,

@@ -101,55 +101,164 @@ def pump_until(condition, timeout: float, what: str) -> None:
     raise AssertionError(f"timed out after {timeout}s: {what}")
 
 
-def check_double_register_no_orphan() -> None:
-    """#125: DBusService.register() with no intervening unregister() must not
-    orphan the previous object registration on the connection. Counted
-    against a stub bus -- registered minus unregistered must be exactly 1
-    live registration after any number of register() calls."""
+class _StubBus:
+    """Counts object registrations so a double-register leak (a registration
+    that is never unregistered) is observable without a real D-Bus daemon."""
+
+    def __init__(self):
+        self.registered: list[int] = []
+        self.unregistered: list[int] = []
+        self._next_id = 1
+
+    def register_object(self, object_path, interface_info,
+                        method_call_closure, get_property_closure):
+        reg_id = self._next_id
+        self._next_id += 1
+        self.registered.append(reg_id)
+        return reg_id
+
+    def unregister_object(self, reg_id):
+        self.unregistered.append(reg_id)
+
+    def emit_signal(self, **kwargs):
+        # DBusMenuService.set_items() -> LayoutUpdate() emits a signal on
+        # construction; the double-register accounting doesn't care.
+        pass
+
+    @property
+    def live(self) -> set:
+        return set(self.registered) - set(self.unregistered)
+
+
+class _StubInterfaceInfo:
+    def cache_build(self):
+        pass
+
+    def cache_release(self):
+        pass
+
+
+def check_base_double_register_no_orphan() -> None:
+    """#125 (base class): DBusService.register() with no intervening
+    unregister() must not orphan the previous object registration on the
+    connection -- exactly one live registration after any number of
+    register() calls, and none after unregister()."""
     from src.backend.trayicon import DBusService
 
-    class StubBus:
-        def __init__(self):
-            self.registered: list[int] = []
-            self.unregistered: list[int] = []
-            self._next_id = 1
-
-        def register_object(self, object_path, interface_info,
-                            method_call_closure, get_property_closure):
-            reg_id = self._next_id
-            self._next_id += 1
-            self.registered.append(reg_id)
-            return reg_id
-
-        def unregister_object(self, reg_id):
-            self.unregistered.append(reg_id)
-
-    class StubInterfaceInfo:
-        def cache_build(self):
-            pass
-
-        def cache_release(self):
-            pass
-
-    bus = StubBus()
-    service = DBusService(StubInterfaceInfo(), "/StubPath", bus)
+    bus = _StubBus()
+    service = DBusService(_StubInterfaceInfo(), "/StubPath", bus)
     service.register()
-    service.register()  # TrayIcon.initialize() + Settings-panel start()
+    service.register()  # double-register with no stop()
 
-    live = set(bus.registered) - set(bus.unregistered)
-    assert len(live) == 1, (
+    assert len(bus.live) == 1, (
         f"double register() leaked object registrations: registered "
         f"{bus.registered}, unregistered {bus.unregistered} -- "
-        f"{len(live)} left live (expected 1)"
+        f"{len(bus.live)} left live (expected 1)"
     )
     service.unregister()
-    live = set(bus.registered) - set(bus.unregistered)
-    assert not live, f"unregister() left registrations live: {live}"
-    print("PASS: double register() keeps exactly one live registration")
+    assert not bus.live, f"unregister() left registrations live: {bus.live}"
+    print("PASS: base DBusService double register() keeps exactly one live "
+          "registration")
+
+
+def check_sni_double_register_keeps_menu_live() -> None:
+    """#125 (real TrayIcon path -- regression guard): the actual
+    double-register path is TrayIcon.initialize() + the Settings-panel
+    start(), which goes through StatusNotifierItemService.register(), NOT
+    the bare DBusService. That override registers BOTH the SNI object and
+    a nested menu object, and (from !21) overrides unregister() to cascade
+    self._menu.unregister().
+
+    An unregister-then-reregister remedy in the base register() dispatches
+    virtually to the SNI unregister() override, tears the menu object down,
+    and never re-registers it -- leaving the tray menu dead on the bus while
+    the base only re-registers the SNI object. So after a second register()
+    BOTH sni.registration_id AND sni._menu.registration_id must stay live,
+    with no orphaned/leaked prior registration.
+
+    Driven against a stub bus so the register/unregister accounting is exact
+    and deterministic. StatusNotifierItemService.register() also watches
+    org.kde.StatusNotifierWatcher via Gio.bus_watch_name_on_connection (which
+    type-checks its first arg against a real connection); that name-watch is
+    orthogonal to the object-registration leak under test, so it is stubbed
+    out here.
+
+    Red-test: against the unregister-then-reregister remedy this FAILS
+    (menu.registration_id is None, and the SNI + menu ids churn); with the
+    early-return guard it passes."""
+    import src.backend.trayicon as trayicon_mod
+    from src.backend.trayicon import StatusNotifierItemService
+
+    orig_watch = trayicon_mod.Gio.bus_watch_name_on_connection
+    orig_unwatch = trayicon_mod.Gio.bus_unwatch_name
+    trayicon_mod.Gio.bus_watch_name_on_connection = (
+        lambda *a, **k: 12345  # a plausible watch id; never a real watch
+    )
+    trayicon_mod.Gio.bus_unwatch_name = lambda *a, **k: None
+    try:
+        bus = _StubBus()
+        sni = StatusNotifierItemService(session_bus=bus, menu_items=[])
+
+        sni.register()                       # TrayIcon.initialize()
+        sni_id = sni.registration_id
+        menu_id = sni._menu.registration_id
+        assert sni_id is not None, "SNI object failed to register"
+        assert menu_id is not None, "menu object failed to register"
+
+        sni.register()                       # Settings-panel start(), no stop()
+
+        assert sni.registration_id is not None, (
+            "SNI object registration lost after double register()"
+        )
+        assert sni._menu.registration_id is not None, (
+            "double register() left the tray MENU object unregistered "
+            f"(menu.registration_id={sni._menu.registration_id!r}); the base "
+            "register() must not tear the menu down via the SNI unregister() "
+            "override -- that cascades self._menu.unregister() and the base "
+            "only re-registers the SNI object, leaving the menu dead. "
+            f"registered={bus.registered} unregistered={bus.unregistered}"
+        )
+        # Exactly two live registrations: the SNI item + its menu, no orphans.
+        assert len(bus.live) == 2, (
+            f"double register() must keep exactly the SNI + menu objects live "
+            f"(no leak, no teardown): registered={bus.registered}, "
+            f"unregistered={bus.unregistered}, live={bus.live} (expected 2)"
+        )
+        # No-op double-register: each object keeps its original registration
+        # id -- nothing was unregistered-then-reregistered (which would both
+        # churn the id and, on this path, kill the menu).
+        assert sni.registration_id == sni_id, (
+            f"SNI object id churned on double register(): {sni_id} -> "
+            f"{sni.registration_id}; register() must be a no-op when already "
+            "registered, not unregister-then-reregister"
+        )
+        assert sni._menu.registration_id == menu_id, (
+            f"menu object id churned on double register(): {menu_id} -> "
+            f"{sni._menu.registration_id}"
+        )
+
+        # A legitimate stop()/start() cycle must still re-register cleanly.
+        sni.unregister()
+        assert not bus.live, f"unregister() left registrations live: {bus.live}"
+        sni.register()
+        assert sni.registration_id is not None and sni._menu.registration_id is not None, (
+            "stop()/start() cycle failed to re-register SNI + menu"
+        )
+        assert len(bus.live) == 2, (
+            f"stop()/start() cycle leaked registrations: live={bus.live} "
+            f"(expected 2)"
+        )
+        sni.unregister()
+    finally:
+        trayicon_mod.Gio.bus_watch_name_on_connection = orig_watch
+        trayicon_mod.Gio.bus_unwatch_name = orig_unwatch
+    print("PASS: StatusNotifierItemService double register() keeps both the "
+          "SNI and menu objects live (no leak, no menu teardown)")
 
 
 def main() -> None:
-    check_double_register_no_orphan()
+    check_base_double_register_no_orphan()
+    check_sni_double_register_keeps_menu_live()
 
     test_bus = Gio.TestDBus.new(Gio.TestDBusFlags.NONE)
     test_bus.up()  # also exports DBUS_SESSION_BUS_ADDRESS for bus_get_sync
