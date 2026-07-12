@@ -108,6 +108,12 @@ def _observer_name(observer) -> str:
 
 def _ensure_monitor() -> None:
     global _monitor_started
+    # Fast path: once started, skip the lock entirely on the hot dispatch
+    # path. A stale read here only ever costs one extra lock acquisition on
+    # the very first concurrent callers before the flag is visibly True --
+    # the lock below still guarantees exactly one thread is ever spawned.
+    if _monitor_started:
+        return
     with _watch_lock:
         if _monitor_started:
             return
@@ -142,9 +148,13 @@ def _monitor_loop() -> None:
 
 def _dispatch_batch(observers: list[Callable], label: str | None, args: tuple, kwargs: dict) -> None:
     global _backlog
-    loop = _get_loop()
-    asyncio.set_event_loop(loop)
     try:
+        # _get_loop() (loop creation, or the lazy log_hooks import inside it)
+        # must be INSIDE this try: it can raise, and the finally below owns
+        # the backlog decrement for THIS batch -- a raise before the finally
+        # would leak the count permanently (issue #5 review round 1).
+        loop = _get_loop()
+        asyncio.set_event_loop(loop)
         for observer in observers:
             with _watch_lock:
                 _current["name"] = _observer_name(observer)

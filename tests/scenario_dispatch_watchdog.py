@@ -10,11 +10,17 @@ observer produces an error log naming the observer and the queued backlog,
 and a piled-up backlog warns on the submit side too.
 
 Checks (real dispatcher, thresholds patched down):
-  1. A wedged observer produces the watchdog error naming it within the
-     monitor interval.
-  2. Backlog crossing the threshold produces the backlog error.
-  3. After the wedge releases, dispatch drains and later events still run
-     (no regression from the accounting).
+  1.  A wedged observer produces the watchdog error naming it within the
+      monitor interval.
+  1b. While still wedged, the watchdog RE-warns with a climbing stall
+      duration (a persistent stall must not look resolved after one log).
+  2.  Backlog crossing the threshold produces the backlog error.
+  3.  After the wedge releases, dispatch drains and later events still run
+      (no regression from the accounting).
+  4.  Backlog accounting does not leak when a batch raises before the
+      observer loop (_get_loop failure): the finally's decrement still runs.
+  5.  A submit that fails because the executor is shut down rolls the
+      increment back and re-raises.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
@@ -56,6 +62,35 @@ def main() -> int:
         return 1
     print("PASS: wedged observer is named in the watchdog error")
 
+    # 1b) the watchdog RE-warns while still stuck, with a climbing duration --
+    # a wedge that logged once and then went quiet would look resolved. Parse
+    # the "wedged for Ns" field out of every wedge record and require at least
+    # two distinct warns whose reported stall duration increased.
+    def _wedge_durations() -> list[float]:
+        out = []
+        for r in records:
+            if "wedged for" not in r:
+                continue
+            try:
+                out.append(float(r.split("wedged for")[1].split("s inside")[0]))
+            except (IndexError, ValueError):
+                pass
+        return out
+
+    if not wait_until(lambda: len(set(_wedge_durations())) >= 2, timeout=5):
+        print("FAIL(1b): watchdog warned once but never re-warned while still "
+              f"wedged (durations seen: {_wedge_durations()}) -- a persistent "
+              "stall would look resolved after the first log")
+        gate.set()
+        return 1
+    durations = _wedge_durations()
+    if max(durations) <= min(durations):
+        print(f"FAIL(1b): re-warn durations did not climb ({durations}) -- the "
+              "stall clock is not advancing across re-warns")
+        gate.set()
+        return 1
+    print(f"PASS: watchdog re-warns with a climbing stall duration ({durations})")
+
     # 2) backlog warning while the lane is stalled
     ran = []
     for i in range(15):
@@ -79,6 +114,53 @@ def main() -> int:
         print("FAIL(3): dispatch broken after a wedge incident")
         return 1
     print("PASS: lane drains and keeps working after the wedge releases")
+
+    # 4) backlog accounting survives a batch that raises BEFORE the observer
+    # loop -- _get_loop() (loop creation / lazy log_hooks import) sits inside
+    # the try whose finally owns the decrement, so a raise there must not leak
+    # the count. Red-checked: with _get_loop() outside the try, this leaks +1
+    # permanently (issue #5 review round 1).
+    baseline = ed._backlog
+    orig_get_loop = ed._get_loop
+
+    def boom_get_loop():
+        raise RuntimeError("simulated loop-creation failure")
+
+    ed._get_loop = boom_get_loop
+    try:
+        ed.dispatch([lambda: None], (), {}, label="leak-probe")
+        # the batch runs on the worker, blows up in _get_loop, and its finally
+        # must still decrement -- backlog returns to baseline, does not leak.
+        leaked = not wait_until(lambda: ed._backlog == baseline, timeout=5)
+    finally:
+        ed._get_loop = orig_get_loop
+    if leaked:
+        print(f"FAIL(4): backlog leaked when _get_loop raised "
+              f"(baseline={baseline}, now={ed._backlog}) -- the finally's "
+              "decrement was skipped")
+        return 1
+    print("PASS: backlog does not leak when a batch raises before dispatch")
+
+    # 5) a submit that fails because the executor is shut down must roll the
+    # increment back and re-raise (not leave the count stuck +1 forever). This
+    # is destructive to the lane, so it runs last.
+    baseline = ed._backlog
+    ed._dispatch_executor.shutdown(wait=True)
+    raised = False
+    try:
+        ed.dispatch([lambda: None], (), {}, label="shutdown-probe")
+    except RuntimeError:
+        raised = True
+    if not raised:
+        print("FAIL(5): dispatch after executor shutdown did not re-raise "
+              "RuntimeError -- callers can't tell the batch was dropped")
+        return 1
+    if ed._backlog != baseline:
+        print(f"FAIL(5): backlog leaked on a failed submit "
+              f"(baseline={baseline}, now={ed._backlog}) -- the increment was "
+              "not rolled back")
+        return 1
+    print("PASS: a failed submit rolls the backlog back and re-raises")
     return 0
 
 
