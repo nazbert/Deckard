@@ -49,7 +49,8 @@ if TYPE_CHECKING:
 # One save lock per page json path, shared across every Page object for that
 # path: each controller showing the same page holds its OWN Page instance, so
 # a per-object lock/semaphore can never order two controllers' saves of the
-# same file (issue #55).
+# same file (issue #55). Grows one entry per distinct page path and never
+# prunes -- bounded by the user's page count (tens), so no eviction is needed.
 _save_locks: dict[str, threading.Lock] = {}
 _save_locks_guard = threading.Lock()
 
@@ -689,12 +690,17 @@ class Page:
     def get_pages_with_same_json(self, get_self: bool = False) -> list:
         pages: list[Page]= []
         for controller in gl.deck_manager.deck_controller:
-            if controller.active_page is None:
+            # Snapshot active_page once: it is set to None from another thread
+            # while a controller (dis)connects/closes, so re-reading the field
+            # per check raced a non-None guard against a None deref of
+            # .json_path (same class as update_input's guard, issue #55).
+            active_page = controller.active_page
+            if active_page is None:
                 continue
-            if controller.active_page == self and not get_self:
+            if active_page == self and not get_self:
                 continue
-            if controller.active_page.json_path == self.json_path:
-                pages.append(controller.active_page)
+            if active_page.json_path == self.json_path:
+                pages.append(active_page)
         return pages
     
     def reload_similar_pages(self, identifier: InputIdentifier = None, reload_self: bool = False,

@@ -3,6 +3,11 @@ Scenario: reload_similar_pages(identifier=None) must reload each sibling
 controller's OWN Page object, not the caller's (issue #55 -- Page.py passed
 `self` to the other controller's load_page, loading THIS controller's Page
 onto other decks: cross-deck page bleed).
+
+Also: get_pages_with_same_json must snapshot controller.active_page once. It
+is cleared to None from another thread while a controller (dis)connects, so
+re-reading the field per check raced a non-None guard against a None deref of
+.json_path -- the same class as update_input's guard (issue #55).
 """
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
 
@@ -58,7 +63,35 @@ def main() -> int:
         print(f"FAIL: sibling controller received {got}, expected its own [page_b]")
         return 1
 
-    print("PASS: reload_similar_pages loads each controller's own Page")
+    # --- active_page flips to None mid-scan must not AttributeError --------
+    class FlippingController:
+        """active_page reads non-None once (passing the guard), then None on
+        the next read -- exactly the (dis)connect race. A per-check re-read
+        would then deref None.json_path; a single snapshot is immune."""
+        def __init__(self, serial, page):
+            self.deck = FaultyFakeDeck(serial_number=serial)
+            self._page = page
+            self._reads = 0
+
+        def serial_number(self):
+            return self.deck.get_serial_number()
+
+        @property
+        def active_page(self):
+            self._reads += 1
+            return self._page if self._reads <= 1 else None
+
+    probe_page = Page(json_path=path, deck_controller=ctrl_a)
+    flipping = FlippingController("reload-flip", probe_page)
+    gl.deck_manager.deck_controller = [flipping]
+    try:
+        probe_page.get_pages_with_same_json(get_self=True)
+    except AttributeError as e:
+        print(f"FAIL: get_pages_with_same_json derefs a concurrently-cleared active_page: {e}")
+        return 1
+
+    print("PASS: reload_similar_pages loads each controller's own Page; "
+          "get_pages_with_same_json survives active_page clearing mid-scan")
     return 0
 
 
