@@ -49,6 +49,29 @@ class StreamDeckUIImporter:
             else:
                 log.error(f"Failed to save {json_path} after all retries, giving up")
             
+    def allocate_page_paths(self, deck: str, page_names) -> dict[str, str]:
+        """Maps each export page name to a collision-free target path.
+        Computed up front for the whole deck so ChangePage cross-references
+        can point at the FINAL filenames -- and so an existing user page
+        named ui_<deck>_<n>.json is never overwritten (a numeric suffix is
+        appended instead)."""
+        pages_dir = os.path.join(gl.DATA_PATH, "pages")
+        os.makedirs(pages_dir, exist_ok=True)
+
+        page_paths: dict[str, str] = {}
+        allocated: set[str] = set()
+        for page_name in page_names:
+            base = f"ui_{deck}_{int(page_name) + 1}"
+            candidate = os.path.join(pages_dir, f"{base}.json")
+            suffix = 2
+            while os.path.exists(candidate) or candidate in allocated:
+                candidate = os.path.join(pages_dir, f"{base}_{suffix}.json")
+                suffix += 1
+            allocated.add(candidate)
+            page_paths[page_name] = candidate
+
+        return page_paths
+
     def get_state_map(self, available_states: list[str]):
         available_states = [int(state) for state in available_states]
         available_states.sort()
@@ -65,16 +88,29 @@ class StreamDeckUIImporter:
 
 
         for deck in self.export.get("state", {}):
-            ## Deck preferences
+            ## Deck preferences -- merge into whatever deck settings already
+            ## exist; replacing the file wholesale erased every unrelated
+            ## section (rotation, key layout, ...) on import (issue #55).
+            preferences_path = os.path.join(gl.DATA_PATH, "settings", "decks", f"{deck}.json")
             preferences = {}
-            preferences["brightness"] = {}
-            preferences["screensaver"] = {}
-            preferences["screensaver"]["enable"] = True
-            preferences["brightness"]["value"] = self.export["state"][deck].get("brightness", 75)
-            preferences["screensaver"]["time-delay"] = self.export["state"][deck].get("display_timeout", 5*60)//60
-            preferences["screensaver"]["brightness"] = self.export["state"][deck].get("brightness_dimmed", 0)
+            try:
+                with open(preferences_path) as f:
+                    preferences = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                preferences = {}
+            preferences.setdefault("brightness", {})["value"] = self.export["state"][deck].get("brightness", 75)
+            screensaver = preferences.setdefault("screensaver", {})
+            screensaver["enable"] = True
+            screensaver["time-delay"] = self.export["state"][deck].get("display_timeout", 5*60)//60
+            screensaver["brightness"] = self.export["state"][deck].get("brightness_dimmed", 0)
 
-            self.save_json(os.path.join(gl.DATA_PATH, "settings", "decks", f"{deck}.json"), preferences)
+            os.makedirs(os.path.dirname(preferences_path), exist_ok=True)
+            self.save_json(preferences_path, preferences)
+
+            # Final page filenames for this deck, collision-suffixed, so
+            # same-named user pages survive and intra-import ChangePage
+            # references stay consistent.
+            page_paths = self.allocate_page_paths(deck, self.export["state"][deck].get("buttons", {}).keys())
 
             for page_name in self.export["state"][deck].get("buttons", {}):
                 ## Keys
@@ -109,8 +145,11 @@ class StreamDeckUIImporter:
                         page["keys"][coords]["states"][page_state]["labels"]["bottom"] = {
                             "text": state_data.get("text", None),
                             "color": hex_to_rgba255(font_color_hex),
-                            "font_size": None,
-                            "font_family": font_family_from_path(state_data.get("font"))
+                            # Hyphenated: the keys Page/LabelManager read.
+                            # The old underscore spellings were dead keys
+                            # the loader never looked at (issue #55).
+                            "font-size": None,
+                            "font-family": font_family_from_path(state_data.get("font"))
                         }
 
                         page["keys"][coords]["states"][page_state]["background"] = {}
@@ -136,7 +175,19 @@ class StreamDeckUIImporter:
                         export_switch_page = state_data.get("switch_page")
                         if str(export_switch_page) != str(int(page_name)+1) and export_switch_page not in [0, "0", None, ""]:
                             if export_switch_page not in [None, ""]:
-                                page_path = os.path.join(gl.DATA_PATH, "pages", f"ui_{deck}_{export_switch_page}.json")
+                                # switch_page is 1-based over the export's
+                                # 0-based page names; resolve through the
+                                # allocation map so the reference tracks any
+                                # collision suffix the target received.
+                                page_path = None
+                                try:
+                                    page_path = page_paths.get(str(int(export_switch_page) - 1))
+                                except (TypeError, ValueError):
+                                    page_path = None
+                                if page_path is None:
+                                    # Target page not part of this export:
+                                    # keep the historical naming.
+                                    page_path = os.path.join(gl.DATA_PATH, "pages", f"ui_{deck}_{export_switch_page}.json")
                                 action = {
                                     "id": "com_core447_DeckPlugin::ChangePage",
                                     "settings": {
@@ -208,14 +259,14 @@ class StreamDeckUIImporter:
                             page["keys"][coords]["states"][page_state]["actions"].append(action)
 
 
-                page_path = os.path.join(gl.DATA_PATH, "pages", f"ui_{deck}_{int(page_name) + 1}.json")
+                page_path = page_paths[page_name]
                 self.save_json(page_path, page)
                 # gl.signal_manager.trigger_signal(Signals.PageAdd, page_path) # We don't trigger the action to save ressources
-                # time.sleep(0.005) # Otherwise the app can't hold up - The problem is the signal call, but is is necessary to 
+                # time.sleep(0.005) # Otherwise the app can't hold up - The problem is the signal call, but is is necessary to
 
                 gl.page_manager.update_dict_of_pages_with_path(page_path)
                 gl.page_manager.reload_pages_with_path(page_path)
-                log.success(f"Imported page {page_name} as page ui_{int(page_name) + 1} on deck {deck}")
+                log.success(f"Imported page {page_name} as page {os.path.basename(page_path)} on deck {deck}")
 
             log.success(f"Imported all pages of deck {deck}")
 
