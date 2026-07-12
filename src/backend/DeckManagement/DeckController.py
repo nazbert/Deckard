@@ -254,6 +254,22 @@ class ReleaseStashedInputsMsg:
     stashed_inputs: dict
 
 
+def _env_float(name: str, default: float) -> float:
+    """Reads a float tuning knob from the environment, falling back to
+    `default` on a malformed value. A typo in an env var must degrade to the
+    built-in default with a warning -- never raise out of MediaPlayerThread
+    init, where DeckManager would swallow it as "Failed to initialize deck"
+    and silently skip the whole device."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning(f"Ignoring malformed {name}={raw!r}; using the default {default}")
+        return default
+
+
 class MediaPlayerThread(threading.Thread):
     # An image batch at or above this size is a bulk repaint (video frame /
     # full-page paint) and gets inter-write yields; below it is interactive
@@ -278,13 +294,13 @@ class MediaPlayerThread(threading.Thread):
         # high-entropy video defeats tile dedup entirely (~270 candidate
         # writes/s) and drags the media loop to ~19fps; 20 sustains 26+ loop
         # fps on that same worst case. 0 disables the cap.
-        self._video_write_hz = float(os.environ.get("STREAMCONTROLLER_VIDEO_WRITE_HZ", 20))
+        self._video_write_hz = _env_float("STREAMCONTROLLER_VIDEO_WRITE_HZ", 20.0)
         self._last_video_write = 0.0
 
         # Inter-write yield inside bulk batches (seconds); see the comment in
         # perform_media_player_tasks. This pacing is the mechanism that keeps
         # the HID reader responsive at the 30Hz default above.
-        self._inter_write_yield = float(os.environ.get("STREAMCONTROLLER_WRITE_YIELD_MS", 1.5)) / 1000.0
+        self._inter_write_yield = _env_float("STREAMCONTROLLER_WRITE_YIELD_MS", 1.5) / 1000.0
 
         self.running = False
         self.media_ticks = 0
