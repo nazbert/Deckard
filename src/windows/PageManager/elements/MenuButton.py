@@ -26,6 +26,8 @@ import globals as gl
 import json
 import os
 
+from src.backend.atomic_json import atomic_write_json
+
 from loguru import logger as log 
 from src.windows.PageManager.Importer.Importer import Importer
 # Import typing
@@ -118,8 +120,7 @@ class MenuButton(Gtk.MenuButton):
         with open(self.pageEditor.active_page_path, "r") as f:
             page_json = json.load(f)
 
-        with open(selected_file.get_path(), "w") as f:
-            json.dump(page_json, f, indent=4)
+        atomic_write_json(selected_file.get_path(), page_json)
 
     def on_import_page(self, *args):
         ChooseImportFileDialog(self, self.import_page_callback)
@@ -186,8 +187,7 @@ class MenuButton(Gtk.MenuButton):
             js = gl.page_manager.get_page_data(path)
             pages[os.path.basename(path)] = js
 
-        with open(selected_path, "w") as f:
-            json.dump(pages, f, indent=4)
+        atomic_write_json(selected_path, pages)
 
     def on_import_streamcontroller(self, *args):
         ChooseImportFileDialog(self, self.import_streamcontroller_callback)

@@ -5,6 +5,7 @@ import time
 from loguru import logger as log
 
 import globals as gl
+from src.backend.atomic_json import atomic_write_json
 
 class StoreCache:
     # Entries carry two clocks: "date" is LAST USE (refreshed on every open,
@@ -41,9 +42,7 @@ class StoreCache:
         
     def set_files(self, files: dict):
         with self.write_lock:
-            os.makedirs(os.path.dirname(self.files_json), exist_ok=True)
-            with open(self.files_json, "w") as f:
-                json.dump(files.copy(), f, indent=4)
+            atomic_write_json(self.files_json, files.copy())
 
     def remove_old_cache_files(self):
         for string in self.files.copy():
@@ -68,10 +67,8 @@ class StoreCache:
         files = [self.files_json]
 
         for file in files:
-            os.makedirs(os.path.dirname(file), exist_ok=True)
             if not os.path.exists(file):
-                with open(file, "w") as f:
-                    json.dump({}, f, indent=4)
+                atomic_write_json(file, {})
 
     def get_user_name(self, repo_url:str) -> str:
         splitted =  repo_url.split("/")

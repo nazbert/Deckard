@@ -40,6 +40,7 @@ from autostart import is_flatpak
 from src.backend.Store.StoreCache import StoreCache
 from src.backend.PluginManager.PluginBase import PluginBase
 from src.backend.DeckManagement.HelperMethods import recursive_hasattr
+from src.backend.atomic_json import atomic_write_json
 
 # Import signals
 from src.Signals import Signals
@@ -713,8 +714,10 @@ class StoreBackend:
             self.api_cache[api_call_url] = {}
             self.api_cache[api_call_url]["answer"] = resp.json()
             self.api_cache[api_call_url]["time-code"] = datetime.now().strftime("%d-%m-%y-%H-%M")
-            with open(os.path.join(gl.DATA_PATH, self.STORE_CACHE_PATH, "api.json"), "w") as f:
-                json.dump(self.api_cache, f, indent=4)
+            # Snapshot: parallel store loads mutate api_cache while this
+            # serializes; handing json.dump the live dict can raise
+            # "dictionary changed size during iteration" and fail the fetch.
+            atomic_write_json(os.path.join(gl.DATA_PATH, self.STORE_CACHE_PATH, "api.json"), dict(self.api_cache))
             return resp.json()
 
         if api_call_url not in self.api_cache:

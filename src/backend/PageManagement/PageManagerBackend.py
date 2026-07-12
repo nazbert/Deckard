@@ -35,6 +35,7 @@ from src.backend.DeckManagement.DeckController import DeckController
 from src.backend.PageManagement.Page import Page
 from src.backend.PageManagement.DummyPage import DummyPage
 from src.backend.DeckManagement.HelperMethods import get_sub_folders, natural_sort, natural_sort_by_filenames, recursive_hasattr, sort_times
+from src.backend.atomic_json import atomic_write_json
 
 # Import globals
 import globals as gl
@@ -335,9 +336,8 @@ class PageManagerBackend:
         path = os.path.join(self.PAGE_PATH, f"{page_name}.json")
         if os.path.exists(path):
             raise FileExistsError(f"A page with the name '{page_name}' already exists.")
-        
-        with open(path, "w") as f:
-            json.dump(page_dict, f)
+
+        atomic_write_json(path, page_dict)
 
         #self.update_auto_change_info()
         return path
@@ -402,6 +402,8 @@ class PageManagerBackend:
             controller.load_page(controller.active_page, allow_reload=True)
 
     def update_dict_of_pages_with_path(self, path: str) -> None:
+        # Re-reading from disk can't lose unsaved in-memory edits: every
+        # in-tree Page.dict mutator persists via save() in the same call.
         pages = self.get_pages_with_path(path)
         for page in pages:
             page.update_dict()
@@ -474,9 +476,8 @@ class PageManagerBackend:
 
             # If any asset was removed, update page file and reload pages
             if page_had_asset:
-                # Write updated page data back to file with pretty JSON
-                with open(page_path, "w") as f:
-                    json.dump(page_dict, f, indent=4)
+                # Write updated page data back to file (atomically)
+                atomic_write_json(page_path, page_dict)
 
                 # Update internal cache or tracking dict with this page path
                 self.update_dict_of_pages_with_path(page_path)
@@ -575,10 +576,14 @@ class PageManagerBackend:
         data["settings"] = settings
         self.settings_manager.save_settings_to_file(path, data)
 
-        for controller in gl.deck_manager.deck_controller:
-            if controller.active_page.json_path != path:
-                continue
-            controller.active_page.dict = data
+        # Refresh EVERY cached Page object for this path, not just the ones
+        # active on a controller (same mechanism set_page_data uses). A
+        # cached-but-not-active Page kept its pre-edit dict here, and the
+        # next Page.save() from any trigger (plugin set_settings, key/state
+        # edits, ...) rewrote the file from that stale dict -- silently
+        # erasing the just-saved settings section (auto-change, screensaver,
+        # brightness, background overrides). See #113/#104.
+        self.update_dict_of_pages_with_path(path)
 
     def get_auto_change_settings(self, path: str) -> dict:
         """
