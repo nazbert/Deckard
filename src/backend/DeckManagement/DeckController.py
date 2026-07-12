@@ -979,8 +979,13 @@ class DeckController:
         # Set once by close() and never cleared (plan P1.3): gates re-entrant
         # producer paths (ScreenSaver.show/hide/on_key_change, load_page)
         # that would otherwise resurrect a controller mid-teardown, and makes
-        # close() itself idempotent against a second call.
+        # close() itself idempotent against a second call. The transition is
+        # made under _close_lock (issue #56 item 5): unplug-thread and
+        # app-quit teardown can race, and an unlocked check-then-set let both
+        # callers pass the gate and run the teardown sweep -- plugin
+        # on_removed hooks and device closes -- concurrently.
         self._closing: bool = False
+        self._close_lock = threading.Lock()
 
         # Timestamp of the last post-load GC (see maybe_collect_garbage).
         self._last_gc_time: float = 0.0
@@ -2027,9 +2032,16 @@ class DeckController:
         + caches); the rest of the sequence (device/thread/registration
         teardown) always runs.
         """
-        if self._closing:
-            return
-        self._closing = True
+        # Locked compare-and-set (issue #56 item 5): two teardown callers
+        # (USB unplug thread vs. app-quit main thread) racing the unlocked
+        # check-then-set could both pass the gate and run the whole sweep
+        # concurrently -- duplicate plugin on_removed hooks, double device
+        # close. Only the transition is under the lock; the sweep itself
+        # stays unlocked (it can block on plugin hooks).
+        with self._close_lock:
+            if self._closing:
+                return
+            self._closing = True
 
         # Invalidate any in-flight page load NOW (issue #15): a load_page
         # that already passed the _closing gate could otherwise attach a
