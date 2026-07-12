@@ -68,6 +68,10 @@ class InputImage(SingleKeyAsset):
             image = ImageEnhance.Color(image).enhance(self._saturation)
 
         self.path = path
+        # Native size of the source file, captured on the first re-decode in
+        # _ensure_fits_composed(). None until then (the constructor's `image`
+        # may already be a fitted copy, so its size is not the source's).
+        self._source_native_size = None
         self.image = self._fit_to_budget(image)
 
         if self.image is None:
@@ -121,14 +125,34 @@ class InputImage(SingleKeyAsset):
         size = layout.size if layout.size is not None else 1
         needed_w = int(tile_w * max(size, 0))
         needed_h = int(tile_h * max(size, 0))
+        # Clamp the ask to what the source can actually deliver: when the
+        # source is smaller than the composed size (any 64px icon on 72px
+        # tiles, any image whose fitted minor dim is sub-tile), no re-decode
+        # can ever satisfy it -- without the clamp every composite re-ran
+        # Image.open + convert + enhance from disk (per-frame disk I/O on
+        # background-video pages, B-03).
+        #
+        # Edge: the native size is memoized from the first re-decode, so if
+        # the file at self.path is later REPLACED with a larger image, this
+        # clamp keeps serving the old resolution and never picks the new one
+        # up. That is consistent with the pre-existing assumption that a given
+        # `path` is a stable source (the whole re-decode-from-path fallback
+        # already relies on the file not changing under it); a genuine media
+        # change goes through a full asset rebuild (new InputImage), not an
+        # in-place file swap.
+        if self._source_native_size is not None:
+            needed_w = min(needed_w, self._source_native_size[0])
+            needed_h = min(needed_h, self._source_native_size[1])
         if needed_w <= self.image.width and needed_h <= self.image.height:
             return
 
         try:
             with Image.open(self.path) as fresh:
+                native_size = fresh.size
                 fresh = fresh.convert("RGBA")
         except (OSError, FileNotFoundError):
             return
+        self._source_native_size = native_size
 
         if abs(self._saturation - 1.0) > 0.001:
             fresh = ImageEnhance.Color(fresh).enhance(self._saturation)
@@ -142,9 +166,12 @@ class InputImage(SingleKeyAsset):
         if fresh.width > budget[0] or fresh.height > budget[1]:
             fresh.thumbnail(budget, Image.Resampling.LANCZOS)
 
-        old_image = self.image
+        # The swapped-out image is deliberately NOT closed: the media thread
+        # may still be compositing the reference get_raw_image() handed it
+        # (closing raised 'Operation on closed image' under load, B-03).
+        # Dropping the reference is the stated policy -- it is collected once
+        # the last composite releases it.
         self.image = fresh
-        old_image.close()
 
     def get_raw_image(self) -> Image.Image:
         if not hasattr(self, "image") or self.image is None:

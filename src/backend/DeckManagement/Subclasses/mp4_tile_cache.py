@@ -464,6 +464,18 @@ class Mp4FrameCache:
     def is_cache_complete(self) -> bool:
         return self._complete
 
+    def is_build_terminal(self) -> bool:
+        """True once the source capture has been released without the cache
+        completing (VideoWriter open failure, os.replace failure, cache
+        reopen failure, or a truncated source whose metadata promised more
+        frames): no further get_frame() can make progress. Only meaningful
+        after at least one get_frame() call. The constructor opens the source
+        eagerly (_open_source), so a fresh builder's cap is already set -- the
+        "trivially terminal before any decode" case (a source that would not
+        open at all) is instead screened by _run_builder's `n_frames <= 0`
+        guard, which returns before the first terminal check."""
+        return self.cap is None and not self._complete
+
     # --- teardown --------------------------------------------------------
 
     def _abort_writer(self) -> None:
@@ -624,6 +636,23 @@ def _run_builder(entry: _TileCacheEntry, source_path: str, out_size: tuple[int, 
             if builder.n_frames <= 0:
                 return
             builder.get_frame(builder.last_frame_index + 1)
+            if builder.is_build_terminal():
+                # Source released without completion. get_frame() returns
+                # instantly in this state, so looping again would busy-spin
+                # a full core for as long as the key stays on screen (B-02).
+                #
+                # This logs once per builder and exits. A permanently
+                # unbuildable source therefore re-attempts (and re-logs once)
+                # each time the entry is recreated by a fresh acquire() after
+                # its refcount hit zero -- accepted: one bounded decode pass +
+                # one log per acquire cycle is a strict improvement over the
+                # pre-fix core-spin, and playback degrades to uncached either
+                # way.
+                log.error(
+                    f"Tile cache build cannot complete for {source_path} -- "
+                    f"leaving uncached playback"
+                )
+                return
         entry.ready = True
     except Exception:
         log.opt(exception=True).error(f"Tile cache builder failed for {source_path}")
