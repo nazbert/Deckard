@@ -87,7 +87,10 @@ def _dispatch_batch(observers: list[Callable], label: str | None, args: tuple, k
         except Exception:
             name = getattr(observer, "__name__", repr(observer))
             where = f" in {label}" if label else ""
-            log.error(f"Callback {name}{where} could not be called")
+            # opt(exception=True) attaches sys.exc_info() so the observer's
+            # full traceback lands in the log -- a bare one-liner here made
+            # raising plugin callbacks invisible (issue #33).
+            log.opt(exception=True).error(f"Callback {name}{where} could not be called")
 
 
 def _log_batch_failure(future) -> None:

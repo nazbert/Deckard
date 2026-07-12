@@ -35,6 +35,8 @@ import threading
 import weakref
 from typing import Callable
 
+from loguru import logger as log
+
 # Read once at import -- this is a debugging knob, not something that should
 # change behavior mid-run.
 _STRONG_CALLBACKS = os.environ.get("SC_STRONG_CALLBACKS") == "1"
@@ -47,6 +49,29 @@ _Entry = object
 
 def _is_bound_method(cb: Callable) -> bool:
     return hasattr(cb, "__self__") and hasattr(cb, "__func__")
+
+
+def _describe_callback(cb: Callable) -> str:
+    """A printable identity for a callback, captured while it's still alive."""
+    qualname = getattr(cb, "__qualname__", None) or repr(cb)
+    module = getattr(cb, "__module__", None)
+    return f"{module}.{qualname}" if module else qualname
+
+
+class _WeakMethodEntry(weakref.WeakMethod):
+    """A WeakMethod that remembers a printable description of the method it
+    wrapped. Once the owner dies the WeakMethod resolves to None and can no
+    longer say what it used to point at -- so the description has to be
+    captured at add() time for snapshot()'s prune log (issue #38) to name
+    what was silently dropped. WeakMethod uses __slots__; this subclass
+    deliberately doesn't, so `description` can live in a normal instance
+    __dict__.
+    """
+
+    def __new__(cls, meth: Callable):
+        self = super().__new__(cls, meth)
+        self.description = _describe_callback(meth)
+        return self
 
 
 def _resolve_entry(entry: _Entry):
@@ -72,7 +97,7 @@ class CallbackRegistry:
 
     def _make_entry(self, cb: Callable) -> _Entry:
         if not _STRONG_CALLBACKS and _is_bound_method(cb):
-            return weakref.WeakMethod(cb)
+            return _WeakMethodEntry(cb)
         return cb
 
     def add(self, cb: Callable) -> bool:
@@ -113,19 +138,43 @@ class CallbackRegistry:
 
     def snapshot(self) -> list[Callable]:
         """Return a list of currently-live callables, pruning dead entries
-        as a side effect.
+        as a side effect. Each pruned entry is logged at DEBUG (issue #38):
+        weak-by-default storage means a bound method of an otherwise
+        unreferenced owner silently loses its subscription at the next gc
+        pass -- deliberate (D2), but without a trace it's undiagnosable when
+        a plugin's events "just stop"; SC_STRONG_CALLBACKS=1 remains the
+        bisect hatch.
         """
+        pruned: list[str] = []
         with self._lock:
             kept = []
             live_callbacks = []
             for entry in self._entries:
                 live = _resolve_entry(entry)
                 if live is None:
-                    continue  # prune: owner is gone
+                    # prune: owner is gone. Only a dead _WeakMethodEntry can
+                    # resolve to None (strong entries are the callable itself
+                    # and never die out from under us), so `.description` is
+                    # always present here; the getattr fallback is pure
+                    # belt-and-suspenders.
+                    pruned.append(getattr(entry, "description", repr(entry)))
+                    continue
                 kept.append(entry)
                 live_callbacks.append(live)
             self._entries = kept
-            return live_callbacks
+        # Log outside the lock -- a sink must never be able to re-enter the
+        # registry while snapshot() holds it. A given dead entry is pruned
+        # from self._entries in the same pass, so it is logged at most once
+        # across the process; the only way to double-log is two threads
+        # racing snapshot() on the same still-dead entry (benign duplicate
+        # DEBUG line, no state corruption -- the locked _entries reassignment
+        # is last-write-wins).
+        for description in pruned:
+            log.debug(
+                f"CallbackRegistry: pruning dead callback {description} "
+                f"(owner was garbage-collected before it was removed)"
+            )
+        return live_callbacks
 
     def __iter__(self):
         # Callers that iterate a registry directly (`for cb in registry`,
