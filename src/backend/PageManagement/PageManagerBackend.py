@@ -479,7 +479,14 @@ class PageManagerBackend:
         if not os.path.exists(path) and os.path.exists(backup_path) and use_backup:
             path = backup_path
 
-        return self.settings_manager.load_settings_from_file(path)
+        data = self.settings_manager.load_settings_from_file(path)
+        if not data and use_backup and path != backup_path \
+                and not os.path.exists(path) and os.path.exists(backup_path):
+            # The loader quarantined a corrupt primary (renamed it aside) --
+            # heal from the backup instead of returning {} and letting the
+            # next Page.save() persist the loss.
+            data = self.settings_manager.load_settings_from_file(backup_path)
+        return data
 
     def set_page_data(self, path: str, data: dict, reload_brightness: bool = True, reload_screensaver: bool = True, reload_background: bool = True, reload_inputs: bool = True):
         self.settings_manager.save_settings_to_file(path, data)
@@ -503,9 +510,10 @@ class PageManagerBackend:
         for page_path in self.get_pages():
             page_had_asset = False  # Flag to track if this page had the asset
 
-            # Open and load JSON page data
-            with open(page_path, "r") as f:
-                page_dict = json.load(f)
+            # Open and load JSON page data. Via the settings loader so one
+            # corrupt page (quarantined, loads {}) skips instead of raising
+            # and aborting the sweep for every remaining page.
+            page_dict = self.settings_manager.load_settings_from_file(page_path)
 
             # Safely get keys dictionary from page data
             keys = page_dict.get("keys", {})

@@ -48,8 +48,26 @@ class Migrator:
         """
         if not os.path.exists(self.SETTINGS_DIR):
             return {}
-        with open(self.SETTINGS_DIR, "r") as f:
-            return json.load(f)
+        try:
+            with open(self.SETTINGS_DIR, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            # A torn migrations.json used to abort startup here (raised
+            # straight out of run_migrators). Quarantine and treat as "no
+            # migrations recorded": re-running the migrators is safe --
+            # beta_5 never deletes-without-write and leaves existing targets
+            # alone, 1_5_0's walker is idempotent, and create_backup() runs
+            # before any destructive work.
+            quarantine = self.SETTINGS_DIR + ".corrupt"
+            try:
+                os.replace(self.SETTINGS_DIR, quarantine)
+            except OSError:
+                quarantine = self.SETTINGS_DIR
+            log.error(
+                f"Could not read {self.SETTINGS_DIR} ({e}) -- preserved at "
+                f"{quarantine}, treating all migrations as pending"
+            )
+            return {}
         
     def set_settings(self, settings: dict) -> None:
         """
