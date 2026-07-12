@@ -41,37 +41,64 @@ class CustomAssetChooser(ChooserPage):
         super().__init__()
         self.asset_manager = asset_manager
 
+        self.asset_chooser: CustomAssetChooserFlowBox = None
         self.build_finished = False
         self.build_task_finished_tasks: list[callable] = []
+        # Serializes build_finished with the deferred-task queue -- see
+        # _finish_build / show_for_path.
+        self._build_tasks_lock = threading.Lock()
 
         threading.Thread(target=self.build).start()
 
     @log.catch
     def build(self):
         self.build_finished = False
-        self.asset_chooser = CustomAssetChooserFlowBox(self)
-        # Append to main_box (like the Wallpaper / SD+ Bar / Icon choosers do),
-        # NOT into ChooserPage's outer ScrolledWindow: a ScrolledWindow sizes
-        # its child to natural height (never stretches it), which collapses a
-        # nested grid, and the flow box brings its own ScrolledWindow +
-        # pagination. As a direct main_box child its own scroller fills the
-        # available height. The default scrolled_window must also be REMOVED
-        # (as the sibling choosers do) -- an empty vexpand=True child competes
-        # for the page's height and squeezes the grid.
-        GLib.idle_add(self.main_box.remove, self.scrolled_window)
-        GLib.idle_add(self.main_box.append, self.asset_chooser)
+        try:
+            self.asset_chooser = CustomAssetChooserFlowBox(self)
+            # Append to main_box (like the Wallpaper / SD+ Bar / Icon choosers do),
+            # NOT into ChooserPage's outer ScrolledWindow: a ScrolledWindow sizes
+            # its child to natural height (never stretches it), which collapses a
+            # nested grid, and the flow box brings its own ScrolledWindow +
+            # pagination. As a direct main_box child its own scroller fills the
+            # available height. The default scrolled_window must also be REMOVED
+            # (as the sibling choosers do) -- an empty vexpand=True child competes
+            # for the page's height and squeezes the grid.
+            GLib.idle_add(self.main_box.remove, self.scrolled_window)
+            GLib.idle_add(self.main_box.append, self.asset_chooser)
 
-        self.browse_files_button = Gtk.Button(label=gl.lm.get("asset-chooser.custom.browse-files"), margin_top=15)
-        self.browse_files_button.connect("clicked", self.on_browse_files_clicked)
-        GLib.idle_add(self.main_box.append, self.browse_files_button)
+            self.browse_files_button = Gtk.Button(label=gl.lm.get("asset-chooser.custom.browse-files"), margin_top=15)
+            self.browse_files_button.connect("clicked", self.on_browse_files_clicked)
+            GLib.idle_add(self.main_box.append, self.browse_files_button)
 
-        self.load_defaults()
+            self.load_defaults()
+        finally:
+            # GUARANTEE the spinner is dismissed (#112): any exception above
+            # used to be swallowed by @log.catch with set_loading(False) never
+            # reached, leaving the Custom Assets page loading forever.
+            # (@log.catch stays -- finally runs first, then the exception
+            # propagates into it and gets logged.)
+            self.set_loading(False)
 
-        self.set_loading(False)
+            self._finish_build()
 
-        self.build_finished = True
-        for task in self.build_task_finished_tasks:
-            task()
+    def _finish_build(self) -> None:
+        """Flips build_finished and snapshots the deferred-task queue as one
+        atomic step. show_for_path checks the flag and appends under the
+        same lock, so a caller that read build_finished as False can no
+        longer slip its task into the queue AFTER this (only) drain already
+        snapshotted it -- such a task used to sit in the list forever and
+        the requested path was never shown."""
+        with self._build_tasks_lock:
+            self.build_finished = True
+            tasks = list(self.build_task_finished_tasks)
+            self.build_task_finished_tasks.clear()
+        # Run the tasks outside the lock: they call back into
+        # show_for_path-adjacent code and must not hold it.
+        for task in tasks:
+            try:
+                task()
+            except Exception as e:
+                log.opt(exception=True).warning(f"Deferred asset-chooser task failed: {e}")
 
     def on_dnd_accept(self, drop, user_data):
         return True
@@ -100,8 +127,16 @@ class CustomAssetChooser(ChooserPage):
         gl.asset_manager.set_cursor_from_name("default")
 
     def show_for_path(self, path):
-        if not self.build_finished:
-            self.build_task_finished_tasks.append(lambda: self.asset_chooser.show_for_path(path))
+        with self._build_tasks_lock:
+            if not self.build_finished:
+                # Deferred under the same lock _finish_build drains with:
+                # the task either makes the snapshot or sees the flag True
+                # here and dispatches directly -- never stranded in between.
+                self.build_task_finished_tasks.append(lambda: self.asset_chooser.show_for_path(path))
+                return
+        if self.asset_chooser is None:
+            # build() failed before the flow box existed -- the failure is
+            # already logged; don't raise into the caller as well.
             return
         self.asset_chooser.show_for_path(path)
 

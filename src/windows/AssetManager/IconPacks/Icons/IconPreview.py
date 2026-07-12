@@ -17,7 +17,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib
+from gi.repository import Gtk, Adw
 
 # Import own modules
 from src.windows.AssetManager.Preview import Preview
@@ -52,5 +52,9 @@ class IconPreview(Preview):
     def set_icon(self, icon: "Icon") -> None:
         self.icon = icon
 
-        GLib.idle_add(self.set_text, os.path.splitext(os.path.basename(self.icon.path))[0])
-        GLib.idle_add(self.set_image, self.icon.path)
+        # Called from DynamicFlowBox._apply_range's main-loop callback (the
+        # only caller is the chooser's factory func): set text/image directly.
+        # Deferring them through idle_add left the recycled child visible for
+        # a frame with the PREVIOUS item's name/thumbnail.
+        self.set_text(os.path.splitext(os.path.basename(self.icon.path))[0])
+        self.set_image(self.icon.path)

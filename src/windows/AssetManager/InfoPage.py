@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 # Import python modules
 from PIL import Image
+from loguru import logger as log
 from videoprops import get_video_properties
 
 # Import own modules
@@ -122,19 +123,31 @@ class InfoPage(Gtk.Box):
         self.image_group.set_visible(True)
         self.video_group.set_visible(False)
 
-        # Update ui content
-        with Image.open(path) as img:
-            self.img_resolution_row.set_url(f"{img.width}x{img.height}")
-            self.img_aspect_ratio_row.set_url(f"{get_image_aspect_ratio(img)}")
+        # Update ui content -- guarded (#112): a corrupt/unreadable file must
+        # show "unknown" fields, not kill the info-button handler.
+        try:
+            with Image.open(path) as img:
+                self.img_resolution_row.set_url(f"{img.width}x{img.height}")
+                self.img_aspect_ratio_row.set_url(f"{get_image_aspect_ratio(img)}")
+        except Exception as e:
+            log.warning(f"Could not read image info for {path}: {e}")
+            self.img_resolution_row.set_url("unknown")
+            self.img_aspect_ratio_row.set_url("unknown")
 
     def show_for_vid(self, path:str):
-        props = get_video_properties(path)
-
         # Update ui vis
         self.image_group.set_visible(False)
         self.video_group.set_visible(True)
 
-        # Update ui content
-        self.video_resolution_row.set_url(f"{props['width']}x{props['height']}")
-        self.aspect_ratio_row.set_url(f"{props['display_aspect_ratio']}")
-        self.video_framerate_row.set_url(f"{eval(props['avg_frame_rate']):.2f} fps")
+        # Update ui content -- guarded (#112): ffprobe raises (or returns a
+        # dict missing keys) for corrupt/unreadable videos.
+        try:
+            props = get_video_properties(path)
+            self.video_resolution_row.set_url(f"{props['width']}x{props['height']}")
+            self.aspect_ratio_row.set_url(f"{props['display_aspect_ratio']}")
+            self.video_framerate_row.set_url(f"{eval(props['avg_frame_rate']):.2f} fps")
+        except Exception as e:
+            log.warning(f"Could not read video info for {path}: {e}")
+            self.video_resolution_row.set_url("unknown")
+            self.aspect_ratio_row.set_url("unknown")
+            self.video_framerate_row.set_url("unknown")

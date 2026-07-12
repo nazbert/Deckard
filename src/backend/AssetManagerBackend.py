@@ -61,7 +61,15 @@ class AssetManagerBackend(list):
             return
         
         
-        hash = sha256(asset_path)
+        try:
+            hash = sha256(asset_path)
+        except OSError as e:
+            # Unreadable file (e.g. permissions): fail this one asset with a
+            # warning instead of killing the import worker thread (#112).
+            # Callers already handle a None id.
+            log.opt(exception=True).warning(f"Could not read asset {asset_path}: {e}")
+            return None
+
         if self.has_by_sha256(hash):
             #TODO: It is possible that the some image has the same sha but not the name because it got renamed
             log.warning(f"Tried to add already existing asset. Ignoring. File: {asset_path}")
@@ -69,10 +77,22 @@ class AssetManagerBackend(list):
             asset = self.get_by_id(id)
             return id
         
-        # Copy asset to internal folder if it does not exist
-        if not file_in_dir(os.path.basename(asset_path), os.path.join(gl.DATA_PATH, "cache")):
+        # Copy the asset into the internal folder -- ALWAYS (#112 rev1). The
+        # old `if not file_in_dir(basename, DATA_PATH/cache)` skip was a
+        # non-recursive top-level name match that nothing legitimately hits
+        # (url downloads land in cache/downloads/), but a basename collision
+        # would have left internal-path pointing at the user's ORIGINAL file
+        # outside the app dir -- which remove_asset_by_id() later os.remove()s.
+        # internal-path must never point outside the app's data dir.
+        # copy_asset() already handles same-file and name-collision cases.
+        try:
             internal_path = self.copy_asset(asset_path)
-        
+        except Exception as e:
+            # Dest permissions, disk full, file deleted between hash and copy:
+            # fail this one asset, don't kill the import worker thread.
+            log.opt(exception=True).warning(f"Could not import asset {asset_path}: {e}")
+            return None
+
         thumbnail_path = internal_path
         
         if is_video(asset_path):
@@ -113,10 +133,24 @@ class AssetManagerBackend(list):
         
         # Create missing directories
         os.makedirs(os.path.join(gl.DATA_PATH, "Assets", "AssetManager", "thumbnails"), exist_ok=True)
-        
-        # Create thumbnail
-        thumbnail = gl.media_manager.generate_thumbnail(asset_path)
-        thumbnail.save(thumbnail_path)
+
+        # Create thumbnail. Guarded (#112): this runs on the import worker
+        # thread (add) AND at app startup (fill_missing_thumbnails) -- one
+        # corrupt video/svg must not kill either. On failure return None
+        # (#112 rev1): Preview renders the broken marker for a None thumbnail,
+        # and fill_missing_thumbnails retries None entries on every boot, so
+        # a TRANSIENT failure (file mid-download, network mount hiccup) heals
+        # itself instead of wedging the asset until delete+re-import.
+        try:
+            thumbnail = gl.media_manager.generate_thumbnail(asset_path)
+            if thumbnail.info.get("sc_broken"):
+                # generate_thumbnail already logged the decode failure; don't
+                # persist the placeholder (keeps the file retryable).
+                return None
+            gl.media_manager.save_image_atomic(thumbnail, thumbnail_path)
+        except Exception as e:
+            log.opt(exception=True).warning(f"Could not create thumbnail for {asset_path}: {e}")
+            return None
 
         return thumbnail_path
     
@@ -129,7 +163,13 @@ class AssetManagerBackend(list):
 
         gl.page_manager.remove_asset_from_all_pages(internal_path)
 
-        os.remove(internal_path)
+        # Guarded (#112 rev1): deleting a broken asset whose file already
+        # vanished must still remove the entry, not raise out of the UI.
+        try:
+            if internal_path is not None and os.path.exists(internal_path):
+                os.remove(internal_path)
+        except OSError as e:
+            log.opt(exception=True).warning(f"Could not delete asset file {internal_path}: {e}")
 
         self.remove(asset)
         self.save_json()
@@ -210,12 +250,23 @@ class AssetManagerBackend(list):
 
         def fill_missing_thumbnails():
             for asset in self:
-                if "thumbnail" in asset:
+                # A previously failed run can leave thumbnail as null in the
+                # json -- os.path.exists(None) would TypeError and take app
+                # startup down with it (#112), so null-check first.
+                if asset.get("thumbnail") is not None:
                     if os.path.exists(asset["thumbnail"]):
                         continue
 
-                # Create thumbnail
-                thumbnail_path = self.save_thumbnail(asset["internal-path"], asset["sha256"])
+                # Create thumbnail -- per-asset guard so one poison entry
+                # cannot block the rest of the batch (or startup). On failure
+                # the thumbnail stays None (NOT some existing path): the
+                # exists-check above must retry it on the next boot (#112 rev1).
+                try:
+                    thumbnail_path = self.save_thumbnail(asset["internal-path"], asset["sha256"])
+                except Exception as e:
+                    log.opt(exception=True).warning(
+                        f"Could not restore thumbnail for {asset.get('internal-path')}: {e}")
+                    thumbnail_path = None
 
                 asset["thumbnail"] = thumbnail_path
 
@@ -227,9 +278,14 @@ class AssetManagerBackend(list):
         self.save_json()
 
     def remove_invalid_data(self):
-        ## Remove assets that have been delted internally
-        for asset in self:
-            if not os.path.exists(asset["internal-path"]):
+        ## Remove assets that have been deleted internally.
+        # Iterate over a copy -- self.remove() during iteration skips the
+        # element after each removal. Null-safe internal-path (#112 rev1):
+        # os.path.exists(None) is a TypeError that would kill app startup
+        # right after the fill_missing_data guard.
+        for asset in list(self):
+            internal_path = asset.get("internal-path")
+            if internal_path is None or not os.path.exists(internal_path):
                 self.remove(asset)
         self.save_json()
 
