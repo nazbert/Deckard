@@ -23,6 +23,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, Gio, Gdk, GObject, GdkPixbuf
 
 # Import Python modules
+import threading
 from loguru import logger as log
 from fuzzywuzzy import fuzz
 import webbrowser as web
@@ -55,6 +56,10 @@ class Store(Gtk.ApplicationWindow):
         self.backend = gl.store_backend
 
         self.currently_downloading: bool = False # Used to prevent multiple downloads because this may lead to errors during plugin initialization
+        # Serializes install/uninstall/update across previews. The bool above
+        # is informational; the lock is what prevents concurrent downloads
+        # (the old check-then-set poll on the bool was racy).
+        self.download_lock = threading.Lock()
 
         self.build()
 
