@@ -39,11 +39,15 @@ builds the flatpak bundle and creates a GitLab Release with it attached.
 - **Builder image**: `quay.io/gnome_infrastructure/gnome-runtime-images:gnome-50`
   (verified to exist, rebuilt daily) — flatpak-builder + org.gnome.{Platform,Sdk}//50
   preinstalled, matching the manifest's `runtime-version: '50'`.
-- **Runner**: `tags: [buildkit]` — the apparmor/seccomp-unconfined runner.
-  flatpak-builder's bubblewrap sandbox needs unprivileged user namespaces, which
-  the Debian 13 default AppArmor profile blocks (same constraint that created
-  that runner for netviz's rootless BuildKit). `--disable-rofiles-fuse` because
-  the docker executor exposes no /dev/fuse (the standard GNOME CI arrangement).
+- **Runner**: `tags: [flatpak]` — a dedicated **privileged** runner
+  (`run_untagged=false`, so privilege reaches only jobs that ask for the tag).
+  Field finding (#128): userns creation alone isn't enough — bwrap must mount a
+  fresh /proc inside its userns, and docker's masked /proc trips the kernel's
+  locked-mounts rule for *any* unprivileged container. `cap_add=SYS_ADMIN` was
+  tested and ruled out (the gnome image runs as uid 1000; caps never become
+  effective), leaving privileged as the only working arrangement — same as
+  GNOME's and flathub's own builders. `--disable-rofiles-fuse` stays, keeping
+  the build independent of FUSE availability.
 - **When builds run**: always on `main` and `v*` tags; on MRs automatically only
   when packaging inputs change (`manifest`, `pypi-requirements.yaml`,
   `flatpak/**`, `.gitlab-ci.yml`), manual+non-blocking otherwise — cold-cache
@@ -70,6 +74,9 @@ builds the flatpak bundle and creates a GitLab Release with it attached.
    token `release-bot`, Maintainer role, scopes `api` + `write_repository`.
 5. StreamController (project 15) on nb-labs/ci-automation's CI job-token
    allowlist (the `.release` jobs clone it with `CI_JOB_TOKEN`).
+6. Instance runner `flatpak-privileged` (id 44) registered in the gitlab-runner
+   container on hugo: docker executor, `privileged = true`, tag `flatpak`,
+   `run_untagged = false`, limits mirroring the buildkit runner.
 
 ## Bootstrap (first release)
 

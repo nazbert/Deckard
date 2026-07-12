@@ -19,11 +19,15 @@
 # gate on it for compatibility checks.
 #
 # Runner requirement: flatpak-builder sandboxes module builds with bubblewrap,
-# which needs unprivileged user namespaces — blocked by the default AppArmor
-# profile on the Debian 13 runner host, so build:flatpak MUST run on the
-# apparmor/seccomp-unconfined runner (tag `buildkit`; netviz's image builds
-# live there for the same reason). rofiles-fuse is disabled: the docker
-# executor exposes no /dev/fuse.
+# which must mount a fresh /proc inside its user namespace. Docker masks paths
+# under /proc, and the kernel's locked-mounts rule rejects a procfs mount in a
+# userns unless proc is fully visible — capabilities, seccomp and apparmor
+# settings don't reach this (the gnome image runs as uid 1000, so cap_add is
+# moot; verified empirically on the runner host, issue #128). build:flatpak
+# therefore MUST run on the dedicated privileged runner (tag `flatpak`,
+# run_untagged=false — privilege is scoped to jobs that ask for it), the same
+# arrangement GNOME/flathub use for their builders. rofiles-fuse stays
+# disabled to keep the build independent of FUSE availability.
 
 # Single pipeline per change: MR pipeline when an MR is open, branch pipeline
 # otherwise, plus tags (the tag pipeline is the binding release gate).
@@ -97,7 +101,7 @@ changelog-check:
 build:flatpak:
   stage: build
   image: quay.io/gnome_infrastructure/gnome-runtime-images:gnome-50
-  tags: [buildkit]   # the apparmor/seccomp-unconfined runner (see header)
+  tags: [flatpak]   # the dedicated privileged runner (see header)
   interruptible: true
   needs: []
   cache:
