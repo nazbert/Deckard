@@ -51,12 +51,13 @@ import faulthandler
 import os
 import signal
 import sys
+import tempfile
 import threading
 from datetime import datetime
 
 from loguru import logger as _LOG
 
-from src.backend.log_redaction import install_log_redaction
+from src.backend.log_redaction import install_log_redaction, scrub
 
 _installed = False
 _prev_sys_hook = None
@@ -140,6 +141,56 @@ def install_exception_hooks() -> None:
     _installed = True
 
 
+def _scrub_fault_log(path: str) -> None:
+    """Scrub PREVIOUS sessions' faulthandler dumps in place (issue #122).
+
+    faulthandler writes its dumps at the C level straight to the stored fd
+    -- by design, so they still land when the interpreter is wedged -- which
+    means the issue-#105 loguru patcher never sees them, and traceback frame
+    paths (File "/home/<user>/...") reach disk raw. A live intercept is
+    impossible without breaking that wedged-interpreter guarantee, so the
+    file is scrubbed here instead, at boot, right before the next boot
+    marker is appended: the sharing scenario only ever reads this file after
+    a restart. Residual risk (accepted, see #122): a dump written during the
+    CURRENT session stays raw on disk until the next boot.
+
+    Streams line-by-line (dumps are line-oriented and every scrub() pattern
+    is single-line) so a years-old multi-boot file cannot balloon memory,
+    and rewrites via a per-process tmp + os.replace so a crash mid-scrub
+    cannot destroy the previous crash's evidence. The tmp is a unique
+    mkstemp name in the SAME directory: same-dir keeps os.replace atomic,
+    and the unique name means two near-simultaneous boots (redirect_
+    faulthandler runs before the DBus single-instance probe) cannot collide
+    on a shared tmp path. The source mode is copied onto the tmp before the
+    replace so a user who locked the log down (0600) does not silently get
+    it widened to the umask default. Best-effort: any failure is logged and
+    swallowed -- a scrub problem must never block startup."""
+    if not os.path.exists(path):
+        return
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=os.path.dirname(path), prefix="faulthandler.", suffix=".scrub"
+        )
+        with open(path, "r", errors="replace") as src, os.fdopen(fd, "w") as dst:
+            for line in src:
+                dst.write(scrub(line))
+        # mkstemp creates 0600; keep the existing log's mode so a locked-down
+        # dump is not silently widened by the scrub (the Page.py idiom).
+        os.chmod(tmp_path, os.stat(path).st_mode & 0o777)
+        os.replace(tmp_path, path)
+    except Exception as e:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        try:
+            _LOG.warning(f"could not scrub faulthandler.log ({e}); continuing boot")
+        except Exception:
+            pass
+
+
 def redirect_faulthandler(directory: str) -> None:
     """Re-point the import-time stderr faulthandler (main.py:40) at
     <directory>/faulthandler.log so native crashes / SIGQUIT dumps survive
@@ -156,7 +207,14 @@ def redirect_faulthandler(directory: str) -> None:
         return
     try:
         os.makedirs(directory, exist_ok=True)
-        f = open(os.path.join(directory, "faulthandler.log"), "a", buffering=1)
+        path = os.path.join(directory, "faulthandler.log")
+        # Previous sessions' dumps bypassed the #105 redaction layer
+        # (C-level fd writes); scrub them BEFORE opening the append fd, so
+        # faulthandler attaches to the rewritten file rather than a
+        # replaced, unlinked inode. Dumps from THIS session stay raw until
+        # the next boot -- see _scrub_fault_log for why that is accepted.
+        _scrub_fault_log(path)
+        f = open(path, "a", buffering=1)
         # Crash dumps are only read after a restart: append + boot markers,
         # never truncate, so the previous crash's evidence survives boot.
         f.write(f"\n===== boot {datetime.now().isoformat()} pid={os.getpid()} =====\n")
