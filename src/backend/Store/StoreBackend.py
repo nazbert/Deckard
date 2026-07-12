@@ -13,16 +13,15 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
  
+import re
 import sys
 import zipfile
 import requests
-from async_lru import alru_cache
 import json
 import asyncio
 from PIL import Image
 from io import BytesIO
 from loguru import logger as log
-from datetime import datetime
 import subprocess
 import time
 import os
@@ -72,6 +71,47 @@ class StoreBackend:
     # few enough not to present as a scrape burst to raw.githubusercontent.
     MAX_CONCURRENT_REQUESTS = 10
 
+    # Whitelist for manifest-supplied asset ids (plugin/icon/wallpaper "id"
+    # fields). These come from a REMOTE manifest.json and are used as single
+    # path components under the app's data dirs -- including as rmtree and
+    # install targets. Must start alphanumeric (rejects ".", "..", hidden
+    # dirs) and may only continue with [A-Za-z0-9._-] (rejects "/", "\\",
+    # whitespace, absolute paths). Length-capped to stay a sane dirname.
+    ASSET_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+    @classmethod
+    def is_safe_asset_id(cls, asset_id) -> bool:
+        """Whether a manifest-supplied id is safe to use as a single path
+        component. Reject (don't normalize): an id that fails this check is
+        a hostile or broken manifest, and quietly repairing it would install
+        into / delete a path the author never named."""
+        return isinstance(asset_id, str) and bool(cls.ASSET_ID_PATTERN.fullmatch(asset_id))
+
+    # A git commit sha is exactly 40 lowercase hex chars. `commit_sha` reaches
+    # git as an argv token (no shell), so this is a sanity gate, not a shell
+    # guard -- but a malformed value should fail loudly rather than be handed
+    # to `git reset --hard`.
+    COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
+
+    # A branch/ref name that came from a REMOTE store catalog (plugin["branch"]).
+    # Even as an argv token it must never carry shell metacharacters, newlines,
+    # NUL, or a leading "-" (which git would read as an option). Kept permissive
+    # enough for real ref names (slashes, dots, dashes-in-the-middle) but no
+    # whitespace or shell-significant characters.
+    SAFE_REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
+
+    @classmethod
+    def is_safe_commit_sha(cls, commit_sha) -> bool:
+        return isinstance(commit_sha, str) and bool(cls.COMMIT_SHA_PATTERN.fullmatch(commit_sha))
+
+    @classmethod
+    def is_safe_ref_name(cls, ref_name) -> bool:
+        """Whether a remote-catalog branch/ref name is safe to pass to git.
+        Rejects shell metachars, whitespace, newlines, and leading '-' so a
+        catalog `branch: "main; rm -rf ~"` can neither inject a shell nor be
+        misread by git as an option."""
+        return isinstance(ref_name, str) and bool(cls.SAFE_REF_PATTERN.fullmatch(ref_name))
+
     def __init__(self):
         self.store_cache = StoreCache()
 
@@ -103,12 +143,29 @@ class StoreBackend:
 
         stores = []
         branch = await self.get_official_store_branch()
+        if not isinstance(branch, str) or not branch:
+            # get_official_store_branch guarantees a str; keep the invariant
+            # enforced at this boundary anyway -- a non-str branch would end
+            # up interpolated into build_url URLs and cache keys.
+            log.error(f"Official store branch resolved to {branch!r}; using {self.STORE_BRANCH}")
+            branch = self.STORE_BRANCH
         log.info(f"Official store branch: {branch}")
         stores.append((self.STORE_REPO_URL, branch))
 
         if settings.get("store", {}).get("enable-custom-stores", False):
             for store in settings.get("store", {}).get("custom-stores", {}):
-                stores.append((store.get("url"), store.get("branch")))
+                url = store.get("url")
+                if not url:
+                    continue
+                custom_branch = store.get("branch")
+                if not isinstance(custom_branch, str) or not custom_branch:
+                    # Third-party stores follow the "main" convention; this
+                    # deliberately differs from the OFFICIAL store's fallback
+                    # (STORE_BRANCH, currently "1.5.0" -- a version-pinned tag
+                    # of THIS app's own store repo, which custom repos don't
+                    # share). Not a copy-paste slip.
+                    custom_branch = "main"
+                stores.append((url, custom_branch))
 
         return stores
     
@@ -123,13 +180,34 @@ class StoreBackend:
         return plugins
     
     async def get_official_store_branch(self) -> str:
+        """Always returns a str branch name. On any failure (fetch failed
+        AND cache too stale, truncated/corrupt versions.json) it falls back
+        to STORE_BRANCH -- returning an error object here used to leak into
+        get_stores' (url, branch) tuples and get interpolated into URLs and
+        cache keys by build_url. The fallback is deliberately NOT cached in
+        official_store_branch_cache, so a later successful fetch corrects it.
+        """
         if self.official_store_branch_cache is not None:
             return self.official_store_branch_cache
         versions_file = await self.get_remote_file(self.STORE_REPO_URL, "versions.json", branch_name="versions", force_refetch=True)
-        if isinstance(versions_file, NoConnectionError):
-            return versions_file
-        versions = json.loads(versions_file)
+        if isinstance(versions_file, NoConnectionError) or versions_file is None:
+            log.warning(f"Could not fetch versions.json; falling back to store branch {self.STORE_BRANCH}")
+            return self.STORE_BRANCH
+        try:
+            versions = json.loads(versions_file)
+        except (json.decoder.JSONDecodeError, TypeError) as e:
+            # A truncated cached versions.json (served by the stale-cache
+            # fallback) used to raise out of here, freeze the store tab's
+            # spinner and mark the page loaded-forever.
+            log.error(f"Corrupt versions.json; falling back to store branch {self.STORE_BRANCH}: {e}")
+            return self.STORE_BRANCH
+        if not isinstance(versions, dict):
+            log.error(f"versions.json is not an object; falling back to store branch {self.STORE_BRANCH}")
+            return self.STORE_BRANCH
         v = versions.get(gl.app_version, "main")
+        if not isinstance(v, str) or not v:
+            log.error(f"versions.json maps {gl.app_version} to {v!r}; falling back to store branch {self.STORE_BRANCH}")
+            return self.STORE_BRANCH
         self.official_store_branch_cache = v
         return v
 
@@ -196,15 +274,20 @@ class StoreBackend:
         if data_type == "content":
             byte_suffix = "b"
 
+        # data_type is part of the cache key: without it a binary fetch
+        # (data_type="content") of some repo/path landed under the same
+        # index entry as a text fetch of that path -- one cache file opened
+        # with conflicting modes depending on who asked first.
         is_cached = False
         if not force_refetch:
             is_cached = self.store_cache.is_cached(
                 url=repo_url,
                 branch=branch_name,
-                path=file_path
+                path=file_path,
+                data_type=data_type
             )
         if is_cached:
-            with self.store_cache.open_cache_file(url=repo_url, branch=branch_name, path=file_path, mode=f"r{byte_suffix}") as f:
+            with self.store_cache.open_cache_file(url=repo_url, branch=branch_name, path=file_path, data_type=data_type, mode=f"r{byte_suffix}") as f:
                 return f.read()
         else:
             pass
@@ -220,18 +303,18 @@ class StoreBackend:
             # empty/errored store page. Bounded by the entry's FETCHED age;
             # its "date" field is a last-use clock that every read renews,
             # so it cannot bound staleness (see StoreCache).
-            if self.store_cache.is_cached(url=repo_url, branch=branch_name, path=file_path):
-                fetched = self.store_cache.get_fetched_date(url=repo_url, branch=branch_name, path=file_path)
+            if self.store_cache.is_cached(url=repo_url, branch=branch_name, path=file_path, data_type=data_type):
+                fetched = self.store_cache.get_fetched_date(url=repo_url, branch=branch_name, path=file_path, data_type=data_type)
                 if fetched is not None and time.time() - fetched <= StoreCache.DAYS_TO_KEEP * 24 * 60 * 60:
                     log.warning(f"Serving cached copy of {file_path} from {repo_url} after failed fetch")
-                    with self.store_cache.open_cache_file(url=repo_url, branch=branch_name, path=file_path, mode=f"r{byte_suffix}") as f:
+                    with self.store_cache.open_cache_file(url=repo_url, branch=branch_name, path=file_path, data_type=data_type, mode=f"r{byte_suffix}") as f:
                         return f.read()
             return answer
-        
+
         if answer is None:
             return
-        
-        with self.store_cache.open_cache_file(url=repo_url, branch=branch_name, path=file_path, mode=f"w{byte_suffix}") as f:
+
+        with self.store_cache.open_cache_file(url=repo_url, branch=branch_name, path=file_path, data_type=data_type, mode=f"w{byte_suffix}") as f:
             if answer is None:
                 return
             if data_type == "text":
@@ -244,16 +327,44 @@ class StoreBackend:
         elif data_type == "content":
             return answer.content
         
-    async def get_last_commit(self, repo_url: str, branch_name: str = "main") -> str:
+    async def get_last_commit(self, repo_url: str, branch_name: str = "main"):
+        """Resolves the tip sha of a branch via the GitHub API.
+
+        The blocking round-trip runs in a worker thread under the fetch
+        semaphore: prepare_plugin awaits this inside the catalog gather for
+        every branch-pinned custom plugin, and a synchronous requests.get()
+        on the loop thread serialized the whole page load behind each call's
+        latency (up to timeout=30 apiece) while also evading the fetch
+        limiter every sibling fetch goes through.
+
+        Returns the sha str, None when the branch resolves to no commits
+        (non-200 answer, empty/unparseable commit list), or NoConnectionError
+        on a network failure -- the same contract as request_from_url, so
+        callers isinstance-check instead of catching requests exceptions
+        out of a gather.
+        """
         url = f"https://api.github.com/repos/{self.get_user_name(repo_url)}/{self.get_repo_name(repo_url)}/commits?sha={branch_name}&per_page=1"
-        response = requests.get(url, timeout=30)
+
+        def _fetch() -> requests.Response:
+            with self._fetch_limiter:
+                return requests.get(url, timeout=30)
+
+        try:
+            response = await asyncio.to_thread(_fetch)
+        except requests.exceptions.RequestException as e:
+            log.error(f"Failed to fetch the last commit of {repo_url}@{branch_name}: {e}")
+            return NoConnectionError()
 
         if response.status_code != 200:
-            return
-        
-        commits = response.json()
-        if len(commits) == 0:
-            return
+            return None
+
+        try:
+            commits = response.json()
+        except ValueError as e:
+            log.error(f"Unparseable commits answer for {repo_url}@{branch_name}: {e}")
+            return None
+        if not isinstance(commits, list) or len(commits) == 0:
+            return None
         return commits[0].get("sha")
     
     async def get_official_authors(self) -> list:
@@ -331,13 +442,6 @@ class StoreBackend:
         if manifest is None:
             return
         return json.loads(manifest)
-    
-    def remove_old_manifest_cache(self, url:str, commit_sha:str):
-        for cached_url in list(self.manifest_cache.keys()):
-            if self.get_repo_name(cached_url) == self.get_repo_name(url) and not commit_sha in cached_url:
-                if os.path.isfile(self.manifest_cache[cached_url]):
-                    os.remove(self.manifest_cache[cached_url])
-                del self.manifest_cache[cached_url]
 
     async def get_attribution(self, url:str, commit:str) -> dict:
         result = await self.get_remote_file(url, "attribution.json", commit)
@@ -348,13 +452,6 @@ class StoreBackend:
             return json.loads(result)
         except (json.decoder.JSONDecodeError, TypeError) as e:
             return {}
-    
-    def remove_old_attribution_cache(self, url:str, commit_sha:str):
-        for cached_url in list(self.attribution_cache.keys()):
-            if self.get_repo_name(cached_url) == self.get_repo_name(url) and not commit_sha in cached_url:
-                if os.path.isfile(self.attribution_cache[cached_url]):
-                    os.remove(self.attribution_cache[cached_url])
-                del self.attribution_cache[cached_url]
 
     async def prepare_plugin(self, plugin, include_image: bool = True, verified: bool = False):
         url = plugin["url"]
@@ -374,6 +471,12 @@ class StoreBackend:
         branch = plugin.get("branch")
         if branch is not None:
             commit = await self.get_last_commit(url, branch)
+            if isinstance(commit, NoConnectionError):
+                # NoConnectionError is falsy: letting it fall through would
+                # fetch the manifest at `branch` but store the error object
+                # as the entry's commit_sha (poisoning sha comparisons).
+                log.error(f"Could not resolve the last commit of {url}@{branch} due to NoConnectionError")
+                return commit
 
         manifest = await self.get_manifest(url, commit or branch)
         if isinstance(manifest, NoConnectionError):
@@ -415,7 +518,7 @@ class StoreBackend:
             official=author in self.official_authors or False,
             commit_sha=commit,
             branch=branch,
-            local_sha=await self.get_local_sha(os.path.join(gl.PLUGIN_DIR, manifest.get("id"))),
+            local_sha=await self.get_local_sha_for_id(gl.PLUGIN_DIR, manifest.get("id")),
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
             repository_name=self.get_repo_name(url),
@@ -456,6 +559,14 @@ class StoreBackend:
         except Exception as e:
             raise RuntimeError(f"Unable to retrieve git commit hash: {e}")
     
+    async def get_local_sha_for_id(self, base_dir: str, asset_id) -> str:
+        """get_local_sha guarded by the asset-id whitelist: an unsafe or
+        missing manifest id never probes the filesystem and simply reads as
+        'not installed' (None)."""
+        if not self.is_safe_asset_id(asset_id):
+            return None
+        return await self.get_local_sha(os.path.join(base_dir, asset_id))
+
     async def get_local_sha(self, git_dir: str):
         if not os.path.exists(git_dir):
             return
@@ -504,7 +615,9 @@ class StoreBackend:
         thumbnail_path = manifest.get("thumbnail")
         image = await self.get_web_image(url, thumbnail_path, commit)
         if isinstance(image, NoConnectionError):
-            return image
+            # A missing/rate-limited thumbnail must not drop the pack from
+            # the catalog -- list it without an image, like prepare_plugin.
+            image = None
 
         author = self.get_user_name(url)
 
@@ -525,7 +638,7 @@ class StoreBackend:
             author=author or None,  # Formerly: user_name
             official=author in self.official_authors or False,
             commit_sha=commit,
-            local_sha=await self.get_local_sha(os.path.join(gl.DATA_PATH, "icons", (manifest.get("id") or ""))),
+            local_sha=await self.get_local_sha_for_id(os.path.join(gl.DATA_PATH, "icons"), manifest.get("id")),
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
             repository_name=self.get_repo_name(url),
@@ -573,12 +686,15 @@ class StoreBackend:
         thumbnail_path = manifest.get("thumbnail")
         image = await self.get_web_image(url, thumbnail_path, commit)
         if isinstance(image, NoConnectionError):
-            return image
+            # A missing/rate-limited thumbnail must not drop the wallpaper
+            # from the catalog -- list it without an image, like
+            # prepare_plugin.
+            image = None
         attribution = await self.get_attribution(url, commit)
         if isinstance(attribution, NoConnectionError):
             return attribution
         attribution = attribution.get("generic", {}) #TODO: Choose correct attribution
-        
+
         author = self.get_user_name(url)
 
         translated_description = gl.lm.get_custom_translation(manifest.get("descriptions", {}))
@@ -594,7 +710,7 @@ class StoreBackend:
             author=author or None,  # Formerly: user_name
             official=author in self.official_authors or False,
             commit_sha=commit,
-            local_sha=await self.get_local_sha(os.path.join(gl.DATA_PATH, "wallpapers", (manifest.get("id") or ""))),
+            local_sha=await self.get_local_sha_for_id(os.path.join(gl.DATA_PATH, "wallpapers"), manifest.get("id")),
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
             repository_name=self.get_repo_name(url),
@@ -640,14 +756,17 @@ class StoreBackend:
         thumbnail_path = manifest.get("thumbnail")
         image = await self.get_web_image(url, thumbnail_path, commit)
         if isinstance(image, NoConnectionError):
-            return image
+            # A missing/rate-limited thumbnail must not drop the SD+ bar
+            # wallpaper from the catalog -- list it without an image, like
+            # prepare_plugin.
+            image = None
         attribution = await self.get_attribution(url, commit)
         if isinstance(attribution, NoConnectionError):
             return attribution
         attribution = attribution.get("generic", {}) #TODO: Choose correct attribution
-        
+
         author = self.get_user_name(url)
-        
+
         translated_description = gl.lm.get_custom_translation(manifest.get("descriptions", {}))
         translated_short_description = gl.lm.get_custom_translation(manifest.get("short-descriptions", {}))
 
@@ -661,7 +780,7 @@ class StoreBackend:
             author=author or None,  # Formerly: user_name
             official=author in self.official_authors or False,
             commit_sha=commit,
-            local_sha=await self.get_local_sha(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", (manifest.get("id") or ""))),
+            local_sha=await self.get_local_sha_for_id(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers"), manifest.get("id")),
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
             repository_name=self.get_repo_name(url),
@@ -684,55 +803,26 @@ class StoreBackend:
         )
 
     async def get_web_image(self, url: str, path: str, branch: str = "main") -> Image:
+        # `except Exception`, NOT bare `except:` -- the bare form also
+        # swallowed asyncio.CancelledError (a BaseException), so cancelling
+        # a store load made its image tasks report "no image" instead of
+        # actually cancelling.
         try:
             result = await self.get_remote_file(url, path, branch, data_type="content")
-        except:
+        except Exception as e:
+            log.error(f"Failed to fetch image {path} from {url}: {e}")
             return
         if isinstance(result, NoConnectionError):
             return result
         try:
             return Image.open(BytesIO(result))
-        except:
+        except Exception as e:
+            log.warning(f"Could not decode image {path} from {url}: {e}")
             return
     
     async def get_stargazers(self, repo_url: str) -> int:
         "Deactivated for now because of rate limits"
         return 0
-        user_name = self.get_user_name(repo_url)
-        repo_name = self.get_repo_name(repo_url)
-
-        url = f"https://api.github.com/repos/{user_name}/{repo_name}"
-        api_answer = await self.make_api_call(url)
-        return api_answer["stargazers_count"]
-    
-    async def make_api_call(self, api_call_url:str) -> dict:
-        async def call():
-            log.trace(f"Making API call: {api_call_url}")
-            resp = await self.request_from_url(api_call_url)
-            if isinstance(resp, NoConnectionError):
-                return resp
-            self.api_cache[api_call_url] = {}
-            self.api_cache[api_call_url]["answer"] = resp.json()
-            self.api_cache[api_call_url]["time-code"] = datetime.now().strftime("%d-%m-%y-%H-%M")
-            # Snapshot: parallel store loads mutate api_cache while this
-            # serializes; handing json.dump the live dict can raise
-            # "dictionary changed size during iteration" and fail the fetch.
-            atomic_write_json(os.path.join(gl.DATA_PATH, self.STORE_CACHE_PATH, "api.json"), dict(self.api_cache))
-            return resp.json()
-
-        if api_call_url not in self.api_cache:
-            return await call()
-
-        # get time from cached result
-        t = self.api_cache[api_call_url]["time-code"]
-        t_int = datetime.strptime(t, "%d-%m-%y-%H-%M").timestamp()
-        t_delta = time.time()-t_int
-
-        if t_delta > 3600:
-            return await call()
-        
-        # Cached
-        return self.api_cache[api_call_url]["answer"]
 
     def get_user_name(self, repo_url:str) -> str:
         splitted =  repo_url.split("/")
@@ -800,13 +890,39 @@ class StoreBackend:
         if extracted_folder_name is None:
             log.error("Could not find extracted folder name")
             return 400
-        
+
         return extracted_folder_name
-    
+
+    def zip_has_unsafe_members(self, zip_path: str) -> bool:
+        """Defense-in-depth Zip-Slip check on a downloaded archive.
+
+        We only ever download GitHub-generated .zip archives, and CPython's
+        zipfile already strips leading "/" and ".." when extracting -- so this
+        is belt-and-suspenders, not the primary guard. It exists so that a
+        future change (a different archive source, or swapping in tar/other
+        formats that CPython does NOT sanitize the same way) can't silently
+        reintroduce a path-traversal write. Any member whose normalized path
+        is absolute or escapes the extraction root fails the whole archive.
+        """
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            for name in zip_ref.namelist():
+                # Reject absolute paths and drive-style/backslash members.
+                if name.startswith(("/", "\\")) or (len(name) > 1 and name[1] == ":"):
+                    log.error(f"Archive member has absolute path, refusing: {name!r}")
+                    return True
+                normalized = os.path.normpath(name.replace("\\", "/"))
+                # normpath collapses "a/../b"; a leading ".." (or a bare "..")
+                # means the member resolves outside the extraction root.
+                if normalized == ".." or normalized.startswith(".." + os.sep) or normalized.startswith("../"):
+                    log.error(f"Archive member escapes extraction root, refusing: {name!r}")
+                    return True
+        return False
+
     async def download_repo(self, repo_url:str, directory:str, commit_sha:str = None, branch_name:str = None):
+        """Returns 200 on success, 404 for a hard failure (e.g. git missing
+        on the devel clone path), or NoConnectionError."""
         if not is_flatpak() and gl.argparser.parse_args().devel:
-            await self.clone_repo(repo_url, directory, commit_sha, branch_name)
-            return
+            return await self.clone_repo(repo_url, directory, commit_sha, branch_name)
 
 
         username = self.get_user_name(repo_url)
@@ -815,6 +931,13 @@ class StoreBackend:
         if commit_sha is None and branch_name is not None:
             # Used to write the version
             sha = await self.get_last_commit(repo_url, branch_name)
+            if isinstance(sha, NoConnectionError):
+                return sha
+            if sha is None:
+                # Fail up front rather than building a ".../None.zip" URL
+                # that 404s later with a misleading log.
+                log.error(f"Could not resolve branch {branch_name!r} of {repo_url}")
+                return 404
         zip_url = f"https://github.com/{username}/{projectname}/archive/{sha}.zip"
 
         zip_path = os.path.join(gl.DATA_PATH, "cache", f"{projectname}-{sha}.zip")
@@ -842,6 +965,11 @@ class StoreBackend:
             # case-sensitive, so it may not match projectname) BEFORE unpacking,
             # so the finally-cleanup also covers a mid-extraction failure.
             extracted_folder_name = self.get_main_folder_of_zip(zip_path)
+            # Defense-in-depth: refuse a traversal/absolute member before we
+            # let shutil.unpack_archive write anything to disk.
+            if self.zip_has_unsafe_members(zip_path):
+                log.error(f"Refusing to extract {projectname}: archive contains unsafe member paths")
+                return NoConnectionError()
             extracted_folder = os.path.join(gl.DATA_PATH, "cache", extracted_folder_name)
             if os.path.exists(extracted_folder):
                 shutil.rmtree(extracted_folder)
@@ -878,20 +1006,28 @@ class StoreBackend:
         return 200
     
     async def clone_repo(self, repo_url:str, local_path:str, commit_sha:str = None, branch_name:str = None):
-        # if branch_name == None and commit_sha == None:
-            # Set branch_name to main branch's name
-            # api_answer = await self.make_api_call(f"https://api.github.com/repos/{self.get_user_name(repo_url)}/{self.get_repo_name(repo_url)}")
-            # branch_name = api_answer["default_branch"]
-
         if commit_sha is not None:
             # Use the main branch for the initial clone
             branch_name = None
+
+        # commit_sha and branch_name originate from the REMOTE store catalog
+        # (plugin["commits"][version] / plugin["branch"]). They used to be
+        # f-string-interpolated into os.system() -- a catalog branch of
+        # "main; <cmd>" injected a shell. Validate them here and pass them to
+        # git as argv tokens with no shell (git -C, see below), the same way
+        # the install-script runners were de-shelled.
+        if commit_sha is not None and not self.is_safe_commit_sha(commit_sha):
+            log.error(f"Refusing to clone {repo_url}: malformed commit sha {commit_sha!r}")
+            return 400
+        if branch_name is not None and not self.is_safe_ref_name(branch_name):
+            log.error(f"Refusing to clone {repo_url}: unsafe branch/ref name {branch_name!r}")
+            return 400
 
         # Check if git is installed on the system - should be the case for most linux systems
         if shutil.which("git") is None:
             log.error("Git is not installed on this system. Please install it.")
             return 404
-        
+
         # Remove folder if it already exists
         shutil.rmtree(local_path, ignore_errors=True)
 
@@ -902,8 +1038,10 @@ class StoreBackend:
         # FIXME: Check if not already added
         await self.subp_call(["git", "config", "--global", "--add", "safe.directory", os.path.abspath(local_path)])
 
-        # Run git pull to create .git/FETCH_HEAD. This allows us to check for available updates
-        await self.os_sys(f"cd '{local_path}' && git pull")
+        # Run git pull to create .git/FETCH_HEAD. This allows us to check for available updates.
+        # `git -C <dir>` (argv, no shell) instead of the old
+        # `os.system("cd '<dir>' && git pull")` which built a shell command line.
+        await self.subp_call(["git", "-C", local_path, "pull"])
 
 
         ## Write version
@@ -913,16 +1051,23 @@ class StoreBackend:
 
         # Set repository to the given commit_sha
         if commit_sha is not None:
-            await self.os_sys(f"cd '{local_path}' && git reset --hard {commit_sha}")
-            return
-        
+            await self.subp_call(["git", "-C", local_path, "reset", "--hard", commit_sha])
+            return 200
+
         if branch_name is not None:
-            await self.os_sys(f"cd '{local_path}' && git switch {branch_name}")
-            return
-        
-        
+            await self.subp_call(["git", "-C", local_path, "switch", branch_name])
+            return 200
+
+        return 200
+
     async def install_plugin(self, plugin_data:PluginData, auto_update: bool = False):
         url = plugin_data.github
+
+        if not self.is_safe_asset_id(plugin_data.plugin_id):
+            # The id names the install dir (which download_repo rmtree-resets)
+            # -- a traversal id like "../../.." must never reach that join.
+            log.error(f"Refusing to install plugin with unsafe id {plugin_data.plugin_id!r} from {url}")
+            return 400
 
         local_path = os.path.join(gl.PLUGIN_DIR, plugin_data.plugin_id)
 
@@ -930,18 +1075,20 @@ class StoreBackend:
 
         # Bail before running install scripts or reloading plugins over a
         # missing or partial tree.
-        if response == 404:
-            return 404
         if isinstance(response, NoConnectionError):
             return response
+        if response != 200:
+            return 404
 
-        # Run install script if present. Make sure to use python binary used to run this process to not break venv dependency installations
+        # Run install script if present. Make sure to use python binary used to run this process to not break venv dependency installations.
+        # List form without a shell: an f-string command both broke on spaces
+        # in the data path and let crafted path components inject shell syntax.
         if os.path.isfile(os.path.join(local_path, "__install__.py")):
-            subprocess.run(f"{sys.executable} {os.path.join(local_path, '__install__.py')}", shell=True, start_new_session=True)
+            subprocess.run([sys.executable, os.path.join(local_path, "__install__.py")], start_new_session=True)
 
         # Install requirements from requirements.txt
         if os.path.isfile(os.path.join(local_path, "requirements.txt")):
-            subprocess.run(f"{sys.executable} -m pip install -r {os.path.join(local_path, 'requirements.txt')}", shell=True, start_new_session=True)
+            subprocess.run([sys.executable, "-m", "pip", "install", "-r", os.path.join(local_path, "requirements.txt")], start_new_session=True)
 
         # Update plugin manager
         gl.plugin_manager.load_plugins()
@@ -972,16 +1119,15 @@ class StoreBackend:
         ## 1. Remove all action objects in every cached page of every
         ## controller -- not just each controller's currently active page.
         ## A page that was previously visited and is still sitting in the
-        ## page cache (`gl.page_manager.pages`) would otherwise keep dead
-        ## plugin action objects alive with no teardown.
-        for controller, controller_pages in list(gl.page_manager.pages.items()):
-            for page_entry in list(controller_pages.values()):
-                page = page_entry.get("page")
-                if page is None:
-                    continue
-                page.remove_plugin_action_objects(plugin_id=plugin_id)
-                if remove_from_pages:
-                    page.remove_plugin_actions_from_json(plugin_id=plugin_id)
+        ## page cache would otherwise keep dead plugin action objects alive
+        ## with no teardown. Snapshot via the _pages_lock accessor: iterating
+        ## gl.page_manager.pages directly raced load_page /
+        ## discard_controller / clear_old_cached_pages mutating the dict
+        ## from other threads.
+        for page in gl.page_manager.all_cached_pages():
+            page.remove_plugin_action_objects(plugin_id=plugin_id)
+            if remove_from_pages:
+                page.remove_plugin_actions_from_json(plugin_id=plugin_id)
 
         ## 2. Inform plugin base
         plugins = gl.plugin_manager.get_plugins()
@@ -1035,41 +1181,86 @@ class StoreBackend:
                     controller.active_page.load_action_objects()
                     controller.load_page(controller.active_page)
 
+    # The (un)install pairs below all join a manifest-supplied id under a
+    # data dir and rmtree/replace the result -- every one of them must reject
+    # unsafe ids (icon/wallpaper packs are data-only; a traversal id would
+    # hand them filesystem-wide delete with no code execution involved).
+
     async def install_icon(self, icon_data:IconData):
+        if not self.is_safe_asset_id(icon_data.icon_id):
+            log.error(f"Refusing to install icon pack with unsafe id {icon_data.icon_id!r} from {icon_data.github}")
+            return 400
+
         icon_path = os.path.join(gl.DATA_PATH, "icons", icon_data.icon_id)
 
         await self.uninstall_icon(icon_data)
 
-        await self.download_repo(repo_url=icon_data.github, directory=icon_path, commit_sha=icon_data.commit_sha)
+        return await self.download_repo(repo_url=icon_data.github, directory=icon_path, commit_sha=icon_data.commit_sha)
 
     async def uninstall_icon(self, icon_data:IconData):
         folder_name = icon_data.icon_id
+        if not self.is_safe_asset_id(folder_name):
+            log.error(f"Refusing to uninstall icon pack with unsafe id {folder_name!r}")
+            return 400
         if os.path.exists(os.path.join(gl.DATA_PATH, "icons", folder_name)):
             shutil.rmtree(os.path.join(gl.DATA_PATH, "icons", folder_name))
 
     async def install_wallpaper(self, wallpaper_data:WallpaperData):
+        if not self.is_safe_asset_id(wallpaper_data.wallpaper_id):
+            log.error(f"Refusing to install wallpaper with unsafe id {wallpaper_data.wallpaper_id!r} from {wallpaper_data.github}")
+            return 400
+
         wallpaper_path = os.path.join(gl.DATA_PATH, "wallpapers", wallpaper_data.wallpaper_id)
 
         await self.uninstall_wallpaper(wallpaper_data)
 
-        await self.download_repo(repo_url=wallpaper_data.github, directory=wallpaper_path, commit_sha=wallpaper_data.commit_sha)
+        return await self.download_repo(repo_url=wallpaper_data.github, directory=wallpaper_path, commit_sha=wallpaper_data.commit_sha)
 
     async def uninstall_wallpaper(self, wallpaper_data:WallpaperData):
         folder_name = wallpaper_data.wallpaper_id
+        if not self.is_safe_asset_id(folder_name):
+            log.error(f"Refusing to uninstall wallpaper with unsafe id {folder_name!r}")
+            return 400
         if os.path.exists(os.path.join(gl.DATA_PATH, "wallpapers", folder_name)):
             shutil.rmtree(os.path.join(gl.DATA_PATH, "wallpapers", folder_name))
 
     async def install_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper_data:SDPlusBarWallpaperData):
+        if not self.is_safe_asset_id(sd_plus_bar_wallpaper_data.id):
+            log.error(f"Refusing to install SD+ bar wallpaper with unsafe id {sd_plus_bar_wallpaper_data.id!r} from {sd_plus_bar_wallpaper_data.github}")
+            return 400
+
         wallpaper_path = os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", sd_plus_bar_wallpaper_data.id)
 
         await self.uninstall_sd_plus_bar_wallpaper(sd_plus_bar_wallpaper_data)
 
-        await self.download_repo(repo_url=sd_plus_bar_wallpaper_data.github, directory=wallpaper_path, commit_sha=sd_plus_bar_wallpaper_data.commit_sha)
+        return await self.download_repo(repo_url=sd_plus_bar_wallpaper_data.github, directory=wallpaper_path, commit_sha=sd_plus_bar_wallpaper_data.commit_sha)
 
     async def uninstall_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper_data:SDPlusBarWallpaperData):
         folder_name = sd_plus_bar_wallpaper_data.id
+        if not self.is_safe_asset_id(folder_name):
+            log.error(f"Refusing to uninstall SD+ bar wallpaper with unsafe id {folder_name!r}")
+            return 400
         if os.path.exists(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", folder_name)):
             shutil.rmtree(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", folder_name))
+
+    def reload_installed_plugins(self) -> None:
+        """Re-register whatever plugins are on disk and refresh UI/pages --
+        the same post-install plumbing install_plugin runs. Recovery path
+        for a failed UPDATE: update flows deregister the old version
+        (uninstall_plugin(remove_files=False)) before the fallible download,
+        and a failure used to leave the plugin unregistered until restart
+        even though its files were untouched."""
+        gl.plugin_manager.load_plugins()
+        gl.plugin_manager.init_plugins()
+        gl.plugin_manager.generate_action_index()
+
+        if recursive_hasattr(gl, "app.main_win.sidebar.action_chooser"):
+            GLib.idle_add(gl.app.main_win.sidebar.action_chooser.plugin_group.update)
+
+        for controller in gl.deck_manager.deck_controller:
+            if getattr(controller, "active_page", None) is not None:
+                controller.active_page.load_action_objects()
+                controller.load_page(controller.active_page)
 
     async def get_plugin_for_id(self, plugin_id):
         plugins = await self.get_all_plugins_async()
@@ -1089,26 +1280,58 @@ class StoreBackend:
             if plugin.local_sha is None:
                 # Plugin is not installed
                 continue
-            if plugin.local_sha != plugin.commit_sha:
-                plugins_to_update.append(plugin)
+            if plugin.local_sha == plugin.commit_sha:
+                # Up to date
+                continue
+            if plugin.commit_sha is None:
+                # Unresolved remote tip (branch-pinned plugin whose
+                # get_last_commit returned None -- 429/empty). There is no
+                # known sha to update to; auto-updating would only hard-404.
+                continue
+            if plugin.is_compatible is False:
+                # When no compatible version exists, prepare_plugin pins the
+                # newest INCOMPATIBLE commit (so the store can still list the
+                # entry). Auto-updating onto it would replace a working
+                # plugin with a build for a different app major -- skip and
+                # report instead. PluginPreview.get_install_state_for makes
+                # the same call for the store UI's update button.
+                log.warning(
+                    f"Skipping update of plugin {plugin.plugin_id}: pinned version "
+                    f"{plugin.commit_sha} is not compatible with app version {gl.app_version}"
+                )
+                continue
+            plugins_to_update.append(plugin)
 
         return plugins_to_update
     
     async def update_all_plugins(self) -> int:
         """
-        Returns number of updated plugins
+        Returns number of SUCCESSFULLY updated plugins
         """
         plugins_to_update = await self.get_plugins_to_update()
         if isinstance(plugins_to_update, NoConnectionError):
             return plugins_to_update
+        n_updated = 0
+        any_failed = False
         for plugin in plugins_to_update:
             try:
                 self.uninstall_plugin(plugin.plugin_id, remove_from_pages=False, remove_files=False)
             except Exception as e:
                 log.error(e)
-            await self.install_plugin(plugin)
-        
-        return len(plugins_to_update)
+            result = await self.install_plugin(plugin)
+            if result is True:
+                n_updated += 1
+            else:
+                log.error(f"Failed to update plugin {plugin.plugin_id}: {result!r}")
+                any_failed = True
+
+        if any_failed:
+            # The failed installs happened AFTER their uninstall_plugin
+            # deregistered the (still on-disk) old versions -- re-register
+            # them so they keep working instead of vanishing until restart.
+            self.reload_installed_plugins()
+
+        return n_updated
 
     async def get_icons_to_update(self):
         icons = await self.get_all_icons()
@@ -1119,24 +1342,42 @@ class StoreBackend:
 
         for icon in icons:
             if icon.local_sha is None:
-                # Plugin is not installed
+                # Icon pack is not installed
                 continue
-            if icon.local_sha != icon.commit_sha:
-                icons_to_update.append(icon)
-                
+            if icon.local_sha == icon.commit_sha:
+                # Up to date
+                continue
+            if icon.is_compatible is False:
+                # prepare_icon pins the newest INCOMPATIBLE commit when no
+                # compatible version exists (so the store can still list it).
+                # Auto-updating onto it would replace a working pack with a
+                # build for a different app major -- skip and report, exactly
+                # like the plugin update path.
+                log.warning(
+                    f"Skipping update of icon pack {icon.icon_id}: pinned version "
+                    f"{icon.commit_sha} is not compatible with app version {gl.app_version}"
+                )
+                continue
+            icons_to_update.append(icon)
+
         return icons_to_update
     
     async def update_all_icons(self) -> int:
         """
-        Returns number of updated icons
+        Returns number of SUCCESSFULLY updated icons
         """
         icons_to_update = await self.get_icons_to_update()
         if isinstance(icons_to_update, NoConnectionError):
             return icons_to_update
+        n_updated = 0
         for icon in icons_to_update:
-            await self.install_icon(icon)
+            result = await self.install_icon(icon)
+            if result == 200:
+                n_updated += 1
+            else:
+                log.error(f"Failed to update icon pack {icon.icon_id}: {result!r}")
 
-        return len(icons_to_update)
+        return n_updated
     
     async def get_wallpapers_to_update(self):
         wallpapers = await self.get_all_wallpapers()
@@ -1147,37 +1388,107 @@ class StoreBackend:
 
         for wallpaper in wallpapers:
             if wallpaper.local_sha is None:
-                # Plugin is not installed
+                # Wallpaper is not installed
                 continue
-            if wallpaper.local_sha != wallpaper.commit_sha:
-                wallpapers_to_update.append(wallpaper)
+            if wallpaper.local_sha == wallpaper.commit_sha:
+                # Up to date
+                continue
+            if wallpaper.is_compatible is False:
+                # prepare_wallpaper pins the newest INCOMPATIBLE commit when
+                # no compatible version exists (so the store can still list
+                # it). Auto-updating onto it would replace a working pack
+                # with a build for a different app major -- skip and report,
+                # exactly like the plugin update path.
+                log.warning(
+                    f"Skipping update of wallpaper {wallpaper.wallpaper_id}: pinned version "
+                    f"{wallpaper.commit_sha} is not compatible with app version {gl.app_version}"
+                )
+                continue
+            wallpapers_to_update.append(wallpaper)
 
         return wallpapers_to_update
-    
+
     async def update_all_wallpapers(self) -> int:
         """
-        Returns number of updated wallpapers
+        Returns number of SUCCESSFULLY updated wallpapers
         """
         wallpapers_to_update = await self.get_wallpapers_to_update()
         if isinstance(wallpapers_to_update, NoConnectionError):
             return wallpapers_to_update
+        n_updated = 0
         for wallpaper in wallpapers_to_update:
-            await self.install_wallpaper(wallpaper)
+            result = await self.install_wallpaper(wallpaper)
+            if result == 200:
+                n_updated += 1
+            else:
+                log.error(f"Failed to update wallpaper {wallpaper.wallpaper_id}: {result!r}")
 
-        return len(wallpapers_to_update)
+        return n_updated
+
+    async def get_sd_plus_bar_wallpapers_to_update(self):
+        wallpapers = await self.get_all_sd_plus_bar_wallpapers()
+        if isinstance(wallpapers, NoConnectionError):
+            return wallpapers
+
+        wallpapers_to_update: list[SDPlusBarWallpaperData] = []
+
+        for wallpaper in wallpapers:
+            if wallpaper.local_sha is None:
+                # Wallpaper is not installed
+                continue
+            if wallpaper.local_sha == wallpaper.commit_sha:
+                # Up to date
+                continue
+            if wallpaper.is_compatible is False:
+                # prepare_sd_plus_bar_wallpaper pins the newest INCOMPATIBLE
+                # commit when no compatible version exists (so the store can
+                # still list it). Auto-updating onto it would replace a
+                # working pack with a build for a different app major -- skip
+                # and report, exactly like the plugin update path.
+                log.warning(
+                    f"Skipping update of SD+ bar wallpaper {wallpaper.id}: pinned version "
+                    f"{wallpaper.commit_sha} is not compatible with app version {gl.app_version}"
+                )
+                continue
+            wallpapers_to_update.append(wallpaper)
+
+        return wallpapers_to_update
+
+    async def update_all_sd_plus_bar_wallpapers(self) -> int:
+        """
+        Returns number of SUCCESSFULLY updated SD+ bar wallpapers
+        """
+        wallpapers_to_update = await self.get_sd_plus_bar_wallpapers_to_update()
+        if isinstance(wallpapers_to_update, NoConnectionError):
+            return wallpapers_to_update
+        n_updated = 0
+        for wallpaper in wallpapers_to_update:
+            result = await self.install_sd_plus_bar_wallpaper(wallpaper)
+            if result == 200:
+                n_updated += 1
+            else:
+                log.error(f"Failed to update SD+ bar wallpaper {wallpaper.id}: {result!r}")
+
+        return n_updated
 
     async def update_everything(self) -> int:
         """
-        Returns number of updated assets
+        Returns number of SUCCESSFULLY updated assets, or NoConnectionError
         """
         n_plugins = await self.update_all_plugins()
         n_icons = await self.update_all_icons()
         n_wallpapers = await self.update_all_wallpapers()
+        # SD+ bar wallpaper packs used to have NO update leg at all -- they
+        # were installed once and never auto-updated.
+        n_sd_plus = await self.update_all_sd_plus_bar_wallpapers()
 
-        if isinstance(n_plugins, NoConnectionError) or isinstance(n_icons, NoConnectionError):
+        # Every leg must be checked -- a NoConnectionError leaking into the
+        # sum below used to raise TypeError (and n_wallpapers wasn't checked
+        # at all).
+        if any(isinstance(n, NoConnectionError) for n in (n_plugins, n_icons, n_wallpapers, n_sd_plus)):
             return NoConnectionError()
 
-        return n_plugins + n_icons + n_wallpapers
+        return n_plugins + n_icons + n_wallpapers + n_sd_plus
 
 class NoCompatibleVersion:
     pass

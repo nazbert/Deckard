@@ -23,7 +23,6 @@ from gi.repository import Gtk, Adw, GLib, Gio, Gdk, GObject, GdkPixbuf
 # Import python modules
 import webbrowser as web
 import asyncio
-from packaging import version
 from loguru import logger as log
 
 # Import own modules
@@ -50,7 +49,8 @@ class PluginPage(StorePage):
         self.compatible_section.search_entry.set_placeholder_text(gl.lm.get("store.plugins.search-placeholder"))
         self.incompatible_section.search_entry.set_placeholder_text(gl.lm.get("store.plugins.search-placeholder"))
 
-    @log.catch
+    # No @log.catch here: StorePage._load_guarded needs to SEE the failure to
+    # show the error page and re-arm the tab for a retry.
     def load(self):
         self.set_loading()
         plugins: list[PluginData] = self.store.backend.get_all_plugins()
@@ -67,15 +67,6 @@ class PluginPage(StorePage):
             GLib.idle_add(section.append_child, PluginPreview(plugin_page=self, plugin_data=plugin))
 
         self.set_loaded()
-
-    def check_required_version(self, app_version_to_check: str, is_min_app_version: bool = False):
-        if is_min_app_version:
-            if app_version_to_check is None:
-                return True
-            min_version = version.parse(app_version_to_check)
-            app_version = version.parse(gl.app_version)
-
-            return min_version < app_version
 
 
 class PluginPreview(StorePreview):
@@ -97,30 +88,69 @@ class PluginPreview(StorePreview):
         self.verified_badge.set_tooltip("store.badges.plugin.verified")
 
         # Set install button state
-        if plugin_data.local_sha is None:
-            self.set_install_state(0)
-        elif plugin_data.local_sha == plugin_data.commit_sha:
-            self.set_install_state(1)
-        else:
-            self.set_install_state(2)
+        self.set_install_state(self.get_install_state_for(plugin_data))
 
         description = self.plugin_data.short_description
         if description in ["", "N/A", None]:
             description = self.plugin_data.description
         self.set_description(description)
 
-    def install(self):
-        asyncio.run(self.store.backend.install_plugin(plugin_data=self.plugin_data))
-        self.set_install_state(1)
+    @staticmethod
+    def get_install_state_for(plugin_data: PluginData) -> int:
+        """0 = not installed, 1 = installed (nothing to offer), 2 = update
+        available. An installed plugin whose pinned store version is
+        incompatible (is_compatible False -- prepare_plugin pins the newest
+        commit of ANOTHER app major when no compatible one exists) reads as
+        state 1: offering that update would replace a working plugin with an
+        incompatible build, exactly what get_plugins_to_update refuses to do
+        on the auto-update path."""
+        if plugin_data.local_sha is None:
+            return 0
+        if plugin_data.local_sha == plugin_data.commit_sha:
+            return 1
+        if plugin_data.commit_sha is None:
+            # Unresolved remote tip (branch-pinned plugin whose get_last_commit
+            # returned None -- 429/empty). commit_sha None != local_sha would
+            # otherwise flash a spurious "update available" badge whose install
+            # can only hard-404. There is no known target to update to.
+            return 1
+        if plugin_data.is_compatible is False:
+            return 1
+        return 2
+
+    def install(self) -> bool:
+        """Runs on the store's download worker thread; returns whether the
+        install actually succeeded. Success is `result is True` -- failure
+        returns (404/400 ints, NoConnectionError) used to be discarded and
+        the button flipped to 'installed' anyway."""
+        result = asyncio.run(self.store.backend.install_plugin(plugin_data=self.plugin_data))
+        if result is not True:
+            log.error(f"Failed to install plugin {self.plugin_data.plugin_id}: {result!r}")
+            self.notify_install_failure()
+            # Leave the button in its previous state so the user can retry.
+            return False
+        GLib.idle_add(self.set_install_state, 1)
+        return True
 
     def uninstall(self):
         self.store.backend.uninstall_plugin(plugin_id=self.plugin_data.plugin_id)
-        self.set_install_state(0)
+        GLib.idle_add(self.set_install_state, 0)
 
     def update(self):
         self.store.backend.uninstall_plugin(plugin_id=self.plugin_data.plugin_id, remove_from_pages=False,
                                             remove_files=False)
-        self.install()
+        if not self.install():
+            # The failed install left the still-on-disk old version
+            # deregistered -- re-register it so it keeps working instead of
+            # vanishing until restart.
+            self.store.backend.reload_installed_plugins()
+
+    def notify_install_failure(self):
+        if gl.app is None:
+            return
+        name = self.plugin_data.plugin_name or self.plugin_data.plugin_id
+        gl.app.send_notification("dialog-information-symbolic", "Plugin install failed",
+                                 f"The plugin {name} could not be installed")
 
     def on_click_main(self, button: Gtk.Button):
         self.plugin_page.set_info_visible(True)
@@ -137,10 +167,5 @@ class PluginPreview(StorePreview):
         self.plugin_page.info_page.set_original_url(self.plugin_data.original_url)
         self.plugin_page.info_page.set_license_description(gl.lm.get_custom_translation(self.plugin_data.license_descriptions))
 
-    def check_required_version(self, app_version_to_check: str):
-        if app_version_to_check is None:
-            return True
-        min_version = version.parse(app_version_to_check)
-        app_version = version.parse(gl.app_version)
-
-        return min_version < app_version
+    # check_required_version is inherited from StorePreview -- one shared
+    # implementation (StoreData.is_min_app_version_satisfied), no copies.

@@ -29,7 +29,6 @@ from loguru import logger as log
 from src.windows.Store.InfoPage import InfoPage
 from GtkHelper.GtkHelper import ErrorPage
 from src.windows.Store.NoConnectionError import NoConnectionError
-from packaging import version
 
 # Typing
 from typing import TYPE_CHECKING
@@ -65,7 +64,19 @@ class StorePage(Gtk.Stack):
         if self._loaded:
             return
         self._loaded = True
-        threading.Thread(target=self.load, name=f"load_{type(self).__name__}").start()
+        threading.Thread(target=self._load_guarded, name=f"load_{type(self).__name__}").start()
+
+    def _load_guarded(self) -> None:
+        """Runs the subclass load() and keeps the tab retryable: an exception
+        used to die in the load()'s @log.catch with the spinner still up and
+        _loaded stuck True, so the tab never retried until the whole store
+        window was recreated. Now a failed load shows the error page and
+        resets _loaded, and revisiting the tab tries again."""
+        try:
+            self.load()
+        except Exception:
+            log.exception(f"{type(self).__name__}.load() failed")
+            self.show_connection_error()
 
     def build(self):
         self.main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
@@ -133,16 +144,12 @@ class StorePage(Gtk.Stack):
             self.store.back_button.set_visible(False)
 
     def show_connection_error(self):
-        self.set_visible_child(self.no_connection_page)
+        # A failed load must stay retryable -- the next ensure_loaded()
+        # (revisiting the tab) attempts a fresh load instead of treating the
+        # error page as "loaded".
+        self._loaded = False
+        # Called from the load() worker thread: marshal the widget change.
+        GLib.idle_add(self.set_visible_child, self.no_connection_page)
 
     def hide_connection_error(self):
-        self.set_visible_child(self.main_box)
-
-    def check_required_version(self, app_version_to_check: str, is_min_app_version: bool = False):
-        if is_min_app_version:
-            if app_version_to_check is None:
-                return True
-            min_version = version.parse(app_version_to_check)
-            app_version = version.parse(gl.app_version)
-
-            return min_version < app_version
+        GLib.idle_add(self.set_visible_child, self.main_box)

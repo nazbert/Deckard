@@ -89,9 +89,11 @@ class MissingRow(Adw.PreferencesRow):
         if plugin is None:
             self.show_install_error()
             return
-        # Install plugin
+        # Install plugin. Success is exactly True -- checking only for 404
+        # let NoConnectionError (and any other failure return) fall through
+        # to the "installed" UI reset.
         success = asyncio.run(gl.store_backend.install_plugin(plugin))
-        if success == 404:
+        if success is not True:
             self.show_install_error()
             return
         
@@ -107,7 +109,9 @@ class MissingRow(Adw.PreferencesRow):
         GLib.idle_add(self.spinner.set_visible, False)
         GLib.idle_add(self.spinner.stop)
         GLib.idle_add(self.label.set_text, self.install_failed_label)
-        GLib.idle_add(self.remove_css_class, "error")
+        # ADD the error class (it was remove_css_class before, so the error
+        # styling never actually showed); hide_install_error removes it.
+        GLib.idle_add(self.add_css_class, "error")
         GLib.idle_add(self.set_sensitive, False)
 
         # Hide error after 3s
