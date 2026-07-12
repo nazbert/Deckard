@@ -25,6 +25,7 @@ import os
 from loguru import logger as log
 
 # Import own modules
+from GtkHelper.GtkHelper import run_on_main
 from src.windows.AssetManager.ChooserPage import ChooserPage
 from src.windows.AssetManager.CustomAssets.FlowBox import CustomAssetChooserFlowBox
 
@@ -54,21 +55,29 @@ class CustomAssetChooser(ChooserPage):
     def build(self):
         self.build_finished = False
         try:
-            self.asset_chooser = CustomAssetChooserFlowBox(self)
-            # Append to main_box (like the Wallpaper / SD+ Bar / Icon choosers do),
-            # NOT into ChooserPage's outer ScrolledWindow: a ScrolledWindow sizes
-            # its child to natural height (never stretches it), which collapses a
-            # nested grid, and the flow box brings its own ScrolledWindow +
-            # pagination. As a direct main_box child its own scroller fills the
-            # available height. The default scrolled_window must also be REMOVED
-            # (as the sibling choosers do) -- an empty vexpand=True child competes
-            # for the page's height and squeezes the grid.
-            GLib.idle_add(self.main_box.remove, self.scrolled_window)
-            GLib.idle_add(self.main_box.append, self.asset_chooser)
+            # The whole GTK construction runs on the main loop: building the
+            # flow box (a page's worth of AssetPreviews) and the button on
+            # this worker thread was the off-main-GTK crash class (issue
+            # #10). One-time jank on opening the tab beats a segfault; only
+            # the build bookkeeping around this stays on the thread.
+            def _build_ui():
+                self.asset_chooser = CustomAssetChooserFlowBox(self)
+                # Append to main_box (like the Wallpaper / SD+ Bar / Icon choosers do),
+                # NOT into ChooserPage's outer ScrolledWindow: a ScrolledWindow sizes
+                # its child to natural height (never stretches it), which collapses a
+                # nested grid, and the flow box brings its own ScrolledWindow +
+                # pagination. As a direct main_box child its own scroller fills the
+                # available height. The default scrolled_window must also be REMOVED
+                # (as the sibling choosers do) -- an empty vexpand=True child competes
+                # for the page's height and squeezes the grid.
+                self.main_box.remove(self.scrolled_window)
+                self.main_box.append(self.asset_chooser)
 
-            self.browse_files_button = Gtk.Button(label=gl.lm.get("asset-chooser.custom.browse-files"), margin_top=15)
-            self.browse_files_button.connect("clicked", self.on_browse_files_clicked)
-            GLib.idle_add(self.main_box.append, self.browse_files_button)
+                self.browse_files_button = Gtk.Button(label=gl.lm.get("asset-chooser.custom.browse-files"), margin_top=15)
+                self.browse_files_button.connect("clicked", self.on_browse_files_clicked)
+                self.main_box.append(self.browse_files_button)
+
+            run_on_main(_build_ui)
 
             self.load_defaults()
         finally:
@@ -158,8 +167,9 @@ class CustomAssetChooser(ChooserPage):
 
     def load_defaults(self):
         settings = gl.settings_manager.load_settings_from_file(os.path.join(gl.DATA_PATH, "settings", "ui", "AssetManager.json"))
-        self.video_button.set_active(settings.get("video-toggle", True))
-        self.image_button.set_active(settings.get("image-toggle", True))
+        # Called from the build worker: toggle writes are GTK calls too.
+        run_on_main(self.video_button.set_active, settings.get("video-toggle", True))
+        run_on_main(self.image_button.set_active, settings.get("image-toggle", True))
 
     def on_search_changed(self, entry):
         self.asset_chooser.refresh()
