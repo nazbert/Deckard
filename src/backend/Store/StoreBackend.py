@@ -17,13 +17,11 @@ import re
 import sys
 import zipfile
 import requests
-from async_lru import alru_cache
 import json
 import asyncio
 from PIL import Image
 from io import BytesIO
 from loguru import logger as log
-from datetime import datetime
 import subprocess
 import time
 import os
@@ -443,13 +441,6 @@ class StoreBackend:
         if manifest is None:
             return
         return json.loads(manifest)
-    
-    def remove_old_manifest_cache(self, url:str, commit_sha:str):
-        for cached_url in list(self.manifest_cache.keys()):
-            if self.get_repo_name(cached_url) == self.get_repo_name(url) and not commit_sha in cached_url:
-                if os.path.isfile(self.manifest_cache[cached_url]):
-                    os.remove(self.manifest_cache[cached_url])
-                del self.manifest_cache[cached_url]
 
     async def get_attribution(self, url:str, commit:str) -> dict:
         result = await self.get_remote_file(url, "attribution.json", commit)
@@ -460,13 +451,6 @@ class StoreBackend:
             return json.loads(result)
         except (json.decoder.JSONDecodeError, TypeError) as e:
             return {}
-    
-    def remove_old_attribution_cache(self, url:str, commit_sha:str):
-        for cached_url in list(self.attribution_cache.keys()):
-            if self.get_repo_name(cached_url) == self.get_repo_name(url) and not commit_sha in cached_url:
-                if os.path.isfile(self.attribution_cache[cached_url]):
-                    os.remove(self.attribution_cache[cached_url])
-                del self.attribution_cache[cached_url]
 
     async def prepare_plugin(self, plugin, include_image: bool = True, verified: bool = False):
         url = plugin["url"]
@@ -838,39 +822,6 @@ class StoreBackend:
     async def get_stargazers(self, repo_url: str) -> int:
         "Deactivated for now because of rate limits"
         return 0
-        user_name = self.get_user_name(repo_url)
-        repo_name = self.get_repo_name(repo_url)
-
-        url = f"https://api.github.com/repos/{user_name}/{repo_name}"
-        api_answer = await self.make_api_call(url)
-        return api_answer["stargazers_count"]
-    
-    async def make_api_call(self, api_call_url:str) -> dict:
-        async def call():
-            log.trace(f"Making API call: {api_call_url}")
-            resp = await self.request_from_url(api_call_url)
-            if isinstance(resp, NoConnectionError):
-                return resp
-            self.api_cache[api_call_url] = {}
-            self.api_cache[api_call_url]["answer"] = resp.json()
-            self.api_cache[api_call_url]["time-code"] = datetime.now().strftime("%d-%m-%y-%H-%M")
-            with open(os.path.join(gl.DATA_PATH, self.STORE_CACHE_PATH, "api.json"), "w") as f:
-                json.dump(self.api_cache, f, indent=4)
-            return resp.json()
-
-        if api_call_url not in self.api_cache:
-            return await call()
-
-        # get time from cached result
-        t = self.api_cache[api_call_url]["time-code"]
-        t_int = datetime.strptime(t, "%d-%m-%y-%H-%M").timestamp()
-        t_delta = time.time()-t_int
-
-        if t_delta > 3600:
-            return await call()
-        
-        # Cached
-        return self.api_cache[api_call_url]["answer"]
 
     def get_user_name(self, repo_url:str) -> str:
         splitted =  repo_url.split("/")
@@ -1054,11 +1005,6 @@ class StoreBackend:
         return 200
     
     async def clone_repo(self, repo_url:str, local_path:str, commit_sha:str = None, branch_name:str = None):
-        # if branch_name == None and commit_sha == None:
-            # Set branch_name to main branch's name
-            # api_answer = await self.make_api_call(f"https://api.github.com/repos/{self.get_user_name(repo_url)}/{self.get_repo_name(repo_url)}")
-            # branch_name = api_answer["default_branch"]
-
         if commit_sha is not None:
             # Use the main branch for the initial clone
             branch_name = None
