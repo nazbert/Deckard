@@ -14,6 +14,9 @@ Covers the behavioral fixes:
       backend_path instead of feeding None into os.path.exists
   (e) ActionCore.get_own_key resolves through get_input(self.input_ident)
       (the attributes the old body read never existed)
+  (f) Page.remove_plugin_actions_from_json tolerates an action carrying an
+      explicit `"id": null` (or no id) -- the old `.get("id", "")` returned
+      None past the default and `.split()` on it raised AttributeError
 
 All checks drive the units directly -- no deck, no GTK widgets; (a) pumps
 the default GLib main context by hand.
@@ -193,6 +196,49 @@ def check_get_own_key_resolves_via_get_input():
     assert action.deck_controller.asked is None
 
 
+def check_remove_plugin_actions_survives_null_id():
+    from src.backend.PageManagement.Page import Page
+
+    # An action with an explicit `"id": null`, one with no id at all, and a
+    # normal one belonging to the plugin being removed. Pre-fix, the null-id
+    # action's `.get("id", "")` returned None and `.split("::")` raised
+    # AttributeError, aborting the whole removal.
+    page_dict = {
+        "keys": {
+            "0x0": {
+                "states": {
+                    "0": {
+                        "actions": [
+                            {"id": None},
+                            {"name": "no-id-key"},
+                            {"id": "victim_plugin::SomeAction"},
+                            {"id": "other_plugin::KeepMe"},
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+    class _PageStub:
+        def __init__(self, d):
+            self.dict = d
+
+        def save(self):
+            pass  # no disk I/O in the unit tier
+
+    stub = _PageStub(page_dict)
+    # Must not raise (pre-fix: AttributeError on the None id).
+    Page.remove_plugin_actions_from_json(stub, "victim_plugin")
+
+    remaining = stub.dict["keys"]["0x0"]["states"]["0"]["actions"]
+    ids = [a.get("id") for a in remaining]
+    assert "victim_plugin::SomeAction" not in ids, f"victim action not removed: {ids!r}"
+    assert "other_plugin::KeepMe" in ids, f"unrelated action wrongly removed: {ids!r}"
+    # The null-id / no-id actions are left untouched (they belong to no plugin).
+    assert len(remaining) == 3, f"expected 3 survivors, got {remaining!r}"
+
+
 def main() -> None:
     assert threading.current_thread() is threading.main_thread()
     check_trigger_signal_kwargs_and_single_shot()
@@ -200,6 +246,7 @@ def main() -> None:
     check_slots_owner_connect_falls_back_strong()
     check_launch_backend_path_validation()
     check_get_own_key_resolves_via_get_input()
+    check_remove_plugin_actions_survives_null_id()
     print("PASS: scenario_plugin_signal_lows")
 
 
