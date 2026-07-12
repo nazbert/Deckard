@@ -197,32 +197,60 @@ class ActionCore(rpyc.Service):
         if is_svg(media_path) and image is None:
             image = gl.media_manager.generate_svg_thumbnail(media_path)
 
-        if image is not None:
-            input_state.set_image(InputImage(
-                controller_input=self.get_state().controller_input,
-                image=image,
-                path=path_for_reopen,
+        controller_input = self.get_input()
+        if controller_input is None:
+            return
+
+        # The write happens under the input's states lock, against a state
+        # object RE-RESOLVED inside the lock: a concurrent page (re)load
+        # replaces every state object (create_n_states), and writing to the
+        # one resolved above would strand this media on a destroyed state --
+        # the key then sat blank until the action happened to repaint (issue
+        # #131). The image decode above deliberately stays outside the lock.
+        with controller_input._states_lock:
+            input_state = controller_input.states.get(self.state)
+            if input_state is None:
+                return
+            if input_state.state != self.state:
+                return
+
+            if image is not None:
+                input_state.set_image(InputImage(
+                    controller_input=controller_input,
+                    image=image,
+                    path=path_for_reopen,
+                ), update=False)
+                self._stamp_media_owner(input_state)
+
+            elif is_video(media_path):
+                input_state.set_video(InputVideo(
+                    controller_input=controller_input,
+                    video_path=media_path,
+                    fps=fps,
+                    loop=loop
+                ))
+                self._stamp_media_owner(input_state)
+
+            else:
+                input_state.set_image(None, update=False)
+
+            input_state.layout_manager.set_action_layout(ImageLayout(
+                valign=valign,
+                halign=halign,
+                size=size
             ), update=False)
-
-        elif is_video(media_path):
-            input_state.set_video(InputVideo(
-                controller_input=self.get_state().controller_input,
-                video_path=media_path,
-                fps=fps,
-                loop=loop
-            ))
-
-        else:
-            input_state.set_image(None, update=False)
-
-        self.get_state().layout_manager.set_action_layout(ImageLayout(
-            valign=valign,
-            halign=halign,
-            size=size
-        ), update=False)
 
         if update:
             self.get_input().update()
+
+    def _stamp_media_owner(self, input_state) -> None:
+        # Record this action as the owner of the media it just set, so
+        # ControllerKey.load_from_input_dict can restore it across the
+        # create_n_states state wipe iff this exact action object still
+        # drives the key (issue #131). Key states only -- dial states don't
+        # carry the attribute and don't participate in the restore.
+        if hasattr(input_state, "media_owner_action"):
+            input_state.media_owner_action = self
 
     def set_background_color(self, color: list[int] = [0, 0, 0, 0], update: bool = True):
         self.raise_error_if_not_ready()

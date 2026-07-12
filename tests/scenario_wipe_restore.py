@@ -1,17 +1,17 @@
 """
 Scenario (issue #70 graduation, half 2 of 2): the no-blank contract.
 
-Pins the OPEN core wipe-without-restore bug (issue #131). REGISTERED IN
-EXPECTED_FAIL_UNTIL_M1 in run_all.py -- it FAILS on today's code and flips to
-PASS when the core fix lands.
+Pins the FIXED wipe-without-restore bug (issue #131) as an always-on
+regression net (formerly in EXPECTED_FAIL_UNTIL_M1 in run_all.py while the
+bug was open).
 
-The bug: ControllerKeyState.load_from_input_dict -> create_n_states
-(DeckController.py ~3557) unconditionally destroys+recreates every state on
-each (re)load, closing every state's key_image. The action-owned image is not
-persisted in the page JSON (it is set at runtime via set_media, not written to
-"media.path"), so the ONLY thing that can re-establish it after the wipe is
-own_actions_update() -> the action's on_update(). A LatchAction that dedups in
-on_update without resetting never repaints -> the key settles BLANK.
+The bug was: ControllerKey.load_from_input_dict -> create_n_states
+unconditionally destroyed+recreated every state on each (re)load, closing
+every state's key_image. The action-owned image is not persisted in the page
+JSON (it is set at runtime via set_media, not written to "media.path"), so
+the ONLY thing that could re-establish it after the wipe was
+own_actions_update() -> the action's on_update(). A LatchAction that dedups
+in on_update without resetting never repaints -> the key settled BLANK.
 
 Why trials, not a single synchronous seam: the blank only manifests through
 the REAL async load pipeline, where the action-executor thread's on_ready
@@ -23,10 +23,12 @@ inherently timing-dependent. The per-trial blank rate on current code is ~0.93
 (P(no blank in TRIALS) ~= 0.07**TRIALS); the assertion fires on the first
 blank. Trials are bounded and each uses a wait_until seam (not a fixed sleep).
 
-Preferred core fix (issue #131, NOT attempted here): stash-and-restore gated
-on action identity in load_from_input_dict -- a same-page reload reuses the
-action (identity matches -> restore -> no blank); a cross-page load builds a
-different action (identity mismatch -> no restore -> no bleed, see
+The fix (issue #131): stash-and-restore gated on action identity in
+load_from_input_dict -- set_media stamps the painting action on the state
+(media_owner_action); the load detaches owned media before create_n_states
+and restores it iff that exact action object still drives the recreated
+state (identity matches -> restore -> no blank); a cross-page load builds a
+different action (identity mismatch -> close, no restore -> no bleed, see
 scenario_wipe_no_bleed.py).
 
 Drives the REAL DeckController/Page/ControllerKey/ActionCore machinery with a
@@ -78,9 +80,8 @@ def main() -> None:
             if not painted:
                 blanks.append(i)
 
-        # The pinned assertion. On today's code this FIRES (blanks non-empty)
-        # -> non-zero exit -> XFAIL. Once issue #131 is fixed, blanks is empty
-        # -> PASS, and this file must be removed from EXPECTED_FAIL_UNTIL_M1.
+        # The pinned assertion: with the #131 identity-gated stash-and-restore
+        # in place, no trial may settle blank.
         assert not blanks, (
             f"the action-control key settled BLANK on {len(blanks)}/{TRIALS} "
             f"loads ({blanks}) -- create_n_states wiped the action-owned image "

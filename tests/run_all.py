@@ -31,10 +31,6 @@ TESTS_DIR = Path(__file__).resolve().parent
 # one-line reason instead of weakening its assertions.
 EXPECTED_FAIL_UNTIL_M1: dict[str, str] = {
     # "scenario_example.py": "needs the M1 control queue",
-    "scenario_wipe_restore.py":
-        "pins the open wipe-without-restore bug (issue #131): create_n_states "
-        "discards the action-owned image and a deduping on_update never "
-        "restores it -- remove from this dict when #131 is fixed",
     "scenario_store_b06_pack_survival.py": (
         "B-06 unfixed: install_icon/wallpaper/sd_plus rmtree the installed "
         "pack before the fallible download and never restore it on failure "

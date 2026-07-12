@@ -3535,6 +3535,13 @@ class ControllerInput:
 
         self.enable_states: bool = True
 
+        # Serializes state-object replacement (create_n_states during a load)
+        # against action media writes (ActionCore.set_media): a paint must
+        # land either fully before the wipe (so the load's stash-and-restore
+        # carries it over) or fully after (on the recreated state object) --
+        # never on a destroyed state (issue #131).
+        self._states_lock = threading.RLock()
+
         self.states: dict[int, ControllerInputState] = {
             0: self.ControllerStateClass(self, 0),
         }
@@ -4041,7 +4048,49 @@ class ControllerKey(ControllerInput):
         Attention: Disabling load_media might result into disabling custom user assets
         """
         n_states = len(input_dict.get("states", {}))
-        self.create_n_states(max(1, n_states))
+
+        # create_n_states destroys every state object, closing any action-set
+        # media; afterwards only on_update() can repaint, and an action that
+        # dedups there never does -- the key settled permanently blank (issue
+        # #131). Detach action-owned media (plus its action layout) before the
+        # wipe and restore it only when the exact action object that painted
+        # it still drives the recreated state: a same-page reload reuses the
+        # action objects (identity match -> restore, no blank), a cross-page
+        # load builds new ones (mismatch -> close, no bleed -- pinned by
+        # scenario_wipe_no_bleed). Under _states_lock so a concurrent
+        # set_media paint lands either fully before the wipe (stash carries
+        # it over) or fully after (on the recreated state) -- never on a
+        # destroyed state object.
+        with self._states_lock:
+            stashed = {}
+            for index, old_state in self.states.items():
+                owner = old_state.media_owner_action
+                if owner is None:
+                    continue
+                if old_state.key_image is None and old_state.key_video is None:
+                    continue
+                stashed[index] = (owner, old_state.key_image, old_state.key_video,
+                                  old_state.layout_manager.action_layout)
+                old_state.key_image = None
+                old_state.key_video = None
+                old_state.media_owner_action = None
+
+            self.create_n_states(max(1, n_states))
+
+            restored: set[int] = set()
+            for index, (owner, key_image, key_video, action_layout) in stashed.items():
+                new_state = self.states.get(index)
+                if new_state is not None and owner in new_state.get_own_actions():
+                    new_state.key_image = key_image
+                    new_state.key_video = key_video
+                    new_state.media_owner_action = owner
+                    new_state.layout_manager.set_action_layout(action_layout, update=False)
+                    restored.add(index)
+                else:
+                    if key_image is not None:
+                        key_image.close()
+                    if key_video is not None:
+                        key_video.close()
 
         old_state_index = self.state
 
@@ -4055,17 +4104,16 @@ class ControllerKey(ControllerInput):
 
             state_dict = input_dict["states"][str(state.state)]
 
-            ## Load media - why here? so that it doesn't overwrite the images chosen by the actions
-            if load_media:
-                state.key_image = None
-                state.key_video = None
-            
             if load_labels:
                 state.label_manager.clear_labels()
 
-            # Reset action layout
-            layout = ImageLayout()
-            state.layout_manager.set_action_layout(layout, update=False)
+            # Reset action layout -- except for a state whose action-owned
+            # media was just restored above: its action layout belongs to the
+            # same still-present action, and resetting it would half-restore
+            # the paint (image back, alignment/size lost).
+            if state.state not in restored:
+                layout = ImageLayout()
+                state.layout_manager.set_action_layout(layout, update=False)
 
             state.own_actions_update() # Why not threaded? Because this would mean that some image changing calls might get executed after the next lines which blocks custom assets
 
@@ -4894,6 +4942,12 @@ class ControllerKeyState(ControllerInputState):
 
         self.key_image: InputImage = None
         self.key_video: InputVideo = None
+        # The ActionCore that set the current key_image/key_video via
+        # set_media(), or None when the media is page/user-owned. Every other
+        # media writer resets it to None; set_media() re-stamps it after the
+        # write. ControllerKey.load_from_input_dict uses it to carry
+        # action-owned media across the create_n_states wipe (issue #131).
+        self.media_owner_action = None
 
     def close_resources(self) -> None:
         if self.key_image is not None:
@@ -4902,6 +4956,7 @@ class ControllerKeyState(ControllerInputState):
         if self.key_video is not None:
             self.key_video.close()
             self.key_video = None
+        self.media_owner_action = None
 
     def set_image(self, key_image: "InputImage", update: bool = True) -> None:
         if self.key_image is not None:
@@ -4915,6 +4970,7 @@ class ControllerKeyState(ControllerInputState):
 
         self.key_image = key_image
         self.key_video = None
+        self.media_owner_action = None
 
         if update:
             self.update()
@@ -4928,6 +4984,7 @@ class ControllerKeyState(ControllerInputState):
         if self.key_image is not None:
             self.key_image.close()
         self.key_image = None
+        self.media_owner_action = None
 
     def clear(self):
         if self.key_video is not None:
@@ -4936,6 +4993,7 @@ class ControllerKeyState(ControllerInputState):
             self.key_video.close()
         self.key_image = None
         self.key_video = None
+        self.media_owner_action = None
         self.label_manager.clear_labels()
         self.layout_manager.clear()
         self.background_manager.set_page_color(None)
