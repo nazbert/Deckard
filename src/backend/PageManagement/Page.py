@@ -640,7 +640,16 @@ class Page:
 
     @log.catch
     def _run_ready_callbacks(self, action: ActionCore):
-        action.on_ready()
+        try:
+            action.on_ready()
+        except Exception:
+            log.opt(exception=True).error(
+                f"on_ready failed for action {getattr(action, 'action_id', action)}"
+            )
+        finally:
+            # A raising on_ready must still open the tick/update gates --
+            # otherwise the action is silently dead for the page's lifetime.
+            action.on_ready_finished = True
         action.on_update()
 
     def clear_action_objects(self):

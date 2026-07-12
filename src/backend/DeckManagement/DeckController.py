@@ -3144,7 +3144,12 @@ class ControllerInputState:
         for action in self.get_own_actions():
             if not isinstance(action, ActionCore):
                 continue
-            if not action.on_ready_called:
+            # Gate on ready_finished, not ready_called: the default on_update
+            # calls on_ready (compat), so dispatching here mid-initialization
+            # ran a second on_ready concurrently with the pool's initial one
+            # (duplicate backend processes). Skipping is lossless -- the
+            # initial ready sequence ends with its own on_update.
+            if not action.on_ready_finished:
                 continue
             action.on_update()
 
@@ -3153,7 +3158,9 @@ class ControllerInputState:
         for action in self.get_own_actions():
             if not isinstance(action, ActionCore):
                 continue
-            if not action.on_ready_called:
+            # on_ready_called is true from schedule time; ticks must wait for
+            # on_ready to actually finish.
+            if not action.on_ready_finished:
                 continue
             action.on_tick()
 

@@ -87,6 +87,11 @@ class ActionCore(rpyc.Service):
         self.generative_ui_objects: list[GenerativeUI] = []
 
         self.on_ready_called = False
+        # Set only after on_ready() has returned (or raised). Ticks and
+        # external on_update() dispatch gate on this, not on_ready_called:
+        # on_ready_called is true from schedule time so that plugin API calls
+        # made *inside* on_ready pass raise_error_if_not_ready.
+        self.on_ready_finished = False
 
         self.has_configuration = False
         self.allow_event_configuration: bool = True
