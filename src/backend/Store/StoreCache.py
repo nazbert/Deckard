@@ -158,17 +158,39 @@ class StoreCache:
                 json.dump(files.copy(), f, indent=4)
 
     def remove_old_cache_files(self):
+        now = time.time()
         for string in self.files.copy():
-            path = self.files[string].get("path")
-            if not os.path.exists(path):
-                continue
-            date = self.files[string].get("date")
-            if date is None:
-                os.remove(path)
+            entry = self.files[string]
+            path = entry.get("path")
+            if not path or not os.path.exists(path):
+                # The file is already gone (or the entry never recorded
+                # one): drop the index entry too. Skipping it made the
+                # entry immortal -- with no file to age out, no future
+                # pass ever removed it.
                 self.files.pop(string)
+                continue
+            # "date" is the last-use clock. Entries written before it
+            # existed fall back to the content clocks -- "fetched", then
+            # the file's mtime -- the same order get_fetched_date uses. A
+            # legacy dateless entry used to fall through into `now - None`
+            # and kill StoreCache.__init__ at startup.
+            date = entry.get("date")
+            if date is None:
+                date = entry.get("fetched")
+            if date is None:
+                try:
+                    date = os.path.getmtime(path)
+                except OSError:
+                    date = None
 
-            if time.time() - date > self.DAYS_TO_KEEP * 24 * 60 * 60:
-                os.remove(path)
+            if date is None or now - date > self.DAYS_TO_KEEP * 24 * 60 * 60:
+                try:
+                    os.remove(path)
+                except OSError as e:
+                    # Keep the entry: the next pass retries instead of
+                    # orphaning the file on disk with no index record.
+                    log.warning(f"Could not remove old cache file {path}: {e}")
+                    continue
                 self.files.pop(string)
 
         self.set_files(self.files)
