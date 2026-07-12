@@ -26,6 +26,7 @@ source until the builder promotes, then switching over.
 import hashlib
 import os
 import threading
+from collections import OrderedDict
 
 import cv2
 import numpy as np
@@ -43,11 +44,16 @@ os.makedirs(VID_CACHE, exist_ok=True)
 # --------------------------------------------------------------------- #
 
 _md5_memo_lock = threading.Lock()
-_md5_memo: dict[tuple[str, int, float], str] = {}
+# Small LRU: every edit of a source video mints a new (path, size, mtime)
+# key, so an unbounded dict grows by one small entry per file version
+# forever. 256 keys is far beyond any realistic working set of distinct
+# videos; eviction only costs a re-hash.
+_MD5_MEMO_MAX = 256
+_md5_memo: "OrderedDict[tuple[str, int, float], str]" = OrderedDict()
 
 
 def get_video_md5(path: str) -> str:
-    """(path, size, mtime) -> md5, memoized.
+    """(path, size, mtime) -> md5, memoized (bounded LRU).
 
     Both cache classes historically hashed the whole source file in their
     constructor on every page-switch/InputVideo-construction -- cheap once,
@@ -59,6 +65,8 @@ def get_video_md5(path: str) -> str:
     key = (path, st.st_size, st.st_mtime)
     with _md5_memo_lock:
         cached = _md5_memo.get(key)
+        if cached is not None:
+            _md5_memo.move_to_end(key)
     if cached is not None:
         return cached
 
@@ -72,6 +80,9 @@ def get_video_md5(path: str) -> str:
 
     with _md5_memo_lock:
         _md5_memo[key] = digest
+        _md5_memo.move_to_end(key)
+        while len(_md5_memo) > _MD5_MEMO_MAX:
+            _md5_memo.popitem(last=False)
     return digest
 
 
@@ -268,12 +279,16 @@ class Mp4FrameCache:
                 payload = self._get_cached_frame(n)
             else:
                 payload = self._decode_source_frame(n)
-        if payload is not None:
-            self.last_payload = payload
-            return payload
-        # Keep showing the last good frame over a transient decode failure.
-        if self.last_payload is not None:
-            return self.last_payload
+            # Published under the lock: close() clears last_payload under
+            # this same lock, so a teardown racing an in-flight decode can
+            # no longer be overtaken by this write and left retaining one
+            # frame on a closed instance.
+            if payload is not None:
+                self.last_payload = payload
+                return payload
+            # Keep showing the last good frame over a transient decode failure.
+            if self.last_payload is not None:
+                return self.last_payload
         return self._fallback_payload()
 
     # After this many failed adoptions of a cache file the registry claims is

@@ -308,6 +308,95 @@ def check_missing_shared_cache_degrades_and_self_heals() -> None:
     print("PASS: a vanished shared cache degrades to source decode and invalidates the registry entry")
 
 
+class _HandoffLock:
+    """Context-manager drop-in for Mp4FrameCache.lock that widens the race
+    window deterministically: when the designated frame thread RELEASES the
+    lock, it blocks until close() has fully run on another thread. If the
+    decoded payload is published outside the lock (the bug), the frame
+    thread's tail then re-retains the frame close() just dropped."""
+
+    def __init__(self):
+        self._inner = threading.Lock()
+        self.frame_thread: threading.Thread = None
+        self.frame_thread_released = threading.Event()
+        self.close_done = threading.Event()
+
+    def __enter__(self):
+        self._inner.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self._inner.release()
+        if threading.current_thread() is self.frame_thread:
+            self.frame_thread_released.set()
+            self.close_done.wait(timeout=5.0)
+        return False
+
+
+def check_close_does_not_retain_last_payload() -> None:
+    """Issue #53 item 3: get_frame() used to publish `last_payload` after
+    releasing the lock, so a close() that ran in that window had its
+    `last_payload = None` overwritten -- one decoded frame retained for the
+    life of the (supposedly closed) cache object."""
+    fixtures.install_stub_globals()
+    video_path = os.path.join(gl.DATA_PATH, "close_race.mp4")
+    _make_test_video(video_path, n_frames=10, size=(120, 90))
+    size = (48, 48)
+    cache_path = os.path.join(gl.DATA_PATH, "cache", "videos", "keys_48x48", "close_race.mp4")
+    cache = mp4_tile_cache.KeyVideoCache(video_path, size, 1.0, cache_path=cache_path, is_builder=False)
+
+    lock = _HandoffLock()
+    cache.lock = lock
+
+    frame_thread = threading.Thread(target=lambda: cache.get_frame(0), name="frame-thread")
+    lock.frame_thread = frame_thread
+    frame_thread.start()
+    assert lock.frame_thread_released.wait(timeout=5.0), "frame thread never released the cache lock"
+    cache.close()          # clears last_payload under the lock
+    lock.close_done.set()  # only now may get_frame's tail run
+    frame_thread.join(timeout=5.0)
+    assert not frame_thread.is_alive(), "frame thread wedged"
+
+    assert cache.last_payload is None, (
+        "a frame decoded before close() must not be re-retained after it "
+        "(last_payload published outside the lock)"
+    )
+
+    print("PASS: close() leaves no retained frame behind a racing get_frame()")
+
+
+def check_md5_memo_bounded() -> None:
+    """Issue #53 item 4: the (path, size, mtime) -> md5 memo grew one entry
+    per source-file version forever; it must be a small bounded LRU."""
+    fixtures.install_stub_globals()
+    original_cap = mp4_tile_cache._MD5_MEMO_MAX
+    mp4_tile_cache._MD5_MEMO_MAX = 8
+    try:
+        with mp4_tile_cache._md5_memo_lock:
+            mp4_tile_cache._md5_memo.clear()
+        paths = []
+        for i in range(20):
+            path = os.path.join(gl.DATA_PATH, f"memo_{i}.bin")
+            with open(path, "wb") as f:
+                f.write(bytes([i]) * 64)
+            paths.append(path)
+            mp4_tile_cache.get_video_md5(path)
+        with mp4_tile_cache._md5_memo_lock:
+            memo_len = len(mp4_tile_cache._md5_memo)
+        assert memo_len <= 8, f"memo must stay bounded, has {memo_len} entries"
+
+        # Eviction must never affect correctness -- an evicted key simply
+        # re-hashes.
+        import hashlib
+        expected = hashlib.md5(bytes([0]) * 64).hexdigest()
+        assert mp4_tile_cache.get_video_md5(paths[0]) == expected
+        assert mp4_tile_cache.get_video_md5(paths[0]) == expected  # memoized hit
+    finally:
+        mp4_tile_cache._MD5_MEMO_MAX = original_cap
+
+    print("PASS: md5 memo is bounded and eviction preserves correctness")
+
+
 def main() -> None:
     fixtures.start_watchdog(WATCHDOG_SECONDS, label="scenario_tile_cache")
 
@@ -318,6 +407,8 @@ def main() -> None:
     check_cache_videos_disabled_starts_no_builder()
     check_saturation_key_and_path_agree()
     check_missing_shared_cache_degrades_and_self_heals()
+    check_close_does_not_retain_last_payload()
+    check_md5_memo_bounded()
 
     print("PASS: scenario_tile_cache")
 
