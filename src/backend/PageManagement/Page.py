@@ -90,6 +90,13 @@ class Page:
 
         self.ready_to_clear = True
 
+        # Serializes the on_ready_called claim in initialize_actions: it
+        # runs outside _load_page_lock (deliberately -- it can block on a
+        # run_on_main marshal), so two concurrent load_page(samePage) calls
+        # could both read the flag as False and submit a second concurrent
+        # on_ready (issue #127).
+        self._ready_claim_lock = threading.Lock()
+
         self.load(load_from_file=True) #TODO: Later we want to limit the load of action objects to the available inputs
 
     def get_name(self) -> str:
@@ -619,13 +626,21 @@ class Page:
     @log.catch
     def initialize_actions(self):
         for action in self.get_all_actions():
-            if not action.on_ready_called:
+            # Atomic claim (issue #127): the bare check-then-set let two
+            # concurrent load_page(samePage) calls both see False and both
+            # submit ready callbacks -- a second concurrent on_ready
+            # (duplicate backend processes, the class #34 closed for the
+            # on_update path). Only the claim is under the lock; the loads
+            # and the pool submit stay outside it.
+            with self._ready_claim_lock:
+                if action.on_ready_called:
+                    continue
                 action.on_ready_called = True
-                action.load_event_overrides()
-                action.load_initial_generative_ui()
-                # Plugin callbacks can block indefinitely; run them on the
-                # deck's action pool, never on the caller's (often GTK) thread.
-                self._submit_ready_callbacks(action)
+            action.load_event_overrides()
+            action.load_initial_generative_ui()
+            # Plugin callbacks can block indefinitely; run them on the
+            # deck's action pool, never on the caller's (often GTK) thread.
+            self._submit_ready_callbacks(action)
 
     def _submit_ready_callbacks(self, action: ActionCore):
         executor = getattr(self.deck_controller, "action_executor", None)
@@ -1029,6 +1044,14 @@ class Page:
         # page reload. GIF media (KeyGIF) has its own timeline and no
         # set_playback -- only InputVideo-style media takes the cap.
         for input_state in self.get_controller_input_states(identifier, state):
+            # Only where THIS page is actually showing (the filter
+            # update_input uses): without it, editing one page's FPS row
+            # rebased the playing video timeline on another deck showing a
+            # different page (issue #14).
+            controller = getattr(input_state, "deck_controller", None)
+            active_page = getattr(controller, "active_page", None)
+            if active_page is None or active_page.json_path != self.json_path:
+                continue
             video = getattr(input_state, "key_video", None) or getattr(input_state, "video", None)
             if video is not None and hasattr(video, "set_playback"):
                 video.set_playback(fps=fps, loop=video.loop)
