@@ -46,6 +46,35 @@ if TYPE_CHECKING:
     from src.backend.DeckManagement.DeckController import ControllerKeyState, ControllerKey
 
 
+# One save lock per page json path, shared across every Page object for that
+# path: each controller showing the same page holds its OWN Page instance, so
+# a per-object lock/semaphore can never order two controllers' saves of the
+# same file (issue #55).
+_save_locks: dict[str, threading.Lock] = {}
+_save_locks_guard = threading.Lock()
+
+
+def _get_save_lock(json_path: str) -> threading.Lock:
+    with _save_locks_guard:
+        return _save_locks.setdefault(json_path, threading.Lock())
+
+
+def _snapshot_json_tree(value):
+    """Structural copy of a json-shaped tree: dicts/lists are re-created,
+    leaves are shared by reference. dict.copy() and list() run entirely in C
+    under the GIL, so each container snapshots atomically even while another
+    thread is mutating it -- unlike json.dump (or copy.deepcopy), this can
+    never raise `RuntimeError: dict changed size during iteration`. Leaves
+    are deliberately NOT deep-copied: action entries hold live ActionCore
+    objects under "object" (the caller strips those from the copy), which
+    must never be duplicated."""
+    if isinstance(value, dict):
+        return {key: _snapshot_json_tree(item) for key, item in value.copy().items()}
+    if isinstance(value, list):
+        return [_snapshot_json_tree(item) for item in list(value)]
+    return value
+
+
 class Page:
     def __init__(self, json_path, deck_controller, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -59,8 +88,6 @@ class Page:
         self.action_objects = {}
 
         self.ready_to_clear = True
-
-        self.file_access_semaphore = threading.Semaphore()
 
         self.load(load_from_file=True) #TODO: Later we want to limit the load of action objects to the available inputs
 
@@ -85,7 +112,9 @@ class Page:
         log.debug(f"Loaded page {self.get_name()} in {end - start:.2f} seconds")
 
     def save(self):
-        with self.file_access_semaphore:
+        # Keyed by json_path, not per-object: two controllers showing the
+        # same page must not interleave their backup/write on one file.
+        with _get_save_lock(self.json_path):
             # Make backup in case something goes wrong
             self.make_backup()
 
@@ -142,9 +171,11 @@ class Page:
         shutil.copy2(src_path, dst_path)
 
     def move_key_to_end(self, dictionary, key):
-        if key in self.dict:
-            value = self.dict.pop(key)
-            self.dict[key] = value
+        # Operates on the passed dict (save()'s snapshot). This used to
+        # pop/reinsert on live self.dict instead -- mutating the page
+        # mid-save while never reordering the dict actually being written.
+        if key in dictionary:
+            dictionary[key] = dictionary.pop(key)
 
     def set_background(self, file_path):
         self.dict.setdefault("background", {})
@@ -432,7 +463,11 @@ class Page:
         self.save()
 
     def get_without_action_objects(self):
-        dictionary = copy(self.dict)
+        # Serialize from a snapshot, never the live tree: json.dump over
+        # self.dict raced concurrent mutations (a RuntimeError mid-dump
+        # lost the whole save), and the old shallow copy() meant the
+        # `del action["object"]` below mutated the ORIGINAL action dicts.
+        dictionary = _snapshot_json_tree(self.dict)
         for type in Input.KeyTypes:
             for key in dictionary.get(type, {}):
                 for state in dictionary[type][key].get("states", {}):
