@@ -31,6 +31,7 @@ def _paint_signature(controller, deck, page, key_count: int) -> dict:
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_switch_storm")
     controller = fixtures.make_headless_controller(serial="storm-1")
     deck = fixtures.raw_deck(controller)
     key_count = controller.deck.key_count()

@@ -202,6 +202,7 @@ def check_background_video_cache() -> None:
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_display_saturation")
     check_background_image()
     check_background_video_cache()
     print("PASS: scenario_display_saturation")

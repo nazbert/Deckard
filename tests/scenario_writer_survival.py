@@ -252,6 +252,7 @@ def leg_control_drain() -> None:
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_writer_survival")
     leg_guard_survival()
     leg_batch_recovery()
     leg_control_drain()

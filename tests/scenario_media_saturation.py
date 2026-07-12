@@ -287,6 +287,7 @@ def check_read_saturation_validates() -> None:
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_media_saturation")
     check_keygif_saturation()
     check_touchscreen_background_saturation()
     check_read_saturation_validates()

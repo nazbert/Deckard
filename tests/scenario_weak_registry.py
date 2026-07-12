@@ -235,6 +235,7 @@ def check_prune_logs_debug():
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_weak_registry")
     check_bound_method_dies_with_owner()
     check_lambda_stays()
     check_dedupe_same_bound_method()

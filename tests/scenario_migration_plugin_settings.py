@@ -196,6 +196,7 @@ def check_atomic_write_survives_death_before_replace() -> None:
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_migration_plugin_settings")
     check_settings_survive_fresh_migration()
     check_existing_settings_not_clobbered()
     check_partial_crash_rerun_is_idempotent()

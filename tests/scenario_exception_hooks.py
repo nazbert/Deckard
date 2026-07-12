@@ -41,6 +41,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_exception_hooks")
     records: list[str] = []
     logger.add(lambda message: records.append(str(message)), level="TRACE")
 

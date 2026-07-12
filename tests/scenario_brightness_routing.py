@@ -22,6 +22,7 @@ import fixtures
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_brightness_routing")
     controller = fixtures.make_headless_controller(serial="brightness-routing-1")
     deck = fixtures.raw_deck(controller)
 

@@ -176,6 +176,7 @@ def test_close_sweeps_screensaver_stash() -> None:
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_deck_close")
     test_double_close_is_safe()
     test_remove_controller_frees_everything()
     test_close_sweeps_screensaver_stash()

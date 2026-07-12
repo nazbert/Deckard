@@ -19,6 +19,7 @@ import globals as gl
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_shutdown_clearclose")
     controller = fixtures.make_headless_controller(serial="shutdown-cc-1")
     deck = fixtures.raw_deck(controller)
     key_count = controller.deck.key_count()

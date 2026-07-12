@@ -240,6 +240,7 @@ def check_remove_plugin_actions_survives_null_id():
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_plugin_signal_lows")
     assert threading.current_thread() is threading.main_thread()
     check_trigger_signal_kwargs_and_single_shot()
     check_eventholder_partial_dedupe_no_crash()
