@@ -3092,9 +3092,6 @@ class ControllerInputState:
         future.add_done_callback(self._log_callback_exception)
         return future
 
-    def own_actions_ready_threaded(self) -> None:
-        self._submit_action_callback(self.own_actions_ready)
-
     def own_actions_update_threaded(self) -> None:
         self._submit_action_callback(self.own_actions_update)
 
@@ -3331,9 +3328,6 @@ class ControllerInput:
                 continue
 
             state_dict = config["states"][str(state.state)]
-
-            self.get_active_state().own_actions_ready()
-            # state.own_actions_ready() # Why not threaded? Because this would mean that some image changing calls might get executed after the next lines which blocks custom assets
 
             if update:
                 self.set_state(old_state_index)
