@@ -50,8 +50,6 @@ class OnboardingWindow(Adw.Dialog):
         self.set_content_width(600)
         self.set_follows_content_size(False)
 
-        self.connect("close-attempt", self.on_close)
-        
         self.build()
 
     def build(self):
@@ -155,19 +153,22 @@ class OnboardingWindow(Adw.Dialog):
         else:
             self.forward_button.set_visible(False)
 
-    def on_close(self, *args, **kwargs):
-        if hasattr(gl.app, "permissions"):
-            gl.app.permissions.present()
-
     def get_udev_version(self):
-        command = "udevadm --version"
+        command = ["udevadm", "--version"]
 
         if is_flatpak():
-            command = f"flatpak run --command {command}"
+            # udevadm lives on the host. The old form ("flatpak run
+            # --command udevadm --version") was malformed and always failed,
+            # so the udev warning never showed for flatpak users -- its
+            # target audience.
+            command = ["flatpak-spawn", "--host"] + command
 
         try:
-            return subprocess.check_output(command, shell=True).decode("utf-8").strip()
-        except subprocess.CalledProcessError:
+            output = subprocess.check_output(command).decode("utf-8").strip()
+            # e.g. "252" -- but some distros append build info; keep the
+            # first token so version.parse() in build() can't choke on it.
+            return output.split()[0] if output else None
+        except (subprocess.CalledProcessError, FileNotFoundError):
             return None
 
 class ImageOnboardingScreen(Gtk.Box):
@@ -342,7 +343,6 @@ class OnboardingScreen5(Gtk.Box):
 
         GLib.idle_add(self.onboarding_window.loading_box.set_spinning, False)
         GLib.idle_add(self.onboarding_window.close)
-        GLib.idle_add(self.onboarding_window.on_close)
         GLib.idle_add(gl.app.main_win.show)
 
 
