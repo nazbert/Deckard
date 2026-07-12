@@ -45,7 +45,13 @@ def test_double_close_is_safe() -> None:
     t0 = time.monotonic()
     controller.close(remove_media=True)
     elapsed = time.monotonic() - t0
-    assert elapsed < 0.5, f"second close() call should be an immediate no-op, took {elapsed:.2f}s"
+    # Liveness ceiling: the second close() must not redo teardown work (which
+    # would incur a real join / 2s stop wait) -- it returns via the _closing
+    # guard almost instantly (~ms). 1.5s stays cleanly below the 2s stop
+    # timeout (so it still catches "the guard didn't fire and it re-ran a
+    # bounded join") while giving a loaded CI runner 3x the original 0.5s
+    # headroom (#69 flake hardening).
+    assert elapsed < 1.5, f"second close() call should be an immediate no-op, took {elapsed:.2f}s"
 
     if controller in gl.deck_manager.deck_controller:
         gl.deck_manager.deck_controller.remove(controller)

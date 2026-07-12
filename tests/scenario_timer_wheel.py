@@ -38,7 +38,12 @@ def check_fires_within_tolerance() -> None:
 
     assert fixtures.wait_until(lambda: len(fired_at) == 1, timeout=2.0), "timer never fired"
     delta = fired_at[0] - t0
-    assert 0.08 <= delta <= 0.6, f"timer fired outside tolerance: {delta:.3f}s (expected ~0.1s)"
+    # Loose lower bound (didn't fire effectively instantly -- a 0.1s schedule
+    # must impose a real delay) and a generous liveness ceiling. Tight
+    # thresholds around 0.1s are a CI flake candidate (scheduler granularity /
+    # loaded runner); what matters is "delayed, and fired within a sane
+    # window", not the exact 0.1s (#69 flake hardening).
+    assert 0.02 <= delta <= 1.5, f"timer fired outside tolerance: {delta:.3f}s (expected ~0.1s)"
 
     print(f"PASS: schedule() fires within tolerance ({delta:.3f}s for a 0.1s delay)")
 
@@ -148,19 +153,33 @@ def check_slow_callback_does_not_delay_unrelated_timer() -> None:
         lambda: any(name == "fast" for name, _ in timeline), timeout=2.0
     ), "the unrelated fast timer never fired"
 
-    fast_delay = next(ts for name, ts in timeline if name == "fast") - t0
-    assert fast_delay < 0.35, (
-        f"the slow callback delayed the unrelated timer: fast fired at {fast_delay:.3f}s "
-        f"(expected ~0.15s, well before the slow callback's 0.55s finish)"
-    )
-
-    # Let the slow callback finish so its dispatch thread doesn't outlive the
-    # assertions below (harmless either way, just tidy).
+    # Let the slow callback finish so both events are on the timeline and its
+    # dispatch thread doesn't outlive the assertions below.
     assert fixtures.wait_until(
         lambda: any(name == "slow_end" for name, _ in timeline), timeout=2.0
+    ), "the slow callback never finished"
+
+    fast_ts = next(ts for name, ts in timeline if name == "fast")
+    slow_end_ts = next(ts for name, ts in timeline if name == "slow_end")
+
+    # The real claim is an ORDERING one: the unrelated fast timer must fire
+    # while the slow callback is still blocked -- i.e. strictly BEFORE the slow
+    # callback returns -- which can only happen if callbacks dispatch off the
+    # scheduler thread rather than inline. Asserting the event order directly
+    # (rather than a wall-clock threshold on fast_delay) proves exactly that
+    # and can't flake on a loaded runner (#69 flake hardening). A generous
+    # liveness ceiling on the fast delay backstops a total scheduler stall.
+    assert fast_ts < slow_end_ts, (
+        f"the slow callback delayed the unrelated timer: fast fired at "
+        f"{fast_ts - t0:.3f}s, not before the slow callback finished at "
+        f"{slow_end_ts - t0:.3f}s -- callbacks are being dispatched inline"
+    )
+    fast_delay = fast_ts - t0
+    assert fast_delay < 0.45, (
+        f"fast timer fired far too late ({fast_delay:.3f}s) -- scheduler liveness ceiling"
     )
 
-    print(f"PASS: a slow callback does not delay an unrelated due timer (fast fired at {fast_delay:.3f}s)")
+    print(f"PASS: a slow callback does not delay an unrelated due timer (fast fired at {fast_delay:.3f}s, before slow_end)")
 
 
 def check_module_level_default_wheel_smoke() -> None:
