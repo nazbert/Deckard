@@ -127,6 +127,13 @@ class App(Adw.Application):
         if not gl.IS_MAC:
             start_dbus_service()
 
+        # Eagerly warm plugin backends (issue #117): async on its own daemon
+        # thread, so backend subprocess launches can never block this GTK
+        # main loop. Matters most in background mode (-b), where no config
+        # UI ever opens to trigger lazy backend init before the first
+        # hardware press.
+        gl.plugin_manager.warm_up_plugins()
+
         log.success("Finished loading app")
 
     def on_reopen(self, *args, **kwargs):
@@ -204,6 +211,14 @@ class App(Adw.Application):
         gl.signal_manager.trigger_signal(Signals.AppQuit)
 
         gl.threads_running = False
+
+        # Stop a pending boot re-enumeration (issue #106) before close_all()
+        # below: the stop event wakes a rescan parked in backoff immediately,
+        # and the bounded join covers an in-flight enumeration -- so the
+        # rescan can't register a fresh controller while the quit path tears
+        # the existing ones down (same residual window as a hotplug event
+        # arriving mid-quit, which the USB monitor has always had).
+        gl.deck_manager.stop_boot_rescan()
 
         # Force quit if normal quit is not possible
         timer = threading.Timer(6, self.force_quit)

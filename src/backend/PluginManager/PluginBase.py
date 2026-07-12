@@ -47,6 +47,15 @@ class PluginBase(rpyc.Service):
         self.backend: netref = None
         self.server: ThreadedServer = None
         self.backend_process: subprocess.Popen = None
+        # Registration-watchdog bookkeeping (_watch_backend_registration):
+        # the generation counter disarms a stale watchdog after a rapid
+        # relaunch (it would otherwise misattribute the NEW backend's
+        # registration -- or the OLD process's exit -- to the launch it was
+        # armed for); the stop flag suppresses the "exited before
+        # registering" error when the exit was requested (plugin
+        # deactivation/unload via on_disconnect).
+        self._backend_launch_gen: int = 0
+        self._backend_stop_requested: bool = False
 
         self.logger = gl.loggers.get("plugins", None)
 
@@ -599,6 +608,11 @@ class PluginBase(rpyc.Service):
         Returns:
             None
         """
+        # Deliberate stop (deactivation/unload route here explicitly, and an
+        # rpyc drop lands here too): disarm a still-armed registration
+        # watchdog so the terminate below isn't reported as "backend exited
+        # before registering" (#117 review round 1).
+        self._backend_stop_requested = True
         if self.server is not None:
             self.server.close()
         if self.backend_connection is not None:
@@ -648,10 +662,62 @@ class PluginBase(rpyc.Service):
             command += f"python3 {backend_path} --port={port}"
 
         log.info(f"Launching backend: {command}")
+        self._backend_stop_requested = False
+        self._backend_launch_gen += 1
         self.backend_process = subprocess.Popen(command, shell=True, start_new_session=True)
         gl.plugin_manager.backend_processes.append(self.backend_process)
 
         self.wait_for_backend()
+        if self.backend_connection is None:
+            # Registration is asynchronous (the subprocess must boot python,
+            # rpyc-connect back and call register_backend) and the bounded
+            # wait above gives up after ~0.3s. At boot that window is
+            # routinely missed -- keep watching so the gap is visible
+            # instead of silently leaving self.backend None (issue #117).
+            self._watch_backend_registration(self.backend_process, self._backend_launch_gen)
+
+    def _watch_backend_registration(self, process: subprocess.Popen, launch_gen: int, timeout: float = 30.0) -> None:
+        """Observe (never manage) a launched backend that hasn't registered
+        yet: on a bounded daemon thread, log the registration latency once
+        it arrives, or an explicit error if the process died or the timeout
+        expires. Process lifecycle stays entirely with launch_backend /
+        on_disconnect / terminate_backend_process. Disarms silently when the
+        launch was superseded (launch_gen mismatch after a relaunch), the
+        stop was deliberate (_backend_stop_requested), or the app is
+        quitting."""
+        plugin_id = self.get_plugin_id_from_folder_name()
+
+        def _watch() -> None:
+            start = time.time()
+            deadline = start + timeout
+            while time.time() < deadline:
+                if self._backend_launch_gen != launch_gen:
+                    # A relaunch superseded this watchdog; the new launch has
+                    # its own. Without this check we'd misattribute the new
+                    # backend's registration (or the old process's reaped
+                    # exit) to the launch this watchdog was armed for.
+                    return
+                if self._backend_stop_requested:
+                    log.debug(f"Plugin {plugin_id}: backend stop requested before registration; watchdog disarmed")
+                    return
+                if not gl.threads_running:
+                    return
+                if self.backend_connection is not None:
+                    log.info(f"Plugin {plugin_id}: backend registered after {time.time() - start:.1f}s")
+                    return
+                if process is not None and process.poll() is not None:
+                    log.error(
+                        f"Plugin {plugin_id}: backend process exited with code "
+                        f"{process.returncode} before registering -- its actions will stay inert"
+                    )
+                    return
+                time.sleep(0.25)
+            log.error(
+                f"Plugin {plugin_id}: backend did not register within {timeout:.0f}s -- "
+                f"its actions will stay inert until it does"
+            )
+
+        threading.Thread(target=_watch, name=f"backend_watch_{plugin_id}", daemon=True).start()
 
     def wait_for_backend(self, tries: int = 3) -> None:
         """
@@ -686,6 +752,38 @@ class PluginBase(rpyc.Service):
         self.backend = self.backend_connection.root
 
         gl.plugin_manager.backends.append(self.backend_connection)
+
+        # Exception-isolated: register_backend is invoked over rpyc by the
+        # backend process itself -- a raising plugin hook must not blow up
+        # the backend's registration call.
+        try:
+            self.on_backend_ready()
+        except Exception as e:
+            log.error(f"Plugin {self.get_plugin_id_from_folder_name()}: on_backend_ready failed: {e}")
+
+    def on_backend_ready(self) -> None:
+        """
+        Called once the backend has connected and registered itself
+        (mirrors ActionCore.on_backend_ready). Backends can register
+        noticeably late on a busy boot, so use this to (re)sync any state
+        that depends on the backend instead of assuming it was available at
+        launch_backend() time. Runs on the rpyc service thread -- do not
+        touch GTK directly. Default: no-op.
+        """
+        pass
+
+    def on_app_ready(self) -> None:
+        """
+        Called once, asynchronously, after the app has finished starting --
+        in both windowed and background (-b) mode. This is the supported
+        place to eagerly launch a plugin backend or start long-lived work:
+        __init__ runs during (and blocks) startup, and an action's on_ready
+        never fires while no deck is connected, so backends launched from
+        either can leave the first hardware presses inert after an
+        autostart boot (issue #117). Runs on a background thread -- do not
+        touch GTK directly. Default: no-op.
+        """
+        pass
 
     def ping(self) -> bool:
         """
