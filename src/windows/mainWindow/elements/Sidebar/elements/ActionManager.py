@@ -454,10 +454,6 @@ class ActionRow(Adw.ActionRow):
         self.down_button.connect("clicked", self.on_click_down)
         self.button_box.append(self.down_button)
 
-        self.remove_button = Gtk.Button(icon_name="user-trash-symbolic", css_classes=["destructive-action"])
-        # self.button_box.append(self.remove_button) #TODO
-        # self.remove_button.connect("clicked", self.on_click_remove)
-
     def update_allow_box_visibility(self):
         self.allow_box.set_visible(True) #TODO
         return
@@ -597,37 +593,7 @@ class ActionRow(Adw.ActionRow):
         self.expander.reorder_actions(self.index, self.index + 1)
 
         self.expander.update_indices()
-        
-    def on_click_remove(self, button):
-        visible_child = gl.app.main_win.leftArea.deck_stack.get_visible_child()
-        if visible_child is None:
-            return
-        controller = visible_child.deck_controller
-        if controller is None:
-            return
-        page = controller.active_page
 
-        # Remove from action_objects
-        del page.action_objects[self.action_object.type][self.action_object.identifier][self.index]
-        page.fix_action_objects_order(self.action_object.type, self.action_object.identifier)
-
-        # Remove from page json
-        page.dict[self.action_object.type][self.action_object.identifier]["actions"].pop(self.index)
-        page.save()
-
-        page.reload_similar_pages(type=self.action_object.type, identifier=self.action_object.identifier)
-        page.reload_similar_pages()
-
-        # Framework-owned teardown: notify then unconditionally clean_up(),
-        # regardless of whether the action overrides the hook (D1).
-        ActionCore.teardown(self.action_object)
-
-        self.action_object = None
-        del self.action_object
-
-        self.get_parent().remove(self)
-            
-        
     def init_dnd(self):
         if self.index == None:
             return
