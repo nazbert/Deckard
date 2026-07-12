@@ -857,6 +857,10 @@ class MediaPlayerThread(threading.Thread):
                 touch_task.run()
 
 class DeckController:
+    # Bound on close() step 6's wait for plugin teardown hooks (issue #12);
+    # class-level so the harness can tighten it.
+    TEARDOWN_JOIN_TIMEOUT_S = 10.0
+
     def __init__(self, deck_manager: "DeckManager", deck: StreamDeck.StreamDeck):
         self.deck_manager: DeckManager = deck_manager
 
@@ -1109,6 +1113,21 @@ class DeckController:
             # can be out of sync (device painted, UI missed), and only
             # re-pushing the UI reconciles them.
             for i in self.inputs[Input.Key]:
+                try:
+                    # Initial DEVICE paint for opaque keys (issue #11): the
+                    # per-frame video loop deliberately never repaints keys
+                    # whose composed color is fully opaque (their tile hides
+                    # the video, nothing changes frame-to-frame) -- but that
+                    # also meant they never received their FIRST paint after
+                    # switching onto a bg-video page: the device kept showing
+                    # the previous page's content there until a keypress. An
+                    # opaque tile hides the video, so this write cannot
+                    # disturb it.
+                    state = i.get_active_state()
+                    if state is not None and state.background_manager.get_composed_color()[-1] >= 255:
+                        i.update()
+                except Exception:
+                    log.exception(f"Opaque-key initial paint failed for {i.identifier}")
                 try:
                     i.set_ui_key_image(i.get_current_image())
                 except Exception:
@@ -1939,6 +1958,21 @@ class DeckController:
             return
         self._closing = True
 
+        # Invalidate any in-flight page load NOW (issue #15): a load_page
+        # that already passed the _closing gate could otherwise attach a
+        # fresh BackgroundVideo (cv2 capture + registry ref + possible
+        # builder thread) AFTER step 7's resource sweep -- leaked until
+        # process exit. The generation bump makes load_background /
+        # load_all_inputs / the awaiting-update task abort at their gen
+        # checks; cancelling the future covers the not-yet-started decode.
+        page_gen_lock = getattr(self, "_page_gen_lock", None)
+        if page_gen_lock is not None:
+            with page_gen_lock:
+                self._page_load_generation += 1
+        bg_future = getattr(self, "_bg_future", None)
+        if bg_future is not None:
+            bg_future.cancel()
+
         if not app_quit and threading.current_thread() is threading.main_thread():
             # Soft guard, not a hard failure: the test harness's teardown()
             # helper calls delete()/close() from what is, in that process,
@@ -2004,8 +2038,29 @@ class DeckController:
         # synchronously on main against a 6s force-quit deadline; hooks that
         # run_on_main here would block it. Device hygiene (steps 1-5, 7-9)
         # is what matters at quit, not plugin notification.
+        #
+        # Bounded (issue #12): a wedged plugin teardown hook (pulsectl
+        # precedent) used to strand this thread inside step 6 forever --
+        # steps 7-9 (media sweep, fallback deck.close, deregistration) never
+        # ran, the unplug leak returned, and _closing=True made a retry a
+        # permanent no-op. On timeout the daemon hook thread is deliberately
+        # abandoned: completing device/registration teardown matters more
+        # than waiting out a hook that may never return.
         if not app_quit:
-            self._teardown_actions()
+            teardown_thread = threading.Thread(
+                target=self._teardown_actions,
+                name=f"DeckCloseTeardown-{getattr(self, '_serial_number', None) or '?'}",
+                daemon=True,
+            )
+            teardown_thread.start()
+            teardown_thread.join(self.TEARDOWN_JOIN_TIMEOUT_S)
+            if teardown_thread.is_alive():
+                log.error(
+                    f"close(): action teardown still running after "
+                    f"{self.TEARDOWN_JOIN_TIMEOUT_S:.0f}s -- a plugin teardown "
+                    f"hook is wedged; abandoning it and completing "
+                    f"device/registration teardown (issue #12)"
+                )
 
         # Step 7: resource sweep. The writer is stopped, so nothing races a
         # paint touching these caches/objects concurrently.
