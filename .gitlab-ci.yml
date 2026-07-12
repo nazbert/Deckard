@@ -125,6 +125,9 @@ build:flatpak:
       when: manual
       allow_failure: true
   script:
+    # The image's user differs from the checkout's owner — git refuses to
+    # operate on "dubiously owned" repos without this.
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
     - python3 -c "import yaml" 2>/dev/null || pip3 install --user --quiet PyYAML
     - mkdir -p build-ws/src dist
     - git archive "$CI_COMMIT_SHA" | tar -x -C build-ws/src
