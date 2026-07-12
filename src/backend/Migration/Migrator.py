@@ -14,6 +14,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 import json
 import shutil
+import tempfile
 import globals as gl
 import os
 from packaging import version
@@ -57,17 +58,33 @@ class Migrator:
         atomic_write_json(self.SETTINGS_DIR, settings)
 
     def create_backup(self) -> None:
+        # Back up everything a migrator may destructively rewrite/delete:
+        # pages/ AND settings/plugins/ (Migrator_1_5_0_beta_5 moves-then-deletes
+        # each plugin's settings.json -- pages/ alone left that with no recovery
+        # path). Nothing to back up if neither exists yet (fresh install).
         pages_path = os.path.join(gl.DATA_PATH, "pages")
-        if not os.path.exists(pages_path):
+        plugin_settings_path = os.path.join(gl.DATA_PATH, "settings", "plugins")
+        sources = [p for p in (pages_path, plugin_settings_path) if os.path.exists(p)]
+        if not sources:
             return
+
         backup_path = os.path.join(gl.DATA_PATH, "backups")
         os.makedirs(backup_path, exist_ok=True)
 
-        # Create zip
-        log.info(f"Creating backup to {backup_path}")
-        path = shutil.make_archive(
-            base_name=os.path.join(backup_path, f"before_{gl.app_version}_migration"),
-            format="zip",
-            root_dir=pages_path,
-        )
+        # Namespace the archive by the MIGRATOR's own version, not gl.app_version:
+        # a chained upgrade runs several migrators in one session and they all
+        # share gl.app_version, so keying on it made each migrator's backup
+        # overwrite the previous one's. self.app_version is unique per migrator.
+        safe_version = self.app_version.replace(os.sep, "_")
+        with tempfile.TemporaryDirectory() as staging:
+            for src in sources:
+                # pages/ -> <staging>/pages, settings/plugins/ -> <staging>/plugins
+                shutil.copytree(src, os.path.join(staging, os.path.basename(src)))
+
+            log.info(f"Creating backup to {backup_path}")
+            path = shutil.make_archive(
+                base_name=os.path.join(backup_path, f"before_{safe_version}_migration"),
+                format="zip",
+                root_dir=staging,
+            )
         log.success(f"Saved backup to {path}")
