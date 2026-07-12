@@ -188,23 +188,29 @@ class StorePreview(Gtk.FlowBoxChild):
 
     @log.catch
     def perform_download_threaded(self):
-        # Prevent multiple downloads because this may lead to errors during plugin initialization
-        while self.store_page.store.currently_downloading:
-            time.sleep(0.1)
-        self.store_page.store.currently_downloading = True
-        if self.install_state == 0:
-            # Install
-            self.install()
-        elif self.install_state == 1:
-            # Uninstall
-            self.uninstall()
-        elif self.install_state == 2:
-            # Update
-            self.update()
-
-        self.store_page.store.currently_downloading = False
-
-        GLib.idle_add(self.show_install_spinner, False)
+        # Prevent multiple downloads because this may lead to errors during
+        # plugin initialization. The lock replaces the old check-then-set
+        # poll on currently_downloading, which was racy (double-click ->
+        # two concurrent installs). The finally is load-bearing: a raising
+        # install/uninstall/update used to leave the flag latched True,
+        # wedging every later download in the poll loop for the session
+        # (and the spinner spinning forever).
+        store = self.store_page.store
+        with store.download_lock:
+            store.currently_downloading = True
+            try:
+                if self.install_state == 0:
+                    # Install
+                    self.install()
+                elif self.install_state == 1:
+                    # Uninstall
+                    self.uninstall()
+                elif self.install_state == 2:
+                    # Update
+                    self.update()
+            finally:
+                store.currently_downloading = False
+                GLib.idle_add(self.show_install_spinner, False)
 
     def install(self):
         pass
