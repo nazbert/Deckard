@@ -44,6 +44,9 @@ class CustomAssetChooser(ChooserPage):
         self.asset_chooser: CustomAssetChooserFlowBox = None
         self.build_finished = False
         self.build_task_finished_tasks: list[callable] = []
+        # Serializes build_finished with the deferred-task queue -- see
+        # _finish_build / show_for_path.
+        self._build_tasks_lock = threading.Lock()
 
         threading.Thread(target=self.build).start()
 
@@ -76,13 +79,26 @@ class CustomAssetChooser(ChooserPage):
             # propagates into it and gets logged.)
             self.set_loading(False)
 
+            self._finish_build()
+
+    def _finish_build(self) -> None:
+        """Flips build_finished and snapshots the deferred-task queue as one
+        atomic step. show_for_path checks the flag and appends under the
+        same lock, so a caller that read build_finished as False can no
+        longer slip its task into the queue AFTER this (only) drain already
+        snapshotted it -- such a task used to sit in the list forever and
+        the requested path was never shown."""
+        with self._build_tasks_lock:
             self.build_finished = True
-            for task in self.build_task_finished_tasks:
-                try:
-                    task()
-                except Exception as e:
-                    log.opt(exception=True).warning(f"Deferred asset-chooser task failed: {e}")
+            tasks = list(self.build_task_finished_tasks)
             self.build_task_finished_tasks.clear()
+        # Run the tasks outside the lock: they call back into
+        # show_for_path-adjacent code and must not hold it.
+        for task in tasks:
+            try:
+                task()
+            except Exception as e:
+                log.opt(exception=True).warning(f"Deferred asset-chooser task failed: {e}")
 
     def on_dnd_accept(self, drop, user_data):
         return True
@@ -111,9 +127,13 @@ class CustomAssetChooser(ChooserPage):
         gl.asset_manager.set_cursor_from_name("default")
 
     def show_for_path(self, path):
-        if not self.build_finished:
-            self.build_task_finished_tasks.append(lambda: self.asset_chooser.show_for_path(path))
-            return
+        with self._build_tasks_lock:
+            if not self.build_finished:
+                # Deferred under the same lock _finish_build drains with:
+                # the task either makes the snapshot or sees the flag True
+                # here and dispatches directly -- never stranded in between.
+                self.build_task_finished_tasks.append(lambda: self.asset_chooser.show_for_path(path))
+                return
         if self.asset_chooser is None:
             # build() failed before the flow box existed -- the failure is
             # already logged; don't raise into the caller as well.
