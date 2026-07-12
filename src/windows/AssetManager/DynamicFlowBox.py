@@ -104,36 +104,47 @@ class DynamicFlowBox(Gtk.Box):
     def show_range(self, start: int, end: int) -> None:
         if not callable(self.factory_func):
             raise ValueError("factory_func must be callable")
-        
-        items = self.get_items_to_show()
 
         self.current_start_index = start
 
-        for i, item in enumerate(items[start:end]):
+        # The whole rebind runs as ONE main-loop callback. Recycled
+        # children used to be set visible right here (synchronously, and
+        # show_range is also called from chooser build threads) while their
+        # new asset was bound via a separate idle per child -- a click in
+        # that gap activated the PREVIOUS page's asset, or a fresh
+        # placeholder's None asset (TypeError in on_child_activated), and a
+        # child selected on the old page kept its GTK selection while
+        # already showing a different asset. Input events are dispatched by
+        # the same main loop, so a single callback leaves no window where a
+        # half-rebound pool is clickable. filter/sort funcs read GTK state
+        # (search entry, toggles), so get_items_to_show now also runs on
+        # the main thread, at apply time.
+        GLib.idle_add(self._apply_range, start, end)
+
+    def _apply_range(self, start: int, end: int) -> bool:
+        items = self.get_items_to_show()
+        page_items = items[start:end]
+
+        # Kill any selection from the previous page/filter BEFORE the pool
+        # is rebound -- the factory re-selects the matching child, if any.
+        self.flow_box.unselect_all()
+
+        for i in range(self.N_ITEMS_PER_PAGE):
             preview = self.flow_box.get_child_at_index(i)
             if preview is None:
-                return
-            
-            preview.set_visible(True)
-            # self.factory_func(preview, item)
-            GLib.idle_add(self.factory_func, preview, item)
+                break
+            if i < len(page_items):
+                # Bind BEFORE showing: the child only ever becomes
+                # clickable already carrying its new asset.
+                self.factory_func(preview, page_items[i])
+                preview.set_visible(True)
+            else:
+                # Hide left over placeholders
+                preview.set_visible(False)
 
-        # Hide left over placeholders
-        for i in range(len(items[start:end]), self.N_ITEMS_PER_PAGE):
-            preview = self.flow_box.get_child_at_index(i)
-            if preview is None:
-                return
-            preview.set_visible(False)
-
-        if start == 0:
-            self.back_button.set_sensitive(False)
-        else:
-            self.back_button.set_sensitive(True)
-
-        if end < len(items):
-            self.next_button.set_sensitive(True)
-        else:
-            self.next_button.set_sensitive(False)
+        self.back_button.set_sensitive(start > 0)
+        self.next_button.set_sensitive(end < len(items))
+        return False  # one-shot idle
 
 
     def on_next(self, *args):

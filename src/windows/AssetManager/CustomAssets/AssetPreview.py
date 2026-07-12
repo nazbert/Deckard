@@ -17,7 +17,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib, GdkPixbuf
+from gi.repository import Gtk, Adw, GdkPixbuf
 
 # Import own modules
 from src.windows.AssetManager.Preview import Preview
@@ -42,8 +42,12 @@ class AssetPreview(Preview):
         self.flow = flow
         self.asset = asset
 
-        GLib.idle_add(self.set_text, asset["name"])
-        GLib.idle_add(self.set_image, asset["thumbnail"])
+        # Runs inside DynamicFlowBox._apply_range's main-loop callback: set
+        # text/image directly. Deferring them through idle_add reopened a
+        # frame where the child was already visible (and clickable) but
+        # still showed the PREVIOUS asset's name/thumbnail.
+        self.set_text(asset["name"])
+        self.set_image(asset["thumbnail"])
 
     def on_click_info(self, button):
         self.flow.asset_chooser.asset_manager.show_info(
