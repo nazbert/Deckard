@@ -35,13 +35,18 @@ from src.backend.DeckManagement.DeckController import KeyGIF
 
 
 class _StubDeckController:
-    """Exposes exactly what KeyGIF.__init__ reads: get_key_image_size()."""
+    """Exposes exactly what KeyGIF.__init__ reads: get_key_image_size() and
+    get_display_saturation() (default factor -- saturation has its own
+    scenario, scenario_media_saturation.py)."""
 
     def __init__(self, key_size: tuple[int, int]):
         self._key_size = key_size
 
     def get_key_image_size(self) -> tuple[int, int]:
         return self._key_size
+
+    def get_display_saturation(self) -> float:
+        return 1.0
 
 
 class _StubControllerKey:

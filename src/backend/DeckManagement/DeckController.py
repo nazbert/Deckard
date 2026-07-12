@@ -16,6 +16,7 @@ import bisect
 import collections
 import gc
 import itertools
+import math
 import os
 import statistics
 import threading
@@ -1619,6 +1620,14 @@ class DeckController:
     # touching a cache filename, so the on-disk/behavioral footprint at the
     # default is byte-identical to a build without this feature.
     DEFAULT_DISPLAY_SATURATION = 1.0
+    # Valid range for the saturation factor -- matches the UI scale
+    # (DeckGroup.Saturation, min=1.0/max=1.5). A persisted value outside this
+    # is corruption (or a hand-edit): clamp rather than trust it, because the
+    # factor also becomes part of the fitted-bg / tile-cache key and a poison
+    # value (NaN, inf) there is a key that never matches -> a cache that never
+    # hits and re-enhances every composite.
+    MIN_DISPLAY_SATURATION = 1.0
+    MAX_DISPLAY_SATURATION = 1.5
 
     def _read_display_saturation(self) -> float:
         try:
@@ -1628,8 +1637,12 @@ class DeckController:
                 )
             )
         except (TypeError, ValueError):
-            value = self.DEFAULT_DISPLAY_SATURATION
-        return value
+            return self.DEFAULT_DISPLAY_SATURATION
+        # float() accepts "nan"/"inf" without raising: reject non-finite so a
+        # poison value can't reach an ImageEnhance factor or a cache key.
+        if not math.isfinite(value):
+            return self.DEFAULT_DISPLAY_SATURATION
+        return min(self.MAX_DISPLAY_SATURATION, max(self.MIN_DISPLAY_SATURATION, value))
 
     def get_display_saturation(self) -> float:
         return self.display_saturation
@@ -1644,6 +1657,13 @@ class DeckController:
         content upgrades to the new factor on its first playthrough after
         that, not instantaneously."""
         value = round(float(value), 2)
+        if abs(value - self.display_saturation) <= 0.001:
+            # Same-value echo -- notably the settings pane re-emitting the
+            # loaded value on open (DeckGroup's Saturation.load_default is
+            # deferred to map, so its set_value() fires the already-connected
+            # value-changed handler): persisting + a full page reload would
+            # be a pure no-op with a visible flicker, so skip entirely.
+            return
         deck_settings = self.get_deck_settings()
         deck_settings.setdefault("display", {})["saturation"] = value
         gl.settings_manager.save_deck_settings(self.deck.get_serial_number(), deck_settings)
@@ -2389,6 +2409,15 @@ class KeyGIF(SingleKeyAsset):
         tile_w, tile_h = self.deck_controller.get_key_image_size()
         fit_size = (max(1, tile_w * 2), max(1, tile_h * 2))
 
+        # Saturation is baked into the retained frames once, here, at decode
+        # time -- the frame list IS this asset's per-frame memo (get_next_frame
+        # only indexes it), so enhancing there instead would re-pay
+        # ImageEnhance on every media tick. A saturation change reloads the
+        # page, which rebuilds this object under the new factor (see
+        # set_display_saturation) -- the same contract as InputImage/
+        # BackgroundImage. Skipped entirely at the default factor.
+        saturation = self.deck_controller.get_display_saturation()
+
         # Extract frames and their delays. The source file is only needed for
         # the duration of this loop -- close it immediately after so the app
         # doesn't hold a dangling fd + full-res frame cache alive underneath
@@ -2402,6 +2431,8 @@ class KeyGIF(SingleKeyAsset):
                 # source already within budget composites fine as-is.
                 if fitted.width > fit_size[0] or fitted.height > fit_size[1]:
                     fitted = ImageOps.contain(fitted, fit_size)
+                if abs(saturation - 1.0) > 0.001:
+                    fitted = ImageEnhance.Color(fitted).enhance(saturation)
                 self.frames.append(fitted)
                 # Get frame delay from GIF metadata (in milliseconds)
                 # Default to 100ms (10fps) if no delay specified
@@ -4198,16 +4229,25 @@ class ControllerTouchScreenState(ControllerInputState):
         self.update()
 
     def _get_fitted_background_image(self, path: str, size: tuple[int, int]) -> Image.Image:
-        # Decode + fit once per (path, mtime, size) and cache: this runs on
-        # every composite (30/s while a background video plays), and a failed
-        # decode must not log per frame. Videos take the playback path in
-        # _get_background_video_frame instead.
+        # Decode + fit once per (path, mtime, size, saturation) and cache:
+        # this runs on every composite (30/s while a background video plays),
+        # and a failed decode must not log per frame. Videos take the playback
+        # path in _get_background_video_frame instead.
         try:
             mtime = os.path.getmtime(path)
         except OSError:
             return None
 
-        key = (path, mtime, size)
+        # The saturation boost is baked into the cached fitted image (same
+        # one-time contract as BackgroundImage for the key grid), so the
+        # factor is part of the cache key -- a saturation change must not
+        # keep serving the stale enhancement from before it. Rounded to the
+        # persisted 2-decimal precision (set_display_saturation stores
+        # round(v, 2)) so a future unrounded caller can't mint a near-
+        # duplicate float key that misses the cache every composite.
+        saturation = round(self.controller_touch.deck_controller.get_display_saturation(), 2)
+
+        key = (path, mtime, size, saturation)
         cached_key, cached_image = self._fitted_background_cache
         if cached_key == key:
             # Callers paste dial images onto the returned image in place --
@@ -4224,6 +4264,8 @@ class ControllerTouchScreenState(ControllerInputState):
         fitted = None
         if image is not None:
             fitted = ImageOps.fit(image, size, Image.Resampling.LANCZOS).convert("RGBA")
+            if abs(saturation - 1.0) > 0.001:
+                fitted = ImageEnhance.Color(fitted).enhance(saturation)
 
         # Failures are cached too: a bad file logs once, not every frame.
         self._fitted_background_cache = (key, fitted)
