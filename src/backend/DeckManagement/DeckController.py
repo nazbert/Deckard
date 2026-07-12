@@ -316,6 +316,14 @@ class MediaPlayerThread(threading.Thread):
         self.tasks: list[MediaPlayerTask] = []
         self.image_tasks = {}
         self.touchscreen_task = None
+        # Guards the single-slot task stores against producer/consumer
+        # interleaves (issue #8): the drain's read-then-null on
+        # touchscreen_task and the Clear's get-then-del on image_tasks could
+        # both discard a task assigned in between -- and the producer had
+        # already stamped _last_enqueued_hash, so static content stayed
+        # stale forever (no next tick re-enqueues it). Critical sections are
+        # a few instructions; uncontended cost is negligible per tick.
+        self._slot_lock = threading.Lock()
         self._wake_event = threading.Event()
 
         # Control queue (plan §2.1): append/popleft are GIL-atomic, so no
@@ -617,19 +625,19 @@ class MediaPlayerThread(threading.Thread):
         # after this Clear survive and paint afterward, which is what makes
         # the queued Clear order-preserving against the caller's
         # clear-then-paint sequence (plan §2.1).
-        for key in list(self.image_tasks.keys()):
-            task = self.image_tasks.get(key)
-            if task is not None and task.submit_seq is not None and task.submit_seq < msg.seq:
-                del self.image_tasks[key]
-        # Snapshot + identity-compared null (issue #1 vector e):
-        # clear_media_player_tasks()/close() null this slot from other
-        # threads (crash on the re-read), and a producer can assign a NEWER
-        # task between our reads -- one whose submit_seq contractually
-        # survives this Clear (issue #8, this site's half).
-        ts_task = self.touchscreen_task
-        if (ts_task is not None and ts_task.submit_seq is not None
-                and ts_task.submit_seq < msg.seq):
-            if self.touchscreen_task is ts_task:
+        # Under _slot_lock (issue #8, Clear half): the per-key get-then-del
+        # could delete a NEWER task assigned in between -- one whose
+        # submit_seq contractually survives this Clear. Same for the
+        # touchscreen slot (also nulled by clear_media_player_tasks()/close()
+        # from other threads -- issue #1 vector e).
+        with self._slot_lock:
+            for key in list(self.image_tasks.keys()):
+                task = self.image_tasks.get(key)
+                if task is not None and task.submit_seq is not None and task.submit_seq < msg.seq:
+                    del self.image_tasks[key]
+            ts_task = self.touchscreen_task
+            if (ts_task is not None and ts_task.submit_seq is not None
+                    and ts_task.submit_seq < msg.seq):
                 self.touchscreen_task = None
         # Reset dedup state on every current input BEFORE writing the blanks
         # (plan §3): otherwise an identical repaint after this Clear would
@@ -649,8 +657,9 @@ class MediaPlayerThread(threading.Thread):
         # otherwise still be accepted into a queue nothing will ever drain
         # again (design doc bug 12).
         self._stop = True
-        self.image_tasks.clear()
-        self.touchscreen_task = None
+        with self._slot_lock:
+            self.image_tasks.clear()
+            self.touchscreen_task = None
         self.deck_controller._reset_dedup_hashes()
         try:
             self.deck_controller._write_blank_frames()
@@ -739,7 +748,7 @@ class MediaPlayerThread(threading.Thread):
         self._wake_event.set()
 
     def add_touchscreen_task(self, native_image: bytes, page=None, config_gen=None, controller_touchscreen=None, img_hash=None):
-        self.touchscreen_task = MediaPlayerSetTouchscreenImageTask(
+        task = MediaPlayerSetTouchscreenImageTask(
             deck_controller=self.deck_controller,
             page=page if page is not None else self.deck_controller.active_page,
             native_image=native_image,
@@ -748,10 +757,12 @@ class MediaPlayerThread(threading.Thread):
             controller_touchscreen=controller_touchscreen,
             img_hash=img_hash
         )
+        with self._slot_lock:
+            self.touchscreen_task = task
         self._wake_event.set()
 
     def add_image_task(self, key_index: int, native_image: bytes, page=None, config_gen=None, controller_key=None, img_hash=None):
-        self.image_tasks[key_index] = MediaPlayerSetImageTask(
+        task = MediaPlayerSetImageTask(
             deck_controller=self.deck_controller,
             page=page if page is not None else self.deck_controller.active_page,
             key_index=key_index,
@@ -761,6 +772,8 @@ class MediaPlayerThread(threading.Thread):
             img_hash=img_hash,
             submit_seq=self.next_submit_seq()
         )
+        with self._slot_lock:
+            self.image_tasks[key_index] = task
         self._wake_event.set()
 
     def perform_media_player_tasks(self):
@@ -781,9 +794,13 @@ class MediaPlayerThread(threading.Thread):
             except KeyError:
                 continue
 
-        # clear_media_player_tasks (GTK thread) may null this concurrently.
-        touch_task = self.touchscreen_task
-        self.touchscreen_task = None
+        # Under _slot_lock: a producer assigning between the read and the
+        # null lost its frame -- and with _last_enqueued_hash already
+        # stamped, a static strip stayed stale forever (issue #8, drain
+        # half). clear_media_player_tasks (GTK thread) also nulls this.
+        with self._slot_lock:
+            touch_task = self.touchscreen_task
+            self.touchscreen_task = None
 
         # Snapshot page + generation as one pair (the assignment in load_page
         # holds the same lock) so the whole batch is judged consistently.
@@ -848,8 +865,12 @@ class MediaPlayerThread(threading.Thread):
             now = time.time()
             min_gap = 1.0 / self._video_write_hz if self._video_write_hz > 0 else 0
             if min_gap and now - self._last_touch_write < min_gap:
-                if self.touchscreen_task is None:
-                    self.touchscreen_task = touch_task
+                # Locked check-then-set: a producer assigning a NEWER frame
+                # between the None-check and the putback must win (issue #8;
+                # unguarded, the putback clobbered it with this older frame).
+                with self._slot_lock:
+                    if self.touchscreen_task is None:
+                        self.touchscreen_task = touch_task
             else:
                 self._last_touch_write = now
                 if bulk and writes_since_yield >= self.YIELD_STRIDE and self._inter_write_yield > 0:
@@ -1909,8 +1930,11 @@ class DeckController:
             if gen is not None and gen != self._page_load_generation:
                 return
             self.media_player.tasks.clear()
-            self.media_player.image_tasks.clear()
-            self.media_player.touchscreen_task = None
+            # Under the writer's slot lock so this can't interleave with the
+            # drain's read-then-null or a producer's assignment (issue #8).
+            with self.media_player._slot_lock:
+                self.media_player.image_tasks.clear()
+                self.media_player.touchscreen_task = None
 
     def close(self, remove_media: bool, app_quit: bool = False) -> None:
         """One deterministic teardown sweep (docs/memory-footprint-impl-plan.md
