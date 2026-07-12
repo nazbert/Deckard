@@ -152,8 +152,10 @@ class Brightness(Adw.PreferencesRow):
         deck_settings.setdefault("brightness", {})["value"] = value
         settings_manager.save_deck_settings(self.deck_serial_number, deck_settings)
 
-        # Check if brightness is overwritten by the current page
-        page_dict = self.settings_page.deck_controller.active_page.dict
+        # Check if brightness is overwritten by the current page (there may
+        # be no active page, e.g. right after connect or with zero pages)
+        active_page = self.settings_page.deck_controller.active_page
+        page_dict = active_page.dict if active_page is not None else {}
         overwrite = page_dict.get("settings", {}).get("brightness", {}).get("overwrite", False)
 
         # Apply brightness if not overwritten
@@ -398,8 +400,11 @@ class Screensaver(Adw.PreferencesRow):
         self.connect_signals()
 
     def page_overwrites_screensaver(self) -> bool:
-        # Missing "screensaver"/"overwrite" keys mean "not overwritten".
+        # Missing page or missing "screensaver"/"overwrite" keys mean
+        # "not overwritten".
         active_page = self.settings_page.deck_controller.active_page
+        if active_page is None:
+            return False
         return bool(active_page.dict.get("screensaver", {}).get("overwrite", False))
 
     def on_toggle_enable(self, toggle_switch, state):

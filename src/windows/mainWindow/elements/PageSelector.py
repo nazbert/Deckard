@@ -126,8 +126,13 @@ class PageSelector(Gtk.Box):
         active_controller = active_child.deck_controller
         if active_controller is None:
             return
-        
-        page_path = self.pages_model[drop_down.get_active()][1]
+
+        active = drop_down.get_active()
+        if active < 0:
+            # No row selected -- get_active() returns -1, which would
+            # negative-index the model and silently load the LAST page.
+            return
+        page_path = self.pages_model[active][1]
         if active_controller.active_page is not None and active_controller.active_page.json_path == page_path:
             # Selector synced to a deck-triggered switch; the page is already
             # loading/loaded -- don't kick off a redundant second load.
@@ -146,7 +151,12 @@ class PageSelector(Gtk.Box):
     def on_click_open_page_settings(self, button):
         self.on_click_open_page_manager(button)
 
-        page_path = self.pages_model[self.drop_down.get_active()][1]
+        active = self.drop_down.get_active()
+        if active < 0:
+            # Nothing selected: just open the manager without activating the
+            # last page via a -1 negative index.
+            return
+        page_path = self.pages_model[active][1]
         gl.page_manager_window.page_selector.activate_page(page_path)
 
     def disconnect_change_signal(self):
