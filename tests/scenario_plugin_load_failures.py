@@ -28,6 +28,7 @@ the plugin. Pins, without hardware or GTK widgets:
 """
 import json
 import os
+import sys
 import textwrap
 
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
@@ -116,6 +117,15 @@ def seed_plugins() -> None:
     with open(os.path.join(gl.PLUGIN_DIR, "stray-file.txt"), "w") as f:
         f.write("not a plugin")
 
+    # A dotted directory name (typical timestamped backup) is structurally
+    # unimportable as `plugins.<name>.main` -- it must be skipped without an
+    # import attempt, without a traceback, and without inflating the
+    # failed-to-load count (#133). Seeded as a full copy of a working plugin,
+    # exactly like a real backup dir.
+    write_plugin("com_test_good.bak.20260101-000000",
+                 GOOD_MAIN.format(class_name="BackupPlugin"),
+                 manifest("com_test_good_backup"))
+
 
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_plugin_load_failures")
@@ -148,6 +158,17 @@ def main() -> None:
         assert folder not in PluginBase.plugins, f"{folder} must not be registered"
     assert "stray-file.txt" not in pm.load_errors, (
         "a stray file in PLUGIN_DIR is not a plugin failure"
+    )
+    # --- #133: dotted backup dirs are skipped, not failed. ---
+    assert "com_test_good.bak.20260101-000000" not in pm.load_errors, (
+        "a dotted (unimportable) directory must not land in load_errors: "
+        f"{pm.load_errors}"
+    )
+    assert not any("com_test_good.bak" in mod for mod in sys.modules), (
+        "no import may even be attempted for a dotted plugin directory"
+    )
+    assert "com_test_good_backup" not in PluginBase.plugins, (
+        "a backup dir must not register as a plugin"
     )
 
     # --- 3: version-gate outcomes land in disabled_plugins, not nowhere. ---
