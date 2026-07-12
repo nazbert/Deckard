@@ -65,6 +65,7 @@ class _CountingSettingsManager(fixtures.StubSettingsManager):
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_saturation_noop_guard")
     fixtures.install_stub_globals()
     settings_manager = _CountingSettingsManager()
     gl.settings_manager = settings_manager

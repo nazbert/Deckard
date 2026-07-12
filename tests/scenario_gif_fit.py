@@ -139,6 +139,7 @@ def check_small_gif_keeps_source_size() -> None:
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_gif_fit")
     check_large_gif_is_fit()
     check_small_gif_keeps_source_size()
     print("PASS: scenario_gif_fit")

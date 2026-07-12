@@ -71,6 +71,7 @@ def make_video(n_frames: int, fps: float = 10.0, loop: bool = True) -> InputVide
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_keyvideo_build")
     T0 = 1_000_000.0
 
     # --- Building phase: sequential +1 advance, one get_frame call per

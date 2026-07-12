@@ -352,6 +352,7 @@ def check_disconnect_from_event_directly_targets_right_plugin():
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_plugin_events")
     check_raising_sync_observer_logs_traceback()
     check_raising_async_observer_logs_traceback()
     check_raising_observer_does_not_stop_batch()

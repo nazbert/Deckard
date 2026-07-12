@@ -191,6 +191,7 @@ def check_non_label_media_state_fields_untouched() -> None:
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_migration_ordering")
     check_full_chain_rewrites_nested_shape()
     check_flat_shape_still_rewritten()
     check_non_label_media_state_fields_untouched()

@@ -160,6 +160,7 @@ def check_background_set_video_clears_encode_memo() -> None:
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_encode_memo_doorkeeper")
     check_doorkeeper_admission()
     check_doorkeeper_ring_is_bounded()
     check_clear_resets_doorkeeper_and_entries()

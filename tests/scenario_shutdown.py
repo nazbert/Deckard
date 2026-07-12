@@ -17,6 +17,7 @@ import fixtures
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_shutdown")
     controller = fixtures.make_headless_controller(serial="shutdown-1")
     deck = fixtures.raw_deck(controller)
     key_count = controller.deck.key_count()

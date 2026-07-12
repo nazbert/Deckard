@@ -140,6 +140,7 @@ def check_no_matplotlib_imported() -> None:
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_font_resolver")
     check_weight_selects_different_files()
     check_resolved_file_openable()
     check_font_name_round_trips()

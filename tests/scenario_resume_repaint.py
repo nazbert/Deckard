@@ -32,6 +32,7 @@ def seed_hashes(controller, value=123):
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_resume_repaint")
     controller, media_player, deck_manager = fixtures.make_stub_controller(n_keys=2, has_touchscreen=True)
     deck = controller.deck
 

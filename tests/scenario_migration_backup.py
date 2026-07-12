@@ -90,6 +90,7 @@ def check_chained_backups_namespaced_and_include_plugins() -> None:
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_migration_backup")
     check_chained_backups_namespaced_and_include_plugins()
     print("PASS: scenario_migration_backup")
 

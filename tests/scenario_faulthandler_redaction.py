@@ -77,6 +77,7 @@ def simulate_restart() -> None:
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_faulthandler_redaction")
     log_dir = os.path.join(fixtures.DATA_DIR, "logs")
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, "faulthandler.log")

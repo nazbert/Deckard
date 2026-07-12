@@ -38,6 +38,7 @@ def make_gif(frame_delays_ms: list[float], loop: bool = True, n_frames: int = No
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_gif_timeline")
     T0 = 1_000_000.0  # arbitrary wall-clock base, far from 0 to catch base-0 bugs
 
     # --- Boundary picking over variable delays: [0.1, 0.5, 0.2, 1.0]s,

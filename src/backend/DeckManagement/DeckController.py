@@ -281,7 +281,16 @@ class MediaPlayerThread(threading.Thread):
     YIELD_STRIDE = 3
 
     def __init__(self, deck_controller: "DeckController"):
-        super().__init__(name="MediaPlayerThread", daemon=True)
+        # Suffix the thread name with the deck serial so per-deck writer
+        # attribution is possible when two decks run at once (previously every
+        # media thread was just "MediaPlayerThread", making the journal's
+        # thread_name ambiguous in two-deck scenarios). serial_number() is a
+        # cheap attribute read that never raises on any real or fake deck.
+        try:
+            _serial = deck_controller.serial_number()
+        except Exception:
+            _serial = "unknown"
+        super().__init__(name=f"MediaPlayerThread-{_serial}", daemon=True)
         self.deck_controller: DeckController = deck_controller
         self.FPS = 30 # Max refresh rate of the internal displays
 

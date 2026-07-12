@@ -377,6 +377,7 @@ def check_custom_asset_flowbox_drops_callback_refs() -> None:
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_appshell_lows")
     check_on_activate_defers_show_donate()
     check_sidebar_hide_error_targets_stack_child()
     check_deck_name_dedup()

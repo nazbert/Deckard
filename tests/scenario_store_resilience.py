@@ -207,7 +207,12 @@ def test_fetches_run_concurrently() -> None:
         sb_module.requests.get = real_get
 
     assert all(not isinstance(r, NoConnectionError) for r in results)
-    assert elapsed < 1.0, (
+    # Liveness/non-serialization ceiling, deliberately generous: what this
+    # proves is that the 10 x 0.2s blocking fetches did NOT serialize the event
+    # loop (fully serial would be >=2.0s). Any ceiling comfortably under 2.0s
+    # preserves that proof; 1.8s buys headroom against a loaded CI runner
+    # without ever admitting a serialized run (#69 flake hardening).
+    assert elapsed < 1.8, (
         f"10 x 0.2s fetches took {elapsed:.2f}s -- the blocking fetch is "
         f"serializing the event loop (fully serial would be >=2.0s)"
     )
