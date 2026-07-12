@@ -107,7 +107,15 @@ def sat_suffix(saturation: float) -> str:
     """Two-decimal fixed encoding (e.g. 1.30 -> ".sat130"); empty at the
     default factor so plain "{md5}.mp4" caches stay valid and no
     enhance/mode-conversion work happens at 1.0. Derived from the same
-    canonical rounding as the registry key (see _sat_centi)."""
+    canonical rounding as the registry key (see _sat_centi).
+
+    No-op band note: `centi == 100` treats [0.995, 1.005) as the default
+    (the centi rounding this whole module shares), whereas the still-image /
+    GIF bake elsewhere gates on `abs(sat - 1.0) > 0.001`. The (1.001, 1.005)
+    gap is intentional and UI-unreachable -- the saturation slider steps by
+    0.05 and rounds to two decimals, so only exact 0.05 multiples reach here,
+    none of which fall in the gap. A single shared centi rounding for every
+    saturation-derived name is worth more than matching that epsilon."""
     centi = _sat_centi(saturation)
     return "" if centi == 100 else f".sat{centi}"
 
