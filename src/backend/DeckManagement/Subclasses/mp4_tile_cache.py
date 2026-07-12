@@ -26,6 +26,7 @@ source until the builder promotes, then switching over.
 import hashlib
 import os
 import threading
+from collections import OrderedDict
 
 import cv2
 import numpy as np
@@ -43,11 +44,16 @@ os.makedirs(VID_CACHE, exist_ok=True)
 # --------------------------------------------------------------------- #
 
 _md5_memo_lock = threading.Lock()
-_md5_memo: dict[tuple[str, int, float], str] = {}
+# Small LRU: every edit of a source video mints a new (path, size, mtime)
+# key, so an unbounded dict grows by one small entry per file version
+# forever. 256 keys is far beyond any realistic working set of distinct
+# videos; eviction only costs a re-hash.
+_MD5_MEMO_MAX = 256
+_md5_memo: "OrderedDict[tuple[str, int, float], str]" = OrderedDict()
 
 
 def get_video_md5(path: str) -> str:
-    """(path, size, mtime) -> md5, memoized.
+    """(path, size, mtime) -> md5, memoized (bounded LRU).
 
     Both cache classes historically hashed the whole source file in their
     constructor on every page-switch/InputVideo-construction -- cheap once,
@@ -59,6 +65,8 @@ def get_video_md5(path: str) -> str:
     key = (path, st.st_size, st.st_mtime)
     with _md5_memo_lock:
         cached = _md5_memo.get(key)
+        if cached is not None:
+            _md5_memo.move_to_end(key)
     if cached is not None:
         return cached
 
@@ -72,17 +80,44 @@ def get_video_md5(path: str) -> str:
 
     with _md5_memo_lock:
         _md5_memo[key] = digest
+        _md5_memo.move_to_end(key)
+        while len(_md5_memo) > _MD5_MEMO_MAX:
+            _md5_memo.popitem(last=False)
     return digest
+
+
+def _sat_centi(saturation: float) -> int:
+    """Saturation factor in integer hundredths -- THE single rounding for
+    everything saturation-derived. The registry key, the cache-file suffix,
+    and the factor baked into frames must all fall into the same bucket for
+    a given raw float; two independent roundings here (`round(sat, 2)` for
+    the key vs `int(round(sat * 100))` for the path) disagreed around the
+    *.**5 boundaries, leaving a reader polling forever for a file that its
+    entry's builder writes under a different name."""
+    return int(round(float(saturation) * 100))
+
+
+def canonical_saturation(saturation: float) -> float:
+    """Raw factor -> the canonical two-decimal value every saturation
+    consumer (registry key, file suffix, bake-in enhance) derives from."""
+    return _sat_centi(saturation) / 100.0
 
 
 def sat_suffix(saturation: float) -> str:
     """Two-decimal fixed encoding (e.g. 1.30 -> ".sat130"); empty at the
     default factor so plain "{md5}.mp4" caches stay valid and no
-    enhance/mode-conversion work happens at 1.0."""
-    return (
-        "" if abs(saturation - 1.0) <= 0.001
-        else f".sat{int(round(saturation * 100))}"
-    )
+    enhance/mode-conversion work happens at 1.0. Derived from the same
+    canonical rounding as the registry key (see _sat_centi).
+
+    No-op band note: `centi == 100` treats [0.995, 1.005) as the default
+    (the centi rounding this whole module shares), whereas the still-image /
+    GIF bake elsewhere gates on `abs(sat - 1.0) > 0.001`. The (1.001, 1.005)
+    gap is intentional and UI-unreachable -- the saturation slider steps by
+    0.05 and rounds to two decimals, so only exact 0.05 multiples reach here,
+    none of which fall in the gap. A single shared centi rounding for every
+    saturation-derived name is worth more than matching that epsilon."""
+    centi = _sat_centi(saturation)
+    return "" if centi == 100 else f".sat{centi}"
 
 
 # --------------------------------------------------------------------- #
@@ -115,8 +150,8 @@ class Mp4FrameCache:
 
         self.source_path = source_path
         self.out_size = out_size
-        self.saturation = saturation
-        self._sat_suffix = sat_suffix(saturation)
+        self.saturation = canonical_saturation(saturation)
+        self._sat_suffix = sat_suffix(self.saturation)
         self.is_builder = is_builder
 
         self.video_md5 = get_video_md5(source_path)
@@ -137,6 +172,7 @@ class Mp4FrameCache:
         self._cache_pos = 0  # index of the next frame _cache_cap will return
         self._last_entry: tuple[int, object] = None
         self.last_payload = None  # last good decode, served over a transient failure
+        self._adopt_failures = 0  # failed shared-cache adoptions (see _maybe_adopt_shared_cache)
 
         self.cap: cv2.VideoCapture = None
         self._writer: cv2.VideoWriter = None
@@ -251,13 +287,23 @@ class Mp4FrameCache:
                 payload = self._get_cached_frame(n)
             else:
                 payload = self._decode_source_frame(n)
-        if payload is not None:
-            self.last_payload = payload
-            return payload
-        # Keep showing the last good frame over a transient decode failure.
-        if self.last_payload is not None:
-            return self.last_payload
+            # Published under the lock: close() clears last_payload under
+            # this same lock, so a teardown racing an in-flight decode can
+            # no longer be overtaken by this write and left retaining one
+            # frame on a closed instance.
+            if payload is not None:
+                self.last_payload = payload
+                return payload
+            # Keep showing the last good frame over a transient decode failure.
+            if self.last_payload is not None:
+                return self.last_payload
         return self._fallback_payload()
+
+    # After this many failed adoptions of a cache file the registry claims is
+    # ready, give up on it: invalidate the entry so a future acquire() starts
+    # a fresh builder, and detach so playback stops paying a per-frame stat
+    # on a file that is never going to appear.
+    MAX_ADOPT_FAILURES = 3
 
     def _maybe_adopt_shared_cache(self) -> None:
         """Registry consumers only (see KeyVideoCache/acquire() below): if
@@ -265,16 +311,38 @@ class Mp4FrameCache:
         the registry reports the shared cache file was promoted by someone
         else's builder, switch over -- closing the now-unneeded source
         capture. No-op for BackgroundVideoCache (never sets
-        `_registry_entry`) and for the builder instance itself."""
+        `_registry_entry`) and for the builder instance itself.
+
+        Bounded: if the registry says ready but the file cannot be opened
+        (deleted or corrupted behind the registry's back -- e.g. an external
+        cleanup of the cache dir), this degrades instead of retrying forever:
+        after MAX_ADOPT_FAILURES attempts the entry is invalidated (self-heal
+        -- the next acquire() sees ready=False/no builder and rebuilds) and
+        this reader detaches, keeping its own source decode."""
         entry = getattr(self, "_registry_entry", None)
         if entry is None or not entry.ready:
             return
         with self.lock:
             if self._complete:
                 return
-            if self._open_existing_cache() and self.cap is not None:
-                self.cap.release()
-                self.cap = None
+            if self._open_existing_cache():
+                if self.cap is not None:
+                    self.cap.release()
+                    self.cap = None
+                return
+            self._adopt_failures += 1
+            give_up = self._adopt_failures >= self.MAX_ADOPT_FAILURES
+        if not give_up:
+            return
+        log.warning(
+            f"Shared tile cache {self.cache_path} is marked ready but cannot be "
+            f"opened; invalidating its registry entry and continuing uncached "
+            f"from {self.source_path}"
+        )
+        with _registry_lock:
+            entry.ready = False
+            entry.builder_thread = None
+        self._registry_entry = None
 
     def _get_cached_frame(self, n: int):
         n = max(0, min(n, self.n_frames - 1))
@@ -470,7 +538,9 @@ _registry: dict[tuple[str, tuple[int, int], float], _TileCacheEntry] = {}
 
 
 def _registry_key(source_path: str, out_size: tuple[int, int], saturation: float) -> tuple:
-    return (get_video_md5(source_path), tuple(out_size), round(float(saturation), 2))
+    # canonical_saturation is the same rounding sat_suffix() uses, so a key
+    # and the file path derived from it can never disagree.
+    return (get_video_md5(source_path), tuple(out_size), canonical_saturation(saturation))
 
 
 def acquire(source_path: str, out_size: tuple[int, int], saturation: float = 1.0) -> KeyVideoCache:
@@ -533,6 +603,16 @@ def release(reader: KeyVideoCache) -> None:
         if entry.refcount <= 0:
             entry.stop_event.set()
             del _registry[key]
+
+
+def registry_cache_paths() -> set[str]:
+    """Cache-file paths of every live registry entry -- consulted by the
+    startup sweep (video_cache_sweeper.py) so it never deletes a file an
+    attached reader/builder is using, even when the reference scan cannot
+    see the source (e.g. the source file was deleted after acquire(), so
+    its hash can no longer be recomputed)."""
+    with _registry_lock:
+        return {entry.path for entry in _registry.values()}
 
 
 def _run_builder(entry: _TileCacheEntry, source_path: str, out_size: tuple[int, int], saturation: float) -> None:

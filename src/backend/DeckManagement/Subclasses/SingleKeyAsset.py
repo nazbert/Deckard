@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 from PIL import Image, ImageOps, ImageDraw, ImageFont
 import os
 
+import globals as gl
+
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.backend.DeckManagement.DeckController import ControllerInput
@@ -32,7 +34,11 @@ class SingleKeyAsset:
         # composite/close it freely.
         global _error_image
         if _error_image is None:
-            with Image.open(os.path.join("Assets", "images", "error.png")) as img:
+            # Resolved against the repo root (globals.py's directory) -- a
+            # CWD-relative path breaks whenever the app is launched from
+            # anywhere but the checkout root.
+            path = os.path.join(gl.top_level_dir, "Assets", "images", "error.png")
+            with Image.open(path) as img:
                 _error_image = img.copy()
         return _error_image.copy()
     

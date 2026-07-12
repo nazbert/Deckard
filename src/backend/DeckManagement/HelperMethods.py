@@ -127,12 +127,21 @@ def get_sys_param_value(param_name: str) -> str:
 
 
 def get_sys_args_without_param(param_name: str) -> list:
-    args = sys.argv
-    for i, param in enumerate(args):
-        if param.startswith(param_name):
-            if i < len(args):
-                args.pop(i + 1)  # to include the value of the param
-            args.pop(i)
+    """sys.argv minus every argument starting with `param_name` and the
+    value following it. Returns a new list -- sys.argv itself is never
+    modified (the old in-place version corrupted it for later readers and
+    popped past the end when the matched parameter was argv's last
+    element)."""
+    args = []
+    skip_next = False
+    for arg in sys.argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg.startswith(param_name):
+            skip_next = True  # also drop the parameter's value, if present
+            continue
+        args.append(arg)
     return args
 
 
@@ -268,11 +277,14 @@ def instance_cache(func):
     return wrapper
 
 
-def color_values_to_gdk(color_values: tuple[int, int, int, int]) -> Gdk.RGBA:
-    if len(color_values) == 3:
-        color_values.append(255)
+def color_values_to_gdk(color_values: tuple[int, int, int] | tuple[int, int, int, int]) -> Gdk.RGBA:
+    # Copy before normalizing: callers pass tuples (which .append would
+    # crash on) and reuse the sequence they passed in afterwards.
+    values = list(color_values)
+    if len(values) == 3:
+        values.append(255)
     color = Gdk.RGBA()
-    color.parse(f"rgba({color_values[0]}, {color_values[1]}, {color_values[2]}, {color_values[3]})")
+    color.parse(f"rgba({values[0]}, {values[1]}, {values[2]}, {values[3]})")
 
     return color
 
