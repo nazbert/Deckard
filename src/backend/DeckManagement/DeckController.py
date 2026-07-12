@@ -754,7 +754,11 @@ class MediaPlayerThread(threading.Thread):
             # next iteration writes the freshest composite -- content is
             # delayed by at most one budget window, never lost. The slot
             # being non-empty keeps the loop at active FPS (see has_pending
-            # in run()), so the retry is prompt.
+            # in run()), so the retry is prompt. The budget is shared across
+            # ALL producers via the one _last_touch_write timestamp, so a
+            # frame can be deferred even against a different stream -- e.g. a
+            # bg-video frame arriving right after a scroll-label write waits
+            # one window (re-queued, latest-wins); that's fine and by design.
             now = time.time()
             min_gap = 1.0 / self._video_write_hz if self._video_write_hz > 0 else 0
             if min_gap and now - self._last_touch_write < min_gap:
@@ -3819,6 +3823,16 @@ class ControllerKey(ControllerInput):
                                 # fps-as-playback-rate -- an explicit API arg.
                                 natural_speed=True,
                             )) # Videos always update
+                    # No further elif here on purpose: two action-count
+                    # branches used to hang off this chain calling
+                    # self.set_key_image(...), which ControllerKey does not
+                    # have. That branch was NOT unreachable -- it fired on the
+                    # normal load_media=True path whenever `path` was a
+                    # non-empty string that is not a valid image/svg/video
+                    # (e.g. a stale/dangling config path), raising
+                    # AttributeError. Dropped in 0d10fb3b so a bad path is a
+                    # benign no-op instead of a crash; don't re-add without a
+                    # real set_key_image.
 
                 layout = ImageLayout(
                     fill_mode=state_dict.get("media", {}).get("fill-mode"),
