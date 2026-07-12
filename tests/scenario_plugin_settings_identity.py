@@ -87,12 +87,20 @@ def main() -> None:
     # 4. The normal case: folder name == manifest id.
     write_plugin("com_test_plain", "PlainPlugin", "com_test_plain")
 
+    # 5. The id DIRECTORY exists but is EMPTY (no settings.json) while the
+    #    legacy folder-name path holds the real settings. Keying the "id wins"
+    #    decision on the directory (rather than the settings file) would orphan
+    #    the user's data and start empty -- the file must be migrated across.
+    write_plugin("com_test_empty_main", "EmptyIdPlugin", "com_test_empty")
+    seed_settings("com_test_empty_main", "recovered-value")
+    os.makedirs(os.path.join(plugins_root, "com_test_empty"), exist_ok=True)
+
     pm = PluginManager()
     gl.plugin_manager = pm
     pm.load_plugins()
 
     for plugin_id in ("com_test_migrate", "com_test_fresh", "com_test_both",
-                      "com_test_plain"):
+                      "com_test_plain", "com_test_empty"):
         assert plugin_id in PluginBase.plugins, (
             f"{plugin_id} must register; registered={sorted(PluginBase.plugins)}, "
             f"errors={pm.load_errors}"
@@ -141,6 +149,19 @@ def main() -> None:
     # --- 4: the normal case is byte-for-byte the old behavior.
     plain = plugin("com_test_plain")
     assert plain.settings_path == os.path.join(plugins_root, "com_test_plain", "settings.json")
+
+    # --- 5: empty id dir + legacy folder settings -> data migrated, not orphaned.
+    empty = plugin("com_test_empty")
+    assert empty.settings_path == os.path.join(plugins_root, "com_test_empty", "settings.json")
+    assert os.path.isfile(empty.settings_path), (
+        "the legacy settings.json must be moved into the empty id dir"
+    )
+    assert empty.get_settings().get("marker") == "recovered-value", (
+        f"settings must survive when the id dir pre-exists empty: {empty.get_settings()}"
+    )
+    assert not os.path.exists(os.path.join(plugins_root, "com_test_empty_main", "settings.json")), (
+        "the legacy folder-name settings.json must be gone after migration"
+    )
 
     print("PASS: scenario_plugin_settings_identity")
 
