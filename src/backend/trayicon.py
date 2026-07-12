@@ -86,6 +86,11 @@ class DBusService:
         self.registration_id = None
 
     def register(self):
+        if self.registration_id is not None:
+            # Re-registering without an intervening unregister() orphaned the
+            # previous object registration on the connection (double-register
+            # path: TrayIcon.initialize() + the Settings-panel start()).
+            self.unregister()
         self.registration_id = self.bus.register_object(
             object_path=self.object_path,
             interface_info=self.interface_info,

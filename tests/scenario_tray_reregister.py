@@ -101,7 +101,56 @@ def pump_until(condition, timeout: float, what: str) -> None:
     raise AssertionError(f"timed out after {timeout}s: {what}")
 
 
+def check_double_register_no_orphan() -> None:
+    """#125: DBusService.register() with no intervening unregister() must not
+    orphan the previous object registration on the connection. Counted
+    against a stub bus -- registered minus unregistered must be exactly 1
+    live registration after any number of register() calls."""
+    from src.backend.trayicon import DBusService
+
+    class StubBus:
+        def __init__(self):
+            self.registered: list[int] = []
+            self.unregistered: list[int] = []
+            self._next_id = 1
+
+        def register_object(self, object_path, interface_info,
+                            method_call_closure, get_property_closure):
+            reg_id = self._next_id
+            self._next_id += 1
+            self.registered.append(reg_id)
+            return reg_id
+
+        def unregister_object(self, reg_id):
+            self.unregistered.append(reg_id)
+
+    class StubInterfaceInfo:
+        def cache_build(self):
+            pass
+
+        def cache_release(self):
+            pass
+
+    bus = StubBus()
+    service = DBusService(StubInterfaceInfo(), "/StubPath", bus)
+    service.register()
+    service.register()  # TrayIcon.initialize() + Settings-panel start()
+
+    live = set(bus.registered) - set(bus.unregistered)
+    assert len(live) == 1, (
+        f"double register() leaked object registrations: registered "
+        f"{bus.registered}, unregistered {bus.unregistered} -- "
+        f"{len(live)} left live (expected 1)"
+    )
+    service.unregister()
+    live = set(bus.registered) - set(bus.unregistered)
+    assert not live, f"unregister() left registrations live: {live}"
+    print("PASS: double register() keeps exactly one live registration")
+
+
 def main() -> None:
+    check_double_register_no_orphan()
+
     test_bus = Gio.TestDBus.new(Gio.TestDBusFlags.NONE)
     test_bus.up()  # also exports DBUS_SESSION_BUS_ADDRESS for bus_get_sync
     try:
