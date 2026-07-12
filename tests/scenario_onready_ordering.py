@@ -169,12 +169,22 @@ def check_gates() -> int:
     # Raising on_ready still opens the gates.
     controller2 = make_headless_controller(serial="onready-2")
     try:
+        from loguru import logger as _log
         page2 = controller2.active_page
         ident = Input.Key("0x0")
         action2 = make_action(RaisingReadyAction, controller2, page2, ident)
         state_obj2 = controller2.get_input(ident).states[0]
-        page2.initialize_actions()
-        if not wait_until(lambda: action2.on_ready_finished, timeout=5):
+        # on_ready deliberately raises here; _run_ready_callbacks logs that
+        # traceback. It fires before on_ready_finished is set, so silencing
+        # loguru until wait_until observes completion suppresses the expected
+        # noise without hiding a real failure.
+        _log.disable("")
+        try:
+            page2.initialize_actions()
+            ready = wait_until(lambda: action2.on_ready_finished, timeout=5)
+        finally:
+            _log.enable("")
+        if not ready:
             print("FAIL: raising on_ready left on_ready_finished unset (action dead forever)")
             return 1
         state_obj2.own_actions_tick()
@@ -253,14 +263,20 @@ def check_settings_serialization() -> int:
         return 1
     print("PASS: conversion write serialized against concurrent set_settings")
 
-    # set_settings over a corrupt existing file must not raise.
+    # set_settings over a corrupt existing file must not raise. The guarded
+    # read logs the caught JSONDecodeError; that traceback is expected here,
+    # so silence loguru around the deliberate corruption to keep CI clean.
+    from loguru import logger as _log
     with open(settings_path, "w") as f:
         f.write('{"trunc')
+    _log.disable("")
     try:
         plugin.set_settings({"fresh": True})
     except Exception as e:
         print(f"FAIL(b): set_settings raised over a corrupt file: {type(e).__name__}: {e}")
         return 1
+    finally:
+        _log.enable("")
     if plugin.get_settings().get("fresh") is not True:
         print("FAIL(b): settings not recovered after corrupt-file save")
         return 1

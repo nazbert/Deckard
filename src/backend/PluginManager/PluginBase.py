@@ -65,9 +65,11 @@ class PluginBase(rpyc.Service):
         # Serializes get_settings/set_settings: actions of the same plugin run
         # on_ready in parallel since the pool-based page load, so concurrent
         # read-modify-write cycles lost updates (the atomic write only
-        # prevents torn files). RLock: get_settings' v1->v2 conversion writes
-        # while holding the lock.
-        self._settings_lock = threading.RLock()
+        # prevents torn files). Plain Lock: each accessor takes it exactly
+        # once -- neither re-acquires it nor calls the other while holding it,
+        # and atomic_write_json is pure filesystem I/O with no callback back
+        # into locked code.
+        self._settings_lock = threading.Lock()
 
         if use_legacy_locale:
             self.locale_manager = LegacyLocaleManager(os.path.join(self.PATH, legacy_dir))
@@ -431,13 +433,13 @@ class PluginBase(rpyc.Service):
     # via __new__ -- rpyc service plumbing, harness stubs -- skip __init__).
     _settings_lock_guard = threading.Lock()
 
-    def _get_settings_lock(self) -> threading.RLock:
+    def _get_settings_lock(self) -> threading.Lock:
         lock = getattr(self, "_settings_lock", None)
         if lock is None:
             with PluginBase._settings_lock_guard:
                 lock = getattr(self, "_settings_lock", None)
                 if lock is None:
-                    lock = threading.RLock()
+                    lock = threading.Lock()
                     self._settings_lock = lock
         return lock
 
