@@ -312,7 +312,9 @@ class BetterDeck():
             logical_key = self.get_logical_index(key)
             await async_callback(deck, logical_key, state)
 
-        self.set_key_callback_async(remapper_callback, loop)
+        # Delegate to the wrapped deck -- calling ourselves recursed forever
+        # (issue #18).
+        self.deck.set_key_callback_async(remapper_callback, loop)
 
     def set_dial_callback(self, callback):
         """
@@ -349,8 +351,9 @@ class BetterDeck():
                                         each time a button state changes.
         :param asyncio.loop loop: Asyncio loop to dispatch the callback into
         """
-
-        self.set_dial_callback_async(async_callback, loop)
+        # Delegate to the wrapped deck -- calling ourselves recursed forever
+        # (issue #18). Dials need no index remap (see set_dial_callback).
+        self.deck.set_dial_callback_async(async_callback, loop)
 
     def set_touchscreen_callback(self, callback):
         """
@@ -387,8 +390,9 @@ class BetterDeck():
                                         each time a button state changes.
         :param asyncio.loop loop: Asyncio loop to dispatch the callback into
         """
-
-        self.set_touchscreen_callback_async(async_callback, loop)
+        # Delegate to the wrapped deck -- calling ourselves recursed forever
+        # (issue #18). The touchscreen needs no index remap.
+        self.deck.set_touchscreen_callback_async(async_callback, loop)
 
     def key_states(self):
         """
@@ -558,15 +562,22 @@ class BetterDeck():
             return None
     
     def reorder_physical_for_rotation(self, original_list):
+        """Maps a PHYSICAL-indexed list (as the device reports it, e.g.
+        key_states()) into LOGICAL indexing under the current rotation:
+        out[get_logical_index(p)] = orig[p]. The old direction
+        (out[p] = orig[get_logical_index(p)]) applied the INVERSE rotation --
+        only self-inverse at 0/180, so key_states() was scrambled under
+        90/270 and ControllerKey.__init__ read the wrong key's press state
+        on rotated decks (issue #17)."""
         pysical_rows, physical_cols = self.deck.key_layout()
         total = pysical_rows * physical_cols
         reordered = [None] * total
-        
+
         for physical_index in range(total):
             logical_index = self.get_logical_index(physical_index)
             if logical_index is not None and 0 <= logical_index < total:
-                reordered[physical_index] = original_list[logical_index]
-        
+                reordered[logical_index] = original_list[physical_index]
+
         return reordered
         
     def get_rotation(self):

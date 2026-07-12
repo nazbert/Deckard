@@ -3574,7 +3574,9 @@ class ControllerKey(ControllerInput):
     def __init__(self, deck_controller: DeckController, ident: Input.Key):
         super().__init__(deck_controller, ControllerKeyState, ident)
         self.index = ident.get_index(deck_controller)
-        # Keep track of the current state of the key because self.deck_controller.deck.key_states seams to give inverted values in get_current_deck_image
+        # Seed the cached press state from the device so event_callback can diff
+        # against it. key_states() is logical-indexed (rotation map fixed, #17),
+        # so self.index -- a logical index -- selects this key's own state.
         self.press_state: bool = self.deck_controller.deck.key_states()[self.index]
 
         self.down_start_time: float = None
