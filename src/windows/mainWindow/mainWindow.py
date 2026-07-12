@@ -309,12 +309,21 @@ class MainWindow(Adw.ApplicationWindow):
         return False
 
     def show_info_toast(self, text: str) -> None:
+        # Safe to call from any thread
+        GLib.idle_add(self._add_toast, text, Adw.ToastPriority.NORMAL)
+
+    def show_error_toast(self, text: str) -> None:
+        # Safe to call from any thread
+        GLib.idle_add(self._add_toast, text, Adw.ToastPriority.HIGH)
+
+    def _add_toast(self, text: str, priority: Adw.ToastPriority) -> bool:
         toast = Adw.Toast(
             title=text,
             timeout=3,
-            priority=Adw.ToastPriority.NORMAL
+            priority=priority
         )
         self.toast_overlay.add_toast(toast)
+        return GLib.SOURCE_REMOVE
 
     def get_active_controller(self) -> DeckController:
         if not recursive_hasattr(self, "leftArea.deck_stack"): return

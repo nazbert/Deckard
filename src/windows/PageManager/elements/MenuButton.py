@@ -153,7 +153,12 @@ class MenuButton(Gtk.MenuButton):
 
         self.selected_file = None
 
-        page_name = os.path.splitext(os.path.basename(page_path))[0]
+        # `name` is already the page name on both callers: the direct path
+        # passes basename-without-extension, the rename dialog passes the
+        # user's typed text verbatim. Use it as-is -- splitext here would
+        # silently truncate a typed name at its first dot ("backup.v2" ->
+        # "backup"). add_page appends the .json extension itself.
+        page_name = name
         try:
             page_path = gl.page_manager.add_page(page_name, import_dict)
         except FileExistsError:

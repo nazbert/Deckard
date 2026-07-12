@@ -363,16 +363,17 @@ class App(Adw.Application):
         for controller in self.deck_manager.deck_controller:
             if controller.serial_number() == serial_number:
                 page_path = gl.page_manager.find_matching_page_path(page_name)
-
-                if controller is not None:
-                    if controller.active_page is not None:
-                        if os.path.abspath(page_path) == os.path.abspath(controller.active_page.json_path):
-                            continue
-
-                page = gl.page_manager.get_page(page_path, controller)
                 if page_path is None:
+                    # Page not found - provide helpful suggestions
+                    available_pages = [os.path.splitext(os.path.basename(p))[0] for p in gl.page_manager.get_pages()]
+                    log.error(f"Page '{page_name}' not found. Available pages: {', '.join(available_pages)}")
                     continue
 
+                if controller.active_page is not None:
+                    if os.path.abspath(page_path) == os.path.abspath(controller.active_page.json_path):
+                        continue
+
+                page = gl.page_manager.get_page(page_path, controller)
                 controller.load_page(page)
 
     def on_change_state(self, action, data: GLib.Variant, *args):
