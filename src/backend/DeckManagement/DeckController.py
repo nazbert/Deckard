@@ -4622,6 +4622,13 @@ class ControllerTouchScreenState(ControllerInputState):
         self.background_video: "InputVideo" = None
         self._background_video_failed: str = None
         self._background_video_lock = threading.Lock()
+        # The display-saturation factor background_video was constructed
+        # (and its shared tile cache acquired) at. Part of the keep-check in
+        # _get_background_video_frame: the factor is baked into the cache at
+        # construction and set_playback never revisits it, so reusing the
+        # video across a saturation change would keep serving frames
+        # enhanced at the old factor (issue #132).
+        self._background_video_saturation: float = None
         # Timestamp gate for the fps render cap in on_media_player_tick.
         self._last_background_video_render: float = 0.0
 
@@ -4685,8 +4692,18 @@ class ControllerTouchScreenState(ControllerInputState):
             if path == self._background_video_failed:
                 return None
 
+            # Saturation is part of the keep-check (issue #132): the factor
+            # is baked into the video's shared tile cache at construction
+            # (mp4_tile_cache.acquire) and set_playback only updates
+            # fps/loop, so a factor change must rebuild even for the same
+            # path -- mirroring the key-grid BackgroundVideo keep-check and
+            # the fitted-IMAGE cache key one method up. Same 0.001 tolerance
+            # as the BackgroundVideo check.
+            saturation = self.controller_touch.deck_controller.get_display_saturation()
+
             video = self.background_video
-            if video is None or video.video_path != path:
+            if (video is None or video.video_path != path
+                    or abs(self._background_video_saturation - saturation) > 0.001):
                 if video is not None:
                     video.close()
                 video = InputVideo(
@@ -4697,6 +4714,7 @@ class ControllerTouchScreenState(ControllerInputState):
                     natural_speed=True,
                 )
                 self.background_video = video
+                self._background_video_saturation = saturation
             else:
                 video.set_playback(fps=fps, loop=loop)
 

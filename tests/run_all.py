@@ -36,9 +36,6 @@ EXPECTED_FAIL_UNTIL_M1: dict[str, str] = {
         "pack before the fallible download and never restore it on failure "
         "(gl#62 / transactional-install gl#82). Flips to PASS once fixed."
     ),
-    "scenario_saturation_keepcheck.py":
-        "latent bug #132: touchscreen bg-video reuse keep-check ignores "
-        "saturation (masked by the settings page reload)",
 }
 
 
