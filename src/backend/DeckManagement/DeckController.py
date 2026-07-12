@@ -1023,14 +1023,29 @@ class DeckController:
 
     def _update_all_inputs_awaiting_background(self, bg_future, gen=None):
         # Media thread: skip promptly when superseded, then await the background
-        # decode (bounded) so keys composite over the new background.
+        # decode (bounded) so keys composite over the new background. Blocking
+        # the sole writer here is a recorded design tradeoff; the wait is
+        # merely SLICED so a page switch that supersedes this one mid-decode
+        # abandons it at the next slice instead of sitting out the remainder
+        # of a 10s decode for a page we've already left (starving the new
+        # page's paints). Total bound and the paint-anyway fallback unchanged.
         if not self._page_is_current(gen):
             return
         if bg_future is not None:
-            try:
-                bg_future.result(timeout=10)
-            except Exception:
-                log.warning("Background not ready before update_all_inputs; painting anyway")
+            deadline = time.time() + 10
+            while True:
+                try:
+                    bg_future.result(timeout=0.5)
+                    break
+                except FutureTimeoutError:
+                    if not self._page_is_current(gen):
+                        return
+                    if time.time() >= deadline:
+                        log.warning("Background not ready before update_all_inputs; painting anyway")
+                        break
+                except Exception:
+                    log.warning("Background not ready before update_all_inputs; painting anyway")
+                    break
         self.update_all_inputs(gen=gen)
 
     def _reset_dedup_hashes(self) -> None:
