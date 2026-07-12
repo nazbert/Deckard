@@ -296,6 +296,11 @@ class MediaPlayerThread(threading.Thread):
         # fps on that same worst case. 0 disables the cap.
         self._video_write_hz = _env_float("STREAMCONTROLLER_VIDEO_WRITE_HZ", 20.0)
         self._last_video_write = 0.0
+        # The same budget caps ALL touchscreen writes at the write point in
+        # perform_media_player_tasks (dial-state videos and scrolling labels
+        # otherwise rewrite the strip at loop FPS -- the identical
+        # HID-starvation vector via a different content type).
+        self._last_touch_write = 0.0
 
         # Inter-write yield inside bulk batches (seconds); see the comment in
         # perform_media_player_tasks. This pacing is the mechanism that keeps
@@ -737,9 +742,29 @@ class MediaPlayerThread(threading.Thread):
                 writes_since_yield += 1
 
         if touch_task is not None and _is_current(touch_task):
-            if bulk and writes_since_yield >= self.YIELD_STRIDE and self._inter_write_yield > 0:
-                time.sleep(self._inter_write_yield)
-            touch_task.run()
+            # Rate-cap ALL touchscreen writes with the same budget as
+            # background video (_video_write_hz): dial-state videos and
+            # scrolling labels re-render the shared strip from the media
+            # tick at loop FPS, which is the identical HID-starvation vector
+            # the cap was built for, via a different content type. Enforced
+            # here at the write point so every producer (bg-video strip,
+            # dial video, scroll label, interactive paint) is covered.
+            # Latest-wins: an over-budget frame goes back into the single
+            # task slot (unless a newer frame arrived meanwhile) and the
+            # next iteration writes the freshest composite -- content is
+            # delayed by at most one budget window, never lost. The slot
+            # being non-empty keeps the loop at active FPS (see has_pending
+            # in run()), so the retry is prompt.
+            now = time.time()
+            min_gap = 1.0 / self._video_write_hz if self._video_write_hz > 0 else 0
+            if min_gap and now - self._last_touch_write < min_gap:
+                if self.touchscreen_task is None:
+                    self.touchscreen_task = touch_task
+            else:
+                self._last_touch_write = now
+                if bulk and writes_since_yield >= self.YIELD_STRIDE and self._inter_write_yield > 0:
+                    time.sleep(self._inter_write_yield)
+                touch_task.run()
 
 class DeckController:
     def __init__(self, deck_manager: "DeckManager", deck: StreamDeck.StreamDeck):
