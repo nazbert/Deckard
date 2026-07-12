@@ -255,6 +255,22 @@ class ReleaseStashedInputsMsg:
     stashed_inputs: dict
 
 
+def _env_float(name: str, default: float) -> float:
+    """Reads a float tuning knob from the environment, falling back to
+    `default` on a malformed value. A typo in an env var must degrade to the
+    built-in default with a warning -- never raise out of MediaPlayerThread
+    init, where DeckManager would swallow it as "Failed to initialize deck"
+    and silently skip the whole device."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning(f"Ignoring malformed {name}={raw!r}; using the default {default}")
+        return default
+
+
 class MediaPlayerThread(threading.Thread):
     # An image batch at or above this size is a bulk repaint (video frame /
     # full-page paint) and gets inter-write yields; below it is interactive
@@ -279,13 +295,18 @@ class MediaPlayerThread(threading.Thread):
         # high-entropy video defeats tile dedup entirely (~270 candidate
         # writes/s) and drags the media loop to ~19fps; 20 sustains 26+ loop
         # fps on that same worst case. 0 disables the cap.
-        self._video_write_hz = float(os.environ.get("STREAMCONTROLLER_VIDEO_WRITE_HZ", 20))
+        self._video_write_hz = _env_float("STREAMCONTROLLER_VIDEO_WRITE_HZ", 20.0)
         self._last_video_write = 0.0
+        # The same budget caps ALL touchscreen writes at the write point in
+        # perform_media_player_tasks (dial-state videos and scrolling labels
+        # otherwise rewrite the strip at loop FPS -- the identical
+        # HID-starvation vector via a different content type).
+        self._last_touch_write = 0.0
 
         # Inter-write yield inside bulk batches (seconds); see the comment in
         # perform_media_player_tasks. This pacing is the mechanism that keeps
         # the HID reader responsive at the 30Hz default above.
-        self._inter_write_yield = float(os.environ.get("STREAMCONTROLLER_WRITE_YIELD_MS", 1.5)) / 1000.0
+        self._inter_write_yield = _env_float("STREAMCONTROLLER_WRITE_YIELD_MS", 1.5) / 1000.0
 
         self.running = False
         self.media_ticks = 0
@@ -722,9 +743,33 @@ class MediaPlayerThread(threading.Thread):
                 writes_since_yield += 1
 
         if touch_task is not None and _is_current(touch_task):
-            if bulk and writes_since_yield >= self.YIELD_STRIDE and self._inter_write_yield > 0:
-                time.sleep(self._inter_write_yield)
-            touch_task.run()
+            # Rate-cap ALL touchscreen writes with the same budget as
+            # background video (_video_write_hz): dial-state videos and
+            # scrolling labels re-render the shared strip from the media
+            # tick at loop FPS, which is the identical HID-starvation vector
+            # the cap was built for, via a different content type. Enforced
+            # here at the write point so every producer (bg-video strip,
+            # dial video, scroll label, interactive paint) is covered.
+            # Latest-wins: an over-budget frame goes back into the single
+            # task slot (unless a newer frame arrived meanwhile) and the
+            # next iteration writes the freshest composite -- content is
+            # delayed by at most one budget window, never lost. The slot
+            # being non-empty keeps the loop at active FPS (see has_pending
+            # in run()), so the retry is prompt. The budget is shared across
+            # ALL producers via the one _last_touch_write timestamp, so a
+            # frame can be deferred even against a different stream -- e.g. a
+            # bg-video frame arriving right after a scroll-label write waits
+            # one window (re-queued, latest-wins); that's fine and by design.
+            now = time.time()
+            min_gap = 1.0 / self._video_write_hz if self._video_write_hz > 0 else 0
+            if min_gap and now - self._last_touch_write < min_gap:
+                if self.touchscreen_task is None:
+                    self.touchscreen_task = touch_task
+            else:
+                self._last_touch_write = now
+                if bulk and writes_since_yield >= self.YIELD_STRIDE and self._inter_write_yield > 0:
+                    time.sleep(self._inter_write_yield)
+                touch_task.run()
 
 class DeckController:
     def __init__(self, deck_manager: "DeckManager", deck: StreamDeck.StreamDeck):
@@ -983,14 +1028,29 @@ class DeckController:
 
     def _update_all_inputs_awaiting_background(self, bg_future, gen=None):
         # Media thread: skip promptly when superseded, then await the background
-        # decode (bounded) so keys composite over the new background.
+        # decode (bounded) so keys composite over the new background. Blocking
+        # the sole writer here is a recorded design tradeoff; the wait is
+        # merely SLICED so a page switch that supersedes this one mid-decode
+        # abandons it at the next slice instead of sitting out the remainder
+        # of a 10s decode for a page we've already left (starving the new
+        # page's paints). Total bound and the paint-anyway fallback unchanged.
         if not self._page_is_current(gen):
             return
         if bg_future is not None:
-            try:
-                bg_future.result(timeout=10)
-            except Exception:
-                log.warning("Background not ready before update_all_inputs; painting anyway")
+            deadline = time.time() + 10
+            while True:
+                try:
+                    bg_future.result(timeout=0.5)
+                    break
+                except FutureTimeoutError:
+                    if not self._page_is_current(gen):
+                        return
+                    if time.time() >= deadline:
+                        log.warning("Background not ready before update_all_inputs; painting anyway")
+                        break
+                except Exception:
+                    log.warning("Background not ready before update_all_inputs; painting anyway")
+                    break
         self.update_all_inputs(gen=gen)
 
     def _reset_dedup_hashes(self) -> None:
@@ -1156,8 +1216,13 @@ class DeckController:
                 available_pages = [os.path.splitext(os.path.basename(p))[0] for p in gl.page_manager.get_pages()]
                 log.error(f"State change failed: Page '{page_name}' not found for device {self.serial_number()}. Available pages: {', '.join(available_pages)}")
             else:
-                # Load the requested page if it's different from the current one
-                if os.path.abspath(requested_page_path) != os.path.abspath(self.active_page.json_path):
+                # Load the requested page if it's different from the current
+                # one. Snapshot + None-guard: active_page can be None here (a
+                # racing close()/clear, or the load above deferred by a
+                # showing screensaver) -- no current page means the requested
+                # one is trivially "different", so proceed with the load.
+                active_page = self.active_page
+                if active_page is None or os.path.abspath(requested_page_path) != os.path.abspath(active_page.json_path):
                     requested_page = gl.page_manager.get_page(requested_page_path, self)
                     self.load_page(requested_page)
                 
@@ -1496,8 +1561,12 @@ class DeckController:
         # initializing a superseded page is harmless (on_ready_called de-dupes).
         page.initialize_actions()
 
-        # Notify plugin actions
-        gl.signal_manager.trigger_signal(Signals.ChangePage, self, old_path, self.active_page.json_path)
+        # Notify plugin actions. `page.json_path`, not active_page (same
+        # rationale as initialize_actions above): a racing switch or close()
+        # can swap/null active_page after the lock released, and the deref
+        # would AttributeError into @log.catch -- silently skipping this
+        # signal and the DBus notify for a switch that DID happen.
+        gl.signal_manager.trigger_signal(Signals.ChangePage, self, old_path, page.json_path)
 
         # Notify DBus API of the page change
         notify_active_page_changed(self.serial_number(), page.get_name())
@@ -1876,6 +1945,11 @@ class DeckController:
         if gl.page_manager is not None:
             gl.page_manager.discard_controller(self)
         self.active_page = None
+        # A page change deferred while the screensaver was showing would
+        # otherwise keep its whole page object graph pinned on this dead
+        # controller. Teardown-only: the pending mechanism itself (and
+        # active_page while a screensaver shows) is deliberately untouched.
+        self._screensaver_pending_page = None
 
         # Step 9: shut down the per-deck thread pools. The object graph here
         # is cyclic (actions <-> pages <-> controller), so an explicit
@@ -3049,13 +3123,16 @@ class ControllerInputState:
 
     def get_own_actions(self) -> list["ActionCore"]:
         if not self.deck_controller.get_alive(): return []
+        # Snapshot once and use the snapshot throughout: active_page is
+        # nulled/swapped from other threads (close() step 8, load_page), and
+        # re-reading the live attribute after the None check raced exactly
+        # that window (AttributeError out of every own_actions_* caller).
         active_page = self.deck_controller.active_page
-        active_page = self.controller_input.deck_controller.active_page
         if active_page is None:
             return []
         if active_page.action_objects is None:
             return []
-        actions = self.deck_controller.active_page.get_all_actions_for_input(self.controller_input.identifier, self.state)
+        actions = active_page.get_all_actions_for_input(self.controller_input.identifier, self.state)
 
         return actions
 
@@ -3771,6 +3848,16 @@ class ControllerKey(ControllerInput):
                                 # fps-as-playback-rate -- an explicit API arg.
                                 natural_speed=True,
                             )) # Videos always update
+                    # No further elif here on purpose: two action-count
+                    # branches used to hang off this chain calling
+                    # self.set_key_image(...), which ControllerKey does not
+                    # have. That branch was NOT unreachable -- it fired on the
+                    # normal load_media=True path whenever `path` was a
+                    # non-empty string that is not a valid image/svg/video
+                    # (e.g. a stale/dangling config path), raising
+                    # AttributeError. Dropped in 0d10fb3b so a bad path is a
+                    # benign no-op instead of a crash; don't re-add without a
+                    # real set_key_image.
 
                 layout = ImageLayout(
                     fill_mode=state_dict.get("media", {}).get("fill-mode"),
@@ -3779,20 +3866,6 @@ class ControllerKey(ControllerInput):
                     halign=state_dict.get("media", {}).get("halign"),
                 )
                 state.layout_manager.set_page_layout(layout, update=False)
-
-            elif len(state.get_own_actions()) > 1 and False: # Disabled for now - we might reuse it later
-                if state_dict.get("image-control-action") is None:
-                    with Image.open(os.path.join("Assets", "images", "multi_action.png")) as image:
-                        self.set_key_image(InputImage(
-                            controller_input=self,
-                            image=image.copy(),
-                        ), update=False)
-            
-            elif len(state.get_own_actions()) == 1:
-                if state_dict.get("image-control-action") is None:
-                    self.set_key_image(None, update=False)
-                # action = self.get_own_actions()[0]
-                # if action.has_image_control()
 
             if load_background_color:
                 state.background_manager.set_page_color(state_dict.get("background", {}).get("color"), update=False)
