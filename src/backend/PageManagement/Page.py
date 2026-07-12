@@ -708,7 +708,10 @@ class Page:
             if identifier is not None:
                 page.deck_controller.load_input_from_identifier(identifier, page)
             else:
-                page.deck_controller.load_page(self)
+                # Each controller gets its OWN Page object -- passing `self`
+                # here loaded THIS controller's Page onto the others
+                # (cross-deck page bleed, issue #55).
+                page.deck_controller.load_page(page)
 
     def get_action_comment(self, index: int, state: int, identifier: InputIdentifier) -> str:
         try:
@@ -764,7 +767,10 @@ class Page:
         #TODO: Make input specific
         coords = self.get_tuple_coords(coords)
         for controller in gl.deck_manager.deck_controller:
-            if controller.active_page.json_path != self.json_path:
+            # active_page is None while a controller is (dis)connecting or
+            # closing -- skip it instead of AttributeError-ing.
+            active_page = controller.active_page
+            if active_page is None or active_page.json_path != self.json_path:
                 continue
             key_index = controller.coords_to_index(coords)
             if key_index is None:
@@ -781,7 +787,10 @@ class Page:
                 if controller.screen_saver.showing:
                     controller.screen_saver.hide()
 
-            if controller.active_page.json_path != self.json_path:
+            # active_page is None while a controller is (dis)connecting or
+            # closing -- skip it instead of AttributeError-ing.
+            active_page = controller.active_page
+            if active_page is None or active_page.json_path != self.json_path:
                 continue
             c_input = controller.get_input(identifier)
             if c_input is None:
