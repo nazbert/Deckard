@@ -61,7 +61,7 @@ class PluginBase(rpyc.Service):
         self.logger = gl.loggers.get("plugins", None)
 
         self.PATH = os.path.dirname(inspect.getfile(self.__class__))
-        self.settings_path: str = os.path.join(gl.DATA_PATH, "settings", "plugins", self.get_plugin_id_from_folder_name(), "settings.json") #TODO: Retrive from the manifest as well
+        self.settings_path: str = self._resolve_settings_path()
         # Serializes get_settings/set_settings: actions of the same plugin run
         # on_ready in parallel since the pool-based page load, so concurrent
         # read-modify-write cycles lost updates (the atomic write only
@@ -109,6 +109,81 @@ class PluginBase(rpyc.Service):
         manifest = self.get_manifest()
         self._plugin_id_cache = manifest.get("id") or self.get_plugin_id_from_folder_name()
         return self._plugin_id_cache
+
+    def _resolve_settings_path(self) -> str:
+        """
+        Settings live under the manifest id -- the same identity used by
+        registration and the store -- not the folder name: a plugin whose
+        folder name differs from its id (or changes between installs, e.g.
+        store install vs. git clone) used to lose its settings on every
+        reinstall (issue #102). Settings written by earlier versions under
+        the folder-name path are migrated once, the first time the plugin
+        constructs with an id-diverging folder name.
+
+        The decision keys on the id-path settings FILE, not merely the id
+        directory: an id directory that exists but holds no settings.json
+        (a leftover from an aborted first-setup, a partially-completed
+        migration, or external tooling) must NOT be treated as "id already
+        wins" -- doing so would silently orphan the real folder-name
+        settings and start the plugin empty.
+        """
+        plugins_root = os.path.join(gl.DATA_PATH, "settings", "plugins")
+        folder_name = self.get_plugin_id_from_folder_name()
+        plugin_id = self.get_plugin_id()
+        id_dir = os.path.join(plugins_root, plugin_id)
+        id_settings = os.path.join(id_dir, "settings.json")
+
+        if plugin_id != folder_name:
+            folder_dir = os.path.join(plugins_root, folder_name)
+            folder_settings = os.path.join(folder_dir, "settings.json")
+
+            if os.path.isfile(id_settings):
+                # The id path already holds settings; it wins. If the legacy
+                # folder-name path also has settings, leave it untouched
+                # (never delete/overwrite the user's other copy) and warn.
+                if os.path.isfile(folder_settings):
+                    log.warning(
+                        f"Plugin {plugin_id}: settings exist under both {id_dir} "
+                        f"(used) and {folder_dir} (ignored, left in place)"
+                    )
+            elif os.path.isfile(folder_settings):
+                # Only the legacy folder-name path has settings -- migrate it
+                # to the id path so the plugin keeps its data.
+                try:
+                    if not os.path.exists(id_dir):
+                        # Fast path: move the whole dir (preserves any
+                        # sibling files the plugin kept next to settings.json).
+                        os.makedirs(plugins_root, exist_ok=True)
+                        os.rename(folder_dir, id_dir)
+                    else:
+                        # The id dir exists but is missing settings.json; move
+                        # the file (and any siblings) into it, then drop the
+                        # now-empty legacy dir if nothing is left behind.
+                        os.makedirs(id_dir, exist_ok=True)
+                        for entry in os.listdir(folder_dir):
+                            dest = os.path.join(id_dir, entry)
+                            if not os.path.exists(dest):
+                                os.rename(os.path.join(folder_dir, entry), dest)
+                        try:
+                            os.rmdir(folder_dir)
+                        except OSError:
+                            # Non-empty (a name collided and was left in the
+                            # source) or otherwise unremovable -- harmless.
+                            pass
+                    log.info(
+                        f"Plugin {plugin_id}: migrated settings from folder-name "
+                        f"path {folder_dir} to id path {id_dir}"
+                    )
+                except OSError as e:
+                    # Keep reading the settings from where they are rather
+                    # than silently starting empty.
+                    log.opt(exception=e).error(
+                        f"Plugin {plugin_id}: could not migrate settings dir "
+                        f"{folder_dir} -> {id_dir}; keeping the folder-name path"
+                    )
+                    return folder_settings
+
+        return id_settings
 
     def register(self, plugin_name: str = None, github_repo: str = None, plugin_version: str = None,
                  app_version: str = None):
