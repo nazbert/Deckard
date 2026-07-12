@@ -556,9 +556,12 @@ class Page:
         if action_object is None:
             raise ValueError("Could not find action object")
         
+        # NB: the loop variable must not be named `action_dict` -- it used to
+        # shadow the parameter, turning the assignment below into a no-op
+        # self-assignment (issue #55).
         for state in self.dict.get(action_object.input_ident.input_type, {}).get(action_object.input_ident.json_identifier, {}).get("states", {}):
-            for i, action_dict in enumerate(self.dict[action_object.input_ident.input_type][action_object.input_ident.json_identifier]["states"][state].get("actions", [])):
-                if self.action_objects.get(action_object.input_ident.input_type, {}).get(action_object.input_ident.json_identifier, {}).get(int(state), {})[i] is action_object:
+            for i, _existing_dict in enumerate(self.dict[action_object.input_ident.input_type][action_object.input_ident.json_identifier]["states"][state].get("actions", [])):
+                if self.action_objects.get(action_object.input_ident.input_type, {}).get(action_object.input_ident.json_identifier, {}).get(int(state), {}).get(i) is action_object:
                     self.dict[action_object.input_ident.input_type][action_object.input_ident.json_identifier]["states"][state]["actions"][i] = action_dict
                     break
 
