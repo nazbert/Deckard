@@ -23,7 +23,7 @@ from packaging import version
 import webbrowser as web
 from loguru import logger as log
 
-from GtkHelper.GtkHelper import LoadingScreen
+from GtkHelper.GtkHelper import LoadingScreen, run_on_main
 from autostart import is_flatpak
 from src.backend.DeckManagement.HelperMethods import open_web, run_command
 from src.windows.Onboarding.PluginRecommendations import PluginRecommendations
@@ -330,7 +330,9 @@ class OnboardingScreen5(Gtk.Box):
         GLib.idle_add(self.onboarding_window.loading_box.loading_label.set_label, "Installing plugins")
         GLib.idle_add(self.onboarding_window.loading_box.set_spinning, True)
 
-        plugins = self.onboarding_window.recommendations.get_selected_plugins()
+        # get_selected_plugins reads CheckButton state -- a GTK call, so it
+        # must run on the main loop, not this install worker (issue #10).
+        plugins = run_on_main(self.onboarding_window.recommendations.get_selected_plugins)
 
         GLib.idle_add(self.onboarding_window.loading_box.progress_bar.set_visible, len(plugins) > 0)
 

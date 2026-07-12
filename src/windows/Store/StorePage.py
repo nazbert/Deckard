@@ -115,6 +115,17 @@ class StorePage(Gtk.Stack):
         self.no_connection_page = NoConnectionError()
         self.add_titled(self.no_connection_page, "Error", "Error")
 
+    def append_preview_on_main(self, section, factory):
+        """Constructs a preview widget ON the GTK main loop and appends it.
+        The pages' loaders run on worker threads; the old
+        `GLib.idle_add(section.append_child, XPreview(...))` marshalled only
+        the append -- the widget tree was still built as the argument, on the
+        loader thread: the process-fatal off-main-GTK class (issue #10)."""
+        def _build():
+            section.append_child(factory())
+            return False
+        GLib.idle_add(_build)
+
     def set_loading(self):
         GLib.idle_add(self.section_stack.set_visible, False)
         # GLib.idle_add(self.bottom_box.set_visible, False)

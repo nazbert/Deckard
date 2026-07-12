@@ -62,7 +62,7 @@ class WallpaperPage(StorePage):
                 section = self.compatible_section
             else:
                 section = self.incompatible_section
-            GLib.idle_add(section.append_child, WallpaperPreview(wallpaper_page=self, wallpaper_data=wallpaper))
+            self.append_preview_on_main(section, lambda wallpaper=wallpaper: WallpaperPreview(wallpaper_page=self, wallpaper_data=wallpaper))
 
         self.set_loaded()
 

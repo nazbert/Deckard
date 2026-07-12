@@ -44,31 +44,37 @@ class PluginRecommendations(Gtk.Box):
         threading.Thread(target=self.load).start()
 
     def set_loading(self, loading: bool):
-        if loading:
-            self.loading_box.set_spinning(True)
-            GLib.idle_add(self.main_stack.set_visible_child, self.loading_box)
-        else:
-            self.loading_box.set_spinning(False)
-            GLib.idle_add(self.main_stack.set_visible_child, self.scrolled_window)
+        # Marshalled wholesale: load() calls this from a plain thread, and
+        # set_spinning is as much a GTK call as set_visible_child.
+        GLib.idle_add(self.loading_box.set_spinning, loading)
+        GLib.idle_add(self.main_stack.set_visible_child,
+                      self.loading_box if loading else self.scrolled_window)
 
     def load(self):
         self.set_loading(True)
 
+        # Only the data fetch belongs on this thread. Building PluginRows
+        # (Adw.ActionRow + CheckButton) and group.add() ran here too -- the
+        # process-fatal off-main-GTK construction class (issue #10), racing
+        # the carousel on every first launch.
         plugins = gl.store_backend.get_all_plugins()
 
-        for plugin in plugins:
-            if not plugin:
-                continue
-            if not plugin.is_compatible:
-                continue
+        def build_rows():
+            for plugin in plugins:
+                if not plugin:
+                    continue
+                if not plugin.is_compatible:
+                    continue
 
-            row = PluginRow(plugin=plugin)
-            if plugin.plugin_id in self.defaults:
-                row.check.set_active(True)
+                row = PluginRow(plugin=plugin)
+                if plugin.plugin_id in self.defaults:
+                    row.check.set_active(True)
 
-            self.group.add(row)
+                self.group.add(row)
+            self.set_loading(False)
+            return False
 
-        self.set_loading(False)
+        GLib.idle_add(build_rows)
 
     def get_selected_plugins(self) -> list[str]:
         return [row.plugin for row in self.group.get_rows() if row.check.get_active()]
