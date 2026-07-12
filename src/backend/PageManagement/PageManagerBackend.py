@@ -476,16 +476,25 @@ class PageManagerBackend:
 
         backup_path = os.path.join(self.PAGE_PATH, "backups", os.path.basename(path))
 
+        # Missing primary: substitute the backup (only when use_backup).
         if not os.path.exists(path) and os.path.exists(backup_path) and use_backup:
             path = backup_path
 
-        data = self.settings_manager.load_settings_from_file(path)
-        if not data and use_backup and path != backup_path \
-                and not os.path.exists(path) and os.path.exists(backup_path):
-            # The loader quarantined a corrupt primary (renamed it aside) --
-            # heal from the backup instead of returning {} and letting the
-            # next Page.save() persist the loss.
-            data = self.settings_manager.load_settings_from_file(backup_path)
+        data, corrupt = self.settings_manager.load_settings_reporting_corruption(path)
+
+        # Corrupt primary: heal from the backup REGARDLESS of use_backup and
+        # regardless of whether the loader could move the primary aside. This
+        # is the crux of #32: every page-settings mutator reads via
+        # get_page_data(path, False) and then writes the result straight back
+        # (set_page_settings). Returning {} for a corrupt page there guts the
+        # live page (keys/background/dials erased) and, once written, the
+        # gutted file is valid JSON so auto-heal never recovers it. The heal
+        # is a property of the load RESULT (corrupt + backup available), not
+        # of the quarantine rename having happened to remove the primary.
+        if corrupt and path != backup_path and os.path.exists(backup_path):
+            healed, backup_corrupt = self.settings_manager.load_settings_reporting_corruption(backup_path)
+            if not backup_corrupt:
+                data = healed
         return data
 
     def set_page_data(self, path: str, data: dict, reload_brightness: bool = True, reload_screensaver: bool = True, reload_background: bool = True, reload_inputs: bool = True):
@@ -511,8 +520,16 @@ class PageManagerBackend:
             page_had_asset = False  # Flag to track if this page had the asset
 
             # Open and load JSON page data. Via the settings loader so one
-            # corrupt page (quarantined, loads {}) skips instead of raising
-            # and aborting the sweep for every remaining page.
+            # corrupt page (loads {}) skips instead of raising and aborting
+            # the sweep for every remaining page.
+            #
+            # NOTE: the loader quarantines a corrupt file as a side effect of
+            # ANY read -- so this read-oriented sweep may move a corrupt page
+            # aside (to <path>.corrupt) even though it changes nothing about
+            # that page's assets. That is non-destructive: the sidecar keeps
+            # the corrupt bytes, the last good copy survives in pages/backups/
+            # (the next get_page_data heals from it), and page_had_asset stays
+            # False here so nothing is written back over the poison page.
             page_dict = self.settings_manager.load_settings_from_file(page_path)
 
             # Safely get keys dictionary from page data

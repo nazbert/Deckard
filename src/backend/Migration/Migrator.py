@@ -20,7 +20,7 @@ import os
 from packaging import version
 from loguru import logger as log
 
-from src.backend.atomic_json import atomic_write_json
+from src.backend.atomic_json import atomic_write_json, quarantine_corrupt_file
 
 class Migrator:
     SETTINGS_DIR = os.path.join(gl.DATA_PATH, "settings", "migrations.json")
@@ -57,16 +57,19 @@ class Migrator:
             # migrations recorded": re-running the migrators is safe --
             # beta_5 never deletes-without-write and leaves existing targets
             # alone, 1_5_0's walker is idempotent, and create_backup() runs
-            # before any destructive work.
-            quarantine = self.SETTINGS_DIR + ".corrupt"
-            try:
-                os.replace(self.SETTINGS_DIR, quarantine)
-            except OSError:
-                quarantine = self.SETTINGS_DIR
-            log.error(
-                f"Could not read {self.SETTINGS_DIR} ({e}) -- preserved at "
-                f"{quarantine}, treating all migrations as pending"
-            )
+            # before any destructive work. A prior .corrupt is never
+            # clobbered (shared helper picks the first free sidecar name).
+            moved, dest = quarantine_corrupt_file(self.SETTINGS_DIR)
+            if moved:
+                log.error(
+                    f"Could not read {self.SETTINGS_DIR} ({e}) -- preserved at "
+                    f"{dest}, treating all migrations as pending"
+                )
+            else:
+                log.error(
+                    f"Could not read {self.SETTINGS_DIR} ({e}) -- could NOT move it "
+                    f"aside (left in place), treating all migrations as pending"
+                )
             return {}
         
     def set_settings(self, settings: dict) -> None:

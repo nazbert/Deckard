@@ -19,7 +19,7 @@ from functools import lru_cache
 
 # Import own modules
 import globals as gl
-from src.backend.atomic_json import atomic_write_json
+from src.backend.atomic_json import atomic_write_json, quarantine_corrupt_file
 
 class SettingsManager:
     def __init__(self):
@@ -34,32 +34,47 @@ class SettingsManager:
 
     @staticmethod
     def load_settings_from_file(file_path: str) -> dict:
+        data, _corrupt = SettingsManager.load_settings_reporting_corruption(file_path)
+        return data
+
+    @staticmethod
+    def load_settings_reporting_corruption(file_path: str) -> tuple[dict, bool]:
+        """Load JSON, returning ``(data, corrupt)``.
+
+        ``corrupt`` is True *only* when the file was present but unparseable
+        -- NOT for a legitimately empty ``{}`` and NOT for a missing file.
+        Callers that hold a backup (get_page_data) heal on this flag rather
+        than on the quarantine side-effect having removed the primary: a
+        corrupt file is corrupt whether or not it could be moved aside, so
+        the recovery must not depend on the rename succeeding.
+        """
         if not os.path.exists(file_path):
-            return {}
+            return {}, False
         try:
             with open(file_path) as f:
-                return json.load(f)
+                return json.load(f), False
         except FileNotFoundError:
             # Raced a concurrent quarantine between the exists() check and
             # the open.
-            return {}
+            return {}, False
         except json.decoder.JSONDecodeError as e:
             # Quarantine instead of leaving the corrupt file in place: the
             # caller gets {} either way, but the next save would overwrite
             # the only remaining copy of the user's data. Renamed aside it
-            # stays recoverable, and page loads can fall back to their
-            # backup (get_page_data).
-            quarantine_path = file_path + ".corrupt"
-            try:
-                os.replace(file_path, quarantine_path)
-            except OSError:
-                quarantine_path = file_path  # rename failed; left in place
-            log.error(
-                f"Invalid json in {file_path}: {e} -- preserved at "
-                f"{quarantine_path}, loading empty"
-            )
-            return {}
-        
+            # stays recoverable (a prior .corrupt is never clobbered), and
+            # page loads heal from their backup (get_page_data) off the
+            # returned corrupt=True flag regardless of whether this rename
+            # succeeded.
+            moved, dest = quarantine_corrupt_file(file_path)
+            if moved:
+                log.error(f"Invalid json in {file_path}: {e} -- preserved at {dest}, loading empty")
+            else:
+                log.error(
+                    f"Invalid json in {file_path}: {e} -- could NOT move it aside "
+                    f"(left in place); callers with a backup will heal, loading empty"
+                )
+            return {}, True
+
     @staticmethod
     def save_settings_to_file(file_path: str, settings: dict) -> None:
         # Atomic write (tmp file + fsync + os.replace) so an interrupted
