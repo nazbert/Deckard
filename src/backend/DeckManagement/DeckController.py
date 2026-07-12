@@ -342,108 +342,186 @@ class MediaPlayerThread(threading.Thread):
 
         self.show_fps_warnings = gl.settings_manager.get_app_settings().get("warnings", {}).get("enable-fps-warnings", True)
 
-    # @log.catch
+        # Loop-guard state (issue #1): this thread is the sole writer for
+        # paints/brightness/Clear/ClearAndClose -- if it dies the deck is
+        # frozen until replug. The guard in run() keeps it alive; these
+        # rate-limit its logging so a per-tick failure can't storm the sinks
+        # (local until #91's general limiter exists).
+        self._last_tick_error_log: float = 0.0
+        self._suppressed_tick_errors: int = 0
+
     def run(self):
         self.running = True
 
-        while True:
-            start = time.time()
+        # The body is guarded (issue #1): an uncaught exception here used to
+        # kill the sole writer and permanently freeze the deck. @log.catch on
+        # run() would be wrong -- it logs once and RETURNS, dying anyway; the
+        # guard must sit inside the while. #80's threading.excepthook is the
+        # complement (reports an escaping death); this prevents the death.
+        try:
+            while True:
+                try:
+                    if not self._run_one_tick():
+                        break
+                except Exception:
+                    now = time.time()
+                    if now - self._last_tick_error_log >= 5.0:
+                        suffix = (f" ({self._suppressed_tick_errors} earlier repeats were suppressed)"
+                                  if self._suppressed_tick_errors else "")
+                        log.opt(exception=True).error(
+                            f"media writer tick failed -- survived, continuing{suffix}")
+                        self._last_tick_error_log = now
+                        self._suppressed_tick_errors = 0
+                    else:
+                        self._suppressed_tick_errors += 1
+                    # A tick that raised mid-batch already popped its task
+                    # lists (perform_media_player_tasks drains image_tasks/
+                    # touchscreen_task before running them), so the failing
+                    # frame's SIBLINGS are lost too -- without a scheduled
+                    # recovery the not-yet-painted keys keep their previous
+                    # imagery silently forever. Arm the pending full repaint
+                    # (the same recovery a failed device write uses); its 2s
+                    # rate limit makes this safe against a deterministic
+                    # per-tick failure.
+                    self.deck_controller._schedule_full_repaint()
+                    # A raising body never reaches the FPS wait below --
+                    # without this backoff a persistent failure becomes a
+                    # 100% spin. _wake_event (not sleep) so stop() still
+                    # wakes us instantly -- but every producer sets that
+                    # event too, so a single wait() under a set_media storm
+                    # returns immediately and the retry rate would track the
+                    # producer rate instead of ~4Hz. Re-wait until the
+                    # backoff truly elapsed; only _stop cuts it short.
+                    deadline = time.monotonic() + 0.25
+                    while not self._stop:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        self._wake_event.wait(remaining)
+                        self._wake_event.clear()
+                    if self._stop:
+                        break
+        finally:
+            # In a finally, not at the loop's tail: the guard is `except
+            # Exception`, so a BaseException (SystemExit/KeyboardInterrupt)
+            # escapes it -- if that death left running=True, every later
+            # stop() would burn its full join timeout waiting on a corpse.
+            self.running = False
 
-            self.check_resume_gap(start)
-            self.deck_controller._run_pending_repaint()
+    def _run_one_tick(self) -> bool:
+        """One iteration of the writer loop. Returns False to stop."""
+        start = time.time()
 
-            # 1. Drain the control queue fully, first, every wake (plan
-            # §2.2) -- before any animation tick or task work, and before
-            # honoring a pending stop. Order matters: stop()'s caller
-            # (close_all()) submits a terminal ClearAndCloseMsg and then
-            # immediately calls stop() -- if _stop were checked before this
-            # drain (or at the bottom of the loop, after a wake that raced
-            # stop()'s flag-set against this iteration's work), the just-
-            # submitted terminal message could be stranded unprocessed. Every
-            # iteration drains first, unconditionally, THEN looks at _stop.
-            if not self.drain_control_queue():
-                break
-            if self._stop:
-                break
+        # 1. Drain the control queue fully, FIRST, every wake (plan §2.2) --
+        # before the resume-gap check, the pending-repaint hook, any
+        # animation tick or task work, and before honoring a pending stop.
+        # Two orderings matter:
+        #   * drain before _stop: stop()'s caller (close_all()) submits a
+        #     terminal ClearAndCloseMsg and then immediately calls stop() --
+        #     if _stop were checked before this drain (or at the bottom of
+        #     the loop, after a wake that raced stop()'s flag-set against
+        #     this iteration's work), the just-submitted terminal message
+        #     could be stranded unprocessed.
+        #   * drain before EVERYTHING else: the rest of this tick can raise
+        #     into run()'s guard -- if any of it ran ahead of the drain, a
+        #     persistently failing tick would starve SetBrightnessMsg/
+        #     ClearMsg/ClearAndCloseMsg forever (deck never blanked or
+        #     closed on quit).
+        # Every iteration drains first, unconditionally, THEN looks at _stop.
+        if not self.drain_control_queue():
+            return False
+        if self._stop:
+            return False
 
-            # Read by the FPS throttle below even when paused.
-            has_bg_video = False
+        self.check_resume_gap(start)
+        self.deck_controller._run_pending_repaint()
 
-            bg_strip_dirty = False
-            video_repaint = False
+        # Read by the FPS throttle below even when paused.
+        has_bg_video = False
 
-            if self.deck_controller.background.video is not None:
-                if self.deck_controller.background.video.page is self.deck_controller.active_page:
-                    has_bg_video = True
-                    # Rate-limit the video's device writes so the flood
-                    # doesn't starve the HID read thread (see _video_write_hz).
-                    min_gap = 1.0 / self._video_write_hz if self._video_write_hz > 0 else 0
-                    if start - self._last_video_write >= min_gap:
-                        video_repaint = True
-                        self._last_video_write = start
-                    # Background video: guard the tick divider against fps<=0/None
-                    # (would ZeroDivisionError) and >FPS; 0/None plays at loop FPS.
-                    video_fps = self.deck_controller.background.video.fps or self.FPS
-                    video_each_nth_frame = max(1, self.FPS // min(self.FPS, video_fps))
-                    if video_repaint and self.media_ticks % video_each_nth_frame == 0:
-                        self.deck_controller.background.update_tiles()
-                        # A video extended onto the strip needs the shared
-                        # touchscreen re-composited for the new frame.
-                        bg_strip_dirty = self.deck_controller.background.get_touchscreen_image() is not None
+        bg_strip_dirty = False
+        video_repaint = False
 
-            # Only iterate keys if there is animated content to update
-            if video_repaint or self._needs_key_ticks():
-                #TODO: generalize
-                for key in self.deck_controller.inputs[Input.Key]:
-                    cast("ControllerKey", key).on_media_player_tick()
+        # Snapshot once (issue #1 vector b): Background.set_video(None) from
+        # another thread must not null this between the check and the reads.
+        video = self.deck_controller.background.video
+        if video is not None:
+            if video.page is self.deck_controller.active_page:
+                has_bg_video = True
+                # Rate-limit the video's device writes so the flood
+                # doesn't starve the HID read thread (see _video_write_hz).
+                min_gap = 1.0 / self._video_write_hz if self._video_write_hz > 0 else 0
+                if start - self._last_video_write >= min_gap:
+                    video_repaint = True
+                    self._last_video_write = start
+                # Background video: guard the tick divider against fps<=0/None
+                # (would ZeroDivisionError) and >FPS; 0/None plays at loop FPS.
+                video_fps = video.fps or self.FPS
+                video_each_nth_frame = max(1, self.FPS // min(self.FPS, video_fps))
+                if video_repaint and self.media_ticks % video_each_nth_frame == 0:
+                    self.deck_controller.background.update_tiles()
+                    # A video extended onto the strip needs the shared
+                    # touchscreen re-composited for the new frame.
+                    bg_strip_dirty = self.deck_controller.background.get_touchscreen_image() is not None
 
-                # Dials and any per-touchscreen background video share one
-                # touchscreen; render it at most once per frame instead of
-                # once per dial.
-                dials = self.deck_controller.inputs[Input.Dial]
-                touchscreens = self.deck_controller.inputs[Input.Touchscreen]
-                touchscreen_dirty = False
-                for dial in dials:
-                    if cast("ControllerDial", dial).on_media_player_tick():
-                        touchscreen_dirty = True
-                for touchscreen in touchscreens:
-                    if cast("ControllerTouchScreen", touchscreen).on_media_player_tick():
-                        touchscreen_dirty = True
-                if (touchscreen_dirty or bg_strip_dirty) and touchscreens:
-                    cast("ControllerTouchScreen", touchscreens[0]).update()
+        # Only iterate keys if there is animated content to update
+        if video_repaint or self._needs_key_ticks():
+            # Snapshot + .get (issue #1 vector a): the screensaver swaps the
+            # whole inputs dict from another thread. init_inputs is
+            # build-then-swap so any dict we see is complete -- but read
+            # `deck_controller.inputs` once per tick and never hard-subscript
+            # it (the pattern _needs_key_ticks already uses deliberately).
+            inputs = self.deck_controller.inputs
+            #TODO: generalize
+            for key in inputs.get(Input.Key, []):
+                cast("ControllerKey", key).on_media_player_tick()
 
-            # Perform media player tasks
-            self.perform_media_player_tasks()
+            # Dials and any per-touchscreen background video share one
+            # touchscreen; render it at most once per frame instead of
+            # once per dial.
+            dials = inputs.get(Input.Dial, [])
+            touchscreens = inputs.get(Input.Touchscreen, [])
+            touchscreen_dirty = False
+            for dial in dials:
+                if cast("ControllerDial", dial).on_media_player_tick():
+                    touchscreen_dirty = True
+            for touchscreen in touchscreens:
+                if cast("ControllerTouchScreen", touchscreen).on_media_player_tick():
+                    touchscreen_dirty = True
+            if (touchscreen_dirty or bg_strip_dirty) and touchscreens:
+                cast("ControllerTouchScreen", touchscreens[0]).update()
 
-            self.media_ticks += 1
+        # Perform media player tasks
+        self.perform_media_player_tasks()
 
-            end = time.time()
+        self.media_ticks += 1
 
-            if media_prof:
-                media_prof.add("tick", end - start)
-                media_prof.maybe_report()
+        end = time.time()
 
-            # Use low FPS when idle (no animated content, no pending tasks)
-            has_pending = bool(self.tasks or self.image_tasks or self.touchscreen_task)
-            if has_pending or has_bg_video or getattr(self, '_cached_needs_ticks', False):
-                target_fps = self.FPS
-            else:
-                target_fps = 2  # Idle: just check for new tasks occasionally
+        if media_prof:
+            media_prof.add("tick", end - start)
+            media_prof.maybe_report()
 
-            self.append_fps(1 / (end - start))
-            self.update_low_fps_warning()
-            wait = max(0, 1/target_fps - (end - start))
-            # Event-based wait in both paths (plan §2.2 point 4): a submitted
-            # control op or an interactive paint wakes the loop immediately
-            # instead of waiting out a full active-FPS tick.
-            self._wake_event.wait(wait)
-            self._wake_event.clear()
+        # Use low FPS when idle (no animated content, no pending tasks)
+        has_pending = bool(self.tasks or self.image_tasks or self.touchscreen_task)
+        if has_pending or has_bg_video or getattr(self, '_cached_needs_ticks', False):
+            target_fps = self.FPS
+        else:
+            target_fps = 2  # Idle: just check for new tasks occasionally
 
-            # No _stop check here (it moved to the top, right after the
-            # control-queue drain -- see the comment there): the loop always
-            # goes around once more and drains before honoring a stop.
+        self.append_fps(1 / (end - start))
+        self.update_low_fps_warning()
+        wait = max(0, 1/target_fps - (end - start))
+        # Event-based wait in both paths (plan §2.2 point 4): a submitted
+        # control op or an interactive paint wakes the loop immediately
+        # instead of waiting out a full active-FPS tick.
+        self._wake_event.wait(wait)
+        self._wake_event.clear()
 
-        self.running = False
+        # No _stop check here (it moved to the top, right after the
+        # control-queue drain -- see the comment there): the loop always
+        # goes around once more and drains before honoring a stop.
+        return True
 
     def next_submit_seq(self) -> int:
         """Allocates the next value from the writer's monotonic submit-seq
@@ -543,9 +621,16 @@ class MediaPlayerThread(threading.Thread):
             task = self.image_tasks.get(key)
             if task is not None and task.submit_seq is not None and task.submit_seq < msg.seq:
                 del self.image_tasks[key]
-        if (self.touchscreen_task is not None and self.touchscreen_task.submit_seq is not None
-                and self.touchscreen_task.submit_seq < msg.seq):
-            self.touchscreen_task = None
+        # Snapshot + identity-compared null (issue #1 vector e):
+        # clear_media_player_tasks()/close() null this slot from other
+        # threads (crash on the re-read), and a producer can assign a NEWER
+        # task between our reads -- one whose submit_seq contractually
+        # survives this Clear (issue #8, this site's half).
+        ts_task = self.touchscreen_task
+        if (ts_task is not None and ts_task.submit_seq is not None
+                and ts_task.submit_seq < msg.seq):
+            if self.touchscreen_task is ts_task:
+                self.touchscreen_task = None
         # Reset dedup state on every current input BEFORE writing the blanks
         # (plan §3): otherwise an identical repaint after this Clear would
         # still match the pre-clear cached hash and get wrongly skipped,
@@ -882,11 +967,13 @@ class DeckController:
 
         # Unified write-error/resume-repaint state (plan §4 M2). Touched only
         # from the media thread (_on_write_result from the task classes'
-        # run() and _exec_set_brightness; _run_pending_repaint from the run
-        # loop) -- no lock needed, single writer. MUST be initialized before
-        # the media thread starts: its very first iteration dereferences
-        # _full_repaint_pending, and the loop has no exception guard -- an
-        # AttributeError here kills the sole writer silently.
+        # run() and _exec_set_brightness; _run_pending_repaint and the
+        # guard's except path from the run loop) -- no lock needed, single
+        # writer. MUST be initialized before the media thread starts: its
+        # very first iteration dereferences _full_repaint_pending. (The loop
+        # is guarded now -- issue #1 -- so an AttributeError here no longer
+        # kills the writer, but it would still fail every tick until this
+        # init won the race; keep the order.)
         self._had_write_failure: bool = False
         self._full_repaint_pending: bool = False
         self._last_full_repaint_ts: float = 0.0
@@ -958,8 +1045,13 @@ class DeckController:
             self.load_default_page()
 
     def init_inputs(self):
+        # Build-then-swap (issue #1 vector a): the media writer reads
+        # self.inputs concurrently; filling a live dict in place gives it an
+        # empty/partial view (the screensaver-entry KeyError window). Build
+        # complete, then publish with one GIL-atomic assignment.
+        new_inputs = {}
         for i in Input.All:
-            self.inputs[i] = []
+            new_inputs[i] = []
             input_class = getattr(sys.modules[__name__], i.controller_class_name)
 
             for k in input_class.Available_Identifiers(self.deck):
@@ -967,7 +1059,8 @@ class DeckController:
                 # Stamp with the current generation so paints from freshly built
                 # inputs (e.g. the screensaver's) aren't dropped as stale.
                 controller_input.config_gen = self._page_load_generation
-                self.inputs[i].append(controller_input)
+                new_inputs[i].append(controller_input)
+        self.inputs = new_inputs
 
     def get_inputs(self, identifier: InputIdentifier) -> list["ControllerInput"]:
         input_type = type(identifier)
@@ -3972,12 +4065,15 @@ class ControllerTouchScreen(ControllerInput):
         if self.deck_controller.screen_saver.showing:
             return False
         state = self.get_active_state()
-        if state is None or state.background_video is None:
+        # Snapshot (issue #1 vector d): _release_background_video() nulls
+        # this from compositing threads between the check and the .fps read.
+        bg_video = None if state is None else state.background_video
+        if bg_video is None:
             return False
         # The configured fps is a RENDER cap: playback position is wall-clock
         # at the source's native fps (InputVideo natural_speed), so skipping
         # ticks here drops frames without slowing the video down.
-        cap_fps = min(self.deck_controller.media_player.FPS, max(1, state.background_video.fps or 30))
+        cap_fps = min(self.deck_controller.media_player.FPS, max(1, bg_video.fps or 30))
         now = time.time()
         if now - state._last_background_video_render < 1.0 / cap_fps:
             return False
@@ -4406,7 +4502,12 @@ class ControllerTouchScreenState(ControllerInputState):
 
         # Start with background image if set
         background: Image.Image = None
+        # Snapshot + guard (issue #1 vector c): load_page(None) and close()
+        # step 8 null active_page from other threads while the writer
+        # composites; a blank strip is the only sensible frame then.
         active_page = self.controller_touch.deck_controller.active_page
+        if active_page is None:
+            return Image.new("RGBA", (screen_width, screen_height), (0, 0, 0, 255))
         background_image_path = active_page.get_background_image(
             identifier=self.controller_touch.identifier, 
             state=self.state
