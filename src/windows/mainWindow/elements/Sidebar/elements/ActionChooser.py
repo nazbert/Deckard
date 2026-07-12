@@ -80,11 +80,48 @@ class ActionChooser(Gtk.Box):
         self.search_entry.connect("search-changed", self.on_search_changed)
         self.main_box.append(self.search_entry)
 
+        # Created before the PluginGroup: its update() (called from the
+        # PluginGroup constructor and on every store install/uninstall)
+        # refreshes this label through update_empty_state().
+        self.empty_state_label = Gtk.Label(
+            wrap=True,
+            justify=Gtk.Justification.CENTER,
+            margin_top=40,
+            css_classes=["dim-label"],
+            visible=False,
+        )
+
         self.plugin_group = PluginGroup(self, margin_top=40)
         self.main_box.append(self.plugin_group)
+        self.main_box.append(self.empty_state_label)
 
         self.open_store_button = OpenStoreButton(margin_top=40, margin_bottom=40)
         self.main_box.append(self.open_store_button)
+
+    def update_empty_state(self, n_plugins: int) -> None:
+        """Explains an empty action list instead of leaving a blank page:
+        distinguishes 'plugins failed to load' / 'plugins disabled by the
+        version gate' / 'nothing installed'. Main-thread only (called from
+        PluginGroup.update, which store code dispatches via GLib.idle_add)."""
+        if n_plugins > 0:
+            self.empty_state_label.set_visible(False)
+            return
+
+        n_failed, n_disabled = 0, 0
+        if gl.plugin_manager is not None:
+            n_failed, n_disabled = gl.plugin_manager.get_load_health()
+
+        if n_failed > 0:
+            text = (f"No actions available -- {n_failed} plugin{'s' if n_failed != 1 else ''} "
+                    f"failed to load (check the logs)")
+        elif n_disabled > 0:
+            text = (f"No actions available -- {n_disabled} plugin{'s' if n_disabled != 1 else ''} "
+                    f"{'are' if n_disabled != 1 else 'is'} disabled because of an app version mismatch")
+        else:
+            text = "No plugins installed -- use the button below to browse the store"
+
+        self.empty_state_label.set_label(text)
+        self.empty_state_label.set_visible(True)
 
     def show(self, callback_function, current_stack_page, identifier: InputIdentifier, callback_args, callback_kwargs):
         # The current-stack_page is usefull in case the let_user_select_action is called by an plugin action in the action_configurator
@@ -143,6 +180,8 @@ class PluginGroup(BetterPreferencesGroup):
             expander = PluginExpander(self, plugin_name, plugin_dir)
             self.add(expander)
             self.expander.append(expander)
+
+        self.action_chooser.update_empty_state(len(self.expander))
 
     def search(self):
         # Let the expanders search
