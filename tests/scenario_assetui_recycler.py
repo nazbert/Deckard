@@ -23,6 +23,17 @@ Regression test for issue #54 (asset-manager recycler + chooser races).
    opened without preselecting/scrolling to the requested path. Flag and
    queue are now serialized under one lock (_finish_build).
 
+4. IconPackChooserStack carried the SAME unlocked flag-vs-queue race, in
+   its subtler two-flag form: the pack chooser and the icon chooser each
+   build on their OWN worker thread, set their own build_finished, and
+   call on_load_finished. show_for_path checks get_is_build_finished()
+   (both flags) then appends unlocked -- a caller that read a flag False
+   could append after the draining thread snapshotted the queue (task
+   stranded), and because on_load_finished ran from BOTH threads the old
+   copy()-and-remove() drain could double-run or double-remove a task
+   across a concurrent entry. Flag-check + append and snapshot + clear are
+   now serialized under one lock (_loads_lock).
+
 Headless per harness convention: no GTK widget is instantiated -- the
 methods under test are called unbound on stubs, with the modules'
 GLib.idle_add captured into a drainable queue.
@@ -35,6 +46,7 @@ import time
 import src.windows.AssetManager.DynamicFlowBox as dfb_mod
 import src.windows.AssetManager.CustomAssets.AssetPreview as ap_mod
 import src.windows.AssetManager.CustomAssets.Chooser as chooser_mod
+import src.windows.AssetManager.IconPacks.Stack as stack_mod
 
 
 # --------------------------------------------------------------------- #
@@ -355,6 +367,194 @@ def test_enqueue_storm_loses_no_tasks() -> None:
         assert stub.build_task_finished_tasks == []
 
 
+# --------------------------------------------------------------------- #
+# 4. IconPackChooserStack: two-flag build vs deferred-task race
+# --------------------------------------------------------------------- #
+
+class _StubChooser:
+    def __init__(self):
+        self.build_finished = False
+
+
+def _make_stack_stub(ran):
+    """Stub carrying exactly what Stack.show_for_path / on_load_finished
+    touch. The post-lock body of show_for_path records the path via a
+    patched gl.icon_pack_manager (empty pack set -> the GTK-heavy tail never
+    runs), so what the test observes is purely the dispatch/no-strand logic."""
+    class Stub:
+        pass
+
+    stub = Stub()
+    stub.on_loads_finished_tasks = []
+    stub._loads_lock = threading.Lock()
+    stub.pack_chooser = _StubChooser()
+    stub.icon_chooser = _StubChooser()
+
+    # get_is_build_finished is the real method (reads the two flags).
+    stub.get_is_build_finished = lambda: stack_mod.IconPackChooserStack.get_is_build_finished(stub)
+
+    class FakePackManager:
+        def get_icon_packs(self):
+            # Called only once show_for_path passes the build-finished gate;
+            # record the delivery, then return nothing so the loop is a no-op.
+            ran.append(stub._current_path)
+            return {}
+
+    # show_for_path takes only (self, path); stash the path so the patched
+    # manager can record which delivery reached the post-lock body.
+    real_show = stack_mod.IconPackChooserStack.show_for_path
+
+    def show_for_path(path):
+        stub._current_path = path
+        return real_show(stub, path)
+
+    stub.show_for_path = show_for_path
+    stub._orig_pack_manager = stack_mod.gl.icon_pack_manager
+    stack_mod.gl.icon_pack_manager = FakePackManager()
+    return stub
+
+
+def _restore_stack_stub(stub):
+    stack_mod.gl.icon_pack_manager = stub._orig_pack_manager
+
+
+def test_iconpack_raced_deferred_task_still_runs() -> None:
+    """Replay the loser interleaving with the icon-pack's two-flag build:
+    show_for_path reads a flag as False, is 'preempted' inside its append,
+    and the build finishes (second flag flips + on_load_finished) meanwhile.
+    The deferred task must still run."""
+    ran = []
+    stub = _make_stack_stub(ran)
+    try:
+        # Pack chooser already done; icon chooser still building.
+        stub.pack_chooser.build_finished = True
+
+        gate_reached = threading.Event()
+        proceed = threading.Event()
+
+        class GatedList(list):
+            def append(self, item):
+                gate_reached.set()
+                assert proceed.wait(timeout=5), "test wiring: proceed never set"
+                super().append(item)
+
+        stub.on_loads_finished_tasks = GatedList()
+
+        t_caller = threading.Thread(
+            target=stub.show_for_path, args=("raced",), name="raced_show_for_path"
+        )
+        t_caller.start()
+        assert gate_reached.wait(timeout=5), "show_for_path never tried to defer its task"
+
+        # The icon build finishes NOW -- flag flips, then on_load_finished.
+        # With the old unlocked code this drained an empty queue and the
+        # raced append landed afterwards, stranded forever.
+        def finish():
+            stub.icon_chooser.build_finished = True
+            stack_mod.IconPackChooserStack.on_load_finished(stub)
+
+        t_finish = threading.Thread(target=finish, name="on_load_finished")
+        t_finish.start()
+
+        time.sleep(0.1)
+        assert not ran, "on_load_finished must not complete while the append is mid-flight"
+
+        proceed.set()
+        t_caller.join(timeout=5)
+        t_finish.join(timeout=5)
+        assert not t_caller.is_alive() and not t_finish.is_alive()
+
+        assert ran == ["raced"], (
+            f"the raced deferred task must run exactly once, got {ran!r}"
+        )
+        assert stub.on_loads_finished_tasks == [], "no task may be left stranded"
+    finally:
+        _restore_stack_stub(stub)
+
+
+def test_iconpack_concurrent_drain_runs_each_task_once() -> None:
+    """The two-thread hazard unique to this stack: BOTH build threads flip
+    their flag and call on_load_finished, and can enter the drain
+    concurrently. Deterministically force the overlap: drainer #1 blocks
+    inside its FIRST task while drainer #2 enters. With the old unlocked
+    copy()-and-remove() nothing was removed yet (removal follows task()), so
+    #2 re-ran the whole queue -> double-run. Under the lock, #1 snapshots and
+    CLEARS the queue before any task runs, so #2 finds an empty queue. Every
+    task must run exactly once."""
+    ran = []
+    order_lock = threading.Lock()  # serialize appends to `ran`
+    stub = _make_stack_stub(ran)
+    try:
+        first_task_entered = threading.Event()
+        release_first_task = threading.Event()
+        paths = [f"i{i}" for i in range(6)]
+
+        # Pre-seed the queue directly with instrumented tasks (bypassing the
+        # GTK-heavy show_for_path body -- we are exercising the drain, not the
+        # dispatch tail). The first task gates; the rest record immediately.
+        def make_task(p, is_first):
+            def task():
+                if is_first:
+                    first_task_entered.set()
+                    assert release_first_task.wait(timeout=5), "wiring: never released"
+                with order_lock:
+                    ran.append(p)
+            return task
+
+        stub.on_loads_finished_tasks = [
+            make_task(p, i == 0) for i, p in enumerate(paths)
+        ]
+
+        stub.pack_chooser.build_finished = True
+        stub.icon_chooser.build_finished = True
+
+        d1 = threading.Thread(
+            target=stack_mod.IconPackChooserStack.on_load_finished, args=(stub,),
+            name="drainer1",
+        )
+        d1.start()
+        assert first_task_entered.wait(timeout=5), "drainer1 never entered its first task"
+
+        # drainer2 enters WHILE drainer1 is parked in task[0].
+        d2 = threading.Thread(
+            target=stack_mod.IconPackChooserStack.on_load_finished, args=(stub,),
+            name="drainer2",
+        )
+        d2.start()
+        d2.join(timeout=5)
+        # Unfixed: d2 re-snapshots the still-full queue and re-runs task[0],
+        # blocking on the same gate -> still alive here. Fixed: d1 already
+        # cleared the queue under the lock, so d2 finds nothing and returns.
+        assert not d2.is_alive(), (
+            "drainer2 did not return -- it re-entered the drain and re-ran a "
+            "task (double-run) instead of seeing the queue already cleared"
+        )
+
+        release_first_task.set()
+        d1.join(timeout=5)
+        assert not d1.is_alive()
+
+        assert sorted(ran) == sorted(paths), (
+            f"double-run/lost tasks: delivered {sorted(ran)}, wanted {sorted(paths)}"
+        )
+        assert stub.on_loads_finished_tasks == []
+    finally:
+        _restore_stack_stub(stub)
+
+
+def test_iconpack_post_finish_dispatches_directly() -> None:
+    ran = []
+    stub = _make_stack_stub(ran)
+    try:
+        stub.pack_chooser.build_finished = True
+        stub.icon_chooser.build_finished = True
+        stub.show_for_path("direct")
+        assert ran == ["direct"]
+        assert stub.on_loads_finished_tasks == []
+    finally:
+        _restore_stack_stub(stub)
+
+
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_assetui_recycler")
     test_children_not_shown_before_bound()
@@ -364,6 +564,9 @@ def main() -> None:
     test_raced_deferred_task_still_runs()
     test_post_finish_calls_dispatch_directly()
     test_enqueue_storm_loses_no_tasks()
+    test_iconpack_raced_deferred_task_still_runs()
+    test_iconpack_concurrent_drain_runs_each_task_once()
+    test_iconpack_post_finish_dispatches_directly()
     print("scenario_assetui_recycler: PASS")
 
 
