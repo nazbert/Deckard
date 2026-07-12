@@ -3828,20 +3828,6 @@ class ControllerKey(ControllerInput):
                 )
                 state.layout_manager.set_page_layout(layout, update=False)
 
-            elif len(state.get_own_actions()) > 1 and False: # Disabled for now - we might reuse it later
-                if state_dict.get("image-control-action") is None:
-                    with Image.open(os.path.join("Assets", "images", "multi_action.png")) as image:
-                        self.set_key_image(InputImage(
-                            controller_input=self,
-                            image=image.copy(),
-                        ), update=False)
-            
-            elif len(state.get_own_actions()) == 1:
-                if state_dict.get("image-control-action") is None:
-                    self.set_key_image(None, update=False)
-                # action = self.get_own_actions()[0]
-                # if action.has_image_control()
-
             if load_background_color:
                 state.background_manager.set_page_color(state_dict.get("background", {}).get("color"), update=False)
 
