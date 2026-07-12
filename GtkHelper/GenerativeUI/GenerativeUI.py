@@ -94,6 +94,15 @@ class GenerativeUI[T](ABC):
         # it calls) re-enters .widget. The early flag also keeps that
         # re-entrant access from recursing -- it sees _built and falls
         # through to reading self._widget, same as the eager-build era.
+        #
+        # Known residual (issue #56, deliberate): between the flag flip here
+        # and the marshalled build landing on the main loop, a *different*
+        # main-thread reader racing this worker sees _built=True with
+        # self._widget still None and gets a transient None widget. Closing
+        # that window needs a main-thread inline-build path plus a
+        # build-executed latch -- redesign-scale for what it buys; every
+        # in-tree reader either runs after config-open (post-build) or
+        # None-guards.
         with self._build_flag_lock:
             if self._built:
                 return

@@ -20,6 +20,25 @@ from src.Signals.weak_callbacks import CallbackRegistry
 
 from gi.repository import GLib
 
+
+def _invoke_signal_callback(callback: callable, args: tuple, kwargs: dict) -> bool:
+    """GLib.idle_add trampoline for trigger_signal (issue #56).
+
+    Two GLib behaviors made the raw `GLib.idle_add(callback, *args,
+    **kwargs)` form wrong for signal handlers: keyword arguments are
+    silently dropped (idle_add only forwards positional user_data), and a
+    handler returning anything truthy is treated as GLib.SOURCE_CONTINUE --
+    the idle source re-runs it on every main-loop iteration forever. The
+    trampoline forwards both arg shapes intact and always returns False so
+    the source fires exactly once, regardless of the handler's return
+    value. A raising handler propagates into the main-loop dispatch, where
+    the central exception hooks (issue #80) log it; GLib removes the source
+    in that case too.
+    """
+    callback(*args, **kwargs)
+    return False
+
+
 class SignalManager:
     def __init__(self):
         # signal -> CallbackRegistry. Values are CallbackRegistry instances
@@ -82,4 +101,8 @@ class SignalManager:
             if signal == AppQuit:
                 callback(*args, **kwargs)
             else:
-                GLib.idle_add(callback, *args, **kwargs)
+                # Via the trampoline, not GLib.idle_add(callback, *args,
+                # **kwargs): that form drops kwargs and re-schedules any
+                # truthy-returning handler forever (see
+                # _invoke_signal_callback).
+                GLib.idle_add(_invoke_signal_callback, callback, args, kwargs)

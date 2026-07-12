@@ -118,7 +118,20 @@ class CallbackRegistry:
             self._entries = kept
             if already_present:
                 return False
-            self._entries.append(self._make_entry(cb))
+            try:
+                entry = self._make_entry(cb)
+            except TypeError:
+                # WeakMethod refuses bound methods whose owner is not
+                # weak-referenceable (a __slots__ class without __weakref__).
+                # Fall back to strong storage -- the pre-D2 plain list held
+                # these fine, and failing the connect over a storage
+                # optimization is worse than pinning the owner (issue #56).
+                log.debug(
+                    f"CallbackRegistry: owner of {cb!r} is not weak-referenceable "
+                    f"(__slots__ without __weakref__); storing a strong reference"
+                )
+                entry = cb
+            self._entries.append(entry)
             return True
 
     def remove(self, cb: Callable) -> None:

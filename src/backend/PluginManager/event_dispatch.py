@@ -53,6 +53,12 @@ from loguru import logger as log
 # of paying loop-creation cost per trigger. It also means observer batches
 # are dispatched one at a time -- fine, since nothing in the app today
 # relies on concurrent observer execution (see module docstring).
+#
+# The worker is non-daemon: CPython >= 3.9 removed daemon threads from
+# ThreadPoolExecutor (bpo-39812) with no restore knob (issue #56, accepted
+# residual). Exit is covered anyway -- quit ends in os._exit (src/app.py),
+# and a normal interpreter exit unblocks the idle worker via
+# concurrent.futures' atexit queue wake-up.
 _dispatch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="event_dispatch")
 
 # Keyed off the executor's single worker thread. A thread-local (rather than
