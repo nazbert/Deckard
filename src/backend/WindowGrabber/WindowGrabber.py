@@ -135,6 +135,12 @@ class WindowGrabber:
         """Applies the auto-change page rules to a single deck for the given
         foreground window. May raise if the deck is torn down mid-call; the
         caller isolates that per deck."""
+        if deck_controller.active_page is None:
+            # A deck that is still starting up or being hotplugged has no
+            # page yet (#44): there is nothing to compare against or restore,
+            # so skip it instead of dereferencing active_page.json_path.
+            return
+
         found_page = False
         for page_path in gl.page_manager.get_pages():
             info = gl.page_manager.get_auto_change_settings(page_path)
