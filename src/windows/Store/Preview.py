@@ -14,7 +14,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 import os
 # Import gtk modules
 from textwrap import wrap
-import time
 import gi
 
 from src.backend.DeckManagement.HelperMethods import open_web
