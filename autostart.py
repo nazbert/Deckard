@@ -16,7 +16,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 import os
 import shutil
 import sys
-import threading
 
 # Automatically detect macOS
 IS_MAC = sys.platform == "darwin"
@@ -31,19 +30,23 @@ from loguru import logger as log
 def is_flatpak():
     return os.path.isfile('/.flatpak-info')
 
-# Serializes concurrent setup_autostart() calls: the portal's async callback
-# may land long after a NEWER setup_autostart() call already changed the
-# on-disk state -- a stale callback must never clobber it (the classic case:
-# disable removes the entry synchronously, then the disable/enable portal
-# request fails asynchronously and the fallback re-installed a flatpak-style
-# entry exec'ing /app/bin/launch.sh, which is broken on native installs).
-_autostart_lock = threading.Lock()
+# Orders setup_autostart() calls against the portal's async callback: the
+# callback may land long after a NEWER setup_autostart() call already changed
+# the on-disk state -- a stale callback must never clobber it (the classic
+# case: disable removes the entry synchronously, then the disable/enable
+# portal request fails asynchronously and the fallback re-installed a
+# flatpak-style entry exec'ing /app/bin/launch.sh, broken on native installs).
+#
+# No lock: setup_autostart() is called from the GTK main loop (the settings
+# switch's notify::active) and request_background_callback is also dispatched
+# on the main loop, so the counter is only ever touched by that single thread.
+# The generation stamp, not mutual exclusion, is what makes disable
+# authoritative over a stale callback.
 _autostart_generation = 0
 
 
 def _current_autostart_generation() -> int:
-    with _autostart_lock:
-        return _autostart_generation
+    return _autostart_generation
 
 
 @log.catch
@@ -52,9 +55,8 @@ def setup_autostart(enable: bool = True):
     if IS_MAC:
         return
 
-    with _autostart_lock:
-        _autostart_generation += 1
-        generation = _autostart_generation
+    _autostart_generation += 1
+    generation = _autostart_generation
 
     if is_flatpak():
         setup_autostart_flatpak(enable, generation)
