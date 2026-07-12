@@ -193,9 +193,13 @@ class Sidebar(Adw.NavigationPage):
     def hide_error(self):
         if self.main_stack.get_visible_child() != self.error_page:
             return
-        
+
         self.main_stack.set_transition_duration(0)
-        self.main_stack.set_visible_child(self.key_editor)
+        # key_editor is a child of configurator_stack, not of main_stack --
+        # targeting it here was a GTK-warning no-op that left the error page
+        # up. configurator_stack still shows whichever editor was last
+        # selected inside it.
+        self.main_stack.set_visible_child(self.configurator_stack)
         self.main_stack.set_transition_duration(200)
 
     def update(self):

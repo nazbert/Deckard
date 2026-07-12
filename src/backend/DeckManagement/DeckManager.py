@@ -356,7 +356,9 @@ class DeckManager:
             if not controller.deck.connected():
                 self.remove_controller(controller)
 
-        gl.app.main_win.check_for_errors()
+        # USB events can arrive before on_activate has set gl.app / main_win.
+        if recursive_hasattr(gl, "app.main_win"):
+            gl.app.main_win.check_for_errors()
 
     def remove_controller(self, deck_controller: DeckController) -> None:
         # Idempotent: several threads may call this for the same controller;
@@ -417,7 +419,9 @@ class DeckManager:
         if is_fake:
             self.fake_deck_controller.append(deck_controller)
 
-        if not recursive_hasattr(gl, "app.main_win."):
+        # The trailing dot ("app.main_win.") made this check always False and
+        # the call below dead code.
+        if not recursive_hasattr(gl, "app.main_win"):
             return
         gl.app.main_win.check_for_errors()
 

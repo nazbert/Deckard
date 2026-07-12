@@ -40,7 +40,7 @@ class Settings(Adw.PreferencesWindow):
 
         # Center settings win over main_win (depends on DE)
         self.set_transient_for(gl.app.main_win)
-        # Allow interaction with other windows
+        # Keep the settings dialog on top of (and blocking) the main window
         self.set_modal(True)
 
         self.settings_json:dict = None
@@ -242,9 +242,7 @@ class RemoteDecksGroup(Adw.PreferencesGroup):
     def on_row_changed(self, *args):
         #FIXME: For some reason this gets called twice
         n_decks = self.n_remote_decks_row.get_value()
-        app_settings = gl.settings_manager.get_app_settings() 
-        print(app_settings)
-
+        app_settings = gl.settings_manager.get_app_settings()
 
         app_settings.setdefault("dev", {})
         app_settings["dev"]["n-remote-decks"] = n_decks

@@ -100,12 +100,14 @@ class DeckStack(Gtk.Stack):
             self.deck_names.append(deck_type)
             self.deck_attributes[deck_controller] = deck_number, deck_type
             return deck_number, deck_type
-        # name already exists
+        # Name already exists: disambiguate with a "(n)" suffix. Never mutate
+        # the model name's own digits -- that turned a second
+        # "Stream Deck MK.2" into "Stream Deck MK.3".
+        base_type = deck_type
+        suffix = 2
         while deck_type in self.deck_names:
-            if deck_type[-1].isdigit():
-                deck_type = deck_type[:-1] + chr(ord(deck_type[-1]) + 1)
-            else:
-                deck_type = deck_type + " 2"
+            deck_type = f"{base_type} ({suffix})"
+            suffix += 1
 
         self.deck_names.append(deck_type)
 

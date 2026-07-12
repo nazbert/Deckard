@@ -102,8 +102,17 @@ class AssetManager(Gtk.ApplicationWindow):
         the next main-loop iteration even without an explicit destroy() call,
         and this window is reused across opens (P4.2).
         """
-        if callable(self.callback_func):
-            self.callback_func(path, *self.callback_args, **self.callback_kwargs)
+        callback_func = self.callback_func
+        callback_args = self.callback_args
+        callback_kwargs = self.callback_kwargs
+        # Drop the refs before invoking: the hidden singleton must not keep
+        # pinning the opener's bound callback (and through it the action/page
+        # graph) until the next show_for_path.
+        self.callback_func = None
+        self.callback_args = ()
+        self.callback_kwargs = {}
+        if callable(callback_func):
+            callback_func(path, *callback_args, **callback_kwargs)
         self.hide()
 
     def show_info_for_asset(self, asset:dict):
