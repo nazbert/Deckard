@@ -507,11 +507,18 @@ class PluginBase(rpyc.Service):
         """
         Returns a Gtk.Image widget with the icon "view-paged".
 
+        Marshalled onto the GTK main loop for the same reason as
+        add_css_stylesheet and ActionHolder's default icon (issue #35): GTK4
+        is main-thread-only, and while the sole in-tree caller
+        (ActionChooser) is on main, a plugin override reachable from an
+        off-main path would otherwise build a widget off-main -- the
+        segfault/abort class. Inline (zero-cost) when already on main.
+
         Returns:
             Gtk.Widget: A Gtk.Image widget.
         """
-
-        return Gtk.Image(icon_name="view-paged")
+        from GtkHelper.GtkHelper import run_on_main
+        return run_on_main(lambda: Gtk.Image(icon_name="view-paged"))
     
     def on_uninstall(self) -> None:
         """

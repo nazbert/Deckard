@@ -5,15 +5,18 @@ registration happens on a worker -- the store-install path runs the plugin's
 whole __init__ on the installer thread (StoreBackend.install_plugin ->
 load_plugins -> init_plugins -> subclass()).
 
-The GenerativeUI row layer is already marshalled (67b0e5a1); the two
-remaining in-framework construction sites reachable from plugin __init__
-are:
+The GenerativeUI row layer is already marshalled (67b0e5a1); the remaining
+in-framework construction sites reachable from plugin code are:
 
   * ActionHolder's default icon -- Gtk.Image(icon_name=...) built whenever a
     plugin registers an action holder without passing its own icon
     (ActionHolder.py);
   * PluginBase.add_css_stylesheet -- Gtk.CssProvider construction plus
-    Gtk.StyleContext.add_provider_for_display on the default display.
+    Gtk.StyleContext.add_provider_for_display on the default display;
+  * PluginBase.get_selector_icon -- Gtk.Image(icon_name="view-paged"); its
+    only in-tree caller is on main, but a plugin override reachable
+    off-main would build a widget off-main, so the framework marshals it
+    uniformly with the other two.
 
 Both must construct on the main thread (GTK4 is main-thread-only; off-main
 construction is the segfault/abort class). Observed via thread-recording
@@ -26,7 +29,9 @@ runs; the default GLib.MainContext is pumped manually.
       the main thread (red pre-fix: runs on the worker).
   (b) add_css_stylesheet's provider/style-context work from a worker thread
       runs on the main thread (red pre-fix: runs on the worker).
-  (c) Both stay inline on the main thread: no pumping needed, so the
+  (c) get_selector_icon's Gtk.Image from a worker thread runs on the main
+      thread (red pre-fix: runs on the worker).
+  (d) All three stay inline on the main thread: no pumping needed, so the
       normal startup load path (which runs on main) is unchanged.
 """
 import threading
@@ -177,11 +182,37 @@ def check_add_css_stylesheet_marshals() -> None:
     print("PASS: add_css_stylesheet runs its GTK work on the main thread from a worker")
 
 
+def check_get_selector_icon_marshals() -> None:
+    _RecordingImage.threads.clear()
+
+    # __init__ bypassed: get_selector_icon touches no instance state.
+    plugin = PluginBase.__new__(PluginBase)
+    box: dict = {}
+
+    def target():
+        try:
+            box["icon"] = plugin.get_selector_icon()
+        except BaseException as e:  # noqa: BLE001
+            box["exc"] = e
+
+    worker = threading.Thread(target=target, name="fake-installer", daemon=True)
+    worker.start()
+    _pump_until_dead(worker)
+
+    assert "exc" not in box, f"get_selector_icon raised: {box['exc']!r}"
+    assert _RecordingImage.threads == [threading.main_thread()], (
+        "get_selector_icon built its Gtk.Image off the main thread -- "
+        "issue #35's off-main GTK construction"
+    )
+    assert isinstance(box["icon"], _RecordingImage), "get_selector_icon did not return the constructed image"
+    print("PASS: get_selector_icon constructs its Gtk.Image on the main thread from a worker")
+
+
 def check_inline_on_main_thread() -> None:
     _RecordingImage.threads.clear()
     _RecordingCssProvider.threads.clear()
 
-    # No pumping here on purpose: on the main thread both must run inline
+    # No pumping here on purpose: on the main thread all three must run inline
     # (run_on_main's fast path), exactly as the startup load path does.
     holder = _make_holder()
     assert _RecordingImage.threads == [threading.main_thread()]
@@ -190,6 +221,11 @@ def check_inline_on_main_thread() -> None:
     plugin = PluginBase.__new__(PluginBase)
     plugin.add_css_stylesheet("/nonexistent/style.css")
     assert _RecordingCssProvider.threads == [threading.main_thread()]
+
+    _RecordingImage.threads.clear()
+    icon = plugin.get_selector_icon()
+    assert _RecordingImage.threads == [threading.main_thread()]
+    assert isinstance(icon, _RecordingImage)
     print("PASS: main-thread registration stays inline (startup path unchanged)")
 
 
@@ -199,6 +235,7 @@ def main() -> None:
 
     check_action_holder_default_icon_marshals()
     check_add_css_stylesheet_marshals()
+    check_get_selector_icon_marshals()
     check_inline_on_main_thread()
 
     print("PASS: scenario_offmain_gtk_marshal")
