@@ -487,4 +487,8 @@ class Screensaver(Adw.PreferencesRow):
         gl.settings_manager.save_deck_settings(self.deck_serial_number, settings)
 
         deck_controller = self.settings_page.deck_controller
-        deck_controller.load_screensaver(deck_controller.active_page)
+        # No active page (e.g. right after connect or with zero pages) means
+        # there is nothing to reload the screensaver against; load_screensaver
+        # dereferences page.dict, so a None here would raise.
+        if deck_controller.active_page is not None:
+            deck_controller.load_screensaver(deck_controller.active_page)

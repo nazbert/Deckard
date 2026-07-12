@@ -24,7 +24,8 @@ the pre-fix code:
      "flatpak run --command udevadm --version" form was malformed, so the
      udev warning never showed inside flatpak).
   8. The hidden AssetManager singleton must drop the opener's callback refs
-     at delivery time instead of pinning them until the next open.
+     at delivery time instead of pinning them until the next open -- on BOTH
+     delivery paths (deliver_selection and the custom-asset FlowBox).
 """
 import fixtures  # noqa: F401  (must be first: isolates the data dir)
 
@@ -222,6 +223,23 @@ def check_deck_group_active_page_guards() -> None:
         assert Screensaver.page_overwrites_screensaver(stub2) is False, (
             "no active page means 'not overwritten'"
         )
+
+        # update_image (screensaver asset picker callback) must not reload the
+        # screensaver against a None active_page: load_screensaver derefs
+        # page.dict, so a None here would raise.
+        load_screensaver = Recorder()
+        controller3 = Obj(active_page=None, load_screensaver=load_screensaver)
+        stub3 = Obj(
+            deck_serial_number="SN1",
+            set_thumbnail=Recorder(),
+            settings_page=Obj(deck_controller=controller3),
+        )
+        Screensaver.update_image(stub3, "/some/screensaver.png")
+        assert load_screensaver.calls == [], (
+            "with no active page there is nothing to reload the screensaver "
+            f"against -- load_screensaver must be skipped, got "
+            f"{load_screensaver.calls!r}"
+        )
     finally:
         gl.settings_manager = saved_sm
     print("  PASS: Brightness/Screensaver rows tolerate active_page=None")
@@ -292,6 +310,65 @@ def check_asset_manager_drops_callback_refs() -> None:
     print("  PASS: AssetManager drops callback refs at delivery")
 
 
+def check_custom_asset_flowbox_drops_callback_refs() -> None:
+    # Item #8's second delivery path: CustomAssets/FlowBox.on_child_activated
+    # captures the callback then nulls the manager's refs *before* spawning the
+    # delivery thread. Stub threading.Thread so the callback is captured
+    # synchronously and no real thread runs.
+    import src.windows.AssetManager.CustomAssets.FlowBox as fb_mod
+
+    action = Obj(name="opener-action")  # stands in for the pinned action/page
+    callback = Recorder()
+    asset_manager = Obj(
+        callback_func=callback,
+        callback_args=(action,),
+        callback_kwargs={"k": action},
+        hide=Recorder(),
+    )
+    stub = Obj(
+        asset_chooser=Obj(asset_manager=asset_manager),
+        callback_thread=Recorder(),  # thread target; captured, never run here
+    )
+    child = Obj(asset={"internal-path": "/some/custom.png"})
+
+    captured = {}
+
+    class FakeThread:
+        def __init__(self, target=None, args=(), name=None):
+            captured["target"] = target
+            captured["args"] = args
+
+        def start(self):
+            captured["started"] = True
+
+    saved_thread = fb_mod.threading.Thread
+    fb_mod.threading.Thread = FakeThread
+    try:
+        fb_mod.CustomAssetChooserFlowBox.on_child_activated(stub, None, child)
+    finally:
+        fb_mod.threading.Thread = saved_thread
+
+    # Refs must be dropped on the manager the moment delivery is dispatched.
+    assert asset_manager.callback_func is None, (
+        "the hidden singleton must not pin the selection callback after the "
+        "custom-asset FlowBox delivers"
+    )
+    assert asset_manager.callback_args == () and asset_manager.callback_kwargs == {}, (
+        f"callback args/kwargs must be dropped too, got "
+        f"{asset_manager.callback_args!r} / {asset_manager.callback_kwargs!r}"
+    )
+    # And the captured thread must still carry the real callback + path/args.
+    assert captured.get("started") is True, "delivery thread must be started"
+    assert captured["args"] == (
+        "/some/custom.png", callback, (action,), {"k": action}
+    ), (
+        f"the captured callback/path/args must survive the null-out, got "
+        f"{captured.get('args')!r}"
+    )
+    assert len(asset_manager.hide.calls) == 1
+    print("  PASS: CustomAssets FlowBox drops callback refs at delivery")
+
+
 def main() -> None:
     check_on_activate_defers_show_donate()
     check_sidebar_hide_error_targets_stack_child()
@@ -301,6 +378,7 @@ def main() -> None:
     check_deck_group_active_page_guards()
     check_udev_probe_spawn_form()
     check_asset_manager_drops_callback_refs()
+    check_custom_asset_flowbox_drops_callback_refs()
     print("PASS: scenario_appshell_lows")
 
 
