@@ -207,6 +207,15 @@ class PageManagerBackend:
         return page_names
 
     def clear_old_cached_pages(self):
+        # Eviction is an IN-MEMORY teardown ONLY: it never writes to disk
+        # (no Page.save/atomic_write_json here) and never touches the page's
+        # JSON. clear_action_objects() tears down live action objects and
+        # drops the cache entry -- nothing on disk is mutated. So the harm of
+        # gutting a live page (issue #4) is USE-AFTER-EVICT -- a visible page
+        # whose actions are all dead (keypresses do nothing, imagery frozen)
+        # plus a duplicate Page minted on the next get_page() -- recoverable
+        # by a page reload/replug; it is NOT on-disk data loss.
+        #
         # Snapshot the eviction decision under the lock, then act on it
         # outside: clear_action_objects() below can run plugin hooks (D1),
         # and a wedged one must not stall a concurrent close()/get_page()
@@ -242,9 +251,52 @@ class PageManagerBackend:
         # is still the same (now possibly orphaned) dict object, so the pop
         # below is a harmless no-op in that case rather than a KeyError.
         for _, controller_pages, path, page_obj in to_evict:
+            # Re-validate under the lock immediately before teardown (issue
+            # #4): between the snapshot and this point the page may have
+            # become live -- activated by a load_page (WindowGrabber cycling
+            # generates exactly this cache pressure), stashed as a
+            # controller's screensaver-pending page, or re-marked mid-tick.
+            # Pop INSIDE the lock and BEFORE the teardown, so a concurrent
+            # get_page() mints a fresh Page instead of receiving this gutted
+            # one.
+            #
+            # Residual NOT covered here (deferred to #81, pin-counts): a page
+            # already fetched via get_page() but not yet handed to load_page()
+            # is neither active_page nor screensaver-pending and is born
+            # ready_to_clear=True (Page.__init__), so it stays evictable in
+            # this pre-activation window. The harm there is narrow: its
+            # action_objects are still empty (built by load_page ->
+            # initialize_actions, which runs only after active_page is set),
+            # so clear_action_objects() is a near-no-op -- the observable
+            # effect is just the duplicate-Page mint. Only ownership
+            # pin-counts (#81) close this structurally.
+            with self._pages_lock:
+                page_data = controller_pages.get(path)
+                if page_data is None or page_data.get("page") is not page_obj:
+                    continue  # already discarded/replaced
+                if not page_obj.ready_to_clear:
+                    continue
+                if self._page_is_live(page_obj):
+                    continue
+                controller_pages.pop(path, None)
             log.info(f"Evicting cached page {path}")
+            # Teardown stays OUTSIDE the lock: it can run plugin hooks (D1),
+            # and a wedged one must not stall close()/get_page() waiting on
+            # this lock.
             page_obj.clear_action_objects()
-            controller_pages.pop(path, None)
+
+    def _page_is_live(self, page_obj) -> bool:
+        """True when any controller currently depends on this Page object:
+        active, or stashed as the screensaver-pending page (held for the
+        whole screensaver duration and invisible to the snapshot guards --
+        evicting it made ScreenSaver.hide() load a page whose every action
+        was dead; issue #4 window 1)."""
+        for controller in gl.deck_manager.deck_controller:
+            if controller.active_page is page_obj:
+                return True
+            if getattr(controller, "_screensaver_pending_page", None) is page_obj:
+                return True
+        return False
 
     def get_default_page(self, deck_serial_number: str):
         page_settings = self.settings_manager.load_settings_from_file(self.PAGE_SETTINGS_PATH)
@@ -357,6 +409,20 @@ class PageManagerBackend:
                 controller_pages = self.pages.get(controller, {})
                 entry = controller_pages.pop(page_path, None)
             if entry is not None:
+                # Unlike eviction, this teardown needs NO _page_is_live guard
+                # (issue #4): it can never gut a live page. The cache is keyed
+                # per-controller with a distinct Page object per (controller,
+                # path), so popping THIS controller's entry can't touch
+                # another controller's live page. For this controller, we only
+                # reach here when its active_page was on page_path (guard at
+                # the top of the loop) and load_page() above already switched
+                # active_page onto new_page at a DIFFERENT path (the default/
+                # fallback both exclude page_path) -- so entry["page"] is not
+                # active_page. And a controller showing its screensaver is
+                # skipped by that same top guard (its active_page is the
+                # screensaver page, path mismatch), so entry["page"] is never
+                # its _screensaver_pending_page either.
+                #
                 # Outside the lock: clear_action_objects() may run plugin
                 # hooks (D1), which must not stall a concurrent close()/
                 # get_page() waiting on _pages_lock from another thread.
