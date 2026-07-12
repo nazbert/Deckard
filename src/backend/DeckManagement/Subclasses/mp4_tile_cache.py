@@ -597,6 +597,16 @@ def release(reader: KeyVideoCache) -> None:
             del _registry[key]
 
 
+def registry_cache_paths() -> set[str]:
+    """Cache-file paths of every live registry entry -- consulted by the
+    startup sweep (video_cache_sweeper.py) so it never deletes a file an
+    attached reader/builder is using, even when the reference scan cannot
+    see the source (e.g. the source file was deleted after acquire(), so
+    its hash can no longer be recomputed)."""
+    with _registry_lock:
+        return {entry.path for entry in _registry.values()}
+
+
 def _run_builder(entry: _TileCacheEntry, source_path: str, out_size: tuple[int, int], saturation: float) -> None:
     builder = KeyVideoCache(source_path, out_size, saturation, cache_path=entry.path, is_builder=True)
     try:

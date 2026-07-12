@@ -16,12 +16,19 @@ from loguru import logger as log
 
 import globals as gl
 from src.backend.DeckManagement.HelperMethods import is_video
+from src.backend.DeckManagement.Subclasses.mp4_tile_cache import registry_cache_paths, sat_suffix
 
 VID_CACHE = os.path.join(gl.DATA_PATH, "cache", "videos")
 
 # A .tmp.mp4 younger than this may be a build in progress; older ones are
 # leftovers from a crash.
 TMP_MAX_AGE_S = 24 * 60 * 60
+
+# Current cache-file naming: "<md5>.mp4" (default saturation) or
+# "<md5>.satNNN.mp4" (a baked-in saturation variant, see
+# mp4_tile_cache.sat_suffix). Anything else in a layout dir is legacy or a
+# writer temp file and is handled by the other sweep branches.
+_MP4_NAME_RE = re.compile(r"^(?P<hash>[0-9a-f]+)(?P<sat>\.sat\d+)?\.mp4$")
 
 # Top-level directory names the deleted key_video_cache.py's JPEG-per-frame
 # format wrote into: VID_CACHE/single_key/<stem>/<size>/<frame>.jpg and
@@ -78,6 +85,16 @@ def _collect_json_paths() -> list[str]:
         )
     # Includes plugin-registered custom pages.
     paths.extend(gl.page_manager.get_pages(add_custom_pages=True, sort=False))
+    # Plugins keep their own settings JSONs (PluginBase.settings_path:
+    # settings/plugins/<id>/settings.json) and may reference media there
+    # that appears in no deck or page file. Missing these used to delete
+    # caches whose in-process registry entries were live and marked ready.
+    plugins_dir = os.path.join(gl.DATA_PATH, "settings", "plugins")
+    if os.path.isdir(plugins_dir):
+        for root, _, files in os.walk(plugins_dir):
+            paths.extend(
+                os.path.join(root, name) for name in files if name.endswith(".json")
+            )
     return paths
 
 
@@ -122,6 +139,33 @@ def collect_referenced_video_hashes() -> set[str]:
     return hashes
 
 
+def collect_active_sat_suffixes() -> set[str]:
+    """Cache-filename suffixes some deck's CURRENT display.saturation can
+    still produce, plus the default "" (the unsuffixed cache is the
+    upstream-format file and becomes live again the moment a deck resets to
+    1.0). Any other .satNNN variant of a referenced video is a leftover
+    from a factor tried and abandoned -- bounded but permanent disk growth
+    unless swept. An unreadable deck file contributes nothing (its variant
+    may be wrongly swept, but a reader that then finds its ready cache
+    missing invalidates the registry entry and rebuilds -- see
+    mp4_tile_cache._maybe_adopt_shared_cache)."""
+    suffixes = {""}
+    decks_dir = os.path.join(gl.DATA_PATH, "settings", "decks")
+    if not os.path.isdir(decks_dir):
+        return suffixes
+    for name in os.listdir(decks_dir):
+        if not name.endswith(".json"):
+            continue
+        try:
+            settings = gl.settings_manager.load_settings_from_file(
+                os.path.join(decks_dir, name)
+            ) or {}
+            suffixes.add(sat_suffix(float(settings.get("display", {}).get("saturation", 1.0))))
+        except Exception:
+            log.opt(exception=True).warning(f"Could not read display saturation from {name}")
+    return suffixes
+
+
 @log.catch
 def sweep_stale_video_caches(startup_delay: float = 0.0) -> None:
     if startup_delay:
@@ -132,6 +176,12 @@ def sweep_stale_video_caches(startup_delay: float = 0.0) -> None:
     _sweep_legacy_key_video_dirs()
 
     referenced = collect_referenced_video_hashes()
+    active_sat_suffixes = collect_active_sat_suffixes()
+    # Never delete a file a live in-process cache reader/builder is attached
+    # to: the reference scan can miss sources (source file deleted since
+    # acquire, settings formats it can't parse), but an attached consumer is
+    # direct proof of use.
+    protected_paths = registry_cache_paths()
     freed = 0
     removed = 0
 
@@ -171,8 +221,16 @@ def sweep_stale_video_caches(startup_delay: float = 0.0) -> None:
                     size = os.path.getsize(entry_path)
                     os.remove(entry_path)
                 elif entry.endswith(".mp4"):
-                    if entry_hash in referenced:
+                    if entry_path in protected_paths:
                         continue
+                    if entry_hash in referenced:
+                        match = _MP4_NAME_RE.match(entry)
+                        suffix = (match.group("sat") or "") if match else ""
+                        if suffix in active_sat_suffixes:
+                            continue
+                        # Referenced video, but a saturation variant no
+                        # deck's current factor produces (issue #53 item 8):
+                        # fall through and sweep it.
                     size = os.path.getsize(entry_path)
                     os.remove(entry_path)
                 else:
