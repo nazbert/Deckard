@@ -62,6 +62,12 @@ class PluginBase(rpyc.Service):
 
         self.PATH = os.path.dirname(inspect.getfile(self.__class__))
         self.settings_path: str = os.path.join(gl.DATA_PATH, "settings", "plugins", self.get_plugin_id_from_folder_name(), "settings.json") #TODO: Retrive from the manifest as well
+        # Serializes get_settings/set_settings: actions of the same plugin run
+        # on_ready in parallel since the pool-based page load, so concurrent
+        # read-modify-write cycles lost updates (the atomic write only
+        # prevents torn files). RLock: get_settings' v1->v2 conversion writes
+        # while holding the lock.
+        self._settings_lock = threading.RLock()
 
         if use_legacy_locale:
             self.locale_manager = LegacyLocaleManager(os.path.join(self.PATH, legacy_dir))
@@ -421,6 +427,20 @@ class PluginBase(rpyc.Service):
         else:
             plugin.disconnect_from_event(event_id=event_id, callback=callback)
 
+    # Guards lazy creation of per-instance settings locks (instances built
+    # via __new__ -- rpyc service plumbing, harness stubs -- skip __init__).
+    _settings_lock_guard = threading.Lock()
+
+    def _get_settings_lock(self) -> threading.RLock:
+        lock = getattr(self, "_settings_lock", None)
+        if lock is None:
+            with PluginBase._settings_lock_guard:
+                lock = getattr(self, "_settings_lock", None)
+                if lock is None:
+                    lock = threading.RLock()
+                    self._settings_lock = lock
+        return lock
+
     def get_settings(self):
         """
         Retrieves the settings from the settings file.
@@ -428,47 +448,48 @@ class PluginBase(rpyc.Service):
         Returns:
             dict: The settings stored in the settings file. If the settings file does not exist, an empty dictionary is returned.
         """
-        if not os.path.exists(self.settings_path):
-            return {}
-        # A corrupt settings file (e.g. truncated by a crash) must not raise:
-        # this runs inside register()/plugin __init__, where an exception used
-        # to kill the whole plugin -- empty action list with no explanation.
-        try:
-            with open(self.settings_path, "r") as f:
-                settings = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            log.opt(exception=e).error(
-                f"Plugin {self.plugin_name or self.PATH}: could not read settings file "
-                f"{self.settings_path} -- falling back to empty settings"
-            )
-            return {}
-
-        if not isinstance(settings, dict):
-            log.error(
-                f"Plugin {self.plugin_name or self.PATH}: settings file {self.settings_path} "
-                f"does not contain a JSON object -- falling back to empty settings"
-            )
-            return {}
-
-        if settings.get("file-version") == "2.0":
-            # Is newest version, return settings
-            return settings.get("settings", {})
-
-        else:
-            # Is the old format, convert it
-            new_settings = {
-                "file-version": "2.0",
-                "settings": settings
-            }
+        with self._get_settings_lock():
+            if not os.path.exists(self.settings_path):
+                return {}
+            # A corrupt settings file (e.g. truncated by a crash) must not raise:
+            # this runs inside register()/plugin __init__, where an exception used
+            # to kill the whole plugin -- empty action list with no explanation.
             try:
-                atomic_write_json(self.settings_path, new_settings)
-            except OSError as e:
+                with open(self.settings_path, "r") as f:
+                    settings = json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
                 log.opt(exception=e).error(
-                    f"Plugin {self.plugin_name or self.PATH}: could not migrate settings file "
-                    f"{self.settings_path} to the new format"
+                    f"Plugin {self.plugin_name or self.PATH}: could not read settings file "
+                    f"{self.settings_path} -- falling back to empty settings"
                 )
+                return {}
 
-            return settings
+            if not isinstance(settings, dict):
+                log.error(
+                    f"Plugin {self.plugin_name or self.PATH}: settings file {self.settings_path} "
+                    f"does not contain a JSON object -- falling back to empty settings"
+                )
+                return {}
+
+            if settings.get("file-version") == "2.0":
+                # Is newest version, return settings
+                return settings.get("settings", {})
+
+            else:
+                # Is the old format, convert it
+                new_settings = {
+                    "file-version": "2.0",
+                    "settings": settings
+                }
+                try:
+                    atomic_write_json(self.settings_path, new_settings)
+                except OSError as e:
+                    log.opt(exception=e).error(
+                        f"Plugin {self.plugin_name or self.PATH}: could not migrate settings file "
+                        f"{self.settings_path} to the new format"
+                    )
+
+                return settings
                 
     def get_manifest(self):
         """
@@ -518,23 +539,35 @@ class PluginBase(rpyc.Service):
         Returns:
             None
         """
-        content = {}
-        if os.path.isfile(self.settings_path):
-            with open(self.settings_path, "r") as f:
-                content = json.load(f)
+        with self._get_settings_lock():
+            content = {}
+            if os.path.isfile(self.settings_path):
+                # A corrupt existing file must not make saving impossible --
+                # same failure class get_settings guards against.
+                try:
+                    with open(self.settings_path, "r") as f:
+                        content = json.load(f)
+                except (json.JSONDecodeError, OSError) as e:
+                    log.opt(exception=e).error(
+                        f"Plugin {self.plugin_name or self.PATH}: could not read settings file "
+                        f"{self.settings_path} before saving -- rewriting it"
+                    )
+                    content = {}
+            if not isinstance(content, dict):
+                content = {}
 
-        if content.get("file-version") == "2.0":
-            new_content = content
-            new_content["settings"] = settings
-        else:
-            new_content = {
-                "file-version": "2.0",
-                "settings": settings
-            }
+            if content.get("file-version") == "2.0":
+                new_content = content
+                new_content["settings"] = settings
+            else:
+                new_content = {
+                    "file-version": "2.0",
+                    "settings": settings
+                }
 
-        # Atomic write: an interrupted save must not truncate the plugin's
-        # settings file.
-        atomic_write_json(self.settings_path, new_content)
+            # Atomic write: an interrupted save must not truncate the plugin's
+            # settings file.
+            atomic_write_json(self.settings_path, new_content)
 
 
     def add_css_stylesheet(self, path):
