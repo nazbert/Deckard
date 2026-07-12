@@ -26,13 +26,13 @@ removed/deferred (e.g. the settings font-row debounce pattern applied here,
 or a targeted repaint), the strip goes stale silently. This leg pins that
 missing invalidation.
 
-EXPECTED TO FAIL until the keep-check gains the saturation dimension
-(issue #132): it asserts the DESIRED behaviour (a saturation change
-rebuilds/re-acquires the strip video at the new factor). It is registered in
-run_all.EXPECTED_FAIL_UNTIL_M1 as a documented latent-bug pin, not a passing
-regression net -- when #132 is fixed this flips to a passing regression net
-(drop the XFAIL entry then). Full diagnosis + unmasking conditions on #132;
-origin context on issue #68.
+Always-on regression net since the #132 fix (formerly registered in
+run_all.EXPECTED_FAIL_UNTIL_M1 as a latent-bug pin while the keep-check
+lacked the saturation dimension): the keep-check now tracks the factor the
+strip video was constructed at (_background_video_saturation) and rebuilds
+when it diverges, so a saturation change re-acquires the video at the new
+factor. Full diagnosis + unmasking conditions on #132; origin context on
+issue #68.
 
 Drives the REAL ControllerTouchScreenState._get_background_video_frame via
 __new__ + the exact attributes it reads, with a spy InputVideo (patched at
