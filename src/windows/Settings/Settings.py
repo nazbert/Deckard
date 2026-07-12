@@ -261,7 +261,7 @@ class DataPathGroup(Adw.PreferencesGroup):
         self.settings = settings
         super().__init__(title="Data path")
 
-        self.data_path = Adw.EntryRow(title="Data path (requires restart)")
+        self.data_path = Adw.EntryRow(title="Data path (requires restart)", show_apply_button=True)
         self.add(self.data_path)
 
         self.open_data_path_button = Gtk.Button(label="Open", valign=Gtk.Align.CENTER)
@@ -270,28 +270,77 @@ class DataPathGroup(Adw.PreferencesGroup):
 
         self.load_defaults()
 
-        # Connect signals
-        self.data_path.connect("notify::text", self.on_data_path_changed)
+        # Connect signals.
+        # Persist ONLY on an explicit apply (Enter or the check button) --
+        # persisting on notify::text saved every keystroke, so an abandoned
+        # half-typed edit (or a crash mid-edit) became the data path that
+        # globals.py adopts on the next launch, makedirs'ing garbage and
+        # booting with an empty profile. Closing the window without applying
+        # now simply discards the edit.
+        self.data_path.connect("apply", self.on_data_path_apply)
 
     def load_defaults(self):
         static_settings = gl.settings_manager.get_static_settings()
         self.data_path.set_text(static_settings.get("data-path", gl.DATA_PATH))
 
-    def on_data_path_changed(self, *args):
+    def on_data_path_apply(self, *args):
+        new_path = os.path.expanduser(self.data_path.get_text().strip())
+
+        if not self._validate_data_path(new_path):
+            self.data_path.add_css_class("error")
+            self.data_path.set_tooltip_text("Path must be absolute and creatable/writable")
+            return
+        self.data_path.remove_css_class("error")
+        self.data_path.set_tooltip_text(None)
+
+        # Reflect the expanded path back into the row so what the user sees
+        # matches what is persisted and adopted at boot (we store the
+        # expanduser'd value, not the literal "~/..." they may have typed).
+        if self.data_path.get_text() != new_path:
+            self.data_path.set_text(new_path)
+
         static_settings = gl.settings_manager.get_static_settings()
-        static_settings["data-path"] = self.data_path.get_text()
+        old_path = static_settings.get("data-path")
+        if old_path and old_path != new_path:
+            # Keep the previous value recoverable (manually, via the static
+            # settings file) in case the new location turns out to be wrong.
+            static_settings["data-path-previous"] = old_path
+        static_settings["data-path"] = new_path
         gl.settings_manager.save_static_settings(static_settings)
 
-    def on_open_data_path_button_clicked(self, *args):
-        command = ""
-        if is_flatpak():
-            command += "flatpak-spawn --host "
+    @staticmethod
+    def _validate_data_path(path: str) -> bool:
+        """A data path is only persisted if it is absolute and actually
+        usable: an existing writable directory, or one we can create right
+        now (globals.py would makedirs it at boot anyway -- doing it here
+        surfaces the failure while the user is still looking at the row).
 
-        command += f"xdg-open {self.data_path.get_text()}"
+        Runs on the GTK main thread (only on an explicit apply, not per
+        keystroke): the stat/makedirs could briefly stall the UI if the path
+        is on a hung network mount, but that is a deliberate, rare, one-shot
+        cost paid only when the user commits -- not worth an async detour."""
+        if not path or not os.path.isabs(path):
+            return False
+        if os.path.isdir(path):
+            return os.access(path, os.W_OK)
+        try:
+            os.makedirs(path, exist_ok=True)
+            return True
+        except OSError:
+            return False
+
+    def on_open_data_path_button_clicked(self, *args):
+        command = []
+        if is_flatpak():
+            command += ["flatpak-spawn", "--host"]
+
+        # No shell=True: the entry text must never be interpolated into a
+        # shell command line.
+        command += ["xdg-open", self.data_path.get_text()]
 
         try:
-            subprocess.check_output(command, shell=True)
-        except subprocess.CalledProcessError:
+            subprocess.check_output(command)
+        except (subprocess.CalledProcessError, FileNotFoundError):
             pass
 
 

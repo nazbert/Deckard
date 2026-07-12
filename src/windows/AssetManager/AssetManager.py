@@ -89,10 +89,46 @@ class AssetManager(Gtk.ApplicationWindow):
         self.callback_args = callback_args
         self.callback_kwargs = callback_kwargs
 
+        # The window is reused across opens (see deliver_selection), so a new
+        # session must not inherit the previous one's drill-in position or
+        # search filter.
+        self._reset_session_state()
+
         self.asset_chooser.show_for_path(path)
         self.main_stack.set_visible_child(self.asset_chooser)
-        # self.back_button.set_visible(False)
         self.present()
+
+    def _reset_session_state(self) -> None:
+        """Clears navigation + filter state left over from the previous open:
+        backs every pack stack out of its drilled-in chooser and empties every
+        stale search entry. A leftover filter could otherwise hide the very
+        asset show_for_path is about to pre-select."""
+        chooser = self.asset_chooser
+
+        chooser.icon_pack_chooser.set_visible_child_name("pack-chooser")
+        chooser.wallpaper_pack_chooser.set_visible_child_name("pack-chooser")
+        chooser.sd_plus_bar_wallpaper_pack_chooser.set_visible_child_name("pack-chooser")
+        self.back_button.set_visible(False)
+
+        pages = (
+            chooser.custom_asset_chooser,
+            chooser.icon_pack_chooser.pack_chooser,
+            chooser.icon_pack_chooser.icon_chooser,
+            chooser.wallpaper_pack_chooser.pack_chooser,
+            chooser.wallpaper_pack_chooser.wallpaper_chooser,
+            chooser.sd_plus_bar_wallpaper_pack_chooser.pack_chooser,
+            chooser.sd_plus_bar_wallpaper_pack_chooser.wallpaper_chooser,
+        )
+        for page in pages:
+            search_entry = getattr(page, "search_entry", None)
+            if search_entry is None:
+                continue
+            # Only touch entries that actually hold a stale filter: set_text
+            # fires search-changed, and e.g. CustomAssetChooser's handler
+            # dereferences widgets its background build() may not have
+            # attached yet on a truly fresh window.
+            if search_entry.get_text():
+                search_entry.set_text("")
 
     def deliver_selection(self, path: str) -> None:
         """Invokes the opener's selection callback and hides the window.
@@ -177,8 +213,11 @@ class AssetChooser(Gtk.Stack):
 
     def show_for_path(self, path):
         if gl.asset_manager_backend.has_by_internal_path(path):
-            # Is custom asset
+            # Is custom asset -- switch the tab too (the icon-pack branch does
+            # this inside IconPackChooserStack.show_for_path); without it a
+            # reopen after drilling into a pack kept showing the old grid.
             self.custom_asset_chooser.show_for_path(path)
+            self.set_visible_child_name("custom-assets")
             self.asset_manager.back_button.set_visible(False)
         else:
             # Check if really is a icon pack
