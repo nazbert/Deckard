@@ -222,7 +222,9 @@ class ActionExpanderRow(BetterExpander):
         if controller is None:
             return
 
-        actions = controller.active_page.dict[self.active_identifier.input_type][self.active_identifier.json_identifier]["states"][str(self.active_state)]["actions"]
+        state_dict = controller.active_page.dict[self.active_identifier.input_type][self.active_identifier.json_identifier]["states"][str(self.active_state)]
+
+        actions = state_dict["actions"]
         reordered = self.reorder_index_after(copy(actions), move_index, after_index)
 
         action_objects = controller.active_page.action_objects[self.active_identifier.input_type][self.active_identifier.json_identifier][self.active_state]
@@ -230,7 +232,7 @@ class ActionExpanderRow(BetterExpander):
 
 
         # Reorder in page dict
-        controller.active_page.dict[self.active_identifier.input_type][self.active_identifier.json_identifier]["states"][str(self.active_state)]["actions"] = reordered
+        state_dict["actions"] = reordered
 
         # Reorder in action objects
         controller.active_page.action_objects[self.active_identifier.input_type][self.active_identifier.json_identifier][self.active_state] = reordered_action_objects
@@ -243,14 +245,27 @@ class ActionExpanderRow(BetterExpander):
             action_order_map[i] = list(reordered_action_objects.values()).index(action)
 
 
-        image_control_action_index = controller.active_page.dict[self.active_identifier.input_type][self.active_identifier.json_identifier]["states"][str(self.active_state)].get("image-control-action")
-        controller.active_page.dict[self.active_identifier.input_type][self.active_identifier.json_identifier]["states"][str(self.active_state)]["image-control-action"] = action_order_map.get(image_control_action_index, None)
+        image_control_action_index = state_dict.get("image-control-action")
+        state_dict["image-control-action"] = action_order_map.get(image_control_action_index, None)
 
-        label_control_actions = controller.active_page.dict[self.active_identifier.input_type][self.active_identifier.json_identifier]["states"][str(self.active_state)].get("label-control-actions")
+        # The background permission must follow its action just like the
+        # image permission does; this remap was missing (latent while the
+        # reorder buttons were dead), leaving the persisted index pointing
+        # at whatever action slid into the old slot.
+        background_control_action_index = state_dict.get("background-control-action")
+        state_dict["background-control-action"] = action_order_map.get(background_control_action_index, None)
+
+        # The key can be absent on pages that were never touched by
+        # add_action (hand-edited/imported/legacy). Default like
+        # ActionPermissionManager.get_label_control_indices does instead of
+        # raising mid-write: at this point the page dict and action_objects
+        # are already reordered but nothing is saved yet, so an exception
+        # here would silently desync memory from disk.
+        label_control_actions = state_dict.get("label-control-actions", [None, None, None])
         for i, label_control_action in enumerate(label_control_actions):
             label_control_actions[i] = action_order_map.get(label_control_action)
-        controller.active_page.dict[self.active_identifier.input_type][self.active_identifier.json_identifier]["states"][str(self.active_state)]["label-control-actions"] = label_control_actions
-        
+        state_dict["label-control-actions"] = label_control_actions
+
         controller.active_page.save()
 
         controller.load_page(controller.active_page)
@@ -557,23 +572,31 @@ class ActionRow(Adw.ActionRow):
         return self.expander.get_index_of_child(self)
 
     def on_click_up(self, button):
+        # The neighbour is the row widget itself (ActionRow /
+        # MissingActionButtonRow / the add-action Adw.ButtonRow). The add
+        # button is only reachable here via the index-0 wrap-around
+        # (get_rows()[-1]); moving past it makes no sense, so bail.
         one_up_child = self.expander.get_rows()[self.index - 1]
-        if isinstance(one_up_child, AddActionButtonRow.button):
+        if one_up_child is self.expander.add_action_button:
             return
-        self.expander.reorder_child_after(self, one_up_child.button)
+        self.expander.reorder_child_after(self, one_up_child)
         self.expander.reorder_actions(self.index - 1, self.index)
 
-        # self.expander.update_indices()
+        # Keep row.index in sync with the new visual order: the sidebar
+        # rebuild runs at idle priority (load_page ->
+        # GLib.idle_add(update_ui_on_page_change)), so a second click can be
+        # dispatched before it lands and would otherwise use stale indices.
+        self.expander.update_indices()
 
 
     def on_click_down(self, button):
         one_down_child = self.expander.get_rows()[self.index + 1]
-        if isinstance(one_down_child, AddActionButtonRow.button):
+        if one_down_child is self.expander.add_action_button:
             return
-        self.expander.reorder_child_after(self, one_down_child.button)
+        self.expander.reorder_child_after(self, one_down_child)
         self.expander.reorder_actions(self.index, self.index + 1)
 
-        # self.expander.update_indices()
+        self.expander.update_indices()
         
     def on_click_remove(self, button):
         visible_child = gl.app.main_win.leftArea.deck_stack.get_visible_child()
