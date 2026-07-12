@@ -31,14 +31,17 @@ class LockScreenManager:
 
     @log.catch
     def setup(self):
-        env = self.get_active_environment()
-        if env == "gnome":
+        # XDG_CURRENT_DESKTOP is a colon-separated list ("ubuntu:GNOME",
+        # "GNOME-Classic:GNOME") -- an exact match on the whole string meant
+        # lock detection silently never engaged on such setups (issue #55).
+        env_components = self.get_active_environment_components()
+        if "gnome" in env_components:
             self.detector = GnomeLockScreenDetector(self)
-        elif env == "x-cinnamon":
+        elif "x-cinnamon" in env_components:
             self.detector = CinnamonLockScreenDetector(self)
-        elif env == "kde":
+        elif "kde" in env_components:
             self.detector = KDELockScreenDetector(self)
-        elif env == "hyprland":
+        elif "hyprland" in env_components:
             self.detector = HyprlandLockScreenDetector(self)
 
     @log.catch
@@ -47,6 +50,10 @@ class LockScreenManager:
         if desktop is None:
             return
         return desktop.lower()
+
+    def get_active_environment_components(self) -> list[str]:
+        env = self.get_active_environment() or ""
+        return [part.strip() for part in env.split(":") if part.strip()]
 
     @log.catch
     def lock(self, active):

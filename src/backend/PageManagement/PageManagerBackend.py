@@ -53,6 +53,11 @@ class PageManagerBackend:
         # methods below can call each other without deadlocking.
         self._pages_lock = threading.RLock()
         self.pages: dict["DeckController", dict[str, dict[str, Union["Page", int]]]] = {}
+        # In-flight cache-miss constructions, keyed (controller, path) and
+        # guarded by _pages_lock: a second caller for the same page waits on
+        # the first construction instead of building a twin Page whose
+        # actions register live event/signal handlers (issue #55).
+        self._loads_in_flight: dict[tuple, tuple[threading.Thread, threading.Event]] = {}
         self.custom_pages = []
 
         self.page_order = []
@@ -93,18 +98,51 @@ class PageManagerBackend:
         return page
 
     def get_page(self, path: str, deck_controller: "DeckController") -> Page:
-        with self._pages_lock:
-            page = self.pages.get(deck_controller, {}).get(path, {})
-            if page:
-                page["page_number"] = self.page_number
-                page_object = page["page"]
-                self.page_number += 1
+        in_flight_key = (deck_controller, path)
+
+        while True:
+            with self._pages_lock:
+                page = self.pages.get(deck_controller, {}).get(path, {})
+                if page:
+                    page["page_number"] = self.page_number
+                    page_object = page["page"]
+                    self.page_number += 1
+                    return page_object
+
+                in_flight = self._loads_in_flight.get(in_flight_key)
+                if in_flight is None:
+                    done = threading.Event()
+                    self._loads_in_flight[in_flight_key] = (threading.current_thread(), done)
+                    break  # this caller is the builder
+
+            builder_thread, done = in_flight
+            if builder_thread is threading.current_thread():
+                # Re-entrant miss from inside our own construction (a plugin
+                # loading this same page during action init): waiting would
+                # self-deadlock, so fall back to constructing directly --
+                # the pre-guard twin-page tradeoff, now confined to this
+                # pathological case.
+                page_object = self.load_page(path, deck_controller)
+                self.clear_old_cached_pages()
                 return page_object
+
+            done.wait()
+            # The builder finished (or failed): re-check the cache. On a
+            # failed/None load the next pass finds neither a cache entry nor
+            # an in-flight load and this caller becomes the builder itself.
 
         # Cache miss: load_page() takes the lock itself for the actual
         # insert -- constructing Page() (file I/O) outside our hold here
         # keeps a slow load from stalling unrelated controllers' lookups.
-        page_object = self.load_page(path, deck_controller)
+        try:
+            page_object = self.load_page(path, deck_controller)
+        finally:
+            # Always release waiters, even when construction raises --
+            # they re-check the cache and take over if it's still empty.
+            with self._pages_lock:
+                self._loads_in_flight.pop(in_flight_key, None)
+            done.set()
+
         self.clear_old_cached_pages()
         return page_object
 
@@ -333,6 +371,10 @@ class PageManagerBackend:
     def add_page(self, page_name: str, page_dict: dict = None) -> str:
         page_dict = page_dict or {}
 
+        # The app creates the pages dir at startup, but callers before/
+        # outside that init (tests, future code paths) must not crash here.
+        os.makedirs(self.PAGE_PATH, exist_ok=True)
+
         path = os.path.join(self.PAGE_PATH, f"{page_name}.json")
         if os.path.exists(path):
             raise FileExistsError(f"A page with the name '{page_name}' already exists.")
@@ -364,20 +406,21 @@ class PageManagerBackend:
     def get_pages_with_path(self, path: str):
         pages_set = set()
 
-        for controller in gl.deck_manager.deck_controller:
-            # Check active_page
-            page = controller.active_page
-            if page is not None and page.json_path == path:
-                pages_set.add(page)
+        # Reads of self.pages must hold _pages_lock: discard_controller()
+        # pops whole controller entries from another thread, so the
+        # unlocked membership-check/lookup pair here raced it into a
+        # KeyError. Lookups only -- no plugin hooks run under the lock.
+        with self._pages_lock:
+            for controller in gl.deck_manager.deck_controller:
+                # Check active_page
+                page = controller.active_page
+                if page is not None and page.json_path == path:
+                    pages_set.add(page)
 
-            # Check in page cache for the same controller
-            if controller not in self.pages:
-                continue
-
-            path_dict = self.pages[controller]
-            if path in path_dict:
-                page = path_dict[path]["page"]
-                pages_set.add(page)
+                # Check in page cache for the same controller
+                entry = self.pages.get(controller, {}).get(path)
+                if entry is not None:
+                    pages_set.add(entry["page"])
 
         return list(pages_set)
 
