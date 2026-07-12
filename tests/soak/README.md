@@ -66,12 +66,23 @@ each:
 ## Reading the results
 
 ```sh
-tests/soak/mem_census.py <pid>          # anonymous-VMA size-class table
+tests/soak/mem_census.py <pid>          # anonymous-VMA size-class table (rss + swap)
+tests/soak/mem_census.py <pid> --max-rss-mb 800 --max-swap-mb 200   # fail on breach
 grep -v '^#' logs/mem_telemetry.csv     # the sampled rows, markers stripped
 ```
 
 `mem_census.py` buckets anonymous mappings (heap, arenas, anonymous mmaps
--- not file-backed .so's or cache mp4s) by size class. Before P0.4, expect
-several ~57.6MB entries (glibc's default per-thread arena size on a
-64-bit process); after, arena count should be bounded by
+-- not file-backed .so's or cache mp4s) by size class, reporting **both Rss
+and Swap** per bucket plus the process-wide VmRSS/VmSwap from
+`/proc/<pid>/status`. Swap is reported because the 2+ hour idle symptom was
+RSS regrowth *plus* ~463MB VmSwap -- an Rss-only view under-reports it.
+Before P0.4, expect several ~57.6MB entries (glibc's default per-thread
+arena size on a 64-bit process); after, arena count should be bounded by
 `MALLOC_ARENA_MAX=2` regardless of thread count.
+
+Pass `--max-rss-mb` and/or `--max-swap-mb` to turn a soak into a mechanical
+pass/fail check: the tool exits 1 (with a `THRESHOLD BREACH` line on stderr)
+when the process-wide VmRSS/VmSwap exceeds the given ceiling, so an
+overnight soak can fail on its own instead of needing a human to read the
+table. Both flags are optional -- the bare `mem_census.py [pid]` invocation
+is unchanged.
