@@ -275,15 +275,20 @@ class StoreBackend:
         if data_type == "content":
             byte_suffix = "b"
 
+        # data_type is part of the cache key: without it a binary fetch
+        # (data_type="content") of some repo/path landed under the same
+        # index entry as a text fetch of that path -- one cache file opened
+        # with conflicting modes depending on who asked first.
         is_cached = False
         if not force_refetch:
             is_cached = self.store_cache.is_cached(
                 url=repo_url,
                 branch=branch_name,
-                path=file_path
+                path=file_path,
+                data_type=data_type
             )
         if is_cached:
-            with self.store_cache.open_cache_file(url=repo_url, branch=branch_name, path=file_path, mode=f"r{byte_suffix}") as f:
+            with self.store_cache.open_cache_file(url=repo_url, branch=branch_name, path=file_path, data_type=data_type, mode=f"r{byte_suffix}") as f:
                 return f.read()
         else:
             pass
@@ -299,18 +304,18 @@ class StoreBackend:
             # empty/errored store page. Bounded by the entry's FETCHED age;
             # its "date" field is a last-use clock that every read renews,
             # so it cannot bound staleness (see StoreCache).
-            if self.store_cache.is_cached(url=repo_url, branch=branch_name, path=file_path):
-                fetched = self.store_cache.get_fetched_date(url=repo_url, branch=branch_name, path=file_path)
+            if self.store_cache.is_cached(url=repo_url, branch=branch_name, path=file_path, data_type=data_type):
+                fetched = self.store_cache.get_fetched_date(url=repo_url, branch=branch_name, path=file_path, data_type=data_type)
                 if fetched is not None and time.time() - fetched <= StoreCache.DAYS_TO_KEEP * 24 * 60 * 60:
                     log.warning(f"Serving cached copy of {file_path} from {repo_url} after failed fetch")
-                    with self.store_cache.open_cache_file(url=repo_url, branch=branch_name, path=file_path, mode=f"r{byte_suffix}") as f:
+                    with self.store_cache.open_cache_file(url=repo_url, branch=branch_name, path=file_path, data_type=data_type, mode=f"r{byte_suffix}") as f:
                         return f.read()
             return answer
-        
+
         if answer is None:
             return
-        
-        with self.store_cache.open_cache_file(url=repo_url, branch=branch_name, path=file_path, mode=f"w{byte_suffix}") as f:
+
+        with self.store_cache.open_cache_file(url=repo_url, branch=branch_name, path=file_path, data_type=data_type, mode=f"w{byte_suffix}") as f:
             if answer is None:
                 return
             if data_type == "text":
@@ -813,15 +818,21 @@ class StoreBackend:
         )
 
     async def get_web_image(self, url: str, path: str, branch: str = "main") -> Image:
+        # `except Exception`, NOT bare `except:` -- the bare form also
+        # swallowed asyncio.CancelledError (a BaseException), so cancelling
+        # a store load made its image tasks report "no image" instead of
+        # actually cancelling.
         try:
             result = await self.get_remote_file(url, path, branch, data_type="content")
-        except:
+        except Exception as e:
+            log.error(f"Failed to fetch image {path} from {url}: {e}")
             return
         if isinstance(result, NoConnectionError):
             return result
         try:
             return Image.open(BytesIO(result))
-        except:
+        except Exception as e:
+            log.warning(f"Could not decode image {path} from {url}: {e}")
             return
     
     async def get_stargazers(self, repo_url: str) -> int:
