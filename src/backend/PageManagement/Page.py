@@ -424,7 +424,10 @@ class Page:
                         i for i, action in enumerate(actions)
                         # Actions are plain dicts here (raw json), not
                         # ActionCore objects -- `action.id` doesn't exist.
-                        if action.get("id", "").split("::")[0] == plugin_id
+                        # `or ""` (not a .get default): an explicit
+                        # `"id": null` in the json returns None past the
+                        # default (issue #56).
+                        if (action.get("id") or "").split("::")[0] == plugin_id
                     ]
                     for i in reversed(to_remove):
                         del actions[i]

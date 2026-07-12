@@ -25,7 +25,10 @@ class EventHolder:
 
     def add_listener(self, callback: callable):
         if not self.observers.add(callback):
-            log.warning(f"Callback {callback.__name__} is already subscribed to: {self.event_id}")
+            # functools.partial (and other callable objects) have no
+            # __name__ -- the warning must not crash the connect (issue #56).
+            name = getattr(callback, "__name__", repr(callback))
+            log.warning(f"Callback {name} is already subscribed to: {self.event_id}")
 
     def remove_listener(self, callback: callable):
         self.observers.remove(callback)

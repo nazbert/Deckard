@@ -73,6 +73,12 @@ def on_main(func):
 
 # App-lifecycle pool for @background work; I/O-bound work only (the GIL
 # serializes pure-Python CPU).
+#
+# Workers are non-daemon: CPython >= 3.9 removed daemon threads from
+# ThreadPoolExecutor (bpo-39812) and exposes no knob to restore them
+# (issue #56, accepted residual). Exit is covered anyway -- quit ends in
+# os._exit (src/app.py), and a normal interpreter exit unblocks idle
+# workers via concurrent.futures' atexit queue wake-ups.
 _background_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="background")
 
 

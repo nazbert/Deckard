@@ -372,7 +372,14 @@ class ActionCore(rpyc.Service):
         self._connected_signals.append((signal, callback))
 
     def get_own_key(self) -> "ControllerKey":
-        return self.deck_controller.keys[self.key_index]
+        # The old body read `deck_controller.keys` / `self.key_index`,
+        # neither of which has ever existed on these classes (issue #56).
+        # Kept (rather than deleted) because it is upstream plugin-API
+        # surface; resolve through the identifier like get_input() does.
+        # Returns None for non-key actions.
+        if not isinstance(self.input_ident, Input.Key):
+            return None
+        return self.deck_controller.get_input(self.input_ident)
     
     def get_is_multi_action(self) -> bool:
         self.raise_error_if_not_ready()
@@ -571,9 +578,11 @@ class ActionCore(rpyc.Service):
         if venv_path is not None:
             if not os.path.exists(venv_path):
                 raise ValueError(f"Venv path does not exist: {venv_path}")
-        if backend_path is None:
-            if  not os.path.exists(backend_path):
-                raise ValueError(f"Backend path does not exist: {backend_path}")
+        # The gate used to be inverted (`if backend_path is None:` guarding
+        # the exists() check), so None reached os.path.exists -> TypeError
+        # and a real-but-missing path sailed through to Popen (issue #56).
+        if backend_path is None or not os.path.exists(backend_path):
+            raise ValueError(f"Backend path does not exist: {backend_path}")
 
         ## Launch
         if open_in_terminal:
@@ -662,7 +671,17 @@ class ActionCore(rpyc.Service):
         work, so it's marshalled onto the main loop via GLib.idle_add instead
         of being done inline. Backend teardown is likewise offloaded to a
         worker thread: closing an rpyc server/connection can block on an
-        in-flight call that needs the main loop, which would deadlock the UI."""
+        in-flight call that needs the main loop, which would deadlock the UI.
+
+        Queued-callback contract (issue #56): clean_up() does NOT flush or
+        cancel work already queued elsewhere with a strong reference to this
+        action -- an event callback (on_key_down/on_tick/...) submitted to
+        the deck's action executor, or a GLib idle, dispatched just before
+        teardown can still run *after* clean_up() returns (the executor's
+        futures are only cancelled wholesale at deck close). Plugin hooks
+        must therefore tolerate running on a cleaned-up action:
+        get_is_present() is the recommended guard, and settings reads
+        degrade to {} once the page reference drops."""
         with self._cleanup_lock:
             if self._cleaned_up:
                 return
