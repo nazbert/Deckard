@@ -1,9 +1,11 @@
 import threading
 from gi.repository import Gtk, Adw, GLib
+from loguru import logger as log
 
 from GtkHelper.GtkHelper import BetterPreferencesGroup, LoadingScreen
 
 import globals as gl
+from src.backend.Store.StoreBackend import NoConnectionError
 from src.windows.Store.StoreData import PluginData
 
 class PluginRecommendations(Gtk.Box):
@@ -41,6 +43,26 @@ class PluginRecommendations(Gtk.Box):
         self.group.set_sort_func(self.sort_func)
         self.clamp.set_child(self.group)
 
+        # Error state for a failed store fetch (issue #118): without it the
+        # fetch failure killed the loader thread and left the spinner up
+        # forever -- the user paged past, installed nothing, and landed in
+        # the main window with an empty Add-Action list.
+        self.error_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, vexpand=True,
+                                 valign=Gtk.Align.CENTER)
+        self.main_stack.add_named(self.error_box, "error")
+        self.error_label = Gtk.Label(
+            label="Could not reach the plugin store -- check your internet connection.\n"
+                  "You can skip this step and install plugins later from the Store.",
+            wrap=True,
+            justify=Gtk.Justification.CENTER,
+            css_classes=["dim-label"],
+        )
+        self.error_box.append(self.error_label)
+        self.retry_button = Gtk.Button(label="Retry", css_classes=["pill", "suggested-action"],
+                                       halign=Gtk.Align.CENTER, margin_top=20)
+        self.retry_button.connect("clicked", self.on_retry_clicked)
+        self.error_box.append(self.retry_button)
+
         threading.Thread(target=self.load).start()
 
     def set_loading(self, loading: bool):
@@ -50,6 +72,17 @@ class PluginRecommendations(Gtk.Box):
         GLib.idle_add(self.main_stack.set_visible_child,
                       self.loading_box if loading else self.scrolled_window)
 
+    def show_connection_error(self):
+        GLib.idle_add(self.loading_box.set_spinning, False)
+        GLib.idle_add(self.main_stack.set_visible_child, self.error_box)
+        # Re-arm the retry button (disabled on click so a double-click can't
+        # run two loaders and duplicate the rows on success).
+        GLib.idle_add(self.retry_button.set_sensitive, True)
+
+    def on_retry_clicked(self, button):
+        self.retry_button.set_sensitive(False)
+        threading.Thread(target=self.load).start()
+
     def load(self):
         self.set_loading(True)
 
@@ -57,7 +90,20 @@ class PluginRecommendations(Gtk.Box):
         # (Adw.ActionRow + CheckButton) and group.add() ran here too -- the
         # process-fatal off-main-GTK construction class (issue #10), racing
         # the carousel on every first launch.
-        plugins = gl.store_backend.get_all_plugins()
+        #
+        # The fetch returns a NoConnectionError SENTINEL when every store is
+        # unreachable (offline, GitHub rate limit); iterating it raised
+        # TypeError, killing this thread with the spinner still up (issue
+        # #118's fresh-install mode). Exceptions get the same error state.
+        try:
+            plugins = gl.store_backend.get_all_plugins()
+        except Exception as e:
+            log.opt(exception=e).error("Onboarding: plugin recommendations fetch failed")
+            plugins = None
+
+        if plugins is None or isinstance(plugins, NoConnectionError):
+            self.show_connection_error()
+            return
 
         def build_rows():
             for plugin in plugins:

@@ -336,21 +336,39 @@ class OnboardingScreen5(Gtk.Box):
 
         GLib.idle_add(self.onboarding_window.loading_box.progress_bar.set_visible, len(plugins) > 0)
 
+        failed: list[str] = []
         for i, plugin_data in enumerate(plugins):
             GLib.idle_add(self.onboarding_window.loading_box.progress_bar.set_text, f"Installing {plugin_data.plugin_name}")
             GLib.idle_add(self.onboarding_window.loading_box.progress_bar.set_fraction, i / len(plugins))
             plugin = asyncio.run(gl.store_backend.get_plugin_for_id(plugin_data.plugin_id))
             if plugin is None:
+                log.error(f"Onboarding: could not resolve {plugin_data.plugin_name} for install")
+                failed.append(plugin_data.plugin_name)
                 continue
             result = asyncio.run(gl.store_backend.install_plugin(plugin))
             if result is not True:
                 log.error(f"Onboarding: failed to install {plugin_data.plugin_name}: {result!r}")
+                failed.append(plugin_data.plugin_name)
                 GLib.idle_add(self.onboarding_window.loading_box.progress_bar.set_text,
                               f"Failed to install {plugin_data.plugin_name}")
 
         GLib.idle_add(self.onboarding_window.loading_box.set_spinning, False)
         GLib.idle_add(self.onboarding_window.close)
         GLib.idle_add(gl.app.main_win.show)
+        if failed:
+            # The progress-bar text above dies with the closing window; the
+            # user otherwise lands in the main window with no plugins and no
+            # explanation (issue #118). Toast on the surviving main window.
+            def _notify_failures():
+                main_win = getattr(gl.app, "main_win", None)
+                if main_win is not None:
+                    main_win.show_error_toast(
+                        f"Failed to install {len(failed)} plugin"
+                        f"{'s' if len(failed) != 1 else ''} "
+                        f"({', '.join(failed)}) -- you can retry from the Store"
+                    )
+                return False
+            GLib.idle_add(_notify_failures)
 
 
 class DiscordOnboardingScreen(Gtk.Box):
