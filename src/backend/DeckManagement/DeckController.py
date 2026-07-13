@@ -4533,16 +4533,26 @@ class ControllerTouchScreen(ControllerInput):
         if screensaver_was_showing:
             return
         
+        # Touchscreen events arrive pre-classified from the library (SHORT/
+        # LONG/DRAG, single events -- no DOWN/UP tail, so no gesture snapshot
+        # to keep). But the default dispatch resolves the target actions
+        # against active_page when the pool worker runs, so a page swap in
+        # the event->worker window used to redirect the event to the new
+        # page's actions (#123, same window as the dial TURN case). Resolve
+        # at READ time instead, here on the deck's input thread.
         active_state = self.get_active_state()
         if event_type == TouchscreenEventType.DRAG:
+            drag_actions = active_state.get_own_actions()
             # Check if from left to right or the other way
             if value['x'] > value['x_out']:
                 active_state.own_actions_event_callback_threaded(
-                    Input.Touchscreen.Events.DRAG_LEFT
+                    Input.Touchscreen.Events.DRAG_LEFT,
+                    actions=drag_actions
                 )
             else:
                 active_state.own_actions_event_callback_threaded(
-                    Input.Touchscreen.Events.DRAG_RIGHT
+                    Input.Touchscreen.Events.DRAG_RIGHT,
+                    actions=drag_actions
                 )
 
 
@@ -4557,10 +4567,12 @@ class ControllerTouchScreen(ControllerInput):
                     if event_type == TouchscreenEventType.LONG:
                         event = Input.Dial.Events.LONG_TOUCH_PRESS
 
+                    touch_actions = dial_active_state.get_own_actions()
                     dial_active_state.own_actions_event_callback_threaded(
                         event,
                         data={"x": value['x'], "y": value['y']},
-                        show_notifications=True
+                        show_notifications=True,
+                        actions=touch_actions
                     )
 
     def get_dial_for_touch_x(self, touch_x: float) -> "ControllerDial":
@@ -4579,10 +4591,42 @@ class ControllerDial(ControllerInput):
 
         self.down_start_time: float = None
 
+        # DOWN-time gesture snapshot (#123) -- the dial twin of
+        # ControllerKey._gesture (#107, see its __init__ for the full
+        # rationale): a (state, actions) pair captured when the dial went
+        # down, or None outside a gesture. The gesture tail (HOLD_START,
+        # HOLD_STOP/SHORT_UP, UP) dispatches to this snapshot, not to
+        # whatever the dial resolves to at release time -- a ChangePage on
+        # this dial's DOWN swaps active_page mid-gesture, which used to send
+        # the tail to the NEW page's dial actions (jamming EasyCommand's
+        # registered_down latch exactly like upstream #475). Single attribute
+        # so writers clear it in one atomic store and the hold-timer callback
+        # reads a coherent pair or None, never a torn half.
+        self._gesture: tuple = None
+
+    def cancel_gesture(self) -> None:
+        """Ends an in-flight gesture without dispatching its release events:
+        drops the DOWN-time snapshot, the gesture clock, and the pending
+        hold timer. Same contract as ControllerKey.cancel_gesture -- for
+        paths where the physical release can never reach this dial
+        (ScreenSaver.show() confiscates the whole input set mid-hold; the
+        release then lands on the replacement dial and is swallowed)."""
+        self.down_start_time = None
+        self.stop_hold_timer()
+        self._gesture = None
+
     def on_hold_timer_end(self):
-        state = self.get_active_state()
-        state.own_actions_event_callback_threaded(
-            event=Input.Dial.Events.HOLD_START
+        gesture = self._gesture
+        if gesture is None:
+            # The gesture already ended: the UP branch or a cancel_gesture()
+            # raced this callback past the timer's cancel(). A late
+            # HOLD_START must not fire at all -- and especially must not
+            # live-resolve onto whatever page happens to be active now.
+            return
+        gesture_state, gesture_actions = gesture
+        gesture_state.own_actions_event_callback_threaded(
+            event=Input.Dial.Events.HOLD_START,
+            actions=gesture_actions,
         )
 
     def get_touch_screen(self) -> ControllerTouchScreen:
@@ -4600,45 +4644,84 @@ class ControllerDial(ControllerInput):
             # Only on push, not on hold to allow actions to enable the screensaver without directly causing it to wake up again
             self.deck_controller.screen_saver.on_key_change()
         if screensaver_was_showing:
+            if event_type == DialEventType.PUSH and not value:
+                # A release swallowed by the screensaver still ends the
+                # physical gesture (see ControllerKey.event_callback's
+                # matching branch). Belt-and-braces: show() already cancels
+                # gestures on the input set it stashes.
+                self.cancel_gesture()
             return
-        
+
         active_state = self.get_active_state()
         if event_type == DialEventType.PUSH:
             if value:
                 self.down_start_time = time.time()
+                # Snapshot the state and its resolved actions NOW (#123, see
+                # __init__): every event of this gesture -- including this
+                # DOWN, which otherwise resolves actions only when the pool
+                # worker runs -- goes to the actions that were on the dial
+                # when it was pressed, regardless of page swaps in between.
+                gesture_actions = active_state.get_own_actions()
+                self._gesture = (active_state, gesture_actions)
                 self.start_hold_timer()
                 active_state.own_actions_event_callback_threaded(
                     event=Input.Dial.Events.DOWN,
-                    show_notifications=True
+                    show_notifications=True,
+                    actions=gesture_actions
                 )
             elif self.down_start_time is not None:
+                gesture = self._gesture
+                if gesture is not None:
+                    gesture_state, gesture_actions = gesture
+                else:
+                    gesture_state, gesture_actions = active_state, None
                 self.stop_hold_timer()
                 if time.time() >= self.down_start_time + self.deck_controller.hold_time:
-                    active_state.own_actions_event_callback_threaded(
-                        event=Input.Dial.Events.HOLD_STOP
+                    gesture_state.own_actions_event_callback_threaded(
+                        event=Input.Dial.Events.HOLD_STOP,
+                        actions=gesture_actions
                     )
                 else:
-                    active_state.own_actions_event_callback_threaded(
-                        event=Input.Dial.Events.SHORT_UP
+                    gesture_state.own_actions_event_callback_threaded(
+                        event=Input.Dial.Events.SHORT_UP,
+                        actions=gesture_actions
                     )
                 self.down_start_time = None
-                active_state.own_actions_event_callback_threaded(
-                    event=Input.Dial.Events.UP
+                gesture_state.own_actions_event_callback_threaded(
+                    event=Input.Dial.Events.UP,
+                    actions=gesture_actions
                 )
-        
+                # Gesture complete: drop the snapshot (single atomic store,
+                # see __init__) so a superseded page's action objects aren't
+                # pinned past their last event.
+                self._gesture = None
+            else:
+                # Release with no gesture clock: the matching DOWN was
+                # swallowed or its bookkeeping already cleared. Nothing to
+                # dispatch, but a still-armed hold timer or pinned snapshot
+                # from that orphaned DOWN must not outlive the release.
+                self.cancel_gesture()
+
         elif event_type == DialEventType.TURN:
+            # Resolve the target actions at READ time (#123): a turn is a
+            # single event, but the default dispatch resolves against
+            # active_page when the pool worker runs -- a page swap in that
+            # window used to redirect the turn to the new page's actions.
+            turn_actions = active_state.get_own_actions()
             # value is the HID report's signed detent count — fast rotation
             # coalesces several detents into one report, so forward the
             # magnitude instead of collapsing it to a single event.
             if value < 0:
                 active_state.own_actions_event_callback_threaded(
                     event=Input.Dial.Events.TURN_CCW,
-                    data={"ticks": -value}
+                    data={"ticks": -value},
+                    actions=turn_actions
                 )
             else:
                 active_state.own_actions_event_callback_threaded(
                     event=Input.Dial.Events.TURN_CW,
-                    data={"ticks": value}
+                    data={"ticks": value},
+                    actions=turn_actions
                 )
 
     def load_from_input_dict(self, page_dict, update: bool = True):
