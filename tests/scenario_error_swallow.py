@@ -20,6 +20,7 @@ import fixtures
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_error_swallow")
     controller, media_player, deck_manager = fixtures.make_stub_controller(n_keys=3)
     deck = controller.deck
     page = controller.active_page

@@ -19,6 +19,7 @@ import globals as gl
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_shutdown_clearclose")
     controller = fixtures.make_headless_controller(serial="shutdown-cc-1")
     deck = fixtures.raw_deck(controller)
     key_count = controller.deck.key_count()
@@ -67,7 +68,12 @@ def main() -> None:
     controller.keep_actions_ticking = False
     controller.delete()
     delete_elapsed = time.monotonic() - t0
-    assert delete_elapsed < 1.0, f"delete() took too long after shutdown: {delete_elapsed:.2f}s"
+    # Liveness ceiling: media_player.stop() polls `running`, already False after
+    # close_all() above, so delete() must NOT incur a fresh 2s stop wait -- it
+    # returns fast (~ms). 1.5s stays cleanly below the 2s stop timeout (so it
+    # still catches "it took a full fresh stop wait") while giving a loaded CI
+    # runner 50% more headroom than the original 1.0s (#69 flake hardening).
+    assert delete_elapsed < 1.5, f"delete() took too long after shutdown: {delete_elapsed:.2f}s"
 
     if controller in gl.deck_manager.deck_controller:
         gl.deck_manager.deck_controller.remove(controller)

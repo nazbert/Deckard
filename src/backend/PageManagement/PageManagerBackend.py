@@ -381,6 +381,25 @@ class PageManagerBackend:
 
         # Iterate over all deck controllers to handle any that are using the page to be removed
         for controller in gl.deck_manager.deck_controller:
+            # A page change requested while the screensaver owns the deck is
+            # stashed as _screensaver_pending_page (load_page's screensaver
+            # guard) -- invisible to the active_page checks below. If THAT
+            # page is being deleted, drop the request and its cache entry:
+            # hide() would otherwise load a page whose file is gone, and the
+            # first save would resurrect the deleted file (issue #129). The
+            # controller then simply stays on its current page on dismiss.
+            pending = getattr(controller, "_screensaver_pending_page", None)
+            if pending is not None and pending.json_path == page_path:
+                controller._screensaver_pending_page = None
+                with self._pages_lock:
+                    controller_pages = self.pages.get(controller, {})
+                    entry = controller_pages.pop(page_path, None)
+                    if not controller_pages:
+                        self.pages.pop(controller, None)
+                if entry is not None:
+                    # Outside the lock, same rationale as the teardown below.
+                    entry["page"].clear_action_objects()
+
             active_page = controller.active_page
 
             # Skip controllers without an active page or not using the page to be deleted

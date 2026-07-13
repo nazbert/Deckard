@@ -144,6 +144,22 @@ class PluginManager:
             if folder.startswith(".") or not os.path.isdir(os.path.join(gl.PLUGIN_DIR, folder)):
                 # Stray files and hidden directories in the plugin dir are not plugins.
                 continue
+            if "." in folder:
+                # A dot makes the import below structurally impossible:
+                # `plugins.<folder>.main` parses every dot as a package
+                # boundary, so e.g. a timestamped backup dir
+                # (com_x_Plugin.bak.20260703) produced a ModuleNotFoundError
+                # traceback and a false "failed to load" toast entry on every
+                # startup (#133). Not a plugin failure -- warn without a
+                # traceback and keep it out of load_errors. (Deliberately
+                # only dots, not isidentifier(): dash/digit-leading names are
+                # importable through importlib and may be real plugins.)
+                log.warning(
+                    f"Skipping plugin directory '{folder}': dots in the name make "
+                    f"it unimportable as a Python module -- rename it to load it "
+                    f"as a plugin, or ignore this if it is a backup"
+                )
+                continue
             # Import main module
             import_string = f"plugins.{folder}.main"
             if import_string not in sys.modules.keys():

@@ -257,6 +257,7 @@ def check_sni_double_register_keeps_menu_live() -> None:
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_tray_reregister")
     check_base_double_register_no_orphan()
     check_sni_double_register_keeps_menu_live()
 

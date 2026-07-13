@@ -25,6 +25,7 @@ from src.backend.DeckManagement.DeckController import ClearMsg
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_clear_ordering")
     controller, media_player, deck_manager = fixtures.make_stub_controller()
     deck = controller.deck
     page = controller.active_page

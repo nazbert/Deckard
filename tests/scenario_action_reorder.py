@@ -58,6 +58,10 @@ from src.windows.mainWindow.elements.Sidebar.elements.ActionManager import (
     ActionRow,
 )
 
+# This scenario drives its checks at module top level (no main()); start the
+# watchdog here so a hang in the code under test fails fast (#69).
+fixtures.start_watchdog(60, label="scenario_action_reorder")
+
 FAILURES: list[str] = []
 
 

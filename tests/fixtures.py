@@ -124,38 +124,47 @@ class StubDeckManager:
         self.connect_calls += 1
 
     def close_all(self) -> None:
-        """Mirrors the real DeckManager.close_all() (M1: submits a terminal
-        ClearAndCloseMsg per controller, then joins each media thread with a
-        bounded timeout) -- see DeckManager.py's close_all for the
-        authoritative version this must stay in sync with."""
-        from src.backend.DeckManagement.DeckController import ClearAndCloseMsg
+        """Delegates to the REAL close protocol (#69): both this stub and the
+        real DeckManager.close_all now call close_all_controllers() in
+        DeckManager.py, so scenarios that go through the stub exercise
+        production code instead of a copy that could drift."""
+        from src.backend.DeckManagement.DeckManager import close_all_controllers
 
-        pending_joins = []
-        for controller in list(self.deck_controller):
-            if controller.deck is None:
-                continue
-            if not controller.deck.is_open():
-                continue
-            media_player = getattr(controller, "media_player", None)
-            if media_player is None:
-                try:
-                    controller.deck.close()
-                except Exception:
-                    pass
-                continue
-            media_player.submit_control(ClearAndCloseMsg())
-            pending_joins.append(controller)
+        close_all_controllers(self.deck_controller)
 
-        for controller in pending_joins:
-            controller.media_player.stop(timeout=2.0)
+
+# Tier-mixing guard (#69): the unit and integration tiers install different,
+# incompatible gl.* graphs (stub SettingsManager/DeckManager vs the real
+# SettingsManager + PageManagerBackend + SignalManager). Mixing them in one
+# process is silently order-dependent -- e.g. a real DeckController built after
+# install_stub_globals() would dereference stub collaborators that don't
+# implement what it needs. These flags let each installer refuse loudly if the
+# other tier is already live, turning a subtle wrong-tier bug into an
+# immediate, explanatory failure.
+_stub_globals_installed = False
+_integration_globals_installed = False
 
 
 def install_stub_globals(app_settings: dict = None) -> StubDeckManager:
     """Unit tier: installs a StubSettingsManager + StubDeckManager on `gl`.
-    Returns the StubDeckManager for assertions (e.g. `.remove_calls`)."""
+    Returns the StubDeckManager for assertions (e.g. `.remove_calls`).
+
+    Refuses if the integration tier is already installed in this process
+    (#69 tier-mixing): the two gl.* graphs are incompatible, and mixing them
+    was previously silent and order-dependent."""
+    global _stub_globals_installed
+    if _integration_globals_installed:
+        raise RuntimeError(
+            "install_stub_globals() called after the INTEGRATION tier is already "
+            "installed in this process. The unit and integration gl.* graphs are "
+            "incompatible -- a scenario must use exactly one tier. Split the mixed "
+            "assertions into separate scenario_*.py files (each runs in its own "
+            "subprocess) instead of calling both installers here."
+        )
     gl.settings_manager = StubSettingsManager(app_settings=app_settings)
     deck_manager = StubDeckManager()
     gl.deck_manager = deck_manager
+    _stub_globals_installed = True
     return deck_manager
 
 
@@ -232,13 +241,20 @@ class StubDeckController:
     queues dereference: _page_gen_lock, active_page, _page_load_generation,
     deck, serial_number(), background.video, inputs[Input.Key/Dial/
     Touchscreen], and get_touchscreen_image_size() (read by
-    MediaPlayerSetTouchscreenImageTask.run). Also mirrors the write-result/
-    resume-repaint methods DeckController gained in M2
-    (_on_write_result/_schedule_full_repaint/_reset_dedup_hashes) -- the
-    task classes and MediaPlayerThread.check_resume_gap call these by name,
-    so the stub must provide equivalents. Keep these in sync with
-    DeckController.py; `repaint_count` is a test-only counter with no real
-    equivalent."""
+    MediaPlayerSetTouchscreenImageTask.run).
+
+    The write-result/resume-repaint methods DeckController gained in M2
+    (_on_write_result/_schedule_full_repaint/_run_pending_repaint/
+    _reset_dedup_hashes) are NOT re-implemented here -- they're bound to the
+    REAL DeckController functions just below this class (#69 stub-drift:
+    scenario_error_swallow/resume_repaint/shutdown_clearclose used to test
+    hand-mirrored copies; delegating makes drift impossible). The real
+    methods only touch attributes/methods this stub already provides
+    (_full_repaint_pending, _had_write_failure, _last_full_repaint_ts,
+    inputs[*]._last_*_hash, update_all_inputs()). `repaint_count` is a
+    test-only counter with no real equivalent; it's incremented from
+    update_all_inputs() -- the one call the real _run_pending_repaint makes
+    per fired repaint -- so binding the real method keeps the count exact."""
 
     def __init__(self, deck=None, serial: str = "stub-serial-1", n_keys: int = 0, has_touchscreen: bool = False):
         self.deck = deck if deck is not None else FaultyFakeDeck(serial_number=serial)
@@ -281,52 +297,21 @@ class StubDeckController:
             size = self.get_touchscreen_image_size()
             self.deck.set_touchscreen_image(b"\x00" * 16, x_pos=0, y_pos=0, width=size[0], height=size[1])
 
-    def _reset_dedup_hashes(self) -> None:
-        """Mirrors DeckController._reset_dedup_hashes (M2)."""
-        for key in self.inputs.get(Input.Key, []):
-            key._last_img_hash = None
-            key._last_enqueued_hash = None
-        for touchscreen in self.inputs.get(Input.Touchscreen, []):
-            touchscreen._last_img_hash = None
-            touchscreen._last_enqueued_hash = None
+    # _reset_dedup_hashes / _schedule_full_repaint / _run_pending_repaint /
+    # _on_write_result are bound to the REAL DeckController functions below
+    # this class (#69 stub-drift), not re-implemented here.
 
     def update_all_inputs(self, gen=None) -> None:
         """Mirrors DeckController.update_all_inputs's key/touchscreen
         fan-out (the unit tier has no background-video branch to skip --
-        see StubBackground)."""
+        see StubBackground). Bumps the test-only repaint_count: the real
+        _run_pending_repaint (bound below) calls update_all_inputs() exactly
+        once per fired repaint, so this is where the counter belongs now that
+        _run_pending_repaint is the production method itself."""
         for t in self.inputs:
             for i in self.inputs[t]:
                 i.update()
-
-    def _schedule_full_repaint(self) -> None:
-        """Mirrors DeckController._schedule_full_repaint (M2): arms the
-        pending flag; _run_pending_repaint fires it (deferred, not dropped,
-        on rate-limit)."""
-        self._full_repaint_pending = True
-
-    def _run_pending_repaint(self) -> bool:
-        """Mirrors DeckController._run_pending_repaint (M2)."""
-        if not self._full_repaint_pending:
-            return False
-        now = time.time()
-        if now - self._last_full_repaint_ts < 2.0:
-            return False
-        self._full_repaint_pending = False
-        self._last_full_repaint_ts = now
-        self._reset_dedup_hashes()
-        self.update_all_inputs()
         self.repaint_count += 1
-        return True
-
-    def _on_write_result(self, success: bool) -> None:
-        """Mirrors DeckController._on_write_result (M2): every failure arms
-        the pending repaint; the loop's 2s cadence retries until one lands."""
-        if success:
-            if self._had_write_failure:
-                self._had_write_failure = False
-        else:
-            self._had_write_failure = True
-            self._full_repaint_pending = True
 
     def new_page(self):
         """A fresh opaque page sentinel, distinct from .active_page."""
@@ -338,6 +323,34 @@ class StubDeckController:
             return self._page_load_generation
 
 
+_stub_methods_bound = False
+
+
+def _bind_real_deckcontroller_methods() -> None:
+    """#69 stub-drift: delegate the M2 write-result / resume-repaint protocol
+    to the REAL DeckController functions instead of hand-mirroring copies, so
+    scenario_error_swallow / resume_repaint / shutdown_clearclose exercise
+    production code and the copies can never silently drift.
+
+    Done lazily (from make_stub_controller, the only path that instantiates a
+    StubDeckController) rather than at module scope: importing DeckController
+    is NOT free -- it pulls psutil/timer_wheel/mem_telemetry and their
+    module-level side effects, which perturb the isolated GLib/DBus main loop
+    the pure-DBus scenarios (e.g. scenario_tray_reregister) pump. The unit
+    tier already imports DeckController here, so no new import is introduced;
+    the pure-DBus tier never calls this, so it stays untouched. Idempotent."""
+    global _stub_methods_bound
+    if _stub_methods_bound:
+        return
+    from src.backend.DeckManagement.DeckController import DeckController as _RealDeckController
+
+    StubDeckController._reset_dedup_hashes = _RealDeckController._reset_dedup_hashes
+    StubDeckController._schedule_full_repaint = _RealDeckController._schedule_full_repaint
+    StubDeckController._run_pending_repaint = _RealDeckController._run_pending_repaint
+    StubDeckController._on_write_result = _RealDeckController._on_write_result
+    _stub_methods_bound = True
+
+
 def make_stub_controller(serial: str = "stub-serial-1", n_keys: int = 0, has_touchscreen: bool = False):
     """Builds a StubDeckController over a fresh FaultyFakeDeck and wires a
     real MediaPlayerThread to it. The thread is constructed but NOT started
@@ -346,6 +359,7 @@ def make_stub_controller(serial: str = "stub-serial-1", n_keys: int = 0, has_tou
     (controller, media_player, deck_manager_stub)."""
     from src.backend.DeckManagement.DeckController import MediaPlayerThread
 
+    _bind_real_deckcontroller_methods()
     deck_manager = install_stub_globals()
     controller = StubDeckController(serial=serial, n_keys=n_keys, has_touchscreen=has_touchscreen)
     media_player = MediaPlayerThread(deck_controller=controller)
@@ -458,16 +472,25 @@ def seed_page(page_name: str = "Main", data_dir: str = None) -> str:
     return path
 
 
-_integration_globals_installed = False
-
-
 def _install_integration_globals() -> None:
     """Populates the minimum gl.* graph DeckController.__init__/load_page
     dereference. Idempotent -- safe across multiple headless controllers in
-    one process (see scenario_two_decks)."""
+    one process (see scenario_two_decks).
+
+    Refuses if the unit tier is already installed (#69 tier-mixing): the two
+    gl.* graphs are incompatible -- see install_stub_globals()."""
     global _integration_globals_installed
     if _integration_globals_installed:
         return
+    if _stub_globals_installed:
+        raise RuntimeError(
+            "make_headless_controller()/_install_integration_globals() called "
+            "after the UNIT tier (install_stub_globals / make_stub_controller) is "
+            "already installed in this process. The unit and integration gl.* "
+            "graphs are incompatible -- a scenario must use exactly one tier. "
+            "Split the mixed assertions into separate scenario_*.py files (each "
+            "runs in its own subprocess) instead of calling both installers here."
+        )
 
     from src.backend.SettingsManager import SettingsManager
     from src.backend.PageManagement.PageManagerBackend import PageManagerBackend
@@ -550,3 +573,150 @@ def teardown(controller) -> None:
     tick_thread = getattr(controller, "tick_thread", None)
     if tick_thread is not None:
         tick_thread.join(timeout=2.0)
+
+
+# ===================================================================== #
+# Stub plugin manager + latch action (wipe-restore scenarios, issue #131)
+# ===================================================================== #
+#
+# These drive the REAL DeckController/Page/ControllerKey/ActionCore state
+# lifecycle with a minimal action injected via a stub gl.plugin_manager --
+# the harness otherwise never installs a plugin_manager, so load_page over a
+# page whose keys carry actions needs this shim. Promoted out of the
+# graduated diag_wipe_contract.py (issue #70) so more than one scenario can
+# reuse the pattern.
+
+STUB_ACTION_ID = "dev_test_LatchAction"
+
+
+def make_latch_action_class():
+    """Returns a fresh LatchAction subclass of the REAL ActionCore.
+
+    LatchAction is a *non-resetting deduping* action: it paints state 1 once
+    (in on_ready/on_tick) and never calls set_media again. That is the worst
+    case the state-wipe robustness gap (issue #131) relies on the plugin to
+    cover -- a plugin whose on_update short-circuits without resetting never
+    repaints after the framework wipes its key_image, so the key settles
+    permanently blank.
+
+    ActionCore is imported lazily (it pulls in GTK) so importing `fixtures`
+    stays cheap for unit-tier scenarios that never touch this path. A fresh
+    subclass per call keeps the injected `icon_path` closed over per test
+    rather than smeared across a module global.
+    """
+    from src.backend.PluginManager.ActionCore import ActionCore
+
+    class LatchAction(ActionCore):
+        # Set by make_stub_plugin_manager's factory before construction.
+        icon_path = None
+
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.current_state = -1
+
+        def load_event_overrides(self):
+            pass
+
+        def load_initial_generative_ui(self):
+            pass
+
+        def has_image_control(self):
+            return True
+
+        def on_ready(self):
+            self.on_tick()
+
+        def on_tick(self):
+            if self.current_state == 1:
+                return
+            self.current_state = 1
+            self.set_media(media_path=type(self).icon_path, size=0.8)
+
+    return LatchAction
+
+
+class _StubActionHolder:
+    """Minimal ActionHolder stand-in: the loader only calls
+    get_is_compatible() and init_and_get_action() on it."""
+
+    def __init__(self, action_cls, action_id: str, icon_path):
+        self._action_cls = action_cls
+        self._action_id = action_id
+        self._icon_path = icon_path
+
+    def get_is_compatible(self):
+        return True
+
+    def init_and_get_action(self, deck_controller, page, state, input_ident):
+        self._action_cls.icon_path = self._icon_path
+        return self._action_cls(
+            action_id=self._action_id, action_name="LatchAction",
+            deck_controller=deck_controller, page=page,
+            plugin_base=_FAKE_PLUGIN_BASE, state=state, input_ident=input_ident,
+        )
+
+
+class _StubPluginManager:
+    """Minimal gl.plugin_manager stand-in for action-loading scenarios: only
+    the three methods Page.load_action_objects() dereferences are
+    implemented."""
+
+    def __init__(self, action_holder, action_id: str):
+        self._holder = action_holder
+        self._action_id = action_id
+
+    def get_action_holder_from_id(self, action_id):
+        return self._holder if action_id == self._action_id else None
+
+    def get_plugin_id_from_action_id(self, action_id):
+        return "dev_test"
+
+    def get_is_plugin_out_of_date(self, plugin_id):
+        return False
+
+
+import types as _types  # noqa: E402  (local to this additive section)
+
+_FAKE_PLUGIN_BASE = _types.SimpleNamespace(PATH="/tmp", backend=None)
+
+
+def install_stub_plugin_manager(action_cls, icon_path, action_id: str = STUB_ACTION_ID):
+    """Installs a stub gl.plugin_manager that resolves `action_id` to
+    `action_cls` (a real ActionCore subclass, e.g. from
+    make_latch_action_class()), painting `icon_path`. Returns the stub.
+
+    Call BEFORE make_headless_controller() -- load_default_page() runs at the
+    end of DeckController.__init__ and would otherwise hit the (unset)
+    plugin_manager if a seeded page carried an action."""
+    holder = _StubActionHolder(action_cls, action_id, icon_path)
+    gl.plugin_manager = _StubPluginManager(holder, action_id)
+    return gl.plugin_manager
+
+
+def seed_action_page(page_name: str, key_ident: str, action_id: str = STUB_ACTION_ID,
+                     data_dir: str = None) -> str:
+    """Seeds a page whose single key carries `action_id` as its
+    image-control action (state 0). Companion to seed_page() /
+    seed_empty_action_page()."""
+    data_dir = data_dir if data_dir is not None else gl.DATA_PATH
+    pages_dir = os.path.join(data_dir, "pages")
+    os.makedirs(pages_dir, exist_ok=True)
+    path = os.path.join(pages_dir, f"{page_name}.json")
+    with open(path, "w") as f:
+        json.dump({"keys": {key_ident: {"states": {"0": {
+            "actions": [{"id": action_id, "settings": {}}],
+            "image-control-action": 0,
+        }}}}}, f)
+    return path
+
+
+def seed_empty_action_page(page_name: str, key_ident: str, data_dir: str = None) -> str:
+    """Seeds a page whose same key has NO action and NO image-control-action
+    -- loading it must CLEAR the slot (the no-bleed contract)."""
+    data_dir = data_dir if data_dir is not None else gl.DATA_PATH
+    pages_dir = os.path.join(data_dir, "pages")
+    os.makedirs(pages_dir, exist_ok=True)
+    path = os.path.join(pages_dir, f"{page_name}.json")
+    with open(path, "w") as f:
+        json.dump({"keys": {key_ident: {"states": {"0": {"actions": []}}}}}, f)
+    return path

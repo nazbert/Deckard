@@ -17,6 +17,7 @@ import fixtures
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_dedup_coherence")
     controller = fixtures.make_headless_controller(serial="dedup-1")
     deck = fixtures.raw_deck(controller)
 

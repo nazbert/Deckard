@@ -35,6 +35,7 @@ def _storm(controller, pages, n: int) -> None:
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_two_decks")
     controller1 = fixtures.make_headless_controller(serial="two-decks-1")
     controller2 = fixtures.make_headless_controller(serial="two-decks-2")
     deck1 = fixtures.raw_deck(controller1)

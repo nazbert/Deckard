@@ -250,6 +250,7 @@ def check_x11_watcher_survives() -> None:
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_window_watcher_robustness")
     check_pageless_deck_routing()
     check_pageless_guard_is_a_clean_noop()
     check_x11_watcher_survives()

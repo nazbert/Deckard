@@ -281,7 +281,16 @@ class MediaPlayerThread(threading.Thread):
     YIELD_STRIDE = 3
 
     def __init__(self, deck_controller: "DeckController"):
-        super().__init__(name="MediaPlayerThread", daemon=True)
+        # Suffix the thread name with the deck serial so per-deck writer
+        # attribution is possible when two decks run at once (previously every
+        # media thread was just "MediaPlayerThread", making the journal's
+        # thread_name ambiguous in two-deck scenarios). serial_number() is a
+        # cheap attribute read that never raises on any real or fake deck.
+        try:
+            _serial = deck_controller.serial_number()
+        except Exception:
+            _serial = "unknown"
+        super().__init__(name=f"MediaPlayerThread-{_serial}", daemon=True)
         self.deck_controller: DeckController = deck_controller
         self.FPS = 30 # Max refresh rate of the internal displays
 
@@ -332,10 +341,13 @@ class MediaPlayerThread(threading.Thread):
         # clear) never wait behind ticker/task work.
         self.control_q: collections.deque = collections.deque()
         # Per-writer monotonic stamp counter: image/touchscreen tasks are
-        # stamped with next(self._submit_seq) at submission (add_image_task/
-        # add_touchscreen_task), and a Clear captures the counter at its own
-        # submission (next_submit_seq()) so it can tell which already-queued
-        # frames predate it (plan §2.1/§2.2).
+        # stamped with next(self._submit_seq) under _slot_lock, atomically
+        # with their slot assignment (add_image_task/add_touchscreen_task --
+        # issue #130: stamping before the lock let racing producers assign
+        # out of seq order, leaving a slot holding an older frame), and a
+        # Clear captures the counter at its own submission (next_submit_seq())
+        # so it can tell which already-queued frames predate it (plan
+        # §2.1/§2.2).
         self._submit_seq = itertools.count()
 
         # Wall-clock gap detection (plan §4 M2): a gap much larger than the
@@ -756,11 +768,19 @@ class MediaPlayerThread(threading.Thread):
             page=page if page is not None else self.deck_controller.active_page,
             native_image=native_image,
             config_gen=config_gen,
-            submit_seq=self.next_submit_seq(),
             controller_touchscreen=controller_touchscreen,
             img_hash=img_hash
         )
+        # Stamp INSIDE the slot lock (issue #130): allocating the seq before
+        # taking the lock let two racing producers (media tick vs. a dial
+        # update on another thread) allocate in one order and assign in the
+        # other, leaving the single slot holding the LOWER-seq (older) frame.
+        # With stamp+assign atomic, seq order is assignment order, so the
+        # slot always ends up with the newest frame -- and a Clear's
+        # "survives if submitted after" comparison stays consistent with
+        # what the slot actually holds.
         with self._slot_lock:
+            task.submit_seq = self.next_submit_seq()
             self.touchscreen_task = task
         self._wake_event.set()
 
@@ -772,10 +792,12 @@ class MediaPlayerThread(threading.Thread):
             native_image=native_image,
             config_gen=config_gen,
             controller_key=controller_key,
-            img_hash=img_hash,
-            submit_seq=self.next_submit_seq()
+            img_hash=img_hash
         )
+        # Same stamp-inside-the-lock as add_touchscreen_task (issue #130):
+        # the per-key slots have the identical producer-vs-producer shape.
         with self._slot_lock:
+            task.submit_seq = self.next_submit_seq()
             self.image_tasks[key_index] = task
         self._wake_event.set()
 
@@ -957,8 +979,13 @@ class DeckController:
         # Set once by close() and never cleared (plan P1.3): gates re-entrant
         # producer paths (ScreenSaver.show/hide/on_key_change, load_page)
         # that would otherwise resurrect a controller mid-teardown, and makes
-        # close() itself idempotent against a second call.
+        # close() itself idempotent against a second call. The transition is
+        # made under _close_lock (issue #56 item 5): unplug-thread and
+        # app-quit teardown can race, and an unlocked check-then-set let both
+        # callers pass the gate and run the teardown sweep -- plugin
+        # on_removed hooks and device closes -- concurrently.
         self._closing: bool = False
+        self._close_lock = threading.Lock()
 
         # Timestamp of the last post-load GC (see maybe_collect_garbage).
         self._last_gc_time: float = 0.0
@@ -2022,9 +2049,16 @@ class DeckController:
         + caches); the rest of the sequence (device/thread/registration
         teardown) always runs.
         """
-        if self._closing:
-            return
-        self._closing = True
+        # Locked compare-and-set (issue #56 item 5): two teardown callers
+        # (USB unplug thread vs. app-quit main thread) racing the unlocked
+        # check-then-set could both pass the gate and run the whole sweep
+        # concurrently -- duplicate plugin on_removed hooks, double device
+        # close. Only the transition is under the lock; the sweep itself
+        # stays unlocked (it can block on plugin hooks).
+        with self._close_lock:
+            if self._closing:
+                return
+            self._closing = True
 
         # Invalidate any in-flight page load NOW (issue #15): a load_page
         # that already passed the _closing gate could otherwise attach a
@@ -3572,6 +3606,13 @@ class ControllerInput:
 
         self.enable_states: bool = True
 
+        # Serializes state-object replacement (create_n_states during a load)
+        # against action media writes (ActionCore.set_media): a paint must
+        # land either fully before the wipe (so the load's stash-and-restore
+        # carries it over) or fully after (on the recreated state object) --
+        # never on a destroyed state (issue #131).
+        self._states_lock = threading.RLock()
+
         self.states: dict[int, ControllerInputState] = {
             0: self.ControllerStateClass(self, 0),
         }
@@ -4156,7 +4197,49 @@ class ControllerKey(ControllerInput):
         Attention: Disabling load_media might result into disabling custom user assets
         """
         n_states = len(input_dict.get("states", {}))
-        self.create_n_states(max(1, n_states))
+
+        # create_n_states destroys every state object, closing any action-set
+        # media; afterwards only on_update() can repaint, and an action that
+        # dedups there never does -- the key settled permanently blank (issue
+        # #131). Detach action-owned media (plus its action layout) before the
+        # wipe and restore it only when the exact action object that painted
+        # it still drives the recreated state: a same-page reload reuses the
+        # action objects (identity match -> restore, no blank), a cross-page
+        # load builds new ones (mismatch -> close, no bleed -- pinned by
+        # scenario_wipe_no_bleed). Under _states_lock so a concurrent
+        # set_media paint lands either fully before the wipe (stash carries
+        # it over) or fully after (on the recreated state) -- never on a
+        # destroyed state object.
+        with self._states_lock:
+            stashed = {}
+            for index, old_state in self.states.items():
+                owner = old_state.media_owner_action
+                if owner is None:
+                    continue
+                if old_state.key_image is None and old_state.key_video is None:
+                    continue
+                stashed[index] = (owner, old_state.key_image, old_state.key_video,
+                                  old_state.layout_manager.action_layout)
+                old_state.key_image = None
+                old_state.key_video = None
+                old_state.media_owner_action = None
+
+            self.create_n_states(max(1, n_states))
+
+            restored: set[int] = set()
+            for index, (owner, key_image, key_video, action_layout) in stashed.items():
+                new_state = self.states.get(index)
+                if new_state is not None and owner in new_state.get_own_actions():
+                    new_state.key_image = key_image
+                    new_state.key_video = key_video
+                    new_state.media_owner_action = owner
+                    new_state.layout_manager.set_action_layout(action_layout, update=False)
+                    restored.add(index)
+                else:
+                    if key_image is not None:
+                        key_image.close()
+                    if key_video is not None:
+                        key_video.close()
 
         old_state_index = self.state
 
@@ -4170,17 +4253,16 @@ class ControllerKey(ControllerInput):
 
             state_dict = input_dict["states"][str(state.state)]
 
-            ## Load media - why here? so that it doesn't overwrite the images chosen by the actions
-            if load_media:
-                state.key_image = None
-                state.key_video = None
-            
             if load_labels:
                 state.label_manager.clear_labels()
 
-            # Reset action layout
-            layout = ImageLayout()
-            state.layout_manager.set_action_layout(layout, update=False)
+            # Reset action layout -- except for a state whose action-owned
+            # media was just restored above: its action layout belongs to the
+            # same still-present action, and resetting it would half-restore
+            # the paint (image back, alignment/size lost).
+            if state.state not in restored:
+                layout = ImageLayout()
+                state.layout_manager.set_action_layout(layout, update=False)
 
             state.own_actions_update() # Why not threaded? Because this would mean that some image changing calls might get executed after the next lines which blocks custom assets
 
@@ -4772,6 +4854,13 @@ class ControllerTouchScreenState(ControllerInputState):
         self.background_video: "InputVideo" = None
         self._background_video_failed: str = None
         self._background_video_lock = threading.Lock()
+        # The display-saturation factor background_video was constructed
+        # (and its shared tile cache acquired) at. Part of the keep-check in
+        # _get_background_video_frame: the factor is baked into the cache at
+        # construction and set_playback never revisits it, so reusing the
+        # video across a saturation change would keep serving frames
+        # enhanced at the old factor (issue #132).
+        self._background_video_saturation: float = None
         # Timestamp gate for the fps render cap in on_media_player_tick.
         self._last_background_video_render: float = 0.0
 
@@ -4835,8 +4924,18 @@ class ControllerTouchScreenState(ControllerInputState):
             if path == self._background_video_failed:
                 return None
 
+            # Saturation is part of the keep-check (issue #132): the factor
+            # is baked into the video's shared tile cache at construction
+            # (mp4_tile_cache.acquire) and set_playback only updates
+            # fps/loop, so a factor change must rebuild even for the same
+            # path -- mirroring the key-grid BackgroundVideo keep-check and
+            # the fitted-IMAGE cache key one method up. Same 0.001 tolerance
+            # as the BackgroundVideo check.
+            saturation = self.controller_touch.deck_controller.get_display_saturation()
+
             video = self.background_video
-            if video is None or video.video_path != path:
+            if (video is None or video.video_path != path
+                    or abs(self._background_video_saturation - saturation) > 0.001):
                 if video is not None:
                     video.close()
                 video = InputVideo(
@@ -4847,6 +4946,7 @@ class ControllerTouchScreenState(ControllerInputState):
                     natural_speed=True,
                 )
                 self.background_video = video
+                self._background_video_saturation = saturation
             else:
                 video.set_playback(fps=fps, loop=loop)
 
@@ -5092,6 +5192,12 @@ class ControllerKeyState(ControllerInputState):
 
         self.key_image: InputImage = None
         self.key_video: InputVideo = None
+        # The ActionCore that set the current key_image/key_video via
+        # set_media(), or None when the media is page/user-owned. Every other
+        # media writer resets it to None; set_media() re-stamps it after the
+        # write. ControllerKey.load_from_input_dict uses it to carry
+        # action-owned media across the create_n_states wipe (issue #131).
+        self.media_owner_action = None
 
     def close_resources(self) -> None:
         if self.key_image is not None:
@@ -5100,6 +5206,7 @@ class ControllerKeyState(ControllerInputState):
         if self.key_video is not None:
             self.key_video.close()
             self.key_video = None
+        self.media_owner_action = None
 
     def set_image(self, key_image: "InputImage", update: bool = True) -> None:
         if self.key_image is not None:
@@ -5113,6 +5220,7 @@ class ControllerKeyState(ControllerInputState):
 
         self.key_image = key_image
         self.key_video = None
+        self.media_owner_action = None
 
         if update:
             self.update()
@@ -5126,6 +5234,7 @@ class ControllerKeyState(ControllerInputState):
         if self.key_image is not None:
             self.key_image.close()
         self.key_image = None
+        self.media_owner_action = None
 
     def clear(self):
         if self.key_video is not None:
@@ -5134,6 +5243,7 @@ class ControllerKeyState(ControllerInputState):
             self.key_video.close()
         self.key_image = None
         self.key_video = None
+        self.media_owner_action = None
         self.label_manager.clear_labels()
         self.layout_manager.clear()
         self.background_manager.set_page_color(None)

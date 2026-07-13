@@ -48,6 +48,46 @@ if not gl.IS_MAC:
 ELGATO_VENDOR_ID = "0fd9"
 
 
+def close_all_controllers(controllers, join_timeout: float = 2.0) -> None:
+    """The terminal close protocol (plan §2.4), extracted so the test harness's
+    StubDeckManager can drive the SAME code the real DeckManager.close_all runs
+    (previously the stub re-implemented it and no scenario exercised this
+    function, #69).
+
+    Submits the terminal ClearAndClose to every open controller first, THEN
+    joins each media thread with a bound: the message drives the writer's own
+    clear+close, so this only waits for it to land -- the app's force_quit timer
+    (or, on the headerBar quit path, nothing -- this bounded join IS that path's
+    only safety) backstops a stuck writer. A controller with no media_player
+    thread (e.g. one that failed mid-construction) is closed best-effort and
+    directly, same as before this change."""
+    pending_joins = []
+    for controller in list(controllers):
+        if controller.deck is None:
+            continue
+        if not controller.deck.is_open():
+            continue
+
+        log.info(f"Closing deck: {controller.deck.get_serial_number()}")
+        media_player = getattr(controller, "media_player", None)
+        if media_player is None:
+            # No writer thread (e.g. controller failed mid-construction):
+            # best-effort direct close, same as before this change.
+            try:
+                controller.deck.close()
+            except Exception as e:
+                log.error(f"Failed to close deck cleanly: {e}")
+            continue
+        try:
+            media_player.submit_control(ClearAndCloseMsg())
+            pending_joins.append(controller)
+        except Exception as e:
+            log.error(f"Failed to submit ClearAndClose for deck: {e}")
+
+    for controller in pending_joins:
+        controller.media_player.stop(timeout=join_timeout)
+
+
 class DeckManager:
     # Backoff schedule for the startup re-enumeration (issue #106): ~60s
     # total window. Instance-overridable so the harness can shrink it.
@@ -427,37 +467,7 @@ class DeckManager:
 
     def close_all(self):
         log.info("Closing all decks")
-        # Submit the terminal ClearAndClose to every controller first, THEN
-        # join each media thread with a bound (plan §2.4): the message drives
-        # the writer's own clear+close, so this only waits for it to land --
-        # the app's force_quit timer (or, on the headerBar quit path, nothing
-        # -- this bounded join IS that path's only safety) backstops a stuck
-        # writer.
-        pending_joins: list["DeckController"] = []
-        for controller in list(self.deck_controller):
-            if controller.deck is None:
-                continue
-            if not controller.deck.is_open():
-                continue
-
-            log.info(f"Closing deck: {controller.deck.get_serial_number()}")
-            media_player = getattr(controller, "media_player", None)
-            if media_player is None:
-                # No writer thread (e.g. controller failed mid-construction):
-                # best-effort direct close, same as before this change.
-                try:
-                    controller.deck.close()
-                except Exception as e:
-                    log.error(f"Failed to close deck cleanly: {e}")
-                continue
-            try:
-                media_player.submit_control(ClearAndCloseMsg())
-                pending_joins.append(controller)
-            except Exception as e:
-                log.error(f"Failed to submit ClearAndClose for deck: {e}")
-
-        for controller in pending_joins:
-            controller.media_player.stop(timeout=2.0)
+        close_all_controllers(self.deck_controller)
 
     def stop_usb_monitoring(self):
         self.usb_monitor.stop_monitoring(timeout=2)

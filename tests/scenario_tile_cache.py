@@ -137,6 +137,88 @@ def check_builder_promotes_while_consumer_plays_from_source() -> None:
     print("PASS: consumer plays from source until the detached builder promotes, then switches over")
 
 
+def check_plays_from_source_in_forced_window() -> None:
+    """#71 (b): check_builder_promotes_while_consumer_plays_from_source guards
+    its from-source assertion behind `if not entry.ready:` -- on a fast
+    machine the tiny-frame builder promotes before the consumer's first
+    get_frame(), so the assertion is skipped and the "plays from source while
+    building" claim passes vacuously.
+
+    Force the window deterministically with a test seam instead of hoping the
+    builder loses the race: monkeypatch _run_builder with a wrapper that
+    blocks on a barrier until the test has driven a from-source read, THEN
+    runs the real builder. Inside that held window entry.ready is guaranteed
+    False, so the from-source assertion runs UNCONDITIONALLY -- it can no
+    longer be skipped."""
+    fixtures.install_stub_globals()
+    # Distinctive frame count/size so this source's md5 -- and thus its cache
+    # filename -- can't collide with any other check's video in the shared
+    # data dir (install_stub_globals reuses one DATA_PATH per process; a
+    # byte-identical video would md5 to an already-promoted cache path,
+    # leaving entry.ready True and starting no builder to hold).
+    video_path = os.path.join(gl.DATA_PATH, "forced_window.mp4")
+    _make_test_video(video_path, n_frames=57, size=(176, 132))
+    size = (56, 56)
+
+    real_run_builder = mp4_tile_cache._run_builder
+    hold = threading.Event()          # test -> builder: you may proceed
+    builder_entered = threading.Event()  # builder -> test: I'm holding
+
+    def _held_run_builder(entry, source_path, out_size, saturation):
+        # Announce we're in the builder thread but have not yet promoted, then
+        # block here so the consumer is guaranteed to see entry.ready == False
+        # for its first reads. Bounded wait so a bug can't wedge the suite.
+        builder_entered.set()
+        if not hold.wait(timeout=15):
+            return  # test never released us -- fail loud via the assertions
+        real_run_builder(entry, source_path, out_size, saturation)
+
+    mp4_tile_cache._run_builder = _held_run_builder
+    try:
+        reader = mp4_tile_cache.acquire(video_path, size, 1.0)
+        try:
+            entry = reader._registry_entry
+
+            # The builder thread must have started and parked in our hold.
+            assert builder_entered.wait(timeout=5), "builder thread never started"
+            # Deterministically inside the window: not promoted yet.
+            assert entry.ready is False, "forced window invariant: builder must not have promoted yet"
+
+            # UNCONDITIONAL from-source assertions (no `if not entry.ready`
+            # guard): the consumer must decode straight from source and must
+            # not have adopted a cache that does not exist yet.
+            first_frame = reader.get_frame(0)
+            assert first_frame is not None, "consumer must decode from source inside the forced window"
+            assert not reader.is_cache_complete(), (
+                "consumer must NOT report a complete cache while the builder "
+                "is held pre-promotion -- it must be playing from source"
+            )
+            assert reader.cap is not None, (
+                "consumer must hold its own source VideoCapture while playing "
+                "from source (released only on switch-over)"
+            )
+            assert not os.path.isfile(entry.path), (
+                "the shared cache file must not exist yet inside the forced "
+                "pre-promotion window"
+            )
+
+            # Release the builder and let it promote, then confirm the
+            # consumer switches over on its next get_frame() -- the tail the
+            # original check already covered, re-verified here end to end.
+            hold.set()
+            assert fixtures.wait_until(lambda: entry.ready, timeout=10.0), "builder never promoted after release"
+            reader.get_frame(1)
+            assert reader.is_cache_complete(), "consumer must adopt the promoted cache on its next get_frame()"
+            assert reader.cap is None, "the source capture must be released on switch-over"
+        finally:
+            hold.set()  # ensure the builder is never left parked
+            mp4_tile_cache.release(reader)
+    finally:
+        mp4_tile_cache._run_builder = real_run_builder
+
+    print("PASS: consumer plays from source in a deterministically-forced pre-promotion window")
+
+
 def check_release_to_zero_closes_captures() -> None:
     fixtures.install_stub_globals()
     video_path = os.path.join(gl.DATA_PATH, "refcount.mp4")
@@ -402,6 +484,7 @@ def main() -> None:
 
     check_shared_file_one_builder()
     check_builder_promotes_while_consumer_plays_from_source()
+    check_plays_from_source_in_forced_window()
     check_release_to_zero_closes_captures()
     check_decode_failure_during_build_clamps_and_releases()
     check_cache_videos_disabled_starts_no_builder()

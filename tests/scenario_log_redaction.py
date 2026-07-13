@@ -118,6 +118,7 @@ def check_scrub_unit() -> None:
 
 
 def main() -> None:
+    fixtures.start_watchdog(60, label="scenario_log_redaction")
     check_scrub_unit()
 
     # THE REAL BOOT WIRING, and nothing else: main() only ever calls
