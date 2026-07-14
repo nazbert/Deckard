@@ -60,12 +60,12 @@ Lock your Stream Deck when your system is locked (available on KDE, GNOME, and C
 Deckard runs from source:
 
 ```sh
-git clone https://github.com/nazbert/deckard.git deckard
-cd deckard
+git clone https://github.com/nazbert/Deckard.git Deckard
+cd Deckard
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt
-ln -s "$(pwd)/scripts/deckard" ~/.local/bin/deckard
-deckard
+ln -s "$(pwd)/scripts/Deckard" ~/.local/bin/Deckard
+Deckard
 ```
 
 Copy `udev.rules` to `/etc/udev/rules.d/` if your user lacks direct access to the deck hardware.

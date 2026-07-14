@@ -146,8 +146,8 @@ class HeaderHamburgerMenuButton(Gtk.MenuButton):
         self.about.set_developer_name("nazbert")
         self.about.set_license_type(Gtk.License.GPL_3_0)
         self.about.set_comments("Control your Stream Decks. A fork of StreamController by Core447.")
-        self.about.set_website("https://github.com/nazbert/deckard")
-        self.about.set_issue_url("https://gitlab.nb-labs.net/naz/deckard/-/issues")
+        self.about.set_website("https://github.com/nazbert/Deckard")
+        self.about.set_issue_url("https://gitlab.nb-labs.net/naz/Deckard/-/issues")
         # self.about.set_support_url("https://discord.com/invite/MSyHM8TN3u")
 
         self.about.set_copyright("Copyright (C) 2024 Core447, 2026 nazbert")
