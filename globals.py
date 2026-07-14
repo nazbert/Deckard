@@ -118,6 +118,23 @@ loggers: dict[str, "Logger"] = {}
 
 app_version: str = "1.5.0-beta.15"  # In breaking.feature.fix-state format
 exact_app_version_check: bool = False
+
+# Deckard fork release version, stamped into the root VERSION file by the CI
+# release pipeline (issue #128). Kept DISTINCT from app_version above -- that one
+# stays upstream-aligned so plugin `min_app_version` gates and the migration
+# system keep working; deckard_version is purely the number shown to users in the
+# About dialog. Resolved from the repo root beside this file so it works for both
+# a source checkout and the /opt/deckard native install. "dev" when unstamped.
+def _read_deckard_version() -> str:
+    try:
+        _root = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(_root, "VERSION")) as f:
+            return f.read().strip() or "dev"
+    except OSError:
+        return "dev"
+
+deckard_version: str = _read_deckard_version()
+del _read_deckard_version
 # Bounded ring buffer of recent log records (shown in the About dialog).
 # logs_lock guards appends/reads against concurrent iteration.
 logs: "deque[str]" = deque(maxlen=10000)
