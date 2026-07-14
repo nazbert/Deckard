@@ -58,7 +58,7 @@ test:compile:
   interruptible: true
   needs: []
   script:
-    - python -m compileall -q main.py globals.py autostart.py permissons.py src GtkHelper tests
+    - python -m compileall -q *.py src GtkHelper tests
 
 # Advisory nudge: an MR should either add a bullet under ## [Unreleased] in
 # CHANGELOG.md or carry the no-changelog label. auto-release adds MR-title
