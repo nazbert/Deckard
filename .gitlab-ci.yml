@@ -11,8 +11,9 @@
 #              clean `git archive` export of $CI_COMMIT_SHA — the same rewrite
 #              flatpak/install.sh does interactively with yq.
 #   release  — nb-labs/ci-automation bump-labeled-MR bot (auto-release +
-#              tag-release) stamping VERSION + CHANGELOG.md, plus a GitLab
-#              Release with the bundle attached on vX.Y.Z tags.
+#              tag-release) stamping VERSION + CHANGELOG.md, a GitLab Release
+#              with the bundle attached on vX.Y.Z tags, then a mirror of that
+#              release (object + bundle) to the GitHub fork.
 #
 # The fork's release version is the root VERSION file (see release.config.mjs)
 # — NOT globals.py's app_version, which stays upstream-aligned because plugins
@@ -190,6 +191,81 @@ release:gitlab:
       release-cli create --tag-name "$CI_COMMIT_TAG" --name "StreamController (fork) $CI_COMMIT_TAG" \
         --description "$(cat release_notes.md)" \
         --assets-link "{\"name\":\"$asset\",\"url\":\"$url\",\"link_type\":\"package\"}"
+
+# ── release mirror (GitHub fork) ─────────────────────────────────────────────
+# Reproduce the just-cut GitLab release on github.com/nazbert/Deckard. A GitLab
+# push mirror (Settings → Repository → Mirroring) already carries branches +
+# tags to the fork; a mirror moves git refs ONLY, so this job adds what it
+# can't — the Release object and the flatpak asset. Kept downstream of
+# release:gitlab (needs it) so GitHub is only ever cut for releases GitLab also
+# got; GitLab stays the source of truth. Pure curl+jq against the REST API (no
+# gh dependency) and idempotent, so a retry / re-tag reconciles rather than
+# 422s. Naming/asset are kept identical to release:gitlab on purpose — both
+# read the same, and the pending Deckard rebrand renames them together.
+#
+# NEEDS a GH_TOKEN project variable (masked + protected; a fine-grained PAT
+# scoped to the fork repo, Contents: read/write). Protected so it is exposed
+# only on protected v* tag pipelines — never on MR/branch runs.
+release:github:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest   # alpine; has apk
+  interruptible: false
+  variables:
+    GITHUB_REPO: nazbert/Deckard
+    GIT_DEPTH: "0"   # full history so the tag push is self-sufficient even if
+                     # the async mirror hasn't landed this commit yet (a shallow
+                     # push of an unknown commit is rejected)
+  needs:
+    - job: build:flatpak
+      artifacts: true
+    - job: release:gitlab      # GitHub is strictly downstream of the canonical release
+      artifacts: false
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+  before_script:
+    - apk add --no-cache curl jq git
+  script:
+    - |
+      set -eu
+      : "${GH_TOKEN:?set GH_TOKEN (masked+protected CI var: fine-grained PAT, Contents:rw on the fork)}"
+      VERSION="${CI_COMMIT_TAG#v}"
+      asset="streamcontroller-${VERSION}-x86_64.flatpak"
+      api="https://api.github.com/repos/${GITHUB_REPO}"
+      auth="Authorization: Bearer ${GH_TOKEN}"
+
+      # Re-derive the notes exactly as release:gitlab did (artifacts aren't
+      # shared) so both releases carry identical text.
+      awk -v v="## [$VERSION]" 'index($0,v)==1{g=1;next} /^## \[/{g=0} g' CHANGELOG.md > release_notes.md
+      [ -s release_notes.md ] || printf 'StreamController fork %s\n' "$CI_COMMIT_TAG" > release_notes.md
+      echo "----- release notes -----"; cat release_notes.md
+
+      # Land the tag on GitHub ourselves rather than trusting the async mirror's
+      # timing. Not forced: an identical ref is a no-op, a divergent one fails
+      # loudly instead of silently rewriting a published tag. The push drags
+      # whatever commit objects the release target needs.
+      git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPO}.git" \
+        "$CI_COMMIT_SHA:refs/tags/$CI_COMMIT_TAG"
+
+      # Idempotent release: reuse an existing one (job retry / re-tag), else create.
+      rid=$(curl -sS -H "$auth" "$api/releases/tags/$CI_COMMIT_TAG" | jq -r '.id // empty')
+      if [ -z "$rid" ]; then
+        rid=$(jq -n --arg t "$CI_COMMIT_TAG" --arg c "$CI_COMMIT_SHA" \
+                    --arg n "StreamController (fork) $CI_COMMIT_TAG" --rawfile b release_notes.md \
+                    '{tag_name:$t, target_commitish:$c, name:$n, body:$b}' \
+              | curl -sS --fail -X POST -H "$auth" -H "Content-Type: application/json" \
+                     -d @- "$api/releases" | jq -r '.id')
+      fi
+      echo "GitHub release id: $rid"
+
+      # Replace any same-named asset first so a retry re-uploads cleanly, then
+      # push the bundle to the uploads host.
+      curl -sS -H "$auth" "$api/releases/$rid/assets" \
+        | jq -r --arg n "$asset" '.[] | select(.name==$n) | .id' \
+        | while read -r aid; do curl -sS -X DELETE -H "$auth" "$api/releases/assets/$aid"; done
+      curl -sS --fail -X POST -H "$auth" -H "Content-Type: application/octet-stream" \
+        --data-binary @"dist/$asset" \
+        "https://uploads.github.com/repos/${GITHUB_REPO}/releases/$rid/assets?name=$asset"
+      echo "Mirrored $asset to GitHub release $CI_COMMIT_TAG"
 
 # ── release automation (nb-labs/ci-automation) ───────────────────────────────
 # A bump:*-labeled MR merged to main IS the release: auto-release stamps
