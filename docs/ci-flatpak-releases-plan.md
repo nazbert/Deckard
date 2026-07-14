@@ -12,7 +12,8 @@ airsensor / netviz / netviz-collector.
 Identical to the other consumers: merging a `bump:major|minor|patch`-labeled MR to
 `main` IS the release. `auto-release` stamps the version + CHANGELOG.md, commits
 `release: vX.Y.Z`, pushes with `-o ci.skip`, and tags `vX.Y.Z`; the tag pipeline
-builds the flatpak bundle and creates a GitLab Release with it attached.
+builds the flatpak bundle, creates a GitLab Release with it attached, and
+mirrors that release to the GitHub fork (see Key decisions).
 `tag-release` remains the manual-fallback (and the bootstrap path, below).
 
 ## Key decisions
@@ -63,6 +64,18 @@ builds the flatpak bundle and creates a GitLab Release with it attached.
   release-cli driven directly — the declarative `release:description` is
   shell-expanded by GitLab; airsensor audit-X16 lesson). Branch/MR builds name
   bundles `<VERSION>+<shortsha>` and live as 2-week CI artifacts.
+- **Mirror the release to the GitHub fork.** Once the GitLab Release is cut,
+  `release:github` reproduces it on `github.com/nazbert/Deckard`. Split model: a
+  GitLab *push mirror* (Settings → Repository) carries branches + tags, but moves
+  git refs **only** — so the job adds what a mirror can't, the Release object and
+  the flatpak asset, via the GitHub REST API (`curl`+`jq`, no `gh` dependency).
+  `needs: release:gitlab`, so GitHub is only ever cut for releases GitLab also got
+  (GitLab stays the source of truth); it pushes the tag itself (`GIT_DEPTH: 0`)
+  rather than trusting the async mirror's timing, and is idempotent (reuses an
+  existing release / replaces the asset) so a retry or re-tag reconciles instead
+  of `422`-ing. Requires, still to be provisioned manually (see below): the push
+  mirror, a masked+protected `GH_TOKEN`, and removal of the inherited
+  `.github/workflows/release.yaml`.
 
 ## One-time project provisioning (done via API alongside this MR)
 
@@ -77,6 +90,23 @@ builds the flatpak bundle and creates a GitLab Release with it attached.
 6. Instance runner `flatpak-privileged` (id 44) registered in the gitlab-runner
    container on hugo: docker executor, `privileged = true`, tag `flatpak`,
    `run_untagged = false`, limits mirroring the buildkit runner.
+
+## GitHub mirror provisioning (pending — not yet done)
+
+For `release:github` to publish anything:
+
+1. **Push mirror** on the GitLab project (Settings → Repository → Mirroring
+   repositories → Push) → `https://github.com/nazbert/Deckard.git`, a GitHub PAT
+   as the password. Mirrors branches + tags on every push.
+2. **`GH_TOKEN`** project variable (masked + **protected**): a fine-grained PAT
+   scoped to the fork repo, **Contents: read/write**. Protected so it is exposed
+   only on protected `v*` tag pipelines. The same PAT can serve as the mirror
+   password.
+3. **Delete `.github/workflows/release.yaml`** on the fork — the inherited
+   upstream `go-semantic-release` workflow. `workflow_dispatch`-only so it won't
+   auto-fire, but it derives versions from commit messages instead of `VERSION`,
+   i.e. a divergent second release path; the mirror should be the only thing
+   cutting GitHub releases.
 
 ## Bootstrap (first release)
 
