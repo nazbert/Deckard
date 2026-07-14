@@ -15,10 +15,20 @@ IS_MAC = sys.platform == "darwin"
 from cli_args import argparser
 
 MAIN_PATH: str
-VAR_APP_PATH = os.path.join(os.path.expanduser("~"), ".var", "app", appinfo.APP_ID)
+# Data root. Flatpak keeps its per-app dir (~/.var/app/<id>); native installs use
+# the XDG data dir ($XDG_DATA_HOME/deckard, default ~/.local/share/deckard). A
+# pre-XDG native tree at ~/.var/app/<id> is relocated here first by
+# rebrand_migration.migrate_native_var_app_to_xdg() (main.py, pre-import);
+# native_data_root() falls back to that old path if the move was skipped (e.g.
+# across a filesystem boundary), so the app never starts empty.
+if os.path.isfile("/.flatpak-info"):
+    VAR_APP_PATH = os.path.join(os.path.expanduser("~"), ".var", "app", appinfo.APP_ID)
+else:
+    import rebrand_migration
+    VAR_APP_PATH = rebrand_migration.native_data_root()
 STATIC_SETTINGS_FILE_PATH = os.path.join(VAR_APP_PATH, "static", "settings.json")
 
-DATA_PATH = os.path.join(VAR_APP_PATH, "data") # Maybe use XDG_DATA_HOME instead
+DATA_PATH = os.path.join(VAR_APP_PATH, "data")
 if argparser.parse_args().data:
     DATA_PATH = argparser.parse_args().data
 elif not argparser.parse_args().devel:
@@ -118,6 +128,23 @@ loggers: dict[str, "Logger"] = {}
 
 app_version: str = "1.5.0-beta.15"  # In breaking.feature.fix-state format
 exact_app_version_check: bool = False
+
+# Deckard fork release version, stamped into the root VERSION file by the CI
+# release pipeline (issue #128). Kept DISTINCT from app_version above -- that one
+# stays upstream-aligned so plugin `min_app_version` gates and the migration
+# system keep working; deckard_version is purely the number shown to users in the
+# About dialog. Resolved from the repo root beside this file so it works for both
+# a source checkout and the /opt/deckard native install. "dev" when unstamped.
+def _read_deckard_version() -> str:
+    try:
+        _root = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(_root, "VERSION")) as f:
+            return f.read().strip() or "dev"
+    except OSError:
+        return "dev"
+
+deckard_version: str = _read_deckard_version()
+del _read_deckard_version
 # Bounded ring buffer of recent log records (shown in the About dialog).
 # logs_lock guards appends/reads against concurrent iteration.
 logs: "deque[str]" = deque(maxlen=10000)

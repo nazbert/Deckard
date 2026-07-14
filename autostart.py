@@ -189,14 +189,14 @@ def ensure_app_desktop_entry():
 
 def _launcher_exec(extra_args: str = "") -> str:
     """Absolute launch command for generated native desktop entries, so they
-    work without the optional ~/.local/bin/Deckard PATH symlink.
+    work without the optional ~/.local/bin/deckard PATH symlink.
 
     Prefer the wrapper when it is on PATH (it exports the MALLOC_* vars that
     let main.py skip its self-re-exec); otherwise self-reference the running
     interpreter and main.py -- always resolvable, never a dangling command.
     """
     import globals as gl
-    wrapper = shutil.which("Deckard")
+    wrapper = shutil.which("deckard")
     # Quote each path component: a checkout or venv path containing a space
     # would otherwise render an Exec= line the desktop spec word-splits into
     # a broken argv (the dangling-launch class this rewrite exists to avoid).

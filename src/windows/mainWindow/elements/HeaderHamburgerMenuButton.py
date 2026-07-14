@@ -138,14 +138,16 @@ class HeaderHamburgerMenuButton(Gtk.MenuButton):
         self.about = Adw.AboutDialog()
         self.about.set_application_name("Deckard")
 
-        app_version = gl.app_version
+        # Show the Deckard fork release version (gl.deckard_version), NOT
+        # gl.app_version -- the latter stays upstream-aligned for plugin compat.
+        version = gl.deckard_version
         if gl.argparser.parse_args().devel:
-            app_version += " devel"
-        self.about.set_version(app_version)
+            version += " devel"
+        self.about.set_version(version)
         self.about.set_developers(["nazbert", "Core447 (original StreamController author)"])
         self.about.set_developer_name("nazbert")
         self.about.set_license_type(Gtk.License.GPL_3_0)
-        self.about.set_comments("Control your Stream Decks. A fork of StreamController by Core447.")
+        self.about.set_comments(f"Control your Stream Decks. A fork of StreamController {gl.app_version} by Core447.")
         self.about.set_website("https://github.com/nazbert/Deckard")
         self.about.set_issue_url("https://gitlab.nb-labs.net/naz/Deckard/-/issues")
         # self.about.set_support_url("https://discord.com/invite/MSyHM8TN3u")

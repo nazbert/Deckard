@@ -1,0 +1,311 @@
+# Deckard CI — flatpak bundle releases (issue #128; design in
+# docs/ci-flatpak-releases-plan.md).
+#
+# Shape (same skeleton as the other nb-labs repos):
+#   test     — byte-compile smoke over the tree (cheap syntax gate; the real
+#              gate is the flatpak build itself) + advisory changelog nudge.
+#   build    — flatpak-builder produces a single-file x86_64 .flatpak bundle
+#              from THIS checkout. The committed manifest builds the Deckard
+#              module from its GitHub repo (right for flathub, wrong for CI),
+#              so the job derives a CI manifest whose app module points at a
+#              clean `git archive` export of $CI_COMMIT_SHA — the same rewrite
+#              flatpak/install.sh does interactively with yq.
+#   release  — nb-labs/ci-automation bump-labeled-MR bot (auto-release +
+#              tag-release) stamping VERSION + CHANGELOG.md, a GitLab Release
+#              with the bundle attached on vX.Y.Z tags, then a mirror of that
+#              release (object + bundle) to the GitHub fork.
+#
+# The fork's release version is the root VERSION file (see release.config.mjs)
+# — NOT globals.py's app_version, which stays upstream-aligned because plugins
+# gate on it for compatibility checks.
+#
+# Runner requirement: flatpak-builder sandboxes module builds with bubblewrap,
+# which must mount a fresh /proc inside its user namespace. Docker masks paths
+# under /proc, and the kernel's locked-mounts rule rejects a procfs mount in a
+# userns unless proc is fully visible — capabilities, seccomp and apparmor
+# settings don't reach this (the gnome image runs as uid 1000, so cap_add is
+# moot; verified empirically on the runner host, issue #128). build:flatpak
+# therefore MUST run on the dedicated privileged runner (tag `flatpak`,
+# run_untagged=false — privilege is scoped to jobs that ask for it), the same
+# arrangement GNOME/flathub use for their builders. rofiles-fuse stays
+# disabled to keep the build independent of FUSE availability.
+
+# Single pipeline per change: MR pipeline when an MR is open, branch pipeline
+# otherwise, plus tags (the tag pipeline is the binding release gate).
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+
+stages: [test, build, release]
+
+variables:
+  APP_ID: io.github.nazbert.Deckard
+  # Pinned nb-labs/ci-automation release tooling (the bump-labeled-MR bot).
+  CI_AUTOMATION_REF: v0.3.0
+
+# ── test ─────────────────────────────────────────────────────────────────────
+# Syntax-level gate only: compileall byte-compiles every python file without
+# importing it (imports need GTK4/PyGObject, which no slim CI image has). The
+# scenario harness (tests/run_all.py) stays a local tool for now — running it
+# in CI is follow-up work tracked on #128, not part of this pipeline.
+test:compile:
+  stage: test
+  image: python:3.13-slim   # 3.13 = the runtime python req2flatpak targets
+  interruptible: true
+  needs: []
+  script:
+    - python -m compileall -q *.py src GtkHelper tests
+
+# Advisory nudge: an MR should either add a bullet under ## [Unreleased] in
+# CHANGELOG.md or carry the no-changelog label. auto-release adds MR-title
+# fallback bullets for anything that slips through, so this never blocks.
+changelog-check:
+  stage: test
+  image: node:22
+  needs: []
+  allow_failure: true
+  variables:
+    GIT_DEPTH: "0"   # need real history to diff against the MR base
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  script:
+    - |
+      case ",$CI_MERGE_REQUEST_LABELS," in
+        *,no-changelog,*) echo "label 'no-changelog' set — check skipped"; exit 0;;
+      esac
+      git fetch -q origin "$CI_MERGE_REQUEST_DIFF_BASE_SHA" 2>/dev/null || true
+      if git diff --name-only "$CI_MERGE_REQUEST_DIFF_BASE_SHA"...HEAD | grep -qx 'CHANGELOG.md'; then
+        echo "CHANGELOG.md updated ✓"
+      else
+        echo "This MR neither updates CHANGELOG.md (add a bullet under ## [Unreleased])"
+        echo "nor carries the 'no-changelog' label. Advisory only — not blocking."
+        exit 1
+      fi
+
+# ── build ────────────────────────────────────────────────────────────────────
+# Stages a workspace so flatpak-builder never ingests CI cruft:
+#   build-ws/src              clean `git archive` export of $CI_COMMIT_SHA
+#   build-ws/shared-modules   flathub shared-modules (the manifest references
+#                             libusb from it; this repo carries no submodule)
+#   build-ws/<manifest>       committed manifest with the app module's sources
+#                             swapped to {type: dir, path: src}
+# The gnome-runtime-images image ships flatpak-builder plus the matching
+# org.gnome.{Platform,Sdk}//50 preinstalled — no runtime download per job.
+# pypi-requirements.yaml pins every wheel by URL+sha256 (req2flatpak), so
+# flatpak-builder pre-fetches them into the cached state dir; the only
+# uncached network is the wheel/module fetch on a cache miss plus the
+# shared-modules clone.
+build:flatpak:
+  stage: build
+  image: quay.io/gnome_infrastructure/gnome-runtime-images:gnome-50
+  tags: [flatpak]   # the dedicated privileged runner (see header)
+  interruptible: true
+  needs: []
+  cache:
+    key:
+      files:
+        - io.github.nazbert.Deckard.yml
+        - pypi-requirements.yaml
+    paths:
+      - .flatpak-builder/downloads
+      - .flatpak-builder/git
+      - .flatpak-builder/ccache
+      - .flatpak-builder/checksums
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]/'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    # MRs: automatic when packaging inputs change, manual (non-blocking)
+    # otherwise — the build takes tens of minutes on a cold cache.
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - io.github.nazbert.Deckard.yml
+        - pypi-requirements.yaml
+        - flatpak/**/*
+        - .gitlab-ci.yml
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: manual
+      allow_failure: true
+  script:
+    # The image's user differs from the checkout's owner — git refuses to
+    # operate on "dubiously owned" repos without this.
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    - python3 -c "import yaml" 2>/dev/null || pip3 install --user --quiet PyYAML
+    - mkdir -p build-ws/src dist
+    - git archive "$CI_COMMIT_SHA" | tar -x -C build-ws/src
+    - cp io.github.nazbert.Deckard.yml pypi-requirements.yaml build-ws/
+    - git clone --depth 1 https://github.com/flathub/shared-modules.git build-ws/shared-modules
+    - python3 flatpak/ci/make_ci_manifest.py build-ws/io.github.nazbert.Deckard.yml src
+    - cd build-ws
+    - flatpak-builder --user --disable-rofiles-fuse --force-clean
+        --state-dir="$CI_PROJECT_DIR/.flatpak-builder"
+        --repo=repo build-dir io.github.nazbert.Deckard.yml
+    # Bundle name: tag pipelines get the clean release version; branch/MR
+    # pipelines get VERSION+shortsha so unstable bundles are identifiable.
+    - VERSION_REF="${CI_COMMIT_TAG:-$(cat "$CI_PROJECT_DIR/VERSION")+${CI_COMMIT_SHORT_SHA}}"
+    - VERSION_REF="${VERSION_REF#v}"
+    - flatpak build-bundle repo "$CI_PROJECT_DIR/dist/deckard-${VERSION_REF}-x86_64.flatpak" "$APP_ID"
+    - ls -lh "$CI_PROJECT_DIR/dist/"
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 2 weeks
+
+# ── release (strict vX.Y.Z tags) ─────────────────────────────────────────────
+# Upload the bundle to the generic package registry (durable, unlike the
+# 2-week CI artifacts), then create the GitLab Release with notes from this
+# version's CHANGELOG.md section and the bundle linked as a package asset.
+# release-cli is driven directly so the notes pass through a file — the
+# declarative release:description is shell-expanded by GitLab, so backticks
+# in changelog bullets would execute (the airsensor audit-X16 lesson).
+release:gitlab:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  interruptible: false
+  needs:
+    - job: build:flatpak
+      artifacts: true
+    - job: test:compile
+      artifacts: false
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+  before_script:
+    - apk add --no-cache curl
+  script:
+    - |
+      set -e
+      VERSION="${CI_COMMIT_TAG#v}"
+      awk -v v="## [$VERSION]" 'index($0,v)==1{g=1;next} /^## \[/{g=0} g' CHANGELOG.md > release_notes.md
+      [ -s release_notes.md ] || printf 'Deckard %s\n' "$CI_COMMIT_TAG" > release_notes.md
+      echo "----- release notes -----"; cat release_notes.md
+
+      asset="deckard-${VERSION}-x86_64.flatpak"
+      url="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/deckard/${VERSION}/${asset}"
+      echo "Uploading $asset to the generic package registry"
+      curl --fail --silent --show-error --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+        --upload-file "dist/$asset" "$url"
+
+      release-cli create --tag-name "$CI_COMMIT_TAG" --name "Deckard $CI_COMMIT_TAG" \
+        --description "$(cat release_notes.md)" \
+        --assets-link "{\"name\":\"$asset\",\"url\":\"$url\",\"link_type\":\"package\"}"
+
+# ── release mirror (GitHub fork) ─────────────────────────────────────────────
+# Reproduce the just-cut GitLab release on github.com/nazbert/Deckard. A GitLab
+# push mirror (Settings → Repository → Mirroring) already carries branches +
+# tags to the fork; a mirror moves git refs ONLY, so this job adds what it
+# can't — the Release object and the flatpak asset. Kept downstream of
+# release:gitlab (needs it) so GitHub is only ever cut for releases GitLab also
+# got; GitLab stays the source of truth. Pure curl+jq against the REST API (no
+# gh dependency) and idempotent, so a retry / re-tag reconciles rather than
+# 422s. Naming/asset are kept identical to release:gitlab on purpose so both
+# releases read the same.
+#
+# NEEDS a GH_TOKEN project variable (masked + protected; a fine-grained PAT
+# scoped to the fork repo, Contents: read/write). Protected so it is exposed
+# only on protected v* tag pipelines — never on MR/branch runs.
+release:github:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest   # alpine; has apk
+  interruptible: false
+  variables:
+    GITHUB_REPO: nazbert/Deckard
+    GIT_DEPTH: "0"   # full history so the tag push is self-sufficient even if
+                     # the async mirror hasn't landed this commit yet (a shallow
+                     # push of an unknown commit is rejected)
+  needs:
+    - job: build:flatpak
+      artifacts: true
+    - job: release:gitlab      # GitHub is strictly downstream of the canonical release
+      artifacts: false
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+  before_script:
+    - apk add --no-cache curl jq git
+  script:
+    - |
+      set -eu
+      : "${GH_TOKEN:?set GH_TOKEN (masked+protected CI var: fine-grained PAT, Contents:rw on the fork)}"
+      VERSION="${CI_COMMIT_TAG#v}"
+      asset="deckard-${VERSION}-x86_64.flatpak"
+      api="https://api.github.com/repos/${GITHUB_REPO}"
+      auth="Authorization: Bearer ${GH_TOKEN}"
+
+      # Re-derive the notes exactly as release:gitlab did (artifacts aren't
+      # shared) so both releases carry identical text.
+      awk -v v="## [$VERSION]" 'index($0,v)==1{g=1;next} /^## \[/{g=0} g' CHANGELOG.md > release_notes.md
+      [ -s release_notes.md ] || printf 'Deckard %s\n' "$CI_COMMIT_TAG" > release_notes.md
+      echo "----- release notes -----"; cat release_notes.md
+
+      # Land the tag on GitHub ourselves rather than trusting the async mirror's
+      # timing. Not forced: an identical ref is a no-op, a divergent one fails
+      # loudly instead of silently rewriting a published tag. The push drags
+      # whatever commit objects the release target needs.
+      git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPO}.git" \
+        "$CI_COMMIT_SHA:refs/tags/$CI_COMMIT_TAG"
+
+      # Idempotent release: reuse an existing one (job retry / re-tag), else create.
+      rid=$(curl -sS -H "$auth" "$api/releases/tags/$CI_COMMIT_TAG" | jq -r '.id // empty')
+      if [ -z "$rid" ]; then
+        rid=$(jq -n --arg t "$CI_COMMIT_TAG" --arg c "$CI_COMMIT_SHA" \
+                    --arg n "Deckard $CI_COMMIT_TAG" --rawfile b release_notes.md \
+                    '{tag_name:$t, target_commitish:$c, name:$n, body:$b}' \
+              | curl -sS --fail -X POST -H "$auth" -H "Content-Type: application/json" \
+                     -d @- "$api/releases" | jq -r '.id')
+      fi
+      echo "GitHub release id: $rid"
+
+      # Replace any same-named asset first so a retry re-uploads cleanly, then
+      # push the bundle to the uploads host.
+      curl -sS -H "$auth" "$api/releases/$rid/assets" \
+        | jq -r --arg n "$asset" '.[] | select(.name==$n) | .id' \
+        | while read -r aid; do curl -sS -X DELETE -H "$auth" "$api/releases/assets/$aid"; done
+      curl -sS --fail -X POST -H "$auth" -H "Content-Type: application/octet-stream" \
+        --data-binary @"dist/$asset" \
+        "https://uploads.github.com/repos/${GITHUB_REPO}/releases/$rid/assets?name=$asset"
+      echo "Mirrored $asset to GitHub release $CI_COMMIT_TAG"
+
+# ── release automation (nb-labs/ci-automation) ───────────────────────────────
+# A bump:*-labeled MR merged to main IS the release: auto-release stamps
+# VERSION + CHANGELOG.md, commits `release: vX.Y.Z` (no skip-ci marker, so the
+# tag pipeline runs), pushes with -o ci.skip, and tags vX.Y.Z. The tag then
+# drives build:flatpak + release:gitlab above. NEEDS a RELEASE_BOT_TOKEN
+# project variable (api + write_repository; allowed to push protected main
+# and create protected v* tags) and this project on ci-automation's job-token
+# allowlist. Set DRY_RUN=1 to rehearse; AUTO_RELEASE_DISABLED=1 to stop it.
+.release:
+  image: node:22
+  cache: []
+  before_script:
+    - git clone --depth 1 --branch "$CI_AUTOMATION_REF"
+        "https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.nb-labs.net/nb-labs/ci-automation.git" .ci-automation
+
+auto-release:
+  extends: .release
+  stage: release
+  needs: ["test:compile", "build:flatpak"]   # never tag a release whose bundle doesn't build
+  resource_group: release
+  interruptible: false
+  variables:
+    GIT_DEPTH: "0"   # full history: last-tag discovery + tag dates
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  script:
+    - git fetch -q --tags origin
+    - node .ci-automation/src/cli.mjs auto-release
+
+# Manual-fallback safety net: every main push, cheap + idempotent — tag
+# vX.Y.Z iff VERSION holds X.Y.Z with a matching CHANGELOG section and no tag
+# yet. This is also the bootstrap path: the MR introducing this pipeline
+# hand-stamps VERSION=0.1.0 + CHANGELOG, so merging it cuts v0.1.0.
+tag-release:
+  extends: .release
+  stage: release
+  needs: []
+  interruptible: false
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  script:
+    - node .ci-automation/src/cli.mjs tag-release

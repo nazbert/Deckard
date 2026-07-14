@@ -187,6 +187,9 @@ vid_cache/
 
 **/.flatpak-builder/
 
+# CI flatpak build staging (build:flatpak in .gitlab-ci.yml)
+build-ws/
+
 **/.flatpak/
 
 .flatpak/meson.sh
