@@ -230,6 +230,17 @@ class App(Adw.Application):
         timer.setDaemon(True)
         timer.start()
 
+        # Detach the async (enqueue=True) log sinks now, before the slow
+        # teardown below. Each owns a multiprocessing writer queue whose POSIX
+        # semaphores are only released when the handler is removed; deferring
+        # that to the end of on_quit lets the force_quit os._exit(1) fallback
+        # (6s timer above) -- or any exit on a shutdown that overruns it --
+        # skip it, and the multiprocessing resource_tracker then reports the
+        # queue's semaphores as "leaked ... at shutdown". The synchronous
+        # logs.log/stderr sinks stay up for the remaining shutdown messages.
+        for logger_obj in gl.loggers.values():
+            logger_obj.remove_sink()
+
         # Must run BEFORE the delete() loop (plan §2.4): close_all() submits
         # the terminal ClearAndClose control message and bounds a join on
         # each media thread. delete()'s media_player.stop() would otherwise
@@ -366,7 +377,7 @@ class App(Adw.Application):
         if button:
             notif.add_button_with_target(button[0], button[1], button[2])
 
-        GLib.idle_add(super().send_notification, "com.core447.StreamController", notif)
+        GLib.idle_add(super().send_notification, "io.github.nazbert.Deckard", notif)
     def on_change_page(self, action, data: GLib.Variant, *args):
         """
         page_name can be either the name or the path of the page

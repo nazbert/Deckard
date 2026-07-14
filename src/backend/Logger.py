@@ -27,6 +27,7 @@ class Logger:
 
         self.config = config
         self.log_level: dict[str, Loglevel] = {}
+        self.sink_id: int | None = None
 
         for level in log_level:
             self.add_log_level(level)
@@ -62,7 +63,7 @@ class Logger:
                 return True
             return False
 
-        logger.add(
+        self.sink_id = logger.add(
             sink=self.config.log_file_path,
             level=self.config.base_log_level,
             rotation=self.config.rotation,
@@ -72,6 +73,20 @@ class Logger:
             filter=log_filter,
             format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level} | {extra[file_name]} | {extra[function]}:{extra[line]} - {message}"
         )
+
+    def remove_sink(self):
+        """Detach this sink and release its resources.
+
+        The sink is added with ``enqueue=True``, so loguru backs it with a
+        multiprocessing writer queue whose POSIX semaphores are only unlinked
+        when the handler is removed. Callers on the quit path must invoke this
+        BEFORE any ``os._exit`` (including the force_quit fallback), which would
+        otherwise bypass loguru's cleanup and leave the queue's semaphores for
+        the multiprocessing resource_tracker to report as leaked at shutdown.
+        """
+        if self.sink_id is not None:
+            logger.remove(self.sink_id)
+            self.sink_id = None
 
     def _log(self, level, message, *args, **kwargs):
         logger.log(level, message, *args, **kwargs)
