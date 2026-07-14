@@ -335,7 +335,9 @@ def quit_running():
     log.warning("Pre-rename StreamController instance detected on the session bus; asking it to quit")
     try:
         old_obj = session_bus.get_object(appinfo.OLD_APP_ID, appinfo.OLD_DBUS_OBJECT_PATH)
-        dbus.Interface(old_obj, "org.gtk.Actions").Activate("quit", [], [])
+        # Explicit timeout: without it a wedged old instance that accepts but
+        # never replies would block startup for dbus-python's ~25s default.
+        dbus.Interface(old_obj, "org.gtk.Actions").Activate("quit", [], [], timeout=5.0)
     except (dbus.exceptions.DBusException, ValueError) as e:
         log.error(f"Could not close the pre-rename instance: {e}")
         return

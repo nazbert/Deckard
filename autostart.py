@@ -15,6 +15,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import os
 import re
+import shlex
 import shutil
 import sys
 
@@ -150,7 +151,7 @@ def setup_autostart_desktop_entry(enable: bool = True, native: bool = False):
 
     import globals as gl
 
-    xdg_config_home = os.path.join(os.environ.get("HOME"), ".config")
+    xdg_config_home = os.path.join(os.environ.get("HOME") or os.path.expanduser("~"), ".config")
     AUTOSTART_DIR = os.path.join(xdg_config_home, "autostart")
     AUTOSTART_DESKTOP_PATH = os.path.join(AUTOSTART_DIR, "Deckard.desktop")
 
@@ -196,7 +197,13 @@ def _launcher_exec(extra_args: str = "") -> str:
     """
     import globals as gl
     wrapper = shutil.which("deckard")
-    cmd = wrapper if wrapper else f"{sys.executable} {os.path.join(gl.MAIN_PATH, 'main.py')}"
+    # Quote each path component: a checkout or venv path containing a space
+    # would otherwise render an Exec= line the desktop spec word-splits into
+    # a broken argv (the dangling-launch class this rewrite exists to avoid).
+    if wrapper:
+        cmd = shlex.quote(wrapper)
+    else:
+        cmd = f"{shlex.quote(sys.executable)} {shlex.quote(os.path.join(gl.MAIN_PATH, 'main.py'))}"
     return f"{cmd} {extra_args}".rstrip()
 
 

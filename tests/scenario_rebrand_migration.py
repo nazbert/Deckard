@@ -202,12 +202,15 @@ assert marker_state(new) == rm._STATE_COMPLETE
 assert_migrated(old, new)
 print("12. marker backfill on existing symlink: OK")
 
-# --- 14. --data abbreviation (argparse) also skips ----------------------
-old, new = fresh_roots()
-make_old_tree(old)
-rm.migrate(old, new, argv=["main.py", "--dat", "/tmp/custom"])
-assert os.path.isdir(old) and not os.path.lexists(new), "--dat abbrev did not skip"
-print("14. --data abbreviation skip: OK")
+# --- 14. --data argparse abbreviations also skip ------------------------
+# argparse accepts any unambiguous prefix of --data (only --data/--devel
+# start with --d), so --dat and even --da must be recognised as overrides.
+for abbrev in ("--dat", "--da"):
+    old, new = fresh_roots()
+    make_old_tree(old)
+    rm.migrate(old, new, argv=["main.py", abbrev, "/tmp/custom"])
+    assert os.path.isdir(old) and not os.path.lexists(new), f"{abbrev} did not skip"
+print("14. --data abbreviations (--dat, --da) skip: OK")
 
 # --- 15. dir-symlink in new root is NOT skeleton -> abort, link kept ----
 old, new = fresh_roots()

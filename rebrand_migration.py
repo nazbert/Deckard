@@ -8,8 +8,8 @@ it at *import* time -- on every invocation, including CLI early-return runs
 -- which would create an empty skeleton under the NEW id and poison the
 "does the new tree exist" check below. main.py calls migrate() right after
 the patcher, before its main import block. This module is stdlib-only for
-the same reason (dbus is imported lazily, and only to probe for a live
-pre-rename instance); it imports only `appinfo`, which is itself stdlib-only.
+the same reason; it imports only `appinfo` and `cli_args`, both of which are
+themselves stdlib-only and side-effect-free (dbus/fcntl are imported lazily).
 
 Design (docs/rename-deckard-plan.md, Phase 2):
 
@@ -22,10 +22,9 @@ Design (docs/rename-deckard-plan.md, Phase 2):
   state instead. The pending marker is written -- durably (fsync) -- into
   the OLD root immediately before the rename and therefore travels with it:
   any crash after the rename leaves a "symlink-pending" marker in the new
-  tree, which the next start finishes. The durable write matters: a
-  non-fsync'd marker can reach disk as a zero-length file after power loss
-  (the rename metadata commits before the marker's data blocks), which reads
-  as neither state and would be mistaken for a fresh install.
+  tree, which the next start finishes.
+- The real work is serialized by a file lock so two first-run launches
+  cannot race os.rename/rmtree on real user data.
 - Never merge, never delete user data: if both roots contain files beyond
   the known import-time skeleton, refuse loudly and let the user resolve it.
 
@@ -34,6 +33,7 @@ autostart filenames and removes the legacy ones on every launch (self-
 healing), which this one-shot path could not be.
 """
 
+import contextlib
 import os
 import shutil
 import sys
@@ -46,6 +46,7 @@ OLD_ROOT = os.path.expanduser(os.path.join("~", ".var", "app", OLD_ID))
 NEW_ROOT = os.path.expanduser(os.path.join("~", ".var", "app", NEW_ID))
 
 MARKER_NAME = ".migrated-from-" + OLD_ID
+LOCK_NAME = ".deckard-migration.lock"
 _STATE_PENDING = "symlink-pending"
 _STATE_COMPLETE = "complete"
 
@@ -101,6 +102,31 @@ def _write_marker(marker_path: str, state: str) -> bool:
         return False
 
 
+@contextlib.contextmanager
+def _migration_lock(new_root: str):
+    """Serialize the migration across concurrent first-run launches.
+
+    A blocking exclusive lock on ~/.var/app/<lock>: a second launch waits
+    here, then re-reads the (now COMPLETE) marker inside and no-ops, instead
+    of racing os.rename/rmtree. Degrades to no lock where fcntl is
+    unavailable, which is no worse than before this guard existed.
+    """
+    lock_dir = os.path.dirname(new_root)
+    fd = None
+    try:
+        os.makedirs(lock_dir, exist_ok=True)
+        fd = os.open(os.path.join(lock_dir, LOCK_NAME), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except (ImportError, OSError) as e:
+            _log(f"could not acquire migration lock ({e}); proceeding without it")
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 def _old_instance_running() -> bool:
     try:
         import dbus
@@ -111,21 +137,18 @@ def _old_instance_running() -> bool:
 
 
 def _data_override_active(argv: list[str]) -> bool:
-    """True if a --data override is present, including the argparse
-    abbreviations globals.py accepts (--dat, --data=..., etc.).
-
-    We match any `--data`-prefixed flag of at least 5 chars ("--dat"). Very
-    short prefixes ("--da") are treated as NOT an override on purpose: a
-    false positive here would skip the migration and strand the real data
-    unmigrated (the app boots factory-fresh), which is worse than the
-    false-negative case, where the migration merely runs early during a
-    genuinely custom-data session and is harmless to the moved tree.
+    """True if a --data override is present, resolved by the SAME argparser
+    globals uses -- so argparse abbreviations (--dat, --da) and flag/value
+    disambiguation match globals exactly instead of a fragile string guess.
+    On a parse error (e.g. an ambiguous flag) assume no override, which lets
+    the migration run rather than strand the real data unmigrated.
     """
-    for arg in argv[1:]:
-        head = arg.split("=", 1)[0]
-        if len(head) >= 5 and "--data".startswith(head):
-            return True
-    return False
+    import cli_args
+    try:
+        ns, _ = cli_args.argparser.parse_known_args(argv[1:])
+    except SystemExit:
+        return False
+    return ns.data is not None
 
 
 def _is_skeleton(root: str) -> bool:
@@ -155,9 +178,11 @@ def _finish_symlink(old_root: str, new_root: str, marker_path: str) -> None:
             pass  # already in place
         else:
             _log(
-                f"{old_root} reappeared as a real directory or foreign link while the "
-                f"compat symlink was pending; leaving migration pending. Remove it "
-                f"manually so the symlink to {new_root} can be created."
+                f"MIGRATION STUCK: your data was moved to {new_root}, but {old_root} "
+                f"reappeared as a real directory (a still-installed pre-rename build "
+                f"likely recreated it). The compat symlink can't be created, so pages "
+                f"referencing the old path may look empty. Fix: quit/uninstall the old "
+                f"build, delete {old_root}, and restart Deckard."
             )
             return
     else:
@@ -187,6 +212,22 @@ def migrate(old_root: str = OLD_ROOT, new_root: str = NEW_ROOT,
         return
 
     marker_path = os.path.join(new_root, MARKER_NAME)
+    # Lock-free fast paths for the common cases (already migrated / fresh
+    # install): one marker read, no lock, no lock-file litter.
+    state = _read_marker(marker_path)
+    if state == _STATE_COMPLETE:
+        return
+    if state is None and not os.path.lexists(old_root):
+        return  # fresh install -- nothing to migrate
+
+    # Real work (migrate or finish a pending symlink): under the lock, and
+    # re-check state inside in case another launch completed it while we
+    # waited.
+    with _migration_lock(new_root):
+        _migrate_locked(old_root, new_root, marker_path)
+
+
+def _migrate_locked(old_root: str, new_root: str, marker_path: str) -> None:
     state = _read_marker(marker_path)
     if state == _STATE_COMPLETE:
         return
