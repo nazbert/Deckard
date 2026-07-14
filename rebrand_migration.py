@@ -308,6 +308,39 @@ def _xdg_root() -> str:
     return os.path.join(xdg, "deckard")
 
 
+def _same_filesystem(src: str, dest: str) -> bool:
+    """True if `src` and where `dest` would be created live on one filesystem, so
+    os.rename won't fail with EXDEV. `dest` usually does not exist yet, so probe
+    its nearest existing ancestor (mkdir creates on the parent's filesystem).
+    Assume same-fs when it can't be determined: migrate() then attempts the
+    rename and aborts loudly on a genuine failure, rather than silently skipping.
+    """
+    probe = dest
+    while probe and not os.path.exists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    try:
+        return os.stat(src).st_dev == os.stat(probe).st_dev
+    except OSError:
+        return True
+
+
+def native_data_root(legacy_root: str = NEW_ROOT, xdg_root: str | None = None) -> str:
+    """Data root for a native (non-flatpak) install: the XDG dir, falling back to
+    the pre-XDG ~/.var/app/<id> tree when it still exists and the XDG dir does not
+    -- i.e. the relocation was deferred or skipped (e.g. across a filesystem
+    boundary). Keeps the app working from the old location instead of starting
+    empty. After a successful move the legacy path is a symlink to the XDG dir, so
+    the first clause wins and this returns the XDG path.
+    """
+    xdg_root = xdg_root or _xdg_root()
+    if os.path.exists(xdg_root) or not os.path.exists(legacy_root):
+        return xdg_root
+    return legacy_root
+
+
 def migrate_native_var_app_to_xdg(old_root: str = NEW_ROOT, xdg_root: str | None = None,
                                   argv: list[str] | None = None,
                                   require_pre_globals: bool = True) -> None:
@@ -319,13 +352,29 @@ def migrate_native_var_app_to_xdg(old_root: str = NEW_ROOT, xdg_root: str | None
     and must not move. Call AFTER migrate() so a StreamController->Deckard rename
     lands in ~/.var/app/<id> first, then relocates here.
 
-    Reuses migrate()'s crash-safe machinery with its own marker. No
-    running-instance abort: unlike the cross-app rename, this relocates the SAME
-    app's tree, and the compat symlink keeps a live instance's absolute-path
-    writes unified with the moved data -- there is no split-writes hazard.
+    Reuses migrate()'s crash-safe machinery with its own marker. Two deliberate
+    departures from the cross-app rename:
+
+    * No running-instance abort. This relocates the SAME app's tree; the compat
+      symlink keeps a live instance's absolute-path writes unified with the moved
+      data, so there is no split-writes hazard (and an abort-on-running check
+      would never fire the migration for an always-autostarted instance). The one
+      residual window is the microseconds between rename and symlink, where a live
+      instance opening a *new* absolute path gets a transient ENOENT -- rare and
+      non-fatal.
+    * Cross-filesystem is skipped, not attempted. os.rename across filesystems
+      (separate mounts, or btrfs subvolumes for ~/.var vs ~/.local) raises EXDEV,
+      which migrate() would turn into a startup-aborting SystemExit. Skip instead;
+      native_data_root() then keeps the app on ~/.var/app/<id>.
     """
     if _is_flatpak():
         return
-    migrate(old_root=old_root, new_root=xdg_root or _xdg_root(), argv=argv,
+    new_root = xdg_root or _xdg_root()
+    if os.path.isdir(old_root) and not os.path.islink(old_root) \
+            and not _same_filesystem(old_root, new_root):
+        _log(f"{old_root} and {new_root} are on different filesystems; skipping XDG "
+             f"relocation -- the app keeps using {old_root}")
+        return
+    migrate(old_root=old_root, new_root=new_root, argv=argv,
             require_pre_globals=require_pre_globals,
             marker_name=XDG_MARKER_NAME, running_check=lambda: False)

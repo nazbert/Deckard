@@ -16,14 +16,16 @@ from cli_args import argparser
 
 MAIN_PATH: str
 # Data root. Flatpak keeps its per-app dir (~/.var/app/<id>); native installs use
-# the XDG data dir ($XDG_DATA_HOME/deckard, default ~/.local/share/deckard). Any
+# the XDG data dir ($XDG_DATA_HOME/deckard, default ~/.local/share/deckard). A
 # pre-XDG native tree at ~/.var/app/<id> is relocated here first by
-# rebrand_migration.migrate_native_var_app_to_xdg() (main.py, pre-import).
+# rebrand_migration.migrate_native_var_app_to_xdg() (main.py, pre-import);
+# native_data_root() falls back to that old path if the move was skipped (e.g.
+# across a filesystem boundary), so the app never starts empty.
 if os.path.isfile("/.flatpak-info"):
     VAR_APP_PATH = os.path.join(os.path.expanduser("~"), ".var", "app", appinfo.APP_ID)
 else:
-    _xdg_data_home = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
-    VAR_APP_PATH = os.path.join(_xdg_data_home, "deckard")
+    import rebrand_migration
+    VAR_APP_PATH = rebrand_migration.native_data_root()
 STATIC_SETTINGS_FILE_PATH = os.path.join(VAR_APP_PATH, "static", "settings.json")
 
 DATA_PATH = os.path.join(VAR_APP_PATH, "data")

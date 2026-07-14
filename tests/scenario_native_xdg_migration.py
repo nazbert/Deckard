@@ -97,5 +97,29 @@ assert rm._xdg_root() == os.path.join(HOME, "custom-xdg", "deckard")
 os.environ.pop("XDG_DATA_HOME", None)
 print("6. XDG root resolution: OK")
 
+# --- 7. cross-filesystem: skip, never abort/brick -----------------------
+old, new = fresh_roots()
+make_tree(old)
+_orig_same_fs = rm._same_filesystem
+rm._same_filesystem = lambda src, dest: False
+try:
+    rm.migrate_native_var_app_to_xdg(old_root=old, xdg_root=new, argv=["main.py"])
+finally:
+    rm._same_filesystem = _orig_same_fs
+assert os.path.isdir(old) and not os.path.islink(old), "cross-fs run altered the old root"
+assert not os.path.lexists(new), "cross-fs run created the XDG root"
+print("7. cross-filesystem skip (no abort): OK")
+
+# --- 8. native_data_root fallback picks the working tree ----------------
+base = tempfile.mkdtemp(prefix="root_pick_", dir=HOME)
+legacy = os.path.join(base, "legacy")
+xdg = os.path.join(base, "xdg")
+assert rm.native_data_root(legacy_root=legacy, xdg_root=xdg) == xdg, "fresh should pick XDG"
+os.makedirs(legacy)
+assert rm.native_data_root(legacy_root=legacy, xdg_root=xdg) == legacy, "deferred move should keep legacy"
+os.makedirs(xdg)
+assert rm.native_data_root(legacy_root=legacy, xdg_root=xdg) == xdg, "migrated should pick XDG"
+print("8. native_data_root fallback: OK")
+
 shutil.rmtree(HOME, ignore_errors=True)
 print("scenario_native_xdg_migration: all cases passed")
