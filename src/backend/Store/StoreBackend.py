@@ -1096,6 +1096,14 @@ class StoreBackend:
         gl.plugin_manager.generate_action_index()
         plugins = gl.plugin_manager.get_plugins()
 
+        # A version-gated plugin "installs" fine (files on disk, True
+        # returned, store button flips to installed) but lands in
+        # disabled_plugins during the reload above -- and the only feedback
+        # used to be the NEXT launch's disabled-plugins toast: in the install
+        # session it silently never appeared, reading later as "my config
+        # reset after restart" (the custom-repo half of #102). Say so now.
+        self.notify_if_installed_disabled(plugin_data.plugin_id)
+
         # Update ui
         if recursive_hasattr(gl, "app.main_win.sidebar.action_chooser"):
             GLib.idle_add(gl.app.main_win.sidebar.action_chooser.plugin_group.update)
@@ -1113,6 +1121,42 @@ class StoreBackend:
         gl.signal_manager.trigger_signal(Signals.PluginInstall, plugin_data.plugin_id)
 
         log.success(f"Plugin {plugin_data.plugin_id} installed successfully under: {local_path} with sha: {plugin_data.commit_sha}")
+        return True
+
+    @staticmethod
+    def notify_if_installed_disabled(plugin_id: str) -> bool:
+        """If the plugin that was just installed got version-disabled by the
+        register() gate (in disabled_plugins, not in plugins), tell the user
+        immediately instead of leaving the first feedback to the next
+        launch's startup toast (#102). Returns whether it notified."""
+        if plugin_id in PluginBase.plugins:
+            return False
+        entry = PluginBase.disabled_plugins.get(plugin_id)
+        if entry is None:
+            return False
+
+        reason = entry.get("reason")
+        name = getattr(entry.get("object"), "plugin_name", None) or plugin_id
+        if reason == "app-out-of-date":
+            detail = "it requires a newer version of StreamController"
+        elif reason == "plugin-out-of-date":
+            detail = "it was built for an older version of StreamController"
+        else:
+            detail = "its version metadata is invalid"
+        body = f"{name} was installed but is disabled: {detail}"
+        log.warning(f"Install of {plugin_id}: {body}")
+
+        if gl.app is not None:
+            def _notify():
+                gl.app.send_notification(
+                    "dialog-information-symbolic",
+                    "Plugin disabled",
+                    body,
+                )
+                # Explicit: a truthy return would make GLib re-run this
+                # forever (the SignalManager trampoline lesson, #56 item 1).
+                return False
+            GLib.idle_add(_notify)
         return True
 
     def uninstall_plugin(self, plugin_id:str, remove_from_pages:bool = False, remove_files:bool = True) -> bool:

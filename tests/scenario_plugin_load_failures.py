@@ -292,6 +292,49 @@ def main() -> None:
         "errors for still-broken plugins must survive a reload"
     )
 
+    # --- #102 (version-gate leg): a hot install that lands version-disabled
+    # must notify IMMEDIATELY. install_plugin's reload runs the register()
+    # gate in the install session (the gate is session-symmetric), but the
+    # disable used to be log-only there -- the first user-visible feedback
+    # was the NEXT launch's startup toast, reading as "my plugin/config
+    # vanished after restart". Driven directly against the seeded registries;
+    # gl.app is faked only now (the deferral assertions above need it None).
+    import types
+    from gi.repository import GLib
+    from src.backend.Store.StoreBackend import StoreBackend
+
+    notifications = []
+    gl.app = types.SimpleNamespace(
+        send_notification=lambda icon, title, body, **kw: notifications.append((title, body))
+    )
+    try:
+        notified = StoreBackend.notify_if_installed_disabled("com_test_old_major")
+        ctx = GLib.MainContext.default()
+        while ctx.pending():
+            ctx.iteration(False)
+        assert notified, (
+            "installing a version-disabled plugin must notify in the install "
+            "session (#102), not first on the next launch"
+        )
+        assert len(notifications) == 1, f"expected one notification, got {notifications}"
+        assert "older version" in notifications[0][1], (
+            f"the notification must explain the plugin-out-of-date reason: "
+            f"{notifications[0]}"
+        )
+
+        # A healthy registered plugin must NOT notify.
+        assert not StoreBackend.notify_if_installed_disabled("com_test_good")
+        # Nor an id that is in neither registry (plain failed install).
+        assert not StoreBackend.notify_if_installed_disabled("com_test_never_existed")
+        while ctx.pending():
+            ctx.iteration(False)
+        assert len(notifications) == 1, (
+            f"healthy/unknown plugins must not produce disable notifications: "
+            f"{notifications}"
+        )
+    finally:
+        gl.app = None
+
     print("scenario_plugin_load_failures: PASS")
 
 
