@@ -146,11 +146,8 @@ class HeaderHamburgerMenuButton(Gtk.MenuButton):
         self.about.set_developer_name("nazbert")
         self.about.set_license_type(Gtk.License.GPL_3_0)
         self.about.set_comments("Control your Stream Decks. A fork of StreamController by Core447.")
-        # Current repo paths (redirect-safe): both hosts keep an old->new
-        # redirect after the Phase 4 rename, so these resolve before AND after
-        # it -- unlike the not-yet-existing nazbert/deckard paths.
-        self.about.set_website("https://github.com/nazbert/StreamController")
-        self.about.set_issue_url("https://gitlab.nb-labs.net/naz/StreamController/-/issues")
+        self.about.set_website("https://github.com/nazbert/deckard")
+        self.about.set_issue_url("https://gitlab.nb-labs.net/naz/deckard/-/issues")
         # self.about.set_support_url("https://discord.com/invite/MSyHM8TN3u")
 
         self.about.set_copyright("Copyright (C) 2024 Core447, 2026 nazbert")
