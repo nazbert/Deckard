@@ -5,7 +5,7 @@ Regression scenario for #47: tray icon registration must not be one-shot.
 `RegisterStatusNotifierItem` call against `org.kde.StatusNotifierWatcher`:
 
   * if the watcher appeared late (GNOME's AppIndicator support loading
-    after StreamController), the call raised and the icon never appeared;
+    after Deckard), the call raised and the icon never appeared;
   * if the watcher restarted (plasmashell/waybar crash), the new watcher
     instance knows nothing about previously registered items -- per the
     SNI spec items must re-register -- so the icon was permanently lost

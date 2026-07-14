@@ -33,7 +33,7 @@ class KeepRunningDialog(Adw.MessageDialog):
         self.set_title("Keep running?")
         self.set_heading("Keep running?")
         
-        self.set_body(("Do you want to keep StreamController running in the background "
+        self.set_body(("Do you want to keep Deckard running in the background "
                        "when closing the main window? To stop the application you can use the option in the hamburger menu. "
                        "This option can be changed "
                        "in the application settings at any time."))

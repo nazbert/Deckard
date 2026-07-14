@@ -5,7 +5,7 @@ to the device from whatever thread called it (GTK/Timer/switch threads --
 see the plan's inventory table, §1). After routing through
 submit_control(SetBrightnessMsg(...)), the device write must land on the
 media thread, and BetterDeck's owner-assertion tooling
-(STREAMCONTROLLER_ASSERT_DEVICE_OWNER) must record zero violations across
+(DECKARD_ASSERT_DEVICE_OWNER) must record zero violations across
 the whole scenario (bootstrap clear, page load, and the brightness call
 itself).
 
@@ -16,7 +16,7 @@ The env var must be set before the deck's BetterDeck wrapper is constructed
 import os
 import threading
 
-os.environ["STREAMCONTROLLER_ASSERT_DEVICE_OWNER"] = "1"
+os.environ["DECKARD_ASSERT_DEVICE_OWNER"] = "1"
 
 import fixtures
 

@@ -4,7 +4,7 @@ broken flatpak-style autostart entry" (gl#42).
 
 The state machine under test (autostart.py):
 
-  * setup_autostart(False) removes ~/.config/autostart/StreamController.desktop
+  * setup_autostart(False) removes ~/.config/autostart/Deckard.desktop
     synchronously, but the portal request it also fires completes LATER, and
     its failure callback used to call setup_autostart_desktop_entry() with the
     defaults (enable=True, native=False) -- re-copying the flatpak .desktop
@@ -70,7 +70,7 @@ def main() -> None:
 
     home = tempfile.mkdtemp(prefix="sc_autostart_home_")
     os.environ["HOME"] = home  # read at call time by setup_autostart_desktop_entry
-    path = os.path.join(home, ".config", "autostart", "StreamController.desktop")
+    path = os.path.join(home, ".config", "autostart", "Deckard.desktop")
 
     # --- 1. flatpak: disable, then the async portal failure lands -------
     autostart.is_flatpak = lambda: True

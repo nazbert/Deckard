@@ -30,7 +30,7 @@ argparser.add_argument("--change-state", action="append", nargs=4,
 argparser.add_argument("app_args", nargs="*")
 
 MAIN_PATH: str
-VAR_APP_PATH = os.path.join(os.path.expanduser("~"), ".var", "app", "com.core447.StreamController")
+VAR_APP_PATH = os.path.join(os.path.expanduser("~"), ".var", "app", "io.github.nazbert.Deckard")
 STATIC_SETTINGS_FILE_PATH = os.path.join(VAR_APP_PATH, "static", "settings.json")
 
 DATA_PATH = os.path.join(VAR_APP_PATH, "data") # Maybe use XDG_DATA_HOME instead

@@ -106,7 +106,7 @@ def setup_autostart_flatpak(enable: bool = True, generation: int = None):
         # Request Autostart
         xdp.request_background(
             None,  # parent
-            "Autostart StreamController",  # reason
+            "Autostart Deckard",  # reason
             ["/app/bin/launch.sh", "-b"],  # commandline
             flag,
             None,  # cancellable
@@ -124,7 +124,7 @@ def setup_autostart_desktop_entry(enable: bool = True, native: bool = False):
 
     xdg_config_home = os.path.join(os.environ.get("HOME"), ".config")
     AUTOSTART_DIR = os.path.join(xdg_config_home, "autostart")
-    AUTOSTART_DESKTOP_PATH = os.path.join(AUTOSTART_DIR, "StreamController.desktop")
+    AUTOSTART_DESKTOP_PATH = os.path.join(AUTOSTART_DIR, "Deckard.desktop")
 
     if enable:
         try:

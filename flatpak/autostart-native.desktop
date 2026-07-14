@@ -1,4 +1,5 @@
 [Desktop Entry]
 Type=Application
-Name=StreamController
-Exec=streamcontroller -b
+Name=Deckard
+Exec=deckard -b
+

@@ -1,16 +1,16 @@
 """
-StreamController DBus API
+Deckard DBus API
 
-Provides a DBus interface at com.core447.StreamController for external
-tools to query and control StreamController.
+Provides a DBus interface at io.github.nazbert.Deckard for external
+tools to query and control Deckard.
 
-Top-level object: /com/core447/StreamController
+Top-level object: /io/github/nazbert/Deckard
   - Controllers property (list of serial numbers)
   - Pages property, AddPage, RemovePage
   - NotifyForegroundWindow, IconPacks property, GetIconNames
   - ForegroundWindow property (WindowInfo struct)
 
-Per-controller objects: /com/core447/StreamController/controllers/<serial>
+Per-controller objects: /io/github/nazbert/Deckard/controllers/<serial>
   - SetActivePage
   - ActivePageName property
 """
@@ -33,10 +33,10 @@ import globals as gl
 
 WindowInfo = namedtuple("WindowInfo", ["name", "wm_class"])
 
-DBUS_OBJECT_PATH = "/com/core447/StreamController"
+DBUS_OBJECT_PATH = "/io/github/nazbert/Deckard"
 CONTROLLER_BASE_PATH = DBUS_OBJECT_PATH + "/controllers"
-TOP_IFACE = "com.core447.StreamController"
-CTRL_IFACE = "com.core447.StreamController.Controller"
+TOP_IFACE = "io.github.nazbert.Deckard"
+CTRL_IFACE = "io.github.nazbert.Deckard.Controller"
 PROPS_IFACE = "org.freedesktop.DBus.Properties"
 
 
@@ -73,7 +73,7 @@ def _serial_to_dbus_path(serial: str) -> str:
 # Per-controller API (published at .../controllers/<serial>)
 # ─────────────────────────────────────────────────────────────────────
 
-@dbus_interface("com.core447.StreamController.Controller")
+@dbus_interface("io.github.nazbert.Deckard.Controller")
 class ControllerInstanceAPI:
     """DBus interface for a single StreamDeck controller."""
 
@@ -119,12 +119,12 @@ class ControllerInstanceAPI:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Top-level API (published at /com/core447/StreamController)
+# Top-level API (published at /io/github/nazbert/Deckard)
 # ─────────────────────────────────────────────────────────────────────
 
-@dbus_interface("com.core447.StreamController")
-class StreamControllerAPI:
-    """DBus interface for StreamController (top-level)."""
+@dbus_interface("io.github.nazbert.Deckard")
+class DeckardAPI:
+    """DBus interface for Deckard (top-level)."""
 
     def __init__(self):
         self._foreground_window: WindowInfo = WindowInfo("", "")
@@ -154,7 +154,7 @@ class StreamControllerAPI:
                 gl.signal_manager.trigger_signal(Signals.PageAdd, path)
         except FileExistsError as e:
             raise DBusError(
-                "com.core447.StreamController.Error.PageExists",
+                "io.github.nazbert.Deckard.Error.PageExists",
                 f"Page '{name}' already exists"
             )
         except json.JSONDecodeError as e:
@@ -178,7 +178,7 @@ class StreamControllerAPI:
 
     def NotifyForegroundWindow(self, name: Str, wm_class: Str) -> None:
         """
-        Notify StreamController of the current foreground window.
+        Notify Deckard of the current foreground window.
         Useful for testing/development without kdotool.
         """
         win = WindowInfo(name, wm_class)
@@ -223,7 +223,7 @@ class StreamControllerAPI:
 
     @property
     def DataPath(self) -> Str:
-        """The base path where StreamController stores its data (pages, icons, etc). 
+        """The base path where Deckard stores its data (pages, icons, etc). 
         (This is necessary for clients to compose valid JSON page files)"""
         return gl.DATA_PATH
     
@@ -260,11 +260,11 @@ _controller_instances: dict[str, ControllerInstanceAPI] = {}
 
 
 def start_dbus_service():
-    """Publish the StreamController API on the session bus."""
+    """Publish the Deckard API on the session bus."""
     global _bus, _api_instance
     try:
         _bus = SessionMessageBus()
-        _api_instance = StreamControllerAPI()
+        _api_instance = DeckardAPI()
         _bus.publish_object(DBUS_OBJECT_PATH, _api_instance)
 
         # Publish a sub-object for each connected controller
@@ -305,7 +305,7 @@ def stop_dbus_service():
         log.error(f"Failed to stop DBus API service: {e}")
 
 
-def get_api_instance() -> StreamControllerAPI | None:
+def get_api_instance() -> DeckardAPI | None:
     """Return the active top-level API instance, or None if not started."""
     return _api_instance
 

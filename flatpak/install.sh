@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Create a flatpak of StreamController and optionally a flatpak bundle
+# Create a flatpak of Deckard and optionally a flatpak bundle
 #
 
 # Function to check if a command exists
@@ -12,7 +12,7 @@ usage() {
     echo "Usage: $0 [options]"
     echo "Options:"
     echo "  -h --help             Show this message"
-    echo "  --repo=path           Path to StreamController repo (must be local)"
+    echo "  --repo=path           Path to Deckard repo (must be local)"
     echo "                        use 'current' for git repo in current pwd"
     echo "  --branch=branch       Name of branch in --repo to use"
     echo "                        Ignored if --repo is not specified"
@@ -128,35 +128,35 @@ if ! command_exists flatpak-builder; then
     exit 1
 fi
 
-# Check if StreamController directory exists
-if [[ -d "StreamController" ]]; then
-    echo "Warning: The directory 'StreamController' already exists."
+# Check if Deckard directory exists
+if [[ -d "Deckard" ]]; then
+    echo "Warning: The directory 'Deckard' already exists."
     askyesno "Do you want to continue?" || exit 1
 fi
 
-# Check if com.core447.StreamController is installed
-if flatpak list | grep -q "com.core447.StreamController"; then
-    echo "Warning: com.core447.StreamController is already installed."
+# Check if io.github.nazbert.Deckard is installed
+if flatpak list | grep -q "io.github.nazbert.Deckard"; then
+    echo "Warning: io.github.nazbert.Deckard is already installed."
     echo "The data should persist."
     if askyesno "Do you want to remove it before continuing?"; then
-        echo "Removing com.core447.StreamController..."
-        flatpak uninstall com.core447.StreamController -y
+        echo "Removing io.github.nazbert.Deckard..."
+        flatpak uninstall io.github.nazbert.Deckard -y
     fi
 fi
 
-# Create StreamController directory and navigate into it
-mkdir -p StreamController
-cd StreamController || exit 1
+# Create Deckard directory and navigate into it
+mkdir -p Deckard
+cd Deckard || exit 1
 
 if [[ -z $repo ]]; then
     # Download necessary files
-    echo "Downloading com.core447.StreamController.yml"
-    wget -O com.core447.StreamController.yml https://raw.githubusercontent.com/StreamController/StreamController/main/com.core447.StreamController.yml
+    echo "Downloading io.github.nazbert.Deckard.yml"
+    wget -O io.github.nazbert.Deckard.yml https://raw.githubusercontent.com/nazbert/deckard/main/io.github.nazbert.Deckard.yml
     echo "Downloading pypi-requirements.yaml"
-    wget -O pypi-requirements.yaml https://raw.githubusercontent.com/StreamController/StreamController/main/pypi-requirements.yaml
+    wget -O pypi-requirements.yaml https://raw.githubusercontent.com/nazbert/deckard/main/pypi-requirements.yaml
 else
-    echo "Copying com.core447.StreamController.yml"
-    cp $repo/com.core447.StreamController.yml .
+    echo "Copying io.github.nazbert.Deckard.yml"
+    cp $repo/io.github.nazbert.Deckard.yml .
 
     echo "Copying pypi-requirements.yaml"
     cp $repo/pypi-requirements.yaml .
@@ -172,15 +172,15 @@ else
     wget --quiet https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64 -O yq
     chmod +x yq
 
-    echo "Editing com.core447.StreamController.yml"
-    # Find the StreamController section and replace the
+    echo "Editing io.github.nazbert.Deckard.yml"
+    # Find the Deckard section and replace the
     # url and branch fields under the first (only) sources sub-section.
     # Environment variables are used to pass values to yq.
     # Note:
     REPO="file://$repo" BRANCH="$branch" ./yq -i '
-        with(.modules[] | select(.name == "StreamController").sources[0];
+        with(.modules[] | select(.name == "Deckard").sources[0];
              .url = strenv(REPO) |
-             .branch = strenv(BRANCH))' com.core447.StreamController.yml
+             .branch = strenv(BRANCH))' io.github.nazbert.Deckard.yml
 
 fi
 
@@ -198,16 +198,16 @@ echo "Installing flathub runtimes"
 flatpak install runtime/org.gnome.Sdk//46 --system -y
 flatpak install runtime/org.gnome.Platform//46 --system -y
 
-# Build and install StreamController
+# Build and install Deckard
 echo "Building flatpak (this will take a while)"
-flatpak-builder --repo=repo --force-clean --install --user build-dir com.core447.StreamController.yml
+flatpak-builder --repo=repo --force-clean --install --user build-dir io.github.nazbert.Deckard.yml
 rc=$?
 if (( $rc != 0 )); then
     exit $rc
 fi
 
 if (( $make_bundle == 1 )); then
-    echo "Creating flatpak bundle (StreamController.flatpak)"
-    flatpak build-bundle repo StreamController.flatpak com.core447.StreamController
+    echo "Creating flatpak bundle (Deckard.flatpak)"
+    flatpak build-bundle repo Deckard.flatpak io.github.nazbert.Deckard
 fi
 

@@ -47,6 +47,6 @@ def parse_flatpak_permissions(app_id):
     return permissions_dict
 
 # Example usage
-app_id = "com.core447.StreamController"
+app_id = "io.github.nazbert.Deckard"
 permissions = parse_flatpak_permissions(app_id)
 print(permissions)

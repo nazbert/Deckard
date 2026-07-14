@@ -1,0 +1,8 @@
+#!/bin/sh
+# Deckard launcher for source checkouts.
+#
+# Symlink this into your PATH (a copy would break the repo-relative lookup):
+#   ln -s "$(pwd)/scripts/deckard" ~/.local/bin/deckard
+# The symlink must be re-created if the checkout directory moves.
+REPO="$(CDPATH='' cd -- "$(dirname -- "$(readlink -f -- "$0")")/.." && pwd)"
+exec "$REPO/.venv/bin/python" "$REPO/main.py" "$@"

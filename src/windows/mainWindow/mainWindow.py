@@ -94,7 +94,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.split_view = Adw.NavigationSplitView()
         self.set_content(self.split_view)
 
-        self.content_page = Adw.NavigationPage(title="StreamController")
+        self.content_page = Adw.NavigationPage(title="Deckard")
         self.split_view.set_content(self.content_page)
 
         self.main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)

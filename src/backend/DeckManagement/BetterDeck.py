@@ -19,7 +19,7 @@ class BetterDeck():
         # shipping invariant (BetterDeck's RLock remains the real defense).
         # Env checked once here so the hot path is a single attribute test
         # when unset.
-        self._assert_owner: bool = bool(os.environ.get("STREAMCONTROLLER_ASSERT_DEVICE_OWNER"))
+        self._assert_owner: bool = bool(os.environ.get("DECKARD_ASSERT_DEVICE_OWNER"))
         self._expected_writer: threading.Thread | None = None
         self.owner_violations: list[tuple[str, str, str]] = []
 

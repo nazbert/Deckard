@@ -178,7 +178,7 @@ class MenuButton(Gtk.MenuButton):
         self.import_page_callback(file)
 
     def on_export_all_pages(self, *args):
-        initial_name = f"StreamController_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.json"
+        initial_name = f"Deckard_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.json"
         ChooseExportFileDialog(self, self.export_all_pages_callback, initial_name=initial_name)
 
     def export_all_pages_callback(self, selected_file):

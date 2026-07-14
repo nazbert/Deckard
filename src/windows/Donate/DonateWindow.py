@@ -20,7 +20,7 @@ from src.windows.Onboarding.OnboardingWindow import SupportAppOnboardingScreen
 
 class DonateWindow(Adw.Dialog):
     def __init__(self):
-        super().__init__(title="Support the project", accessible_role=Gtk.AccessibleRole.DIALOG)
+        super().__init__(title="Support the original project", accessible_role=Gtk.AccessibleRole.DIALOG)
         self.set_presentation_mode(Adw.DialogPresentationMode.FLOATING)
         self.set_can_close(True)
         self.set_content_height(600)

@@ -34,7 +34,7 @@ if "MALLOC_ARENA_MAX" not in os.environ and "SC_REEXEC" not in os.environ:
 # Import Python modules
 import setproctitle
 
-setproctitle.setproctitle("StreamController")
+setproctitle.setproctitle("Deckard")
 
 # Dump all-thread tracebacks on a fatal signal, or on demand via SIGQUIT.
 # stderr-only from time zero; main() re-points it at logs/faulthandler.log
@@ -113,7 +113,7 @@ from src.backend.Migration.Migrators.Migrator_1_5_0_beta_5 import Migrator_1_5_0
 import globals as gl
 
 # Define constants
-DEFAULT_DATA_PATH = os.path.expanduser("~/.var/app/com.core447.StreamController/data")
+DEFAULT_DATA_PATH = os.path.expanduser("~/.var/app/io.github.nazbert.Deckard/data")
 MAX_REASONABLE_X = 10
 MAX_REASONABLE_Y = 10
 
@@ -169,7 +169,7 @@ def load():
     log.info("Loading app")
     gl.deck_manager = DeckManager()
     gl.deck_manager.load_decks()
-    gl.main = Main(application_id="com.core447.StreamController", deck_manager=gl.deck_manager)
+    gl.main = Main(application_id="io.github.nazbert.Deckard", deck_manager=gl.deck_manager)
 
 @log.catch
 def create_cache_folder():
@@ -283,7 +283,7 @@ def quit_running():
     obj: dbus.BusObject = None
     action_interface: dbus.Interface = None
     try:
-        obj = session_bus.get_object("com.core447.StreamController", "/com/core447/StreamController")
+        obj = session_bus.get_object("io.github.nazbert.Deckard", "/io/github/nazbert/Deckard")
         action_interface = dbus.Interface(obj, "org.gtk.Actions")
     except dbus.exceptions.DBusException as e:
         log.info("No other instance running, continuing")
@@ -307,6 +307,7 @@ def quit_running():
             action_interface.Activate("reopen", [], [])
             log.info("Already running, exiting")
             sys.exit(0)
+
 
 def handle_listing_commands():
     """
@@ -409,7 +410,7 @@ def handle_listing_commands():
             
             if not os.path.exists(pages_dir):
                 print(f"Pages directory not found: {pages_dir}")
-                print("\nThis might mean StreamController hasn't been set up yet.")
+                print("\nThis might mean Deckard hasn't been set up yet.")
                 return True
             
             page_files = [f for f in os.listdir(pages_dir) if f.endswith('.json') and not f.startswith('.')]
@@ -535,7 +536,7 @@ def make_api_calls():
     obj: dbus.BusObject = None
     action_interface: dbus.Interface = None
     try:
-        obj = session_bus.get_object("com.core447.StreamController", "/com/core447/StreamController")
+        obj = session_bus.get_object("io.github.nazbert.Deckard", "/io/github/nazbert/Deckard")
         action_interface = dbus.Interface(obj, "org.gtk.Actions")
     except dbus.exceptions.DBusException as e:
         obj = None

@@ -270,7 +270,7 @@ class App(Adw.Application):
 
         gl.tray_icon.stop()
 
-        log.success("Stopped StreamController. Have a nice day!")
+        log.success("Stopped Deckard. Have a nice day!")
         log.stop()
         # os._exit, not sys.exit: interpreter teardown aborts in libusb on the
         # hidapi read thread during exit.
@@ -366,7 +366,7 @@ class App(Adw.Application):
         if button:
             notif.add_button_with_target(button[0], button[1], button[2])
 
-        GLib.idle_add(super().send_notification, "com.core447.StreamController", notif)
+        GLib.idle_add(super().send_notification, "io.github.nazbert.Deckard", notif)
     def on_change_page(self, action, data: GLib.Variant, *args):
         """
         page_name can be either the name or the path of the page

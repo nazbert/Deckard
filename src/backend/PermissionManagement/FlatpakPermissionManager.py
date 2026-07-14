@@ -37,7 +37,7 @@ class FlatpakPermissionManager:
         self.portal = None
         if not gl.IS_MAC:
             self.portal = Xdp.Portal.new()
-        self.app_id = "com.core447.StreamController"
+        self.app_id = "io.github.nazbert.Deckard"
 
     def get_is_flatpak(self):
         if gl.IS_MAC or self.portal is None:
