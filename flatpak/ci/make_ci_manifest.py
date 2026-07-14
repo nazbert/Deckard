@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Derive the CI flatpak manifest from the committed one.
 
-The committed manifest (com.core447.StreamController.yml) builds the app
-module from upstream's GitHub repo at a pinned tag — right for flathub,
-wrong for CI, which must build the commit under test. This swaps the
-StreamController module's sources for a local directory (a clean
+The committed manifest (io.github.nazbert.Deckard.yml) builds the app
+module from the fork's GitHub repo — right for flathub, wrong for CI,
+which must build the commit under test. This swaps the Deckard module's
+sources for a local directory (a clean
 `git archive` export staged by .gitlab-ci.yml, relative to the manifest)
 and leaves every other module untouched. Same rewrite flatpak/install.sh
 performs with yq for local builds.
@@ -24,11 +24,11 @@ def main() -> int:
         manifest = yaml.safe_load(f)
 
     for module in manifest["modules"]:
-        if isinstance(module, dict) and module.get("name") == "StreamController":
+        if isinstance(module, dict) and module.get("name") == "Deckard":
             module["sources"] = [{"type": "dir", "path": src_dir}]
             break
     else:
-        print("error: no 'StreamController' module in the manifest", file=sys.stderr)
+        print("error: no 'Deckard' module in the manifest", file=sys.stderr)
         return 1
 
     with open(manifest_path, "w") as f:

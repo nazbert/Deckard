@@ -1,12 +1,12 @@
-# StreamController fork CI — flatpak bundle releases (issue #128; design in
+# Deckard CI — flatpak bundle releases (issue #128; design in
 # docs/ci-flatpak-releases-plan.md).
 #
 # Shape (same skeleton as the other nb-labs repos):
 #   test     — byte-compile smoke over the tree (cheap syntax gate; the real
 #              gate is the flatpak build itself) + advisory changelog nudge.
 #   build    — flatpak-builder produces a single-file x86_64 .flatpak bundle
-#              from THIS checkout. The committed manifest builds upstream's
-#              GitHub repo at a pinned tag (right for flathub, wrong for CI),
+#              from THIS checkout. The committed manifest builds the Deckard
+#              module from its GitHub repo (right for flathub, wrong for CI),
 #              so the job derives a CI manifest whose app module points at a
 #              clean `git archive` export of $CI_COMMIT_SHA — the same rewrite
 #              flatpak/install.sh does interactively with yq.
@@ -43,7 +43,7 @@ workflow:
 stages: [test, build, release]
 
 variables:
-  APP_ID: com.core447.StreamController
+  APP_ID: io.github.nazbert.Deckard
   # Pinned nb-labs/ci-automation release tooling (the bump-labeled-MR bot).
   CI_AUTOMATION_REF: v0.3.0
 
@@ -108,7 +108,7 @@ build:flatpak:
   cache:
     key:
       files:
-        - com.core447.StreamController.yml
+        - io.github.nazbert.Deckard.yml
         - pypi-requirements.yaml
     paths:
       - .flatpak-builder/downloads
@@ -122,7 +122,7 @@ build:flatpak:
     # otherwise — the build takes tens of minutes on a cold cache.
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       changes:
-        - com.core447.StreamController.yml
+        - io.github.nazbert.Deckard.yml
         - pypi-requirements.yaml
         - flatpak/**/*
         - .gitlab-ci.yml
@@ -136,18 +136,18 @@ build:flatpak:
     - python3 -c "import yaml" 2>/dev/null || pip3 install --user --quiet PyYAML
     - mkdir -p build-ws/src dist
     - git archive "$CI_COMMIT_SHA" | tar -x -C build-ws/src
-    - cp com.core447.StreamController.yml pypi-requirements.yaml build-ws/
+    - cp io.github.nazbert.Deckard.yml pypi-requirements.yaml build-ws/
     - git clone --depth 1 https://github.com/flathub/shared-modules.git build-ws/shared-modules
-    - python3 flatpak/ci/make_ci_manifest.py build-ws/com.core447.StreamController.yml src
+    - python3 flatpak/ci/make_ci_manifest.py build-ws/io.github.nazbert.Deckard.yml src
     - cd build-ws
     - flatpak-builder --user --disable-rofiles-fuse --force-clean
         --state-dir="$CI_PROJECT_DIR/.flatpak-builder"
-        --repo=repo build-dir com.core447.StreamController.yml
+        --repo=repo build-dir io.github.nazbert.Deckard.yml
     # Bundle name: tag pipelines get the clean release version; branch/MR
     # pipelines get VERSION+shortsha so unstable bundles are identifiable.
     - VERSION_REF="${CI_COMMIT_TAG:-$(cat "$CI_PROJECT_DIR/VERSION")+${CI_COMMIT_SHORT_SHA}}"
     - VERSION_REF="${VERSION_REF#v}"
-    - flatpak build-bundle repo "$CI_PROJECT_DIR/dist/streamcontroller-${VERSION_REF}-x86_64.flatpak" "$APP_ID"
+    - flatpak build-bundle repo "$CI_PROJECT_DIR/dist/deckard-${VERSION_REF}-x86_64.flatpak" "$APP_ID"
     - ls -lh "$CI_PROJECT_DIR/dist/"
   artifacts:
     paths:
@@ -179,16 +179,16 @@ release:gitlab:
       set -e
       VERSION="${CI_COMMIT_TAG#v}"
       awk -v v="## [$VERSION]" 'index($0,v)==1{g=1;next} /^## \[/{g=0} g' CHANGELOG.md > release_notes.md
-      [ -s release_notes.md ] || printf 'StreamController fork %s\n' "$CI_COMMIT_TAG" > release_notes.md
+      [ -s release_notes.md ] || printf 'Deckard %s\n' "$CI_COMMIT_TAG" > release_notes.md
       echo "----- release notes -----"; cat release_notes.md
 
-      asset="streamcontroller-${VERSION}-x86_64.flatpak"
-      url="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/streamcontroller/${VERSION}/${asset}"
+      asset="deckard-${VERSION}-x86_64.flatpak"
+      url="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/deckard/${VERSION}/${asset}"
       echo "Uploading $asset to the generic package registry"
       curl --fail --silent --show-error --header "JOB-TOKEN: $CI_JOB_TOKEN" \
         --upload-file "dist/$asset" "$url"
 
-      release-cli create --tag-name "$CI_COMMIT_TAG" --name "StreamController (fork) $CI_COMMIT_TAG" \
+      release-cli create --tag-name "$CI_COMMIT_TAG" --name "Deckard $CI_COMMIT_TAG" \
         --description "$(cat release_notes.md)" \
         --assets-link "{\"name\":\"$asset\",\"url\":\"$url\",\"link_type\":\"package\"}"
 
@@ -200,8 +200,8 @@ release:gitlab:
 # release:gitlab (needs it) so GitHub is only ever cut for releases GitLab also
 # got; GitLab stays the source of truth. Pure curl+jq against the REST API (no
 # gh dependency) and idempotent, so a retry / re-tag reconciles rather than
-# 422s. Naming/asset are kept identical to release:gitlab on purpose — both
-# read the same, and the pending Deckard rebrand renames them together.
+# 422s. Naming/asset are kept identical to release:gitlab on purpose so both
+# releases read the same.
 #
 # NEEDS a GH_TOKEN project variable (masked + protected; a fine-grained PAT
 # scoped to the fork repo, Contents: read/write). Protected so it is exposed
@@ -229,14 +229,14 @@ release:github:
       set -eu
       : "${GH_TOKEN:?set GH_TOKEN (masked+protected CI var: fine-grained PAT, Contents:rw on the fork)}"
       VERSION="${CI_COMMIT_TAG#v}"
-      asset="streamcontroller-${VERSION}-x86_64.flatpak"
+      asset="deckard-${VERSION}-x86_64.flatpak"
       api="https://api.github.com/repos/${GITHUB_REPO}"
       auth="Authorization: Bearer ${GH_TOKEN}"
 
       # Re-derive the notes exactly as release:gitlab did (artifacts aren't
       # shared) so both releases carry identical text.
       awk -v v="## [$VERSION]" 'index($0,v)==1{g=1;next} /^## \[/{g=0} g' CHANGELOG.md > release_notes.md
-      [ -s release_notes.md ] || printf 'StreamController fork %s\n' "$CI_COMMIT_TAG" > release_notes.md
+      [ -s release_notes.md ] || printf 'Deckard %s\n' "$CI_COMMIT_TAG" > release_notes.md
       echo "----- release notes -----"; cat release_notes.md
 
       # Land the tag on GitHub ourselves rather than trusting the async mirror's
@@ -250,7 +250,7 @@ release:github:
       rid=$(curl -sS -H "$auth" "$api/releases/tags/$CI_COMMIT_TAG" | jq -r '.id // empty')
       if [ -z "$rid" ]; then
         rid=$(jq -n --arg t "$CI_COMMIT_TAG" --arg c "$CI_COMMIT_SHA" \
-                    --arg n "StreamController (fork) $CI_COMMIT_TAG" --rawfile b release_notes.md \
+                    --arg n "Deckard $CI_COMMIT_TAG" --rawfile b release_notes.md \
                     '{tag_name:$t, target_commitish:$c, name:$n, body:$b}' \
               | curl -sS --fail -X POST -H "$auth" -H "Content-Type: application/json" \
                      -d @- "$api/releases" | jq -r '.id')

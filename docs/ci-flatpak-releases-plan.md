@@ -57,7 +57,7 @@ builds the flatpak bundle and creates a GitLab Release with it attached.
   imports need GTK4/PyGObject). Honest but thin — the flatpak build is the real
   gate. Running the scenario harness (`tests/run_all.py`) in CI is follow-up
   work, tracked on #128.
-- **Release artifact**: `streamcontroller-<X.Y.Z>-x86_64.flatpak` uploaded to
+- **Release artifact**: `deckard-<X.Y.Z>-x86_64.flatpak` uploaded to
   the generic package registry (durable) and linked as a package asset on the
   GitLab Release; notes = that version's CHANGELOG.md section (awk extraction,
   release-cli driven directly — the declarative `release:description` is
@@ -72,7 +72,7 @@ builds the flatpak bundle and creates a GitLab Release with it attached.
    release-stamp commit).
 4. `RELEASE_BOT_TOKEN` project variable (masked + protected): project access
    token `release-bot`, Maintainer role, scopes `api` + `write_repository`.
-5. StreamController (project 15) on nb-labs/ci-automation's CI job-token
+5. Deckard (project 15) on nb-labs/ci-automation's CI job-token
    allowlist (the `.release` jobs clone it with `CI_JOB_TOKEN`).
 6. Instance runner `flatpak-privileged` (id 44) registered in the gitlab-runner
    container on hugo: docker executor, `privileged = true`, tag `flatpak`,
@@ -93,7 +93,7 @@ Rehearsal: the MR's own pipeline runs `build:flatpak` automatically (it changes
 ## Install / consume
 
 Download the `.flatpak` asset from the GitLab Release, then
-`flatpak install ./streamcontroller-<ver>-x86_64.flatpak` (runtime dependency
+`flatpak install ./deckard-<ver>-x86_64.flatpak` (runtime dependency
 `org.gnome.Platform//50` resolves from flathub). Bundle installs don't
 auto-update — an ostree repo channel would fix that; see follow-ups.
 
