@@ -42,8 +42,6 @@ assert "globals" not in sys.modules, "rebrand_migration must not pull in globals
 
 rm._old_instance_running = lambda: False  # no session bus in the harness
 
-AUTOSTART_DIR = os.path.join(HOME, ".config", "autostart")
-
 
 def fresh_roots():
     base = tempfile.mkdtemp(prefix="rebrand_roots_", dir=HOME)
@@ -66,16 +64,6 @@ def make_skeleton(new_root):
     # exactly what globals.py + mp4_tile_cache.py leave behind at import time
     os.makedirs(os.path.join(new_root, "data", "plugins"))
     os.makedirs(os.path.join(new_root, "data", "cache", "videos"))
-
-
-def make_stale_autostart():
-    os.makedirs(AUTOSTART_DIR, exist_ok=True)
-    for name in rm._STALE_AUTOSTART_NAMES:
-        with open(os.path.join(AUTOSTART_DIR, name), "w") as f:
-            f.write("[Desktop Entry]\n")
-    # an unrelated entry that must survive
-    with open(os.path.join(AUTOSTART_DIR, "opendeck.desktop"), "w") as f:
-        f.write("[Desktop Entry]\n")
 
 
 def marker_state(new_root):
@@ -111,16 +99,14 @@ rm.migrate(old, new, argv=["main.py"])
 assert not os.path.lexists(old) and not os.path.lexists(new)
 print("1. fresh install no-op: OK")
 
-# --- 2. normal move + autostart cleanup --------------------------------
+# --- 2. normal move -----------------------------------------------------
+# (stale-autostart cleanup now lives in autostart.remove_legacy_autostart_
+# entries, covered by scenario_autostart_disable.py.)
 old, new = fresh_roots()
 make_old_tree(old)
-make_stale_autostart()
 rm.migrate(old, new, argv=["main.py"])
 assert_migrated(old, new)
-for name in rm._STALE_AUTOSTART_NAMES:
-    assert not os.path.exists(os.path.join(AUTOSTART_DIR, name)), f"stale {name} not removed"
-assert os.path.exists(os.path.join(AUTOSTART_DIR, "opendeck.desktop")), "unrelated entry removed"
-print("2. normal move + autostart cleanup: OK")
+print("2. normal move: OK")
 
 # --- 3. idempotent re-run ----------------------------------------------
 rm.migrate(old, new, argv=["main.py"])
@@ -215,6 +201,46 @@ rm.migrate(old, new, argv=["main.py"])
 assert marker_state(new) == rm._STATE_COMPLETE
 assert_migrated(old, new)
 print("12. marker backfill on existing symlink: OK")
+
+# --- 14. --data abbreviation (argparse) also skips ----------------------
+old, new = fresh_roots()
+make_old_tree(old)
+rm.migrate(old, new, argv=["main.py", "--dat", "/tmp/custom"])
+assert os.path.isdir(old) and not os.path.lexists(new), "--dat abbrev did not skip"
+print("14. --data abbreviation skip: OK")
+
+# --- 15. dir-symlink in new root is NOT skeleton -> abort, link kept ----
+old, new = fresh_roots()
+make_old_tree(old)
+target = tempfile.mkdtemp(prefix="relocation_", dir=HOME)
+os.makedirs(os.path.join(new, "data"))
+os.symlink(target, os.path.join(new, "data", "plugins"))  # user relocation, no plain files
+expect_exit(lambda: rm.migrate(old, new, argv=["main.py"]))
+assert os.path.islink(os.path.join(new, "data", "plugins")), "relocation symlink deleted as skeleton"
+assert os.path.isdir(old) and not os.path.islink(old), "old tree mutated on abort"
+print("15. dir-symlink not treated as skeleton: OK")
+
+# --- 16. new root is itself a symlink -> abort, not rmtree crash --------
+old, new = fresh_roots()
+make_old_tree(old)
+elsewhere = tempfile.mkdtemp(prefix="newlink_", dir=HOME)
+os.makedirs(os.path.dirname(new), exist_ok=True)
+os.symlink(elsewhere, new)
+expect_exit(lambda: rm.migrate(old, new, argv=["main.py"]))
+assert os.path.islink(new) and os.path.realpath(new) == os.path.realpath(elsewhere)
+print("16. symlinked new root abort: OK")
+
+# --- 17. undurable pending marker write -> abort before rename ----------
+old, new = fresh_roots()
+make_old_tree(old)
+os.chmod(old, 0o500)  # deny file creation in old_root -> pending marker write fails
+try:
+    expect_exit(lambda: rm.migrate(old, new, argv=["main.py"]))
+finally:
+    os.chmod(old, 0o700)
+assert os.path.isdir(old) and not os.path.lexists(new), "renamed despite undurable marker"
+assert os.path.isfile(os.path.join(old, "data", "settings", "settings.json"))
+print("17. undurable marker aborts before rename: OK")
 
 # --- 13. pre-globals contract ------------------------------------------
 class _FakeGlobals:  # simulate globals already imported

@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING
 import argparse
 import sys
 import threading
+
+import appinfo
 from collections import deque
 from loguru import logger as log
 
@@ -30,7 +32,7 @@ argparser.add_argument("--change-state", action="append", nargs=4,
 argparser.add_argument("app_args", nargs="*")
 
 MAIN_PATH: str
-VAR_APP_PATH = os.path.join(os.path.expanduser("~"), ".var", "app", "io.github.nazbert.Deckard")
+VAR_APP_PATH = os.path.join(os.path.expanduser("~"), ".var", "app", appinfo.APP_ID)
 STATIC_SETTINGS_FILE_PATH = os.path.join(VAR_APP_PATH, "static", "settings.json")
 
 DATA_PATH = os.path.join(VAR_APP_PATH, "data") # Maybe use XDG_DATA_HOME instead

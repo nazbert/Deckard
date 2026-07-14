@@ -1,12 +1,13 @@
 import os
 from loguru import logger as log
+import appinfo
 import globals as gl
 from src.backend.trayicon import DBusTrayIcon, DBusMenu
 
 class TrayIcon(DBusTrayIcon):
-    MenuPath = "/io/github/nazbert/Deckard/Menu"
-    IndicatorPath = "/org/ayatana/NotificationItem/io_github_nazbert_Deckard_TrayIcon"
-    AppId = "io.github.nazbert.Deckard.TrayIcon"
+    MenuPath = f"{appinfo.DBUS_OBJECT_PATH}/Menu"
+    IndicatorPath = f"/org/ayatana/NotificationItem/{appinfo.DBUS_UNDERSCORE}_TrayIcon"
+    AppId = f"{appinfo.APP_ID}.TrayIcon"
 
     def __init__(self):
         if gl.IS_MAC:
@@ -21,7 +22,7 @@ class TrayIcon(DBusTrayIcon):
         self.menu.add_menu_item(7, "Quit", callback=self.on_quit)
         super().__init__(self.menu, self.MenuPath, self.IndicatorPath, self.AppId, "Deckard")
         icon_theme_path = os.path.join(gl.MAIN_PATH, "Assets", "icons")
-        self.set_icon("io.github.nazbert.Deckard", path=icon_theme_path)
+        self.set_icon(appinfo.APP_ID, path=icon_theme_path)
         self.set_tooltip("Deckard")
         self.set_label("Deckard")
 

@@ -151,9 +151,9 @@ cd Deckard || exit 1
 if [[ -z $repo ]]; then
     # Download necessary files
     echo "Downloading io.github.nazbert.Deckard.yml"
-    wget -O io.github.nazbert.Deckard.yml https://raw.githubusercontent.com/nazbert/deckard/main/io.github.nazbert.Deckard.yml
+    wget -O io.github.nazbert.Deckard.yml https://raw.githubusercontent.com/nazbert/StreamController/main/io.github.nazbert.Deckard.yml
     echo "Downloading pypi-requirements.yaml"
-    wget -O pypi-requirements.yaml https://raw.githubusercontent.com/nazbert/deckard/main/pypi-requirements.yaml
+    wget -O pypi-requirements.yaml https://raw.githubusercontent.com/nazbert/StreamController/main/pypi-requirements.yaml
 else
     echo "Copying io.github.nazbert.Deckard.yml"
     cp $repo/io.github.nazbert.Deckard.yml .

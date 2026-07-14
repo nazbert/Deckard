@@ -55,7 +55,7 @@ def find_streamcontroller_pid() -> int | None:
                 cmdline = f.read().decode(errors="replace")
         except OSError:
             continue
-        if "main.py" in cmdline and "Deckard" in cmdline:
+        if "Deckard" in cmdline:
             return int(entry)
     return None
 

@@ -27,6 +27,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Gio, Adw, GLib
 
 # Import globals
+import appinfo
 import globals as gl
 
 # Import python modules
@@ -145,12 +146,15 @@ class HeaderHamburgerMenuButton(Gtk.MenuButton):
         self.about.set_developer_name("nazbert")
         self.about.set_license_type(Gtk.License.GPL_3_0)
         self.about.set_comments("Control your Stream Decks. A fork of StreamController by Core447.")
-        self.about.set_website("https://github.com/nazbert/deckard")
-        self.about.set_issue_url("https://gitlab.nb-labs.net/naz/deckard/-/issues")
+        # Current repo paths (redirect-safe): both hosts keep an old->new
+        # redirect after the Phase 4 rename, so these resolve before AND after
+        # it -- unlike the not-yet-existing nazbert/deckard paths.
+        self.about.set_website("https://github.com/nazbert/StreamController")
+        self.about.set_issue_url("https://gitlab.nb-labs.net/naz/StreamController/-/issues")
         # self.about.set_support_url("https://discord.com/invite/MSyHM8TN3u")
 
         self.about.set_copyright("Copyright (C) 2024 Core447, 2026 nazbert")
-        self.about.set_application_icon("io.github.nazbert.Deckard")
+        self.about.set_application_icon(appinfo.APP_ID)
         self.about.set_visible(True)
 
         self.about.add_legal_section(
@@ -197,7 +201,7 @@ class HeaderHamburgerMenuButton(Gtk.MenuButton):
         with gl.logs_lock:
             logs_snapshot = list(gl.logs)
         self.about.set_debug_info("".join(logs_snapshot))
-        self.about.set_debug_info_filename(os.path.join(gl.DATA_PATH, "Deckard.log"))
+        self.about.set_debug_info_filename(os.path.join(gl.DATA_PATH, "logs", "logs.log"))
 
         self.about.set_release_notes(gl.release_notes)  
         self.about.set_release_notes_version(gl.app_version)

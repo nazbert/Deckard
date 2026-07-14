@@ -123,6 +123,26 @@ def main() -> None:
     assert not os.path.exists(path), "native disable must remove the entry"
     print("PASS: native path never touches the portal; entry content is native")
 
+    # --- 4. legacy pre-rename autostart entries removed on every setup ---
+    autostart_dir = os.path.join(home, ".config", "autostart")
+    os.makedirs(autostart_dir, exist_ok=True)
+    for legacy in autostart.LEGACY_AUTOSTART_NAMES:
+        with open(os.path.join(autostart_dir, legacy), "w") as f:
+            f.write("[Desktop Entry]\n")
+    # an unrelated entry that must survive
+    with open(os.path.join(autostart_dir, "opendeck.desktop"), "w") as f:
+        f.write("[Desktop Entry]\n")
+
+    autostart.setup_autostart(True)  # runs remove_legacy_autostart_entries()
+    for legacy in autostart.LEGACY_AUTOSTART_NAMES:
+        assert not os.path.exists(os.path.join(autostart_dir, legacy)), (
+            f"legacy autostart entry {legacy} not removed"
+        )
+    assert os.path.exists(os.path.join(autostart_dir, "opendeck.desktop")), (
+        "unrelated autostart entry removed"
+    )
+    print("PASS: legacy autostart entries removed, unrelated kept")
+
     print("PASS: scenario_autostart_disable")
 
 

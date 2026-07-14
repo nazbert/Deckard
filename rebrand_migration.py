@@ -9,7 +9,7 @@ it at *import* time -- on every invocation, including CLI early-return runs
 "does the new tree exist" check below. main.py calls migrate() right after
 the patcher, before its main import block. This module is stdlib-only for
 the same reason (dbus is imported lazily, and only to probe for a live
-pre-rename instance).
+pre-rename instance); it imports only `appinfo`, which is itself stdlib-only.
 
 Design (docs/rename-deckard-plan.md, Phase 2):
 
@@ -19,34 +19,35 @@ Design (docs/rename-deckard-plan.md, Phase 2):
 - A compat symlink is left at the old root: live JSON (deck settings, pages
   incl. backups) embeds absolute paths into the old tree.
 - rename+symlink cannot be atomic together, so a marker file tracks the
-  state instead. The pending marker is written into the OLD root immediately
-  before the rename and therefore travels with it: any crash after the
-  rename leaves a "symlink-pending" marker in the new tree, which the next
-  start finishes. (The only unrecoverable window is a crash between the
-  marker write and the rename itself -- two adjacent syscalls -- which
-  degrades to a plain unmigrated state and is retried in full.)
+  state instead. The pending marker is written -- durably (fsync) -- into
+  the OLD root immediately before the rename and therefore travels with it:
+  any crash after the rename leaves a "symlink-pending" marker in the new
+  tree, which the next start finishes. The durable write matters: a
+  non-fsync'd marker can reach disk as a zero-length file after power loss
+  (the rename metadata commits before the marker's data blocks), which reads
+  as neither state and would be mistaken for a fresh install.
 - Never merge, never delete user data: if both roots contain files beyond
   the known import-time skeleton, refuse loudly and let the user resolve it.
+
+Stale pre-rename autostart entries are NOT handled here -- autostart.py owns
+autostart filenames and removes the legacy ones on every launch (self-
+healing), which this one-shot path could not be.
 """
 
 import os
 import shutil
 import sys
 
-OLD_ID = "com.core447.StreamController"
-NEW_ID = "io.github.nazbert.Deckard"
+import appinfo
+
+OLD_ID = appinfo.OLD_APP_ID
+NEW_ID = appinfo.APP_ID
 OLD_ROOT = os.path.expanduser(os.path.join("~", ".var", "app", OLD_ID))
 NEW_ROOT = os.path.expanduser(os.path.join("~", ".var", "app", NEW_ID))
 
 MARKER_NAME = ".migrated-from-" + OLD_ID
 _STATE_PENDING = "symlink-pending"
 _STATE_COMPLETE = "complete"
-
-# Autostart entries written under the old identity. The app-written one
-# ("StreamController.desktop", autostart.py pre-rename) would relaunch an
-# old-identity build at every login; the portal-era one is a flatpak
-# remnant no code path ever removed on native installs.
-_STALE_AUTOSTART_NAMES = ("StreamController.desktop", OLD_ID + ".desktop")
 
 
 def _log(msg: str) -> None:
@@ -68,12 +69,36 @@ def _read_marker(marker_path: str) -> str | None:
         return None
 
 
-def _write_marker(marker_path: str, state: str) -> None:
+def _write_marker(marker_path: str, state: str) -> bool:
+    """Durably write the marker (fsync file + fsync dir + atomic replace).
+
+    Returns True on success. Durability is load-bearing: a truncated or
+    zero-length marker surviving a crash reads as neither state and would be
+    treated as a fresh install, stranding the migrated data with no compat
+    symlink.
+    """
+    tmp = marker_path + ".tmp"
     try:
-        with open(marker_path, "w") as f:
-            f.write(state + "\n")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        try:
+            os.write(fd, (state + "\n").encode())
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, marker_path)
+        dir_fd = os.open(os.path.dirname(marker_path), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+        return True
     except OSError as e:
-        _log(f"could not write marker {marker_path} ({e}); state will be re-derived next start")
+        _log(f"could not durably write marker {marker_path} ({e})")
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
 
 
 def _old_instance_running() -> bool:
@@ -85,30 +110,42 @@ def _old_instance_running() -> bool:
         return False
 
 
-def _is_skeleton(root: str) -> bool:
-    """True if `root` holds only (nested) empty directories.
+def _data_override_active(argv: list[str]) -> bool:
+    """True if a --data override is present, including the argparse
+    abbreviations globals.py accepts (--dat, --data=..., etc.).
 
-    globals.py and mp4_tile_cache.py os.makedirs() the data tree at import
-    time on every invocation, so a new-id root consisting purely of empty
-    dirs is machine residue, not user state. Any regular file or symlink
-    anywhere below means it is not ours to delete.
+    We match any `--data`-prefixed flag of at least 5 chars ("--dat"). Very
+    short prefixes ("--da") are treated as NOT an override on purpose: a
+    false positive here would skip the migration and strand the real data
+    unmigrated (the app boots factory-fresh), which is worse than the
+    false-negative case, where the migration merely runs early during a
+    genuinely custom-data session and is harmless to the moved tree.
     """
-    for _dirpath, _dirnames, filenames in os.walk(root):
+    for arg in argv[1:]:
+        head = arg.split("=", 1)[0]
+        if len(head) >= 5 and "--data".startswith(head):
+            return True
+    return False
+
+
+def _is_skeleton(root: str) -> bool:
+    """True only if `root` is a tree of empty directories -- the import-time
+    makedirs residue globals.py / mp4_tile_cache.py leave behind.
+
+    Any regular file, or ANY symlink anywhere below (a directory-symlink is
+    reported by os.walk in dirnames, unfollowed; a file-symlink in
+    filenames), means the tree holds real user state -- e.g. a data-
+    relocation symlink -- and is not ours to delete.
+    """
+    if os.path.islink(root):
+        return False
+    for dirpath, dirnames, filenames in os.walk(root):
         if filenames:
             return False
+        for d in dirnames:
+            if os.path.islink(os.path.join(dirpath, d)):
+                return False
     return True
-
-
-def _cleanup_stale_autostart() -> None:
-    autostart_dir = os.path.expanduser(os.path.join("~", ".config", "autostart"))
-    for name in _STALE_AUTOSTART_NAMES:
-        path = os.path.join(autostart_dir, name)
-        if os.path.isfile(path):
-            try:
-                os.remove(path)
-                _log(f"removed stale autostart entry {path}")
-            except OSError as e:
-                _log(f"could not remove stale autostart entry {path}: {e}")
 
 
 def _finish_symlink(old_root: str, new_root: str, marker_path: str) -> None:
@@ -130,8 +167,10 @@ def _finish_symlink(old_root: str, new_root: str, marker_path: str) -> None:
         except OSError as e:
             _log(f"could not create compat symlink ({e}); will retry next start")
             return
+    # A failed complete-marker write is self-healing: the marker that
+    # travelled with the rename still reads "pending", so the next start
+    # re-enters _finish_symlink via the pending branch and retries.
     _write_marker(marker_path, _STATE_COMPLETE)
-    _cleanup_stale_autostart()
 
 
 def migrate(old_root: str = OLD_ROOT, new_root: str = NEW_ROOT,
@@ -143,7 +182,7 @@ def migrate(old_root: str = OLD_ROOT, new_root: str = NEW_ROOT,
         )
 
     argv = sys.argv if argv is None else argv
-    if "--data" in argv or any(a.startswith("--data=") for a in argv):
+    if _data_override_active(argv):
         _log("--data override active; skipping data-dir migration")
         return
 
@@ -164,7 +203,6 @@ def migrate(old_root: str = OLD_ROOT, new_root: str = NEW_ROOT,
             # Our compat link, but the marker is missing (e.g. marker write
             # failed earlier): data is already at the new root.
             _write_marker(marker_path, _STATE_COMPLETE)
-            _cleanup_stale_autostart()
             return
         _abort(
             f"{old_root} is a symlink but does not resolve to {new_root} (broken or "
@@ -180,6 +218,11 @@ def migrate(old_root: str = OLD_ROOT, new_root: str = NEW_ROOT,
         )
 
     if os.path.lexists(new_root):
+        if os.path.islink(new_root):
+            _abort(
+                f"{new_root} is a symlink; the migration expects to create it as a "
+                f"real directory. Resolve it manually, then restart."
+            )
         if _is_skeleton(new_root):
             _log(f"removing empty skeleton at {new_root} (import-time makedirs residue)")
             shutil.rmtree(new_root)
@@ -189,8 +232,14 @@ def migrate(old_root: str = OLD_ROOT, new_root: str = NEW_ROOT,
                 f"delete either. Move one of them aside manually, then restart."
             )
 
-    # The pending marker travels with the rename (see module docstring).
-    _write_marker(os.path.join(old_root, MARKER_NAME), _STATE_PENDING)
+    # The pending marker travels with the rename (see module docstring). A
+    # non-durable marker here is the one unrecoverable state, so refuse to
+    # rename without it -- old_root is still intact, so this is a clean retry.
+    if not _write_marker(os.path.join(old_root, MARKER_NAME), _STATE_PENDING):
+        _abort(
+            f"could not durably write the migration marker into {old_root}; refusing "
+            f"to rename without it. Fix permissions/space on that path and restart."
+        )
     try:
         os.rename(old_root, new_root)
     except OSError as e:

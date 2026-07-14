@@ -24,6 +24,7 @@ from src.windows.Store.ResponsibleNotesDialog import ResponsibleNotesDialog
 from src.windows.Donate.DonateWindow import DonateWindow
 
 # Import globals first to get IS_MAC
+import appinfo
 import globals as gl
 
 gi.require_version("Gtk", "4.0")
@@ -366,7 +367,7 @@ class App(Adw.Application):
         if button:
             notif.add_button_with_target(button[0], button[1], button[2])
 
-        GLib.idle_add(super().send_notification, "io.github.nazbert.Deckard", notif)
+        GLib.idle_add(super().send_notification, appinfo.APP_ID, notif)
     def on_change_page(self, action, data: GLib.Variant, *args):
         """
         page_name can be either the name or the path of the page

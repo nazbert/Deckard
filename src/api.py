@@ -29,15 +29,17 @@ from dasbus.typing import Str, List
 from dasbus.error import DBusError
 from gi.repository import GLib, Gio
 
+import appinfo
 import globals as gl
 
 WindowInfo = namedtuple("WindowInfo", ["name", "wm_class"])
 
-DBUS_OBJECT_PATH = "/io/github/nazbert/Deckard"
+DBUS_OBJECT_PATH = appinfo.DBUS_OBJECT_PATH
 CONTROLLER_BASE_PATH = DBUS_OBJECT_PATH + "/controllers"
-TOP_IFACE = "io.github.nazbert.Deckard"
-CTRL_IFACE = "io.github.nazbert.Deckard.Controller"
+TOP_IFACE = appinfo.APP_ID
+CTRL_IFACE = f"{appinfo.APP_ID}.Controller"
 PROPS_IFACE = "org.freedesktop.DBus.Properties"
+ERROR_PAGE_EXISTS = f"{appinfo.APP_ID}.Error.PageExists"
 
 
 def _emit_properties_changed(object_path: str, interface: str,
@@ -73,7 +75,7 @@ def _serial_to_dbus_path(serial: str) -> str:
 # Per-controller API (published at .../controllers/<serial>)
 # ─────────────────────────────────────────────────────────────────────
 
-@dbus_interface("io.github.nazbert.Deckard.Controller")
+@dbus_interface(CTRL_IFACE)
 class ControllerInstanceAPI:
     """DBus interface for a single StreamDeck controller."""
 
@@ -122,7 +124,7 @@ class ControllerInstanceAPI:
 # Top-level API (published at /io/github/nazbert/Deckard)
 # ─────────────────────────────────────────────────────────────────────
 
-@dbus_interface("io.github.nazbert.Deckard")
+@dbus_interface(TOP_IFACE)
 class DeckardAPI:
     """DBus interface for Deckard (top-level)."""
 
@@ -154,7 +156,7 @@ class DeckardAPI:
                 gl.signal_manager.trigger_signal(Signals.PageAdd, path)
         except FileExistsError as e:
             raise DBusError(
-                "io.github.nazbert.Deckard.Error.PageExists",
+                ERROR_PAGE_EXISTS,
                 f"Page '{name}' already exists"
             )
         except json.JSONDecodeError as e:

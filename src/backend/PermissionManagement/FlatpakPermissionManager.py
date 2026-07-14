@@ -27,6 +27,8 @@ import subprocess
 import shlex
 from loguru import logger as log
 
+import appinfo
+
 import globals as gl
 
 from src.windows.Permissions.FlatpakPermissionRequest import FlatpakPermissionRequestWindow
@@ -37,7 +39,7 @@ class FlatpakPermissionManager:
         self.portal = None
         if not gl.IS_MAC:
             self.portal = Xdp.Portal.new()
-        self.app_id = "io.github.nazbert.Deckard"
+        self.app_id = appinfo.APP_ID
 
     def get_is_flatpak(self):
         if gl.IS_MAC or self.portal is None:

@@ -37,9 +37,9 @@
     <color type="primary" scheme_preference="dark">#244b62</color>
   </branding>
 
-  <url type="homepage">https://github.com/nazbert/deckard</url>
-  <url type="bugtracker">https://gitlab.nb-labs.net/naz/deckard/-/issues</url>
-  <url type="contribute">https://github.com/nazbert/deckard</url>
+  <url type="homepage">https://github.com/nazbert/StreamController</url>
+  <url type="bugtracker">https://gitlab.nb-labs.net/naz/StreamController/-/issues</url>
+  <url type="contribute">https://github.com/nazbert/StreamController</url>
   <releases>
     <release version="1.5.0-beta.15" date="2026-07-09">
       <description translatable="no">

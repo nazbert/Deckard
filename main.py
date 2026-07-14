@@ -57,6 +57,7 @@ patcher.patch()
 # MUST run before `import globals` below -- globals.py os.makedirs()es the
 # data dir at import time on every invocation, which would poison the
 # migration's existence checks (docs/rename-deckard-plan.md, Phase 2).
+import appinfo
 from rebrand_migration import migrate as _rebrand_migrate
 _rebrand_migrate()
 
@@ -121,7 +122,7 @@ from src.backend.Migration.Migrators.Migrator_1_5_0_beta_5 import Migrator_1_5_0
 import globals as gl
 
 # Define constants
-DEFAULT_DATA_PATH = os.path.expanduser("~/.var/app/io.github.nazbert.Deckard/data")
+DEFAULT_DATA_PATH = os.path.expanduser(f"~/.var/app/{appinfo.APP_ID}/data")
 MAX_REASONABLE_X = 10
 MAX_REASONABLE_Y = 10
 
@@ -177,7 +178,7 @@ def load():
     log.info("Loading app")
     gl.deck_manager = DeckManager()
     gl.deck_manager.load_decks()
-    gl.main = Main(application_id="io.github.nazbert.Deckard", deck_manager=gl.deck_manager)
+    gl.main = Main(application_id=appinfo.APP_ID, deck_manager=gl.deck_manager)
 
 @log.catch
 def create_cache_folder():
@@ -291,7 +292,7 @@ def quit_running():
     obj: dbus.BusObject = None
     action_interface: dbus.Interface = None
     try:
-        obj = session_bus.get_object("io.github.nazbert.Deckard", "/io/github/nazbert/Deckard")
+        obj = session_bus.get_object(appinfo.APP_ID, appinfo.DBUS_OBJECT_PATH)
         action_interface = dbus.Interface(obj, "org.gtk.Actions")
     except dbus.exceptions.DBusException as e:
         log.info("No other instance running, continuing")
@@ -319,18 +320,33 @@ def quit_running():
     # Transition guard for the rename (docs/rename-deckard-plan.md, Phase 2):
     # a pre-rename build still owning the old bus name is invisible to the
     # gate above, and reset_all_decks() below would USB-reset decks it owns.
-    # Ask it to quit the same way --close-running does for the new name.
+    # Probe with NameHasOwner, never get_object: get_object on a well-known
+    # name activates it, which for the old id could START an upstream install
+    # via its D-Bus service file -- the very race this guard exists to
+    # prevent. NameHasOwner==False (the normal case) is also the effective
+    # sunset: once nothing owns the old name, this is a single cheap no-op
+    # round trip per launch.
     try:
-        old_obj = session_bus.get_object("com.core447.StreamController", "/com/core447/StreamController")
-        old_iface = dbus.Interface(old_obj, "org.gtk.Actions")
-    except dbus.exceptions.DBusException:
-        return  # expected: no pre-rename instance on the bus
+        if not session_bus.name_has_owner(appinfo.OLD_APP_ID):
+            return
+    except (dbus.exceptions.DBusException, ValueError) as e:
+        log.debug(f"Could not probe the pre-rename bus name: {e}")
+        return
     log.warning("Pre-rename StreamController instance detected on the session bus; asking it to quit")
     try:
-        old_iface.Activate("quit", [], [])
-        time.sleep(5)
-    except dbus.exceptions.DBusException as e:
+        old_obj = session_bus.get_object(appinfo.OLD_APP_ID, appinfo.OLD_DBUS_OBJECT_PATH)
+        dbus.Interface(old_obj, "org.gtk.Actions").Activate("quit", [], [])
+    except (dbus.exceptions.DBusException, ValueError) as e:
         log.error(f"Could not close the pre-rename instance: {e}")
+        return
+    # Poll (bounded) for it to drop the name instead of a flat 5s sleep.
+    for _ in range(25):
+        try:
+            if not session_bus.name_has_owner(appinfo.OLD_APP_ID):
+                break
+        except (dbus.exceptions.DBusException, ValueError):
+            break
+        time.sleep(0.2)
 
 def handle_listing_commands():
     """
@@ -559,7 +575,7 @@ def make_api_calls():
     obj: dbus.BusObject = None
     action_interface: dbus.Interface = None
     try:
-        obj = session_bus.get_object("io.github.nazbert.Deckard", "/io/github/nazbert/Deckard")
+        obj = session_bus.get_object(appinfo.APP_ID, appinfo.DBUS_OBJECT_PATH)
         action_interface = dbus.Interface(obj, "org.gtk.Actions")
     except dbus.exceptions.DBusException as e:
         obj = None

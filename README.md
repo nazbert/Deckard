@@ -60,7 +60,7 @@ Lock your Stream Deck when your system is locked (available on KDE, GNOME, and C
 Deckard runs from source:
 
 ```sh
-git clone https://github.com/nazbert/deckard.git
+git clone https://github.com/nazbert/StreamController.git deckard
 cd deckard
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt

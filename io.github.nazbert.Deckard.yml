@@ -110,9 +110,12 @@ modules:
       - install -D flatpak/launch.desktop /app/share/applications/io.github.nazbert.Deckard.desktop
       - install -D flatpak/io.github.nazbert.Deckard.metainfo.xml /app/share/metainfo/io.github.nazbert.Deckard.metainfo.xml
     sources:
+      # Track main: the build-commands reference the renamed files, which no
+      # pre-rename tag carries. Redirect-safe URL (see the About-dialog note).
+      # The flatpak path is untested and finalised with issue #128.
       - type: git
-        url: https://github.com/nazbert/deckard.git
-        tag: 1.5.0-beta.14
+        url: https://github.com/nazbert/StreamController.git
+        branch: main
 
 # Install via: flatpak-builder --repo=repo --force-clean --install --user build-dir io.github.nazbert.Deckard.yml
 # Use git submodule update --init if the shared-modules folder is empty
