@@ -52,6 +52,14 @@ from src.patcher.patcher import Patcher
 patcher = Patcher()
 patcher.patch()
 
+# One-time rename migration (StreamController -> Deckard): move the whole
+# ~/.var/app tree to the new id and leave a compat symlink at the old path.
+# MUST run before `import globals` below -- globals.py os.makedirs()es the
+# data dir at import time on every invocation, which would poison the
+# migration's existence checks (docs/rename-deckard-plan.md, Phase 2).
+from rebrand_migration import migrate as _rebrand_migrate
+_rebrand_migrate()
+
 import sys
 from loguru import logger as log
 import os
@@ -93,7 +101,7 @@ from src.backend.IconPackManagement.IconPackManager import IconPackManager
 from src.backend.WallpaperPackManagement.WallpaperPackManager import WallpaperPackManager
 from src.backend.SDPlusBarWallpaperPackManagement.SDPlusBarWallpaperPackManager import SDPlusBarWallpaperPackManager
 from src.backend.Store.StoreBackend import StoreBackend, NoConnectionError
-from autostart import setup_autostart
+from autostart import setup_autostart, ensure_app_desktop_entry
 from src.Signals.SignalManager import SignalManager
 from src.backend.WindowGrabber.WindowGrabber import WindowGrabber
 from src.backend.GnomeExtensions import GnomeExtensions
@@ -308,6 +316,21 @@ def quit_running():
             log.info("Already running, exiting")
             sys.exit(0)
 
+    # Transition guard for the rename (docs/rename-deckard-plan.md, Phase 2):
+    # a pre-rename build still owning the old bus name is invisible to the
+    # gate above, and reset_all_decks() below would USB-reset decks it owns.
+    # Ask it to quit the same way --close-running does for the new name.
+    try:
+        old_obj = session_bus.get_object("com.core447.StreamController", "/com/core447/StreamController")
+        old_iface = dbus.Interface(old_obj, "org.gtk.Actions")
+    except dbus.exceptions.DBusException:
+        return  # expected: no pre-rename instance on the bus
+    log.warning("Pre-rename StreamController instance detected on the session bus; asking it to quit")
+    try:
+        old_iface.Activate("quit", [], [])
+        time.sleep(5)
+    except dbus.exceptions.DBusException as e:
+        log.error(f"Could not close the pre-rename instance: {e}")
 
 def handle_listing_commands():
     """
@@ -624,6 +647,7 @@ def main():
     app_settings = gl.settings_manager.get_app_settings()
     auto_start = app_settings.get("system", {}).get("autostart", True)
     setup_autostart(auto_start)
+    ensure_app_desktop_entry()
     
     create_cache_folder()
     threading.Thread(target=update_assets, name="update_assets").start()

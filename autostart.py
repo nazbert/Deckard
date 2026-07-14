@@ -144,6 +144,37 @@ def setup_autostart_desktop_entry(enable: bool = True, native: bool = False):
             except Exception as e:
                 log.error(f"Failed to remove autostart from: {AUTOSTART_DESKTOP_PATH} with error: {e}")
 
+def ensure_app_desktop_entry():
+    """Install/refresh ~/.local/share/applications/<app id>.desktop.
+
+    On Wayland the compositor maps a window's app_id (the GtkApplication id)
+    to a desktop file of the same name to find its taskbar/dock icon; on
+    source installs nothing else provides one. Mirrors the autostart
+    copy-on-launch pattern above. Icon= is rewritten to the absolute path of
+    the repo's 512px icon so no icon-theme installation is needed.
+    """
+    if IS_MAC or is_flatpak():
+        return
+
+    import globals as gl
+
+    app_id = "io.github.nazbert.Deckard"
+    target_dir = os.path.join(os.environ.get("HOME"), ".local", "share", "applications")
+    target = os.path.join(target_dir, f"{app_id}.desktop")
+    source = os.path.join(gl.MAIN_PATH, "flatpak", "deckard-app.desktop")
+    icon_path = os.path.join(gl.MAIN_PATH, "Assets", "icons", "hicolor", "512x512", "apps", f"{app_id}.png")
+    try:
+        with open(source) as f:
+            content = f.read()
+        content = content.replace(f"Icon={app_id}", f"Icon={icon_path}")
+        os.makedirs(target_dir, exist_ok=True)
+        with open(target, "w") as f:
+            f.write(content)
+        log.info(f"App desktop entry refreshed at: {target}")
+    except Exception as e:
+        log.error(f"Failed to install app desktop entry at: {target} with error: {e}")
+
+
 def copy_desktop_file(source: str, target: str, overwrite: bool = False):
     if not overwrite and os.path.exists(target):
         log.info(f"Desktop file already exists at: {target}")
