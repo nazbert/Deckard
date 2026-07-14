@@ -71,26 +71,26 @@ Expect: `fork` → `git@github.com:nazbert/deckard.git`, `gitlab` →
 ## 7. Rename the local checkout — LAST, manual
 
 ```sh
-cd ~ && mv ~/dev/StreamController ~/dev/deckard && cd ~/dev/deckard
+cd ~ && mv ~/dev/StreamController ~/dev/Deckard && cd ~/dev/Deckard
 ```
 
 Breaks this session's cwd and touches things keyed to the old path:
 
 - **Claude Code memory** is keyed to the cwd (`~/.claude/projects/-home-naz-dev-StreamController/`). Move it so history follows (MEMORY.md links are relative, so it's safe):
   ```sh
-  mv ~/.claude/projects/-home-naz-dev-StreamController ~/.claude/projects/-home-naz-dev-deckard
+  mv ~/.claude/projects/-home-naz-dev-StreamController ~/.claude/projects/-home-naz-dev-Deckard
   ```
-- **`deckard` wrapper symlink** (if installed) points at the old checkout — recreate it:
+- **`Deckard` wrapper symlink** (if installed) points at the old checkout — recreate it:
   ```sh
-  ln -sf ~/dev/deckard/scripts/deckard ~/.local/bin/deckard
+  ln -sf ~/dev/Deckard/scripts/Deckard ~/.local/bin/Deckard
   ```
 - **Installed desktop/autostart entries** embed the absolute old `.venv`/`main.py` paths. They regenerate on the next app launch (`ensure_app_desktop_entry` / `setup_autostart` run every start), so just launch Deckard once from the new path.
-- Reopen your editor/terminal/Claude session from `~/dev/deckard`.
+- Reopen your editor/terminal/Claude session from `~/dev/Deckard`.
 
 ## Follow-ups (not part of Phase 4)
 
 - `ci/flatpak-releases` (#128) manifest filename/app-id — adopt before that branch commits.
-- The redirect-safe About/README/install.sh URLs continue to resolve after this rename; optionally re-point them at the `deckard` paths in a later cosmetic pass.
+- About/README/install.sh/metainfo URLs now point directly at the renamed repos (naz/Deckard, nazbert/Deckard).
 
 ## Rollback
 
