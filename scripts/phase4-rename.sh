@@ -21,7 +21,9 @@ echo "== Deckard Phase 4 rename -- $mode =="
 # Precondition: the rename must already be on gitlab/main.
 if [[ $GO -eq 1 ]]; then
   git fetch gitlab --quiet
-  if ! git log --oneline gitlab/main | grep -q 'rebrand fork to Deckard'; then
+  # Native message search: no pipe, so `set -o pipefail` + grep -q's SIGPIPE
+  # to git log cannot produce a false-negative precondition.
+  if [ -z "$(git log --grep='rebrand fork to Deckard' --format=%H gitlab/main)" ]; then
     echo "STOP: 'rebrand fork to Deckard' commit not found on gitlab/main -- merge MR !61 first." >&2
     exit 1
   fi
@@ -30,7 +32,8 @@ fi
 
 # 1. GitLab project rename (naz/StreamController -> naz/deckard; redirect kept)
 run glab api --method PUT projects/15 -f path=deckard -f name=Deckard
-[[ $GO -eq 1 ]] && echo "  gitlab now: $(glab api projects/15 --jq .path_with_namespace)"
+# glab api has no --jq; parse the path out of the JSON instead.
+[[ $GO -eq 1 ]] && echo "  gitlab now: $(glab api projects/15 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["path_with_namespace"])')"
 
 # 2. repoint local gitlab remote
 run git remote set-url gitlab https://gitlab.nb-labs.net/naz/deckard.git
