@@ -1,8 +1,8 @@
 # deckard-git — AUR recipe
 
 Native Arch-family package for [Deckard](https://github.com/nazbert/Deckard),
-tracking `main`. **Secondary** distribution format; the flatpak (GitLab #128) is
-the broad primary. Plan: `docs/aur-pkgbuild-plan.md` · issue #151.
+tracking `main`. **Secondary** distribution format; the flatpak bundle is the
+broad primary.
 
 This directory is the **source of truth**; the AUR repo is a mirror of it.
 
@@ -26,15 +26,50 @@ Notes:
 
 ## Publishing to the AUR
 
+Per the [AUR submission guidelines](https://wiki.archlinux.org/title/AUR_submission_guidelines).
+One-time: register an SSH public key on your AUR account and configure it for
+`aur.archlinux.org` (`~/.ssh/config` → `Host aur.archlinux.org`, `User aur`).
+
 ```sh
+# 1. clone (creates the repo on first push; the empty-repo warning is expected)
+git -c init.defaultBranch=master clone ssh://aur@aur.archlinux.org/deckard-git.git
+cd deckard-git
+
+# 2. copy the recipe in + a .gitignore excluding build cruft (src/, pkg/, *.pkg.tar.zst)
+cp /path/to/Deckard/packaging/aur/deckard-git/{PKGBUILD,deckard-git.install} .
+printf '%s\n' '*' '!.gitignore' '!PKGBUILD' '!.SRCINFO' '!*.install' > .gitignore
+
+# 3. commit as the pseudonym — the AUR git log is PUBLIC and permanent, and your
+#    global git identity would otherwise author it
+git config user.name  'nazbert'
+git config user.email '1339898+nazbert@users.noreply.github.com'
+
+# 4. regenerate .SRCINFO (required — the AUR reads version/deps from it)
 makepkg --printsrcinfo > .SRCINFO
-# push PKGBUILD, deckard-git.install, .SRCINFO to ssh://aur@aur.archlinux.org/deckard-git.git
+
+# 5. commit + push to master (the only branch the AUR accepts)
+git add -f PKGBUILD .SRCINFO deckard-git.install .gitignore
+git commit -m "Initial import: deckard-git"
+git push
 ```
 
-Keep the AUR repo limited to `PKGBUILD` + `deckard-git.install` + `.SRCINFO`
-(the launcher and scriptlet are generated/embedded, no extra source files).
+The AUR repo holds only `PKGBUILD`, `.SRCINFO`, `deckard-git.install`, and the
+`.gitignore`. Never commit `src/`, `pkg/`, or the built `*.pkg.tar.zst` — the
+guidelines forbid the makepkg tarball and filelist.
 
-## Verification (do on real hardware — see plan §7)
+**Pre-submission checks:**
+
+```sh
+namcap PKGBUILD                       # lint the recipe
+makepkg -C                            # build in a clean chroot (or extra-x86_64-build)
+namcap deckard-git-*.pkg.tar.zst      # lint the built package
+```
+
+Optional but encouraged (and required for any future official-repo promotion):
+add a `0BSD` `LICENSE` for the packaging sources (distinct from Deckard's own
+GPL-3.0, declared in `license=()`).
+
+## Verification (do on real hardware)
 
 1. `deckard` launches; GTK4/libadwaita UI renders.
 2. Plug a Stream Deck → detected (udev + hidapi/libusb path).

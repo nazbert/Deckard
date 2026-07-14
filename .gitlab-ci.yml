@@ -280,7 +280,7 @@ release:github:
   cache: []
   before_script:
     - git clone --depth 1 --branch "$CI_AUTOMATION_REF"
-        "https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.nb-labs.net/nb-labs/ci-automation.git" .ci-automation
+        "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/nb-labs/ci-automation.git" .ci-automation
 
 auto-release:
   extends: .release

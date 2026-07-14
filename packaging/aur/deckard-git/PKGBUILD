@@ -1,8 +1,7 @@
-# Maintainer: Nigel <n.jurgens7@gmail.com>
+# Maintainer: nazbert <1339898+nazbert@users.noreply.github.com>
 #
 # deckard-git — Arch-family (AUR) package for Deckard, tracking the main branch.
-# Secondary distribution format; flatpak (GitLab #128) is the broad primary.
-# Plan: docs/aur-pkgbuild-plan.md · GitLab issue #151 · decision: #128 note_2142.
+# Secondary distribution format; the flatpak bundle is the broad primary.
 #
 # ── Packaging approach: Option A (bundled venv) ────────────────────────────────
 # Deckard's requirements.txt is heavily pinned to cp313 wheels (the flatpak's
@@ -12,7 +11,7 @@
 #     truth) — the ~15 deps missing from Arch repos are handled by pip, not mapped;
 #   * decouples the install from Arch's system-python churn: a future `python`
 #     3.15 bump does NOT break this package (only a python313 ABI bump would).
-# Trade-offs (see docs/aur-pkgbuild-plan.md §3/§6): larger install; pip fetches
+# Trade-offs: larger install; pip fetches
 # from PyPI during build() (unavoidable with pinned wheels — a `-git` convenience
 # package, not a reproducible fully-declared-sources build); the compiled sdists
 # (PyGObject/pycairo/dbus-python) link system glib2/cairo/dbus, so a soname bump
@@ -83,8 +82,8 @@ sha256sums=('SKIP')
 
 pkgver() {
   cd "$srcdir/$_pkgname"
-  # No release tags exist yet (VERSION file is empty pending #128); fall back to
-  # r<commit-count>.<short-hash>. Once #128 stamps v* tags, describe kicks in.
+  # Prefer `git describe` off the latest vX.Y.Z release tag (-> 0.1.0.r0.g<sha>);
+  # fall back to r<commit-count>.<short-hash> if the clone carries no tags.
   ( set -o pipefail
     git describe --long --tags 2>/dev/null \
       | sed 's/^v//; s/\([^-]*-g\)/r\1/; s/-/./g' ) \
@@ -134,7 +133,7 @@ EOF
   install -Dm644 "$srcdir/$_pkgname/udev.rules" \
     "$pkgdir/usr/lib/udev/rules.d/60-deckard.rules"
 
-  # 5. Desktop entry (native form: Exec=Deckard), icon, AppStream metainfo
+  # 5. Desktop entry (native form: Exec=deckard), icon, AppStream metainfo
   install -Dm644 "$srcdir/$_pkgname/flatpak/deckard-app.desktop" \
     "$pkgdir/usr/share/applications/io.github.nazbert.Deckard.desktop"
   install -Dm644 "$srcdir/$_pkgname/flatpak/icon_256.png" \

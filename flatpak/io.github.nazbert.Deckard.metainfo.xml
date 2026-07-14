@@ -38,7 +38,7 @@
   </branding>
 
   <url type="homepage">https://github.com/nazbert/Deckard</url>
-  <url type="bugtracker">https://gitlab.nb-labs.net/naz/Deckard/-/issues</url>
+  <url type="bugtracker">https://github.com/nazbert/Deckard/issues</url>
   <url type="contribute">https://github.com/nazbert/Deckard</url>
   <releases>
     <release version="1.5.0-beta.15" date="2026-07-09">
