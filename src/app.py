@@ -238,8 +238,16 @@ class App(Adw.Application):
         # skip it, and the multiprocessing resource_tracker then reports the
         # queue's semaphores as "leaked ... at shutdown". The synchronous
         # logs.log/stderr sinks stay up for the remaining shutdown messages.
+        # Trade-off: PLUGIN-level records emitted by plugin threads after this
+        # point are dropped (not written to plugins.log); no in-repo teardown
+        # uses the plugin logger, so this only affects third-party plugins
+        # logging during their own shutdown. Guarded per-logger so one failing
+        # detach cannot abort the rest of teardown.
         for logger_obj in gl.loggers.values():
-            logger_obj.remove_sink()
+            try:
+                logger_obj.remove_sink()
+            except Exception as e:
+                log.warning(f"Failed to detach log sink during shutdown: {e}")
 
         # Must run BEFORE the delete() loop (plan §2.4): close_all() submits
         # the terminal ClearAndClose control message and bounds a join on
@@ -377,7 +385,7 @@ class App(Adw.Application):
         if button:
             notif.add_button_with_target(button[0], button[1], button[2])
 
-        GLib.idle_add(super().send_notification, "io.github.nazbert.Deckard", notif)
+        GLib.idle_add(super().send_notification, "com.core447.StreamController", notif)
     def on_change_page(self, action, data: GLib.Variant, *args):
         """
         page_name can be either the name or the path of the page
