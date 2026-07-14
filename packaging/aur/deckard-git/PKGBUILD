@@ -1,0 +1,148 @@
+# Maintainer: Nigel <n.jurgens7@gmail.com>
+#
+# deckard-git — Arch-family (AUR) package for Deckard, tracking the main branch.
+# Secondary distribution format; flatpak (GitLab #128) is the broad primary.
+# Plan: docs/aur-pkgbuild-plan.md · GitLab issue #151 · decision: #128 note_2142.
+#
+# ── Packaging approach: Option A (bundled venv) ────────────────────────────────
+# Deckard's requirements.txt is heavily pinned to cp313 wheels (the flatpak's
+# GNOME 50 runtime ships Python 3.13). Arch's system `python` is already 3.14, so
+# we deliberately build the app's venv against a pinned `python313` (AUR) instead:
+#   * reuses the exact requirements.txt the flatpak consumes (one dep source of
+#     truth) — the ~15 deps missing from Arch repos are handled by pip, not mapped;
+#   * decouples the install from Arch's system-python churn: a future `python`
+#     3.15 bump does NOT break this package (only a python313 ABI bump would).
+# Trade-offs (see docs/aur-pkgbuild-plan.md §3/§6): larger install; pip fetches
+# from PyPI during build() (unavoidable with pinned wheels — a `-git` convenience
+# package, not a reproducible fully-declared-sources build); the compiled sdists
+# (PyGObject/pycairo/dbus-python) link system glib2/cairo/dbus, so a soname bump
+# there needs a rebuild.
+#
+# After editing, regenerate .SRCINFO:  makepkg --printsrcinfo > .SRCINFO
+
+_pkgname=Deckard
+pkgname=deckard-git
+
+# Interpreter the app's venv is built against. Pinned to 3.13 to match the
+# flatpak runtime (GNOME 50 ships 3.13) and the cp313 wheel pins in
+# requirements.txt — NOT to the system `python` (already 3.14 on Arch). To bump:
+# see the "Bumping the Python version" section in this dir's README.md — it is a
+# project-level change (flatpak runtime + regenerated pins), not just this line.
+_python=python3.13
+pkgver=0.r0.0000000
+pkgrel=1
+pkgdesc="Control your Elgato Stream Decks (Deckard fork, tracks main)"
+arch=('x86_64')
+url="https://github.com/nazbert/Deckard"
+license=('GPL-3.0-or-later')
+
+# Runtime: pinned interpreter + the native libraries the venv's compiled
+# bindings dlopen / load typelibs from. Names verified against extra/ + AUR.
+depends=(
+  'python313'                    # AUR — venv base interpreter (matches cp313 pins)
+  'gtk4' 'libadwaita'            # UI toolkit
+  'gobject-introspection-runtime' # girepository runtime for PyGObject
+  'librsvg' 'gdk-pixbuf2'        # SVG / pixbuf loaders (CairoSVG, symbolic icons)
+  'cairo' 'pango'               # pycairo / text
+  'hidapi' 'libusb' 'libgusb'   # Stream Deck HID access
+  'libpeas-2'                   # plugin engine (2.x — NOT the v1 `libpeas`)
+  'libportal' 'libportal-gtk4'  # xdg portals (autostart, file chooser)
+  'xdg-desktop-portal'          # portal service libportal talks to (autostart/bg)
+  'libpulse'                    # pulsectl (VolumeMixer/Audio plugins)
+  'gstreamer' 'gst-plugins-base' # GTK media; add -good/-libav if a codec is missing
+  'dbus'                        # dbus-python / dasbus IPC + API service
+)
+
+# A portal backend must be present for autostart/file-chooser to work; which one
+# depends on the desktop. Left as optdepends (not a hard dep on -gtk like the
+# upstream streamcontroller-git package) so KDE/wlroots users aren't forced onto
+# the GTK backend.
+optdepends=(
+  'xdg-desktop-portal-gtk: portal backend (GNOME/others)'
+  'xdg-desktop-portal-kde: portal backend (KDE Plasma)'
+  'xdg-desktop-portal-hyprland: portal backend (Hyprland)'
+  'gst-plugins-good: extra media codecs for video backgrounds'
+)
+
+# Build: headers/tools for the sdist-only wheels (PyGObject, pycairo,
+# dbus-python, evdev, indexed_bzip2). pip build-isolation pulls the Python
+# backends; these provide the C libs + .pc files they compile against.
+makedepends=(
+  'git'
+  'gobject-introspection'       # dev files + g-ir-scanner for PyGObject
+  'glib2' 'cairo' 'dbus'        # -dev headers ship in the base packages on Arch
+  'meson' 'ninja'
+)
+
+provides=('deckard')
+conflicts=('deckard')
+options=('!strip' '!debug')     # do not strip prebuilt wheel .so's
+install="$pkgname.install"
+source=("$_pkgname::git+https://github.com/nazbert/Deckard.git#branch=main")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$srcdir/$_pkgname"
+  # No release tags exist yet (VERSION file is empty pending #128); fall back to
+  # r<commit-count>.<short-hash>. Once #128 stamps v* tags, describe kicks in.
+  ( set -o pipefail
+    git describe --long --tags 2>/dev/null \
+      | sed 's/^v//; s/\([^-]*-g\)/r\1/; s/-/./g' ) \
+  || printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd "$srcdir/$_pkgname"
+
+  # Build the venv against the pinned interpreter, not the system 3.14.
+  "$_python" -m venv venv
+  venv/bin/python -m pip install --upgrade pip wheel
+  # The exact pinned set the flatpak uses; pip resolves the transitive tail.
+  venv/bin/python -m pip install --no-cache-dir -r requirements.txt
+}
+
+package() {
+  # 1. App source + venv → /opt/deckard
+  install -dm755 "$pkgdir/opt/deckard"
+  cp -a "$srcdir/$_pkgname/." "$pkgdir/opt/deckard/"
+  # Drop dev-only cruft (keep venv internals untouched)
+  rm -rf "$pkgdir/opt/deckard/.git" \
+         "$pkgdir/opt/deckard/.github" \
+         "$pkgdir/opt/deckard/tests" \
+         "$pkgdir/opt/deckard/docs"
+
+  # 2. Rewrite the venv's baked build-time path ($srcdir/Deckard → /opt/deckard).
+  #    Only the bin/ activate|pip scripts and pyvenv.cfg carry it; the interpreter
+  #    itself (a symlink to /usr/bin/python3.13) computes prefix at runtime.
+  find "$pkgdir/opt/deckard/venv/bin" -type f \
+    -exec sed -i "s|$srcdir/$_pkgname|/opt/deckard|g" {} +
+  [ -f "$pkgdir/opt/deckard/venv/pyvenv.cfg" ] \
+    && sed -i "s|$srcdir/$_pkgname|/opt/deckard|g" "$pkgdir/opt/deckard/venv/pyvenv.cfg"
+
+  # 3. /usr/bin/deckard launcher — mirrors flatpak/launch.sh: set the glibc malloc
+  #    tunables BEFORE the interpreter starts so main.py skips its self-re-exec.
+  cat > "$srcdir/Deckard.launcher" <<'EOF'
+#!/bin/sh
+export MALLOC_ARENA_MAX=2
+export MALLOC_TRIM_THRESHOLD_=131072
+cd /opt/deckard || exit 1
+exec /opt/deckard/venv/bin/python /opt/deckard/main.py "$@"
+EOF
+  install -Dm755 "$srcdir/Deckard.launcher" "$pkgdir/usr/bin/deckard"
+
+  # 4. udev rule — the native package's headline advantage (flatpak can't do this)
+  install -Dm644 "$srcdir/$_pkgname/udev.rules" \
+    "$pkgdir/usr/lib/udev/rules.d/60-deckard.rules"
+
+  # 5. Desktop entry (native form: Exec=Deckard), icon, AppStream metainfo
+  install -Dm644 "$srcdir/$_pkgname/flatpak/deckard-app.desktop" \
+    "$pkgdir/usr/share/applications/io.github.nazbert.Deckard.desktop"
+  install -Dm644 "$srcdir/$_pkgname/flatpak/icon_256.png" \
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/io.github.nazbert.Deckard.png"
+  install -Dm644 "$srcdir/$_pkgname/flatpak/io.github.nazbert.Deckard.metainfo.xml" \
+    "$pkgdir/usr/share/metainfo/io.github.nazbert.Deckard.metainfo.xml"
+
+  # 6. License
+  install -Dm644 "$srcdir/$_pkgname/LICENSE" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

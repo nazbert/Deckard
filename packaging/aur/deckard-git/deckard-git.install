@@ -1,0 +1,29 @@
+_reload() {
+  udevadm control --reload-rules 2>/dev/null || true
+  udevadm trigger 2>/dev/null || true
+  update-desktop-database -q 2>/dev/null || true
+  gtk-update-icon-cache -qtf /usr/share/icons/hicolor 2>/dev/null || true
+}
+
+post_install() {
+  _reload
+  cat <<'EOF'
+==> Deckard installed.
+    * Replug your Stream Deck (or run `udevadm trigger`) so the new udev rule
+      takes effect and your user gains access to the device.
+    * Enable autostart from within the app (Settings) — on a native install it
+      writes ~/.config/autostart/…desktop that execs `deckard -b`.
+    * Data lives in ~/.var/app/io.github.nazbert.Deckard/ (shared layout with a
+      co-installed flatpak); override with `Deckard --data <path>` if desired.
+EOF
+}
+
+post_upgrade() {
+  _reload
+}
+
+post_remove() {
+  udevadm control --reload-rules 2>/dev/null || true
+  update-desktop-database -q 2>/dev/null || true
+  gtk-update-icon-cache -qtf /usr/share/icons/hicolor 2>/dev/null || true
+}
