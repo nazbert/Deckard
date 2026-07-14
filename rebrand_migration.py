@@ -50,6 +50,16 @@ LOCK_NAME = ".deckard-migration.lock"
 _STATE_PENDING = "symlink-pending"
 _STATE_COMPLETE = "complete"
 
+# Second, native-only migration (migrate_native_var_app_to_xdg below): pre-XDG
+# builds used ~/.var/app/<id> as the data root even outside flatpak; relocate
+# that to $XDG_DATA_HOME/deckard. Its own marker so it can't collide with the
+# StreamController->Deckard marker above -- both may run, in that order.
+XDG_MARKER_NAME = ".migrated-to-xdg"
+
+
+def _is_flatpak() -> bool:
+    return os.path.isfile("/.flatpak-info")
+
 
 def _log(msg: str) -> None:
     # The logger is not configured yet at this point in startup (and must not
@@ -199,7 +209,8 @@ def _finish_symlink(old_root: str, new_root: str, marker_path: str) -> None:
 
 
 def migrate(old_root: str = OLD_ROOT, new_root: str = NEW_ROOT,
-            argv: list[str] | None = None, require_pre_globals: bool = True) -> None:
+            argv: list[str] | None = None, require_pre_globals: bool = True,
+            marker_name: str = MARKER_NAME, running_check=None) -> None:
     if require_pre_globals and "globals" in sys.modules:
         raise AssertionError(
             "rebrand_migration.migrate() must run before `import globals` -- "
@@ -211,7 +222,9 @@ def migrate(old_root: str = OLD_ROOT, new_root: str = NEW_ROOT,
         _log("--data override active; skipping data-dir migration")
         return
 
-    marker_path = os.path.join(new_root, MARKER_NAME)
+    if running_check is None:
+        running_check = _old_instance_running
+    marker_path = os.path.join(new_root, marker_name)
     # Lock-free fast paths for the common cases (already migrated / fresh
     # install): one marker read, no lock, no lock-file litter.
     state = _read_marker(marker_path)
@@ -224,10 +237,11 @@ def migrate(old_root: str = OLD_ROOT, new_root: str = NEW_ROOT,
     # re-check state inside in case another launch completed it while we
     # waited.
     with _migration_lock(new_root):
-        _migrate_locked(old_root, new_root, marker_path)
+        _migrate_locked(old_root, new_root, marker_path, running_check)
 
 
-def _migrate_locked(old_root: str, new_root: str, marker_path: str) -> None:
+def _migrate_locked(old_root: str, new_root: str, marker_path: str,
+                    running_check) -> None:
     state = _read_marker(marker_path)
     if state == _STATE_COMPLETE:
         return
@@ -251,7 +265,7 @@ def _migrate_locked(old_root: str, new_root: str, marker_path: str) -> None:
         )
 
     # old_root is a real directory holding the pre-rename data.
-    if _old_instance_running():
+    if running_check():
         _abort(
             f"a pre-rename instance still owns {OLD_ID} on the session bus. Quit the "
             f"running StreamController first, then start Deckard again. Renaming the "
@@ -276,7 +290,7 @@ def _migrate_locked(old_root: str, new_root: str, marker_path: str) -> None:
     # The pending marker travels with the rename (see module docstring). A
     # non-durable marker here is the one unrecoverable state, so refuse to
     # rename without it -- old_root is still intact, so this is a clean retry.
-    if not _write_marker(os.path.join(old_root, MARKER_NAME), _STATE_PENDING):
+    if not _write_marker(os.path.join(old_root, os.path.basename(marker_path)), _STATE_PENDING):
         _abort(
             f"could not durably write the migration marker into {old_root}; refusing "
             f"to rename without it. Fix permissions/space on that path and restart."
@@ -287,3 +301,31 @@ def _migrate_locked(old_root: str, new_root: str, marker_path: str) -> None:
         _abort(f"could not move {old_root} -> {new_root}: {e}")
     _log(f"moved {old_root} -> {new_root}")
     _finish_symlink(old_root, new_root, marker_path)
+
+
+def _xdg_root() -> str:
+    xdg = os.environ.get("XDG_DATA_HOME") or os.path.expanduser(os.path.join("~", ".local", "share"))
+    return os.path.join(xdg, "deckard")
+
+
+def migrate_native_var_app_to_xdg(old_root: str = NEW_ROOT, xdg_root: str | None = None,
+                                  argv: list[str] | None = None,
+                                  require_pre_globals: bool = True) -> None:
+    """Native-only: relocate the data root from ~/.var/app/<id> (the flatpak-era
+    location the pre-XDG builds used even outside flatpak) to
+    $XDG_DATA_HOME/deckard, once, leaving a compat symlink behind.
+
+    No-op under flatpak, where ~/.var/app/<id> IS the correct per-app data root
+    and must not move. Call AFTER migrate() so a StreamController->Deckard rename
+    lands in ~/.var/app/<id> first, then relocates here.
+
+    Reuses migrate()'s crash-safe machinery with its own marker. No
+    running-instance abort: unlike the cross-app rename, this relocates the SAME
+    app's tree, and the compat symlink keeps a live instance's absolute-path
+    writes unified with the moved data -- there is no split-writes hazard.
+    """
+    if _is_flatpak():
+        return
+    migrate(old_root=old_root, new_root=xdg_root or _xdg_root(), argv=argv,
+            require_pre_globals=require_pre_globals,
+            marker_name=XDG_MARKER_NAME, running_check=lambda: False)

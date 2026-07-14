@@ -13,8 +13,8 @@ post_install() {
       takes effect and your user gains access to the device.
     * Enable autostart from within the app (Settings) — on a native install it
       writes ~/.config/autostart/…desktop that execs `deckard -b`.
-    * Data lives in ~/.var/app/io.github.nazbert.Deckard/ (shared layout with a
-      co-installed flatpak); override with `Deckard --data <path>` if desired.
+    * Data lives in ~/.local/share/deckard/ (XDG); override with
+      `deckard --data <path>` if desired.
 EOF
 }
 

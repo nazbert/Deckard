@@ -58,8 +58,11 @@ patcher.patch()
 # data dir at import time on every invocation, which would poison the
 # migration's existence checks (docs/rename-deckard-plan.md, Phase 2).
 import appinfo
-from rebrand_migration import migrate as _rebrand_migrate
+from rebrand_migration import migrate as _rebrand_migrate, migrate_native_var_app_to_xdg as _xdg_migrate
 _rebrand_migrate()
+# Native only (no-op under flatpak): relocate ~/.var/app/<id> -> XDG data dir.
+# After the rename above so a StreamController->Deckard tree lands first.
+_xdg_migrate()
 
 import sys
 from loguru import logger as log
