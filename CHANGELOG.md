@@ -8,7 +8,7 @@ release publishes an installable flatpak bundle on the GitLab Release.
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-07-12
+## [0.1.0] - 2026-07-14
 
 ### Added
 
@@ -16,3 +16,10 @@ release publishes an installable flatpak bundle on the GitLab Release.
   CI checkout on the unconfined runner, GitLab Releases with the bundle
   attached on `v*` tags, and bump-labeled-MR release automation via
   nb-labs/ci-automation (#128).
+- Native Arch-family package (`deckard-git`) on the AUR, alongside the flatpak
+  (#151).
+- Native installs run as the `deckard` command and store their data under
+  `$XDG_DATA_HOME/deckard` (`~/.local/share/deckard`), migrated automatically
+  from the previous `~/.var/app` location.
+- About dialog shows the Deckard fork release version (from this `VERSION`
+  file); the upstream StreamController base is noted in the About comments.
