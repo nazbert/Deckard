@@ -4,33 +4,18 @@ from typing import TYPE_CHECKING
 import argparse
 import sys
 import threading
+
+import appinfo
 from collections import deque
 from loguru import logger as log
 
 # Automatically detect macOS
 IS_MAC = sys.platform == "darwin"
 
-argparser = argparse.ArgumentParser()
-argparser.add_argument("-b", help="Open in background", action="store_true")
-argparser.add_argument("--devel", help="Developer mode (disables auto update)", action="store_true")
-argparser.add_argument("--skip-load-hardware-decks", help="Skips initilization/use of hardware decks", action="store_true")
-argparser.add_argument("--close-running", help="Close running", action="store_true")
-argparser.add_argument("--data", help="Data path", type=str)
-argparser.add_argument("--change-page", action="append", nargs=2, help="Change the page for a device", metavar=("SERIAL_NUMBER", "PAGE_NAME"))
-argparser.add_argument("--list-devices", help="List all connected StreamDeck devices and their properties", action="store_true")
-argparser.add_argument("--list-pages", help="List all available pages", action="store_true")
-argparser.add_argument("--change-state", action="append", nargs=4, 
-                      help="Change the state of a StreamDeck item. Format: SERIAL PAGE COORDS STATE\n"
-                           "  SERIAL: Device serial number (e.g., CL123456789)\n"
-                           "  PAGE: Page name (e.g., Main, Soundboard) \n"
-                           "  COORDS: Position as x,y (e.g., 0,0 for top-left)\n"
-                           "  STATE: State number to change to (0, 1, 2, etc.)\n"
-                           "Example: --change-state CL123456789 Main 0,0 1", 
-                      metavar=("SERIAL", "PAGE", "COORDS", "STATE"))
-argparser.add_argument("app_args", nargs="*")
+from cli_args import argparser
 
 MAIN_PATH: str
-VAR_APP_PATH = os.path.join(os.path.expanduser("~"), ".var", "app", "com.core447.StreamController")
+VAR_APP_PATH = os.path.join(os.path.expanduser("~"), ".var", "app", appinfo.APP_ID)
 STATIC_SETTINGS_FILE_PATH = os.path.join(VAR_APP_PATH, "static", "settings.json")
 
 DATA_PATH = os.path.join(VAR_APP_PATH, "data") # Maybe use XDG_DATA_HOME instead

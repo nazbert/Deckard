@@ -1,4 +1,4 @@
-# StreamController runtime dependencies — hand-curated (P3.4).
+# Deckard runtime dependencies — hand-curated (P3.4).
 #
 # This list is DIRECT app dependencies only. Transitive deps (e.g. matplotlib's
 # contourpy/cycler/kiwisolver, requests' certifi/urllib3/idna/charset-normalizer,

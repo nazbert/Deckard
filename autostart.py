@@ -14,11 +14,22 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
 import os
+import re
+import shlex
 import shutil
 import sys
 
+import appinfo
+
 # Automatically detect macOS
 IS_MAC = sys.platform == "darwin"
+
+# Autostart entries written under the pre-rename identity. The app-written
+# "StreamController.desktop" would relaunch an old-identity build at every
+# login; the id-named one is a flatpak portal remnant no code path removed on
+# native installs. Removed on every launch (self-healing), since a still-
+# installed old build could recreate them after the one-time data migration.
+LEGACY_AUTOSTART_NAMES = ("StreamController.desktop", appinfo.OLD_APP_ID + ".desktop")
 
 if not IS_MAC:
     import gi
@@ -49,11 +60,29 @@ def _current_autostart_generation() -> int:
     return _autostart_generation
 
 
+def remove_legacy_autostart_entries():
+    """Delete any pre-rename autostart entries. Runs on every launch so it
+    self-heals if a transient failure or a re-run of an old build leaves one
+    behind -- the old data-migration path could only do this once."""
+    autostart_dir = os.path.join(os.environ.get("HOME") or os.path.expanduser("~"),
+                                 ".config", "autostart")
+    for name in LEGACY_AUTOSTART_NAMES:
+        path = os.path.join(autostart_dir, name)
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+                log.info(f"Removed legacy autostart entry: {path}")
+            except OSError as e:
+                log.error(f"Failed to remove legacy autostart entry {path}: {e}")
+
+
 @log.catch
 def setup_autostart(enable: bool = True):
     global _autostart_generation
     if IS_MAC:
         return
+
+    remove_legacy_autostart_entries()
 
     _autostart_generation += 1
     generation = _autostart_generation
@@ -106,7 +135,7 @@ def setup_autostart_flatpak(enable: bool = True, generation: int = None):
         # Request Autostart
         xdp.request_background(
             None,  # parent
-            "Autostart StreamController",  # reason
+            "Autostart Deckard",  # reason
             ["/app/bin/launch.sh", "-b"],  # commandline
             flag,
             None,  # cancellable
@@ -122,20 +151,20 @@ def setup_autostart_desktop_entry(enable: bool = True, native: bool = False):
 
     import globals as gl
 
-    xdg_config_home = os.path.join(os.environ.get("HOME"), ".config")
+    xdg_config_home = os.path.join(os.environ.get("HOME") or os.path.expanduser("~"), ".config")
     AUTOSTART_DIR = os.path.join(xdg_config_home, "autostart")
-    AUTOSTART_DESKTOP_PATH = os.path.join(AUTOSTART_DIR, "StreamController.desktop")
+    AUTOSTART_DESKTOP_PATH = os.path.join(AUTOSTART_DIR, "Deckard.desktop")
 
     if enable:
-        try:
-            os.makedirs(os.path.dirname(AUTOSTART_DESKTOP_PATH), exist_ok=True)
-            if native:
-                copy_desktop_file(os.path.join(gl.MAIN_PATH, "flatpak", "autostart-native.desktop"), AUTOSTART_DESKTOP_PATH, True) # Why overwrite? In case someone is using the Flatpak and the source version
-            else:
-                copy_desktop_file(os.path.join(gl.MAIN_PATH, "flatpak", "autostart.desktop"), AUTOSTART_DESKTOP_PATH, True) # Why overwrite? In case someone is using the Flatpak and the source version
-            log.info(f"Autostart set up at: {AUTOSTART_DESKTOP_PATH}")
-        except Exception as e:
-            log.error(f"Failed to set up autostart at: {AUTOSTART_DESKTOP_PATH} with error: {e}")
+        if native:
+            _install_desktop_file("autostart-native.desktop", AUTOSTART_DESKTOP_PATH, exec_args="-b")
+        else:
+            try:
+                os.makedirs(os.path.dirname(AUTOSTART_DESKTOP_PATH), exist_ok=True)
+                copy_desktop_file(os.path.join(gl.MAIN_PATH, "flatpak", "autostart.desktop"), AUTOSTART_DESKTOP_PATH, True) # flatpak entry: Exec is the sandbox launcher, kept verbatim
+                log.info(f"Autostart set up at: {AUTOSTART_DESKTOP_PATH}")
+            except Exception as e:
+                log.error(f"Failed to set up autostart at: {AUTOSTART_DESKTOP_PATH} with error: {e}")
     else:
         if os.path.exists(AUTOSTART_DESKTOP_PATH):
             try:
@@ -143,6 +172,75 @@ def setup_autostart_desktop_entry(enable: bool = True, native: bool = False):
                 log.info(f"Autostart removed from: {AUTOSTART_DESKTOP_PATH}")
             except Exception as e:
                 log.error(f"Failed to remove autostart from: {AUTOSTART_DESKTOP_PATH} with error: {e}")
+
+def ensure_app_desktop_entry():
+    """Install/refresh ~/.local/share/applications/<app id>.desktop.
+
+    On Wayland the compositor maps a window's app_id (the GtkApplication id)
+    to a desktop file of the same name to find its taskbar/dock icon; on
+    source installs nothing else provides one.
+    """
+    if IS_MAC or is_flatpak():
+        return
+    target = os.path.join(os.environ.get("HOME") or os.path.expanduser("~"),
+                          ".local", "share", "applications", f"{appinfo.APP_ID}.desktop")
+    _install_desktop_file("deckard-app.desktop", target)
+
+
+def _launcher_exec(extra_args: str = "") -> str:
+    """Absolute launch command for generated native desktop entries, so they
+    work without the optional ~/.local/bin/deckard PATH symlink.
+
+    Prefer the wrapper when it is on PATH (it exports the MALLOC_* vars that
+    let main.py skip its self-re-exec); otherwise self-reference the running
+    interpreter and main.py -- always resolvable, never a dangling command.
+    """
+    import globals as gl
+    wrapper = shutil.which("deckard")
+    # Quote each path component: a checkout or venv path containing a space
+    # would otherwise render an Exec= line the desktop spec word-splits into
+    # a broken argv (the dangling-launch class this rewrite exists to avoid).
+    if wrapper:
+        cmd = shlex.quote(wrapper)
+    else:
+        cmd = f"{shlex.quote(sys.executable)} {shlex.quote(os.path.join(gl.MAIN_PATH, 'main.py'))}"
+    return f"{cmd} {extra_args}".rstrip()
+
+
+def _install_desktop_file(template_name: str, target: str, exec_args: str = ""):
+    """Write a native desktop entry from a flatpak/ template, rewriting Icon=
+    to an absolute repo path and Exec= to an absolute launch command, and
+    skipping the write when the target is already byte-identical.
+
+    The compare-before-write avoids a needless mtime bump that makes desktop
+    environments re-scan their application cache on every launch.
+    """
+    import globals as gl
+    source = os.path.join(gl.MAIN_PATH, "flatpak", template_name)
+    icon_path = os.path.join(gl.MAIN_PATH, "Assets", "icons", "hicolor",
+                             "512x512", "apps", f"{appinfo.APP_ID}.png")
+    try:
+        with open(source) as f:
+            content = f.read()
+    except OSError as e:
+        log.error(f"Desktop template missing at {source}: {e}")
+        return
+    content = content.replace(f"Icon={appinfo.APP_ID}", f"Icon={icon_path}")
+    content = re.sub(r"(?m)^Exec=.*$", lambda m: "Exec=" + _launcher_exec(exec_args), content)
+    try:
+        with open(target) as f:
+            if f.read() == content:
+                return  # unchanged -- skip the write and the DE cache churn
+    except OSError:
+        pass
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w") as f:
+            f.write(content)
+        log.info(f"Desktop entry installed at: {target}")
+    except OSError as e:
+        log.error(f"Failed to install desktop entry at {target}: {e}")
+
 
 def copy_desktop_file(source: str, target: str, overwrite: bool = False):
     if not overwrite and os.path.exists(target):

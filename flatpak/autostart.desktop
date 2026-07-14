@@ -1,5 +1,5 @@
 [Desktop Entry]
 Type=Application
-Name=com.core447.StreamController
-Exec=flatpak run --command=/app/bin/launch.sh com.core447.StreamController -b
-X-Flatpak=com.core447.StreamController
+Name=Deckard
+Exec=flatpak run --command=/app/bin/launch.sh io.github.nazbert.Deckard -b
+X-Flatpak=io.github.nazbert.Deckard

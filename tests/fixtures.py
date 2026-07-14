@@ -8,7 +8,7 @@ test/scenario script. `globals.py` computes DATA_PATH from argparse at
 fresh temp directory before its own `import globals`, which is the only way
 to guarantee later code (SettingsManager, PageManagerBackend, FakeDeck, ...)
 never resolves paths under the user's real
-~/.var/app/com.core447.StreamController/data.
+~/.var/app/io.github.nazbert.Deckard/data.
 
 Two fixture tiers:
 
@@ -68,8 +68,12 @@ if gl.DATA_PATH != DATA_DIR:
         f"`import fixtures` first."
     )
 
-_REAL_DATA_ROOT = os.path.expanduser("~/.var/app/com.core447.StreamController")
-if gl.DATA_PATH.startswith(_REAL_DATA_ROOT):
+_REAL_DATA_ROOTS = (
+    os.path.expanduser("~/.var/app/io.github.nazbert.Deckard"),
+    # Pre-rename data dir: keep guarded while it (or its compat symlink) exists.
+    os.path.expanduser("~/.var/app/com.core447.StreamController"),
+)
+if gl.DATA_PATH.startswith(_REAL_DATA_ROOTS):
     raise RuntimeError("refusing to run the harness against the real user data dir")
 
 from src.backend.DeckManagement.InputIdentifier import Input  # noqa: E402

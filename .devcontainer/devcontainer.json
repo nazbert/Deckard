@@ -1,5 +1,5 @@
 {
-  "name": "StreamController Development",
+  "name": "Deckard Development",
   "build": {
     "dockerfile": "Dockerfile",
     "options": [ "--network", "host" ]

@@ -65,4 +65,4 @@ class MediaPipelineProfiler:
 
 
 # None when disabled so call sites can skip timing work entirely.
-media_prof = MediaPipelineProfiler() if os.environ.get("STREAMCONTROLLER_MEDIA_PROFILE") else None
+media_prof = MediaPipelineProfiler() if os.environ.get("DECKARD_MEDIA_PROFILE") else None

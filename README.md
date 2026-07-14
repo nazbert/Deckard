@@ -1,25 +1,29 @@
-# StreamController
+# Deckard
 
-[![Flathub Downloads](https://img.shields.io/flathub/downloads/com.core447.StreamController?style=flat&label=Flathub%20Downloads&link=https%3A%2F%2Fflathub.org%2Fapps%2Fcom.core447.StreamController)](https://flathub.org/apps/com.core447.StreamController)
-[![Discord](https://img.shields.io/discord/1221536306367303690?label=Discord&link=https%3A%2F%2Fdiscord.gg%2FMSyHM8TN3u)](https://discord.gg/MSyHM8TN3u)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Made with Python](https://img.shields.io/badge/Made%20with-Python-ff7b3f.svg)](https://www.python.org/)
-[![Flathub Version](https://img.shields.io/flathub/v/com.core447.StreamController?label=Flathub%20Version)](https://flathub.org/apps/com.core447.StreamController)
 
-**StreamController** is an elegant Linux application designed for the Elgato Stream Deck, offering advanced features like plug-ins and automatic page switching to enhance your streaming and productivity setup.
+**Deckard** is a Linux application for the Elgato Stream Deck, with plugin support, automatic page switching, video wallpapers, and full Stream Deck + (dials and touchscreen) support.
 
-![Main Screen](https://streamcontroller.core447.com/assets/screenshots/main_screen.png)  
+It is a heavily reworked fork of [StreamController](https://github.com/StreamController/StreamController) by [Core447](https://github.com/Core447), which remains the foundation of this app. The fork has diverged too far to be reintegrated upstream; upstream contributions should go to StreamController.
+
+![Main Screen](https://streamcontroller.core447.com/assets/screenshots/main_screen.png)
 *Background image by [kvacm](https://kvacm.artstation.com)*
 
-## In Action
-[![YouTube](http://i.ytimg.com/vi/kIJOj_6Jimk/hqdefault.jpg)](https://www.youtube.com/watch?v=kIJOj_6Jimk)  
-(click on the image to play)
+## About this fork
 
-@danie10 created this amazing video going over all the details and features of StreamController. You can use the available timestamps to jump to specific parts of the video.
+Notable divergences from upstream:
+
+- Single-writer deck render pipeline with substantially higher video-background frame rates
+- Stream Deck + dial and touchscreen event routing (swipes, drags, strip taps) to actions
+- Background image/video extension onto the SD+ touchscreen strip
+- Memory-footprint and long-uptime fixes (cache caps, leak repairs)
+- Central exception hooks with log redaction
+- An extensive headless regression harness (`tests/`)
 
 ## Supported Devices
 
-StreamController supports the following Elgato Stream Deck models:
+Deckard supports the following Elgato Stream Deck models:
 
 - Stream Deck Original (2)
 - Stream Deck Mini
@@ -33,65 +37,52 @@ StreamController supports the following Elgato Stream Deck models:
 
 ### Plugins
 
-StreamController features plugin support with a built-in store to download your favorite actions. You can also publish your own plugins. For more details, visit the [Wiki](https://streamcontroller.github.io/docs).
+Plugin support with a built-in store to download actions; plugins from the upstream StreamController store are compatible. For plugin development details, see the upstream [Wiki](https://streamcontroller.github.io/docs).
 
 ### Wallpapers
 
-Customize your Stream Deck pages with cool wallpapers and videos to make them more engaging.
+Customize your Stream Deck pages with image and video wallpapers — including extending them onto the Stream Deck +'s touchscreen strip.
 
 ### Screen Saver
 
-Set up a custom screen saver to display a picture or video when your Stream Deck is in idle.
+Set up a custom screen saver to display a picture or video when your Stream Deck is idle.
 
 ### Automatic Page Switching
 
-Available for GNOME, Hyprland, Sway, KDE (when kdotool is installed) and all X11 desktops, this feature allows you to automatically change your active page based on the active window. For example, you can switch to your favorite music albums when you open Spotify, your projects when you open VSCode, or your favorite websites in Firefox.
+Available for GNOME, Hyprland, Sway, KDE (when kdotool is installed) and all X11 desktops: automatically change the active page based on the focused window.
 
-## Auto-Lock
+### Auto-Lock
 
-Lock your Stream deck when your system is locked, preventing unwanted use from third parties (available on KDE and GNOME, and Cinnamon).
+Lock your Stream Deck when your system is locked (available on KDE, GNOME, and Cinnamon).
 
 ## Installation
 
-To install StreamController, click the button below or follow the [installation instructions](https://streamcontroller.github.io/docs/latest/installation/):
-
-<a href='https://flathub.org/apps/details/com.core447.StreamController'><img width='200px' alt='Download on Flathub' src='https://flathub.org/assets/badges/flathub-badge-en.png'/></a>
-
-To install the head of main as a Flatpak just run the following command:
+Deckard runs from source:
 
 ```sh
-bash -c "$(wget -O - https://raw.githubusercontent.com/StreamController/StreamController/main/flatpak/install.sh)"
+git clone https://github.com/nazbert/StreamController.git deckard
+cd deckard
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt
+ln -s "$(pwd)/scripts/deckard" ~/.local/bin/deckard
+deckard
 ```
 
-#### Unofficial Packages
+Copy `udev.rules` to `/etc/udev/rules.d/` if your user lacks direct access to the deck hardware.
 
-The following packages are functional but unofficial and maintained by our community:
+On first launch after upgrading from StreamController, existing data under `~/.var/app/com.core447.StreamController` is migrated automatically.
 
-[![Packaging status](https://repology.org/badge/vertical-allrepos/streamcontroller.svg)](https://repology.org/project/streamcontroller/versions)
+A Flatpak manifest (`io.github.nazbert.Deckard.yml`) is maintained but currently untested.
 
-## Warning
+## Attribution
 
-StreamController is currently in beta. While core features like actions and pages are stable, high memory usage can still be an issue. We are actively working to resolve this and bring the app to a stable release soon. Please report any issues you encounter.
-
-## Contributing
-
-We welcome contributions! Feel free to open pull requests to improve StreamController.
-
-If you're interested in helping with the development of this app, you can contact me on our [Discord server](https://discord.gg/MSyHM8TN3u) to request write access to our [Dev planning board](https://github.com/orgs/StreamController/projects/2). For more information see [Dev-Planning-Board](Dev-Planning-Board.md).
-
-### Contributors
-
-Thank you to all our contributors for your hard work and support!
-
-<a href="https://github.com/streamcontroller/streamcontroller/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=streamcontroller/streamcontroller"/>
-</a>
+Deckard is derived from [StreamController](https://github.com/StreamController/StreamController), copyright Core447 and contributors, licensed under GPL-3.0. If you find this app useful, consider [supporting Core447](https://ko-fi.com/core447), whose work this fork builds on.
 
 ## Links
 
-- [Website](https://core447.com)
-- [Wiki](https://streamcontroller.github.io/docs)
-- [Discord](https://discord.gg/MSyHM8TN3u)
+- [Upstream project](https://github.com/StreamController/StreamController)
+- [Upstream Wiki](https://streamcontroller.github.io/docs)
+- [Upstream Discord](https://discord.gg/MSyHM8TN3u)
 
 ## Note
 

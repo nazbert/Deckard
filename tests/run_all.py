@@ -91,7 +91,7 @@ def write_junit(path: Path, results: list) -> None:
     n_skip = sum(1 for _, s, _, _ in results if s == "XFAIL")
 
     suite = ET.Element("testsuite", {
-        "name": "streamcontroller-harness",
+        "name": "deckard-harness",
         "tests": str(len(results)),
         "failures": str(n_fail),
         "skipped": str(n_skip),

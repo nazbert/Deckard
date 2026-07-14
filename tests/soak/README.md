@@ -6,9 +6,9 @@ harness (`tests/run_all.py`) -- they're for the longer, hardware-attached
 soaks that the harness can't do: multi-hour idle drift, real USB
 unplug/replug, and eyeballing where RSS actually goes with `mem_census.py`.
 
-**These scripts talk to a real, running StreamController process (over
+**These scripts talk to a real, running Deckard process (over
 DBus and /proc), and one of them changes the active page on real
-hardware.** Only point them at a StreamController instance you intend to
+hardware.** Only point them at a Deckard instance you intend to
 soak-test right now, not a system your device is actively depended on --
 `soak_driver.py` will cycle its Stream Deck's displayed page.
 
@@ -22,7 +22,7 @@ SC_MEM_TELEMETRY=1 SC_MALLOC_TRIM=1 .venv/bin/python main.py
 ```
 
 The CSV lands at `<DataPath>/logs/mem_telemetry.csv` (query `DataPath`
-over the DBus API, or check `~/.var/app/com.core447.StreamController/data`
+over the DBus API, or check `~/.var/app/io.github.nazbert.Deckard/data`
 for a source run without `--data`).
 
 ## Automated driving: `soak_driver.py`

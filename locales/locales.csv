@@ -109,7 +109,7 @@ quit;Beenden;Quit;Quitter;Salir de;Sair
 store.plugins.search-placeholder;Nach Plugins suchen;Search for plugins;Recherchez des plugins;Buscar plugins;Buscar por plugins
 store.icons.search-placeholder;Nach Icons suchen;Search for icons;Recherchez des icônes;Buscar iconos;Buscar por ícones
 store.wallpapers.search-placeholder;Nach Hintergründen suchen;Search for wallpapers;Recherchez des fonds d'écran;Buscar fondos de pantalla;Buscar por papéis de parede
-onboarding.welcome.header;Willkommen bei StreamController!;Welcome To StreamController!;Bienvenue chez StreamController !;Bienvenido a StreamController;Bem-vindo ao StreamController!
+onboarding.welcome.header;Willkommen bei Deckard!;Welcome To Deckard!;Bienvenue chez Deckard !;Bienvenido a Deckard;Bem-vindo ao Deckard!
 onboarding.welcome.details;Die Linux App für das Elgato Stream Deck;The Linux app for the Elgato Stream Deck;L'application Linux pour le Stream Deck d'Elgato;La aplicación Linux para Elgato Stream Deck;O aplicativo Linux para o Elgato Stream Deck
 onboarding.store.header;Asset Store;Asset Store;Magasin de ressources;Tienda;Loja de Ativos
 onboarding.store.details;Icons und Hintergründe herunterladen;Download plugins;Télécharger des plugins;Búsqueda de iconos y fondos de pantalla;Baixar plugins
@@ -236,4 +236,4 @@ settings-font-outline-color-settings-header;Farbe der Schriftumrandung;Outline c
 settings-font-outline-color-settings-subtitle;Standardfarbe der Schriftumrandung;Default color for the label outline;Couleur par défaut du contour;Color predeterminado del contorno;Cor padrão para o contorno do rótulo
 settings-font-outline-width-settings-header;Dicke der Schriftumrandung;Width of the outline;Taille du contour;Ancho del contorno;Largura do contorno
 settings-font-outline-width-settings-subtitle;Standarddicke der Schriftumrandung;Default width of the outline;Taille par défaut du contour;Ancho predeterminado del contorno;Largura padrão do contorno
-support;Unterstützen;Donate;Faites un don;Donar;Doar
+support;Core447 unterstützen (Original-Autor);Support Core447 (original author);Soutenir Core447 (auteur original);Apoyar a Core447 (autor original);Apoiar Core447 (autor original)

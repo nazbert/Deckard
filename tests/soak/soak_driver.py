@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-soak_driver.py -- drive a running StreamController over its DBus API
+soak_driver.py -- drive a running Deckard over its DBus API
 (src/api.py) for a memory soak run (docs/memory-footprint-plan.md Phase 0
 P0.6; see tests/soak/README.md for the full manual soak procedure this
 script is one part of).
@@ -28,10 +28,10 @@ import re
 import sys
 import time
 
-SERVICE = "com.core447.StreamController"
-TOP_PATH = "/com/core447/StreamController"
-TOP_IFACE = "com.core447.StreamController"
-CTRL_IFACE = "com.core447.StreamController.Controller"
+SERVICE = "io.github.nazbert.Deckard"
+TOP_PATH = "/io/github/nazbert/Deckard"
+TOP_IFACE = "io.github.nazbert.Deckard"
+CTRL_IFACE = "io.github.nazbert.Deckard.Controller"
 CONTROLLER_BASE_PATH = TOP_PATH + "/controllers"
 
 
@@ -56,7 +56,7 @@ def connect():
         # the service is actually up before committing to a run.
         _ = top.Controllers
     except Exception as e:
-        print(f"StreamController DBus API not reachable ({e}). Is the app running?", file=sys.stderr)
+        print(f"Deckard DBus API not reachable ({e}). Is the app running?", file=sys.stderr)
         return None, None
     return bus, top
 

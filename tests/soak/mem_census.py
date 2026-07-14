@@ -19,7 +19,7 @@ Usage:
     .venv/bin/python tests/soak/mem_census.py [pid] --max-rss-mb 800 --max-swap-mb 200
 
 If no pid is given, scans /proc for a process whose cmdline mentions
-main.py and StreamController. With --max-rss-mb / --max-swap-mb, exits 1 if
+main.py and Deckard. With --max-rss-mb / --max-swap-mb, exits 1 if
 the process-wide VmRSS / VmSwap exceeds the given threshold -- so a soak can
 fail mechanically instead of needing a human to eyeball the table.
 """
@@ -55,7 +55,7 @@ def find_streamcontroller_pid() -> int | None:
                 cmdline = f.read().decode(errors="replace")
         except OSError:
             continue
-        if "main.py" in cmdline and "StreamController" in cmdline:
+        if "Deckard" in cmdline:
             return int(entry)
     return None
 
@@ -139,7 +139,7 @@ def print_table(buckets: dict[str, dict[str, int]]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("pid", nargs="?", type=int, default=None,
-                         help="target pid (default: auto-detect the running StreamController)")
+                         help="target pid (default: auto-detect the running Deckard)")
     parser.add_argument("--max-rss-mb", type=float, default=None,
                          help="fail (exit 1) if process-wide VmRSS exceeds this many MB")
     parser.add_argument("--max-swap-mb", type=float, default=None,
@@ -148,7 +148,7 @@ def main() -> int:
 
     pid = args.pid or find_streamcontroller_pid()
     if pid is None:
-        print("No pid given and no running StreamController process found "
+        print("No pid given and no running Deckard process found "
               "(looked for main.py in /proc/*/cmdline).", file=sys.stderr)
         return 1
 

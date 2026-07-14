@@ -1,12 +1,13 @@
 import os
 from loguru import logger as log
+import appinfo
 import globals as gl
 from src.backend.trayicon import DBusTrayIcon, DBusMenu
 
 class TrayIcon(DBusTrayIcon):
-    MenuPath = "/com/core447/StreamController/Menu"
-    IndicatorPath = "/org/ayatana/NotificationItem/com_core447_StreamController_TrayIcon"
-    AppId = "com.core447.StreamController.TrayIcon"
+    MenuPath = f"{appinfo.DBUS_OBJECT_PATH}/Menu"
+    IndicatorPath = f"/org/ayatana/NotificationItem/{appinfo.DBUS_UNDERSCORE}_TrayIcon"
+    AppId = f"{appinfo.APP_ID}.TrayIcon"
 
     def __init__(self):
         if gl.IS_MAC:
@@ -19,11 +20,11 @@ class TrayIcon(DBusTrayIcon):
         self.menu.add_menu_item(5, "About", callback=self.on_about)
         self.menu.add_menu_item(6, menu_type="separator")
         self.menu.add_menu_item(7, "Quit", callback=self.on_quit)
-        super().__init__(self.menu, self.MenuPath, self.IndicatorPath, self.AppId, "StreamController")
+        super().__init__(self.menu, self.MenuPath, self.IndicatorPath, self.AppId, "Deckard")
         icon_theme_path = os.path.join(gl.MAIN_PATH, "Assets", "icons")
-        self.set_icon("com.core447.StreamController", path=icon_theme_path)
-        self.set_tooltip("StreamController")
-        self.set_label("StreamController")
+        self.set_icon(appinfo.APP_ID, path=icon_theme_path)
+        self.set_tooltip("Deckard")
+        self.set_label("Deckard")
 
         self.main_win = None
         self.show_about_action = None
@@ -87,11 +88,11 @@ class TrayIcon(DBusTrayIcon):
 #     def __init__(self):
 #         icon_image = Image.open("flatpak/icon_256.png")
 #         menu = Menu(
-#             MenuItem("StreamController", enabled=False, action=None),
+#             MenuItem("Deckard", enabled=False, action=None),
 #             MenuItem("Open", self.on_open),
 #             MenuItem("Quit", self.on_quit)
 #         )
-#         super().__init__("StreamController", icon_image, menu=menu, title="StreamController")
+#         super().__init__("Deckard", icon_image, menu=menu, title="Deckard")
 
 #     def on_open(self):
 #         print("Open")

@@ -392,11 +392,11 @@ class SupportAppOnboardingScreen(Gtk.Box):
                                margin_bottom=70, use_markup=True, justify=Gtk.Justification.CENTER)
         self.append(self.label)
 
-        self.detail = Gtk.Label(label="Creating this app was a lot of work, and your support helps me continue to further improve it. Consider donating to enable me to dedicate more time to new features and enhancements.", css_classes=["onboarding-welcome-detail-label"],
+        self.detail = Gtk.Label(label="Deckard is a fork of StreamController by Core447. Creating the original app was a lot of work, and it remains the foundation of everything here. Consider donating to Core447 to support continued development of the original project.", css_classes=["onboarding-welcome-detail-label"],
                                 width_request=300, halign=Gtk.Align.CENTER, wrap_mode=Pango.WrapMode.WORD_CHAR, wrap=True, justify=Gtk.Justification.CENTER, use_markup=True)
         self.append(self.detail)
 
-        self.support_button = Gtk.Button(label="Donate", css_classes=["pill", "suggested-action"], margin_top=90, hexpand=False, halign=Gtk.Align.CENTER)
+        self.support_button = Gtk.Button(label="Donate to Core447", css_classes=["pill", "suggested-action"], margin_top=90, hexpand=False, halign=Gtk.Align.CENTER)
         self.support_button.connect("clicked", self.on_support_button_clicked)
         self.append(self.support_button)
 

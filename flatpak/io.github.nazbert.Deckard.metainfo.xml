@@ -1,17 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
-<!-- Copyright 2024 Core447 -->
+<!-- Copyright 2024 Core447 (original StreamController); fork changes copyright 2026 nazbert -->
 <component type="desktop-application">
-  <id>com.core447.StreamController</id>
+  <id>io.github.nazbert.Deckard</id>
 
-  <developer_name translate="no">Core447</developer_name>
-  <developer id="com.core447">
-    <name translate="no">Core447</name>
+  <developer_name translate="no">nazbert</developer_name>
+  <developer id="io.github.nazbert">
+    <name translate="no">nazbert</name>
   </developer>
 
-  <launchable type="desktop-id">com.core447.StreamController.desktop</launchable>
+  <launchable type="desktop-id">io.github.nazbert.Deckard.desktop</launchable>
 
-  <name>StreamController</name>
+  <name>Deckard</name>
   <summary>Control your Elgato Stream Decks with plugin support</summary>
 
   <metadata_license>CC-BY-4.0</metadata_license>
@@ -37,9 +37,9 @@
     <color type="primary" scheme_preference="dark">#244b62</color>
   </branding>
 
-  <url type="homepage">https://github.com/StreamController/StreamController</url>
-  <url type="bugtracker">https://github.com/StreamController/StreamController/issues</url>
-  <url type="contribute">https://github.com/StreamController/StreamController</url>
+  <url type="homepage">https://github.com/nazbert/StreamController</url>
+  <url type="bugtracker">https://gitlab.nb-labs.net/naz/StreamController/-/issues</url>
+  <url type="contribute">https://github.com/nazbert/StreamController</url>
   <releases>
     <release version="1.5.0-beta.15" date="2026-07-09">
       <description translatable="no">
@@ -589,7 +589,7 @@
   <description>
     <p>
       An elegant Linux app for the Elgato Stream Deck featuring advanced features like plugins and
-      automatic page changing.
+      automatic page changing. Deckard is a heavily reworked fork of StreamController by Core447.
     </p>
     <p>
       App Features:
