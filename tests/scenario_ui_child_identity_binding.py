@@ -24,10 +24,22 @@ import globals as gl
 
 class _FakeStack:
     def __init__(self, children):
-        self._pages = [SimpleNamespace(get_child=lambda c=c: c) for c in children]
+        # A None in `children` models GTK's ListModel race: iteration
+        # snapshots len once, so pages removed mid-scan yield None for
+        # trailing indices.
+        self._pages = [
+            None if c is None else SimpleNamespace(get_child=lambda c=c: c)
+            for c in children
+        ]
 
     def get_pages(self):
         return list(self._pages)
+
+    def get_child_by_name(self, name):
+        # Name lookups must cleanly MISS on these name-free fakes: a
+        # name-based reimplementation of the lookup should fail the
+        # meaningful assertions below, not crash on a missing API.
+        return None
 
 
 def _fake_child(controller, grid):
@@ -43,7 +55,13 @@ def _fake_child(controller, grid):
 
 def _install_fake_app(deck_stack):
     gl.app = SimpleNamespace(
-        main_win=SimpleNamespace(leftArea=SimpleNamespace(deck_stack=deck_stack))
+        main_win=SimpleNamespace(
+            leftArea=SimpleNamespace(deck_stack=deck_stack),
+            # Background repaints resolve main_win.get_mapped() while the
+            # fake is installed -- give them a stable answer instead of an
+            # AttributeError swallowed noisily by the tick loop.
+            get_mapped=lambda: False,
+        )
     )
 
 
@@ -86,6 +104,14 @@ def main() -> None:
         _install_fake_app(_FakeStack([stranger]))
         assert controller.get_own_deck_stack_child() is None, (
             "identity scan matched a child belonging to another controller"
+        )
+
+        # 4b. Mid-scan stack mutation: trailing None pages (ListModel len
+        # snapshot after a main-thread removal) must terminate the scan
+        # cleanly, not raise.
+        _install_fake_app(_FakeStack([stranger, None]))
+        assert controller.get_own_deck_stack_child() is None, (
+            "scan over a mutating stack did not terminate cleanly"
         )
 
         # 5. Widget-tree replacement heals via re-binding (what add_page does

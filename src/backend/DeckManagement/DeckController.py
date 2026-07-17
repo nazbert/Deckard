@@ -1962,10 +1962,19 @@ class DeckController:
         # this scan never runs; it covers children created before this
         # controller learned about them.
         for page in deck_stack.get_pages():
+            if page is None:
+                # Racing a main-thread stack mutation: ListModel iteration
+                # snapshots len once, so removed trailing indices yield
+                # None. Only trailing entries can be None -- stop.
+                break
             deck_stack_child = page.get_child()
             if getattr(deck_stack_child, "deck_controller", None) is self:
-                self.own_deck_stack_child = deck_stack_child
-                return deck_stack_child
+                # Publish only if still unbound: a stale scan (e.g. over a
+                # replaced window's stack) must not clobber add_page's
+                # fresh bind for the new widget tree.
+                if self.own_deck_stack_child is None:
+                    self.own_deck_stack_child = deck_stack_child
+                return self.own_deck_stack_child
         return
     
     def _write_blank_frames(self) -> None:
