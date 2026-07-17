@@ -354,20 +354,43 @@ def quit_running():
             break
         time.sleep(0.2)
 
-def hand_off_to_lock_owner():
+def hand_off_to_lock_owner(closing: bool = False):
     """Called when single_instance.claim() lost the race (issue #155): another
-    launch is booting right now. It does not own the app bus name yet, so poll
-    briefly for it to finish, ask it to present its window, and exit either
-    way -- this process must not touch the decks."""
-    log.info("Another launch holds the single-instance lock; handing off and exiting")
+    launch is booting right now. Poll for it to finish; if it instead DIES
+    mid-boot (releases the lock without ever owning the app name), take the
+    lock over and continue booting -- RETURNING from this function means
+    "proceed as the single instance". Every other outcome exits the process.
+
+    `closing` (--close-running): the user asked to CLOSE the running
+    instance, so if it is still alive after the grace period, fail loudly
+    instead of presenting its window."""
+    log.info("Another launch holds the single-instance lock; handing off")
     session_bus = dbus.SessionBus()
+    owner_seen = False
     for _ in range(50):  # up to 10 s for the winner to finish booting
         try:
             if session_bus.name_has_owner(appinfo.APP_ID):
+                owner_seen = True
                 break
         except (dbus.exceptions.DBusException, ValueError):
             break
+        # The winner may have crashed mid-boot and released the lock (its
+        # connection died): take it over rather than stranding the user's
+        # session with zero instances. This cannot steal from a live winner
+        # -- the claim only succeeds once the holder's connection is gone.
+        if single_instance.claim(appinfo.APP_ID):
+            log.warning("Lock holder vanished before owning the app name; taking over as the single instance")
+            return
         time.sleep(0.2)
+    if not owner_seen:
+        # Never get_object an ownerless well-known name: it would D-Bus-
+        # activate a service file if one ever ships (same rule as the
+        # pre-rename probe in quit_running()).
+        log.error("Timed out waiting for the winning launch to appear; exiting with no instance running")
+        sys.exit(1)
+    if closing:
+        log.error("--close-running: the running instance did not exit within the grace period")
+        sys.exit(1)
     try:
         obj = session_bus.get_object(appinfo.APP_ID, appinfo.DBUS_OBJECT_PATH)
         dbus.Interface(obj, "org.gtk.Actions").Activate("reopen", [], [], timeout=5.0)
@@ -680,9 +703,9 @@ def main():
         # probe. The lock claim is the atomic tie-breaker, and it must happen
         # BEFORE reset_all_decks() so a losing launch never USB-resets decks
         # the winner is initializing (issue #155, field incident 2026-07-16).
-        wait = 10.0 if gl.argparser.parse_args().close_running else 0.0
-        if not single_instance.claim(appinfo.APP_ID, wait_seconds=wait):
-            hand_off_to_lock_owner()
+        closing = gl.argparser.parse_args().close_running
+        if not single_instance.claim(appinfo.APP_ID, wait_seconds=10.0 if closing else 0.0):
+            hand_off_to_lock_owner(closing=closing)
 
     reset_all_decks()
 

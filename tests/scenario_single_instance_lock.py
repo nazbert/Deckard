@@ -63,7 +63,36 @@ def main() -> None:
         )
         assert time.monotonic() - start < 5.0, "claim waited past the release"
 
-        print("PASS: lock is atomic, idempotent for the owner, and released on exit")
+        # 5. Genuine concurrency: N fresh connections race the same lock;
+        # the daemon must admit exactly one (this is the login autostart +
+        # session-restore shape that motivated the fix).
+        race_id = f"io.github.nazbert.DeckardLockRace{os.getpid()}"
+        results = []
+        results_lock = threading.Lock()
+
+        def racer():
+            b = dbus.SessionBus(private=True)
+            won = single_instance.claim(race_id, bus=b)
+            with results_lock:
+                results.append((won, b))
+
+        threads = [threading.Thread(target=racer) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        winners = [won for won, _ in results]
+        assert winners.count(True) == 1, (
+            f"{winners.count(True)} of 8 concurrent claims won the lock -- "
+            "the daemon-serialized exclusion is broken"
+        )
+        for _, b in results:
+            try:
+                b.close()
+            except Exception:
+                pass
+
+        print("PASS: lock is atomic (8-way race: 1 winner), idempotent for the owner, and released on exit")
     finally:
         try:
             bus_b.close()
