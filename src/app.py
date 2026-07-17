@@ -88,15 +88,24 @@ class App(Adw.Application):
 
     def on_activate(self, app):
         log.trace("running: on_activate")
-        if getattr(self, "main_win", None) is not None:
+        if getattr(self, "_activate_completed", False):
             # Remote activation: a second launch was forwarded here by
             # GApplication. Rebuilding the window would orphan every
             # gl.app.main_win consumer and the controllers' cached UI
             # bindings (issue #158, field 2026-07-16: the replacement was
             # also never presented because the boot argv had -b, so preview
-            # pushes dirty-marked forever). The user just launched the app,
-            # so present the existing window regardless of the boot argv.
-            self.main_win.present()
+            # pushes dirty-marked forever). Delegate to on_reopen so this
+            # route behaves exactly like the single-instance probe's
+            # Activate("reopen") -- one code path for re-activation.
+            #
+            # Guarded by an explicit completion flag, NOT by main_win:
+            # MainWindow.__init__'s first statement publishes itself as
+            # gl.app.main_win (= self.main_win) before construction can
+            # still fail, so a main_win guard would latch on a failed first
+            # build and permanently present a half-built window with the
+            # reopen action never registered. On such a failure this guard
+            # stays False and the next activation retries the full build.
+            self.on_reopen()
             return
         self.main_win = MainWindow(application=app, deck_manager=self.deck_manager)
         if not gl.argparser.parse_args().b:
@@ -148,6 +157,10 @@ class App(Adw.Application):
         # UI ever opens to trigger lazy backend init before the first
         # hardware press.
         gl.plugin_manager.warm_up_plugins()
+
+        # Last: everything above ran to completion, so re-activations may
+        # take the present-only early return from now on.
+        self._activate_completed = True
 
         log.success("Finished loading app")
 
