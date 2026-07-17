@@ -68,10 +68,29 @@ def main() -> None:
                 )
 
             # Idempotence: a second boot's scrub (concurrent-boot path) must
-            # not corrupt already-scrubbed content.
+            # be a byte-exact no-op -- not just "the redacted line survives".
+            with open(path, "rb") as f:
+                after_first = f.read()
             _scrub_fault_log(path)
-            with open(path) as f:
-                assert expected_line in f.read(), "re-scrub corrupted the file"
+            with open(path, "rb") as f:
+                assert f.read() == after_first, "re-scrub was not a byte-exact no-op"
+
+            # Undecodable bytes must not crash the scrub or corrupt the file:
+            # with nothing left to redact, the file must stay byte-untouched
+            # (the unchanged-skip path -- raw bytes preserved, no U+FFFD
+            # rewrite).
+            os.write(running_fd, b"garbage \xff\xfe bytes\n")
+            with open(path, "rb") as f:
+                with_garbage = f.read()
+            _scrub_fault_log(path)
+            with open(path, "rb") as f:
+                assert f.read() == with_garbage, (
+                    "scrub rewrote a file that had nothing to redact"
+                )
+
+            # No .scrub tmp may survive any of the runs above.
+            leftovers = [n for n in os.listdir(d) if n.endswith(".scrub")]
+            assert not leftovers, f"leaked scrub tmp files: {leftovers}"
         finally:
             os.close(running_fd)
 

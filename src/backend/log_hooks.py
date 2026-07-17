@@ -165,32 +165,53 @@ def _scrub_fault_log(path: str) -> None:
     -- a booting secondary (this runs before the single-instance gate) then
     silently redirected the primary's future crash/SIGQUIT dumps into a
     file nothing can find. Same-inode rewrite keeps live fds valid, and
-    mode/ownership untouched (nothing is re-created). The flock makes the
-    read-scrub-writeback a critical section, so two near-simultaneous boots
-    serialize instead of interleaving partial writes; scrubbing is
-    idempotent, so the second boot re-scrubbing is a no-op. Tradeoff
-    (accepted): a crash mid-writeback can leave a partially rewritten file,
-    where the old atomic replace kept it intact -- but the replace is
-    exactly what broke running instances, and this file is best-effort
-    diagnostics. Any failure is logged and swallowed -- a scrub problem
-    must never block startup."""
+    mode/ownership untouched (nothing is re-created); the one coverage
+    trade is that "r+" needs WRITE permission, so a manually chmod'd
+    read-only log is skipped (warning below) where os.replace would have
+    swapped it.
+
+    Concurrency: the flock is NON-blocking -- on contention the scrub is
+    skipped outright, because the only legitimate holder is another boot
+    scrubbing this same file to the same result, and waiting would let a
+    wedged holder (SIGSTOP, stalled disk) block every subsequent launch.
+    The flock is advisory: it excludes other scrubbers only. A dump another
+    instance appends at the C level DURING the writeback window lands past
+    the read snapshot and is lost to truncate() -- accepted; the old code
+    lost the same dump to the unlinked inode AND stranded the fd forever.
+    Scrubbing is idempotent for faulthandler content (frame paths, boot
+    markers -- all fixed points; scrub() is NOT idempotent in general, see
+    issue #162), so a second boot's re-scrub is a content no-op -- and the
+    unchanged-detection below turns it into a no-WRITE as well: the file is
+    only rewritten when a line actually changed, so the partial-writeback
+    window (crash/ENOSPC mid-copy) exists only on boots that had raw PII to
+    redact. Any failure is logged and swallowed -- a scrub problem must
+    never block startup."""
     if not os.path.exists(path):
         return
     tmp_path = None
     try:
-        fd, tmp_path = tempfile.mkstemp(
-            dir=os.path.dirname(path), prefix="faulthandler.", suffix=".scrub"
-        )
-        with open(path, "r+", errors="replace") as log_file:
-            fcntl.flock(log_file.fileno(), fcntl.LOCK_EX)
-            with os.fdopen(fd, "w+") as dst:
+        with open(path, "r+", encoding="utf-8", errors="replace") as log_file:
+            try:
+                fcntl.flock(log_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                # Another boot is scrubbing this exact file right now; its
+                # result is what ours would be. Never wait.
+                return
+            fd, tmp_path = tempfile.mkstemp(
+                dir=os.path.dirname(path), prefix="faulthandler.", suffix=".scrub"
+            )
+            changed = False
+            with os.fdopen(fd, "w+", encoding="utf-8") as dst:
                 for line in log_file:
-                    dst.write(scrub(line))
-                dst.flush()
-                dst.seek(0)
-                log_file.seek(0)
-                shutil.copyfileobj(dst, log_file)
-                log_file.truncate()
+                    scrubbed = scrub(line)
+                    if scrubbed != line:
+                        changed = True
+                    dst.write(scrubbed)
+                if changed:
+                    dst.seek(0)
+                    log_file.seek(0)
+                    shutil.copyfileobj(dst, log_file)
+                    log_file.truncate()
         os.unlink(tmp_path)
         tmp_path = None
     except Exception as e:
