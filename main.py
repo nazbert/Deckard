@@ -115,6 +115,7 @@ from src.backend.LockScreenManager.LockScreenManager import LockScreenManager
 from src.tray import TrayIcon
 from src.backend.Logger import Logger, LoggerConfig, Loglevel
 from src.backend.log_hooks import install_exception_hooks, redirect_faulthandler
+from src.backend import single_instance
 
 # Migration
 from src.backend.Migration.MigrationManager import MigrationManager
@@ -352,6 +353,27 @@ def quit_running():
         except (dbus.exceptions.DBusException, ValueError):
             break
         time.sleep(0.2)
+
+def hand_off_to_lock_owner():
+    """Called when single_instance.claim() lost the race (issue #155): another
+    launch is booting right now. It does not own the app bus name yet, so poll
+    briefly for it to finish, ask it to present its window, and exit either
+    way -- this process must not touch the decks."""
+    log.info("Another launch holds the single-instance lock; handing off and exiting")
+    session_bus = dbus.SessionBus()
+    for _ in range(50):  # up to 10 s for the winner to finish booting
+        try:
+            if session_bus.name_has_owner(appinfo.APP_ID):
+                break
+        except (dbus.exceptions.DBusException, ValueError):
+            break
+        time.sleep(0.2)
+    try:
+        obj = session_bus.get_object(appinfo.APP_ID, appinfo.DBUS_OBJECT_PATH)
+        dbus.Interface(obj, "org.gtk.Actions").Activate("reopen", [], [], timeout=5.0)
+    except (dbus.exceptions.DBusException, ValueError) as e:
+        log.warning(f"Could not hand off to the winning instance: {e}")
+    sys.exit(0)
 
 def handle_listing_commands():
     """
@@ -653,6 +675,14 @@ def main():
         DBusGMainLoop(set_as_default=True)
         # Dbus
         quit_running()
+        # quit_running() catches a fully-booted instance; two launches booting
+        # at the same moment (login autostart + session restore) both pass its
+        # probe. The lock claim is the atomic tie-breaker, and it must happen
+        # BEFORE reset_all_decks() so a losing launch never USB-resets decks
+        # the winner is initializing (issue #155, field incident 2026-07-16).
+        wait = 10.0 if gl.argparser.parse_args().close_running else 0.0
+        if not single_instance.claim(appinfo.APP_ID, wait_seconds=wait):
+            hand_off_to_lock_owner()
 
     reset_all_decks()
 
