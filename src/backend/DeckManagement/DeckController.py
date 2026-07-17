@@ -945,6 +945,9 @@ class DeckController:
         
         self.own_deck_stack_child: "DeckStackChild" = None
         self.own_key_grid: "KeyGridChild" = None
+        # Coalescing flag for _queue_ui_page_sync (issue #157): rapid page
+        # changes must not queue one full sidebar rebuild each.
+        self._ui_page_sync_queued: bool = False
 
         self.screen_saver = ScreenSaver(deck_controller=self)
         self.allow_interaction = True
@@ -1218,6 +1221,11 @@ class DeckController:
                     log.warning("Background not ready before update_all_inputs; painting anyway")
                     break
         self.update_all_inputs(gen=gen)
+        # Inputs are loaded and painted (media tasks are FIFO, so
+        # load_all_inputs has completed by the time this task runs) --
+        # the sidebar can now render the NEW page's state objects.
+        if self._page_is_current(gen):
+            self._queue_ui_page_sync()
 
     def _reset_dedup_hashes(self) -> None:
         """Nulls `_last_img_hash`/`_last_enqueued_hash` on every current key
@@ -1575,23 +1583,51 @@ class DeckController:
         input_dict = controller_input.identifier.get_config(page)
         controller_input.load_from_input_dict(input_dict, update)
 
+    def _queue_ui_page_sync(self):
+        # Coalesce page-load completion signals into one pending idle
+        # callback: N rapid page changes (unlock bursts, ChangePage chains)
+        # must not queue N full sidebar rebuilds. Each callback renders the
+        # LIVE state, so whichever completion lands last wins. The
+        # check-then-set race between the two trigger threads is benign --
+        # worst case two idles, both rendering the same current state.
+        if self._ui_page_sync_queued:
+            return
+        self._ui_page_sync_queued = True
+        GLib.idle_add(self._run_ui_page_sync)
+
+    def _run_ui_page_sync(self):
+        self._ui_page_sync_queued = False
+        self.update_ui_on_page_change()
+        return False
+
     def update_ui_on_page_change(self):
-        # Update ui
-        if recursive_hasattr(gl, "app.main_win.sidebar"):
-            try:
-                # gl.app.main_win.header_bar.page_selector.update_selected()
-                settings_page = gl.app.main_win.leftArea.deck_stack.get_visible_child().page_settings.settings_page
-                settings_group = settings_page.settings_group
-                background_group = settings_page.background_group
-
-                # Update ui
-                settings_group.brightness.load_defaults_from_page()
-                settings_group.screensaver.load_defaults_from_page()
-                background_group.media_row.load_defaults_from_page()
-
-                gl.app.main_win.sidebar.update()
-            except AttributeError as e:
-                log.error(f"{e} -> This is okay if you just activated your first deck.")
+        # Refresh the sidebar so the selected input's editor shows the NEW
+        # page's action configuration. This is all that is left of the
+        # original sync: the settings/background groups it also poked predate
+        # the settings restructure -- the page-scoped group variants are
+        # unreferenced, the deck-scoped rows reload on map, and
+        # BackgroundMediaRow.load_defaults_from_page is a deliberate dead
+        # early-return. The old accessor chain (...page_settings.
+        # settings_page) died on AttributeError on EVERY call -- swallowed by
+        # a blanket except as first-deck noise -- so none of it, the sidebar
+        # update included, ever ran (issue #157). No except wrapper anymore:
+        # this runs on the GLib main loop, where a real failure reaches the
+        # central hooks (#80) instead of being mislabeled.
+        if not recursive_hasattr(gl, "app.main_win.sidebar"):
+            return
+        # The sidebar mirrors the VISIBLE deck's selected input; a page
+        # change on a background deck must not reload it.
+        if gl.app.main_win.leftArea.deck_stack.get_visible_child() is not self.get_own_deck_stack_child():
+            return
+        sidebar = gl.app.main_win.sidebar
+        # Never yank the user out of a sub-view: Sidebar.load_for_* forces
+        # main_stack back to the input editor, so refreshing while the
+        # ActionChooser/ActionConfigurator (or the error page, whose
+        # deferred on_map task handles its own reload) is up would snap a
+        # mid-edit user away on every automatic page change.
+        if sidebar.main_stack.get_visible_child() is not sidebar.configurator_stack:
+            return
+        sidebar.update()
 
     def close_image_ressources(self):
         """Releases every input's media (key/dial images+videos) plus the
@@ -1720,8 +1756,12 @@ class DeckController:
             # Stop queued tasks (skipped if a newer switch already superseded this one)
             self.clear_media_player_tasks(gen)
 
-            # Update ui
-            GLib.idle_add(self.update_ui_on_page_change) #TODO: Use new signal manager instead
+            # UI sync is NOT triggered here: at this point the new page's
+            # input states and actions don't exist yet, so a sidebar rebuild
+            # would render the OLD page's data with nothing correcting it
+            # later. It fires from the load-completion side instead -- see
+            # _queue_ui_page_sync callers (end of the awaited input load on
+            # the media thread, and after initialize_actions below).
 
             bg_future = None
             if load_background:
@@ -1753,6 +1793,12 @@ class DeckController:
         # `page`, not active_page: a newer switch may already own active_page;
         # initializing a superseded page is harmless (on_ready_called de-dupes).
         page.initialize_actions()
+
+        # Second completion signal: action_objects now exist, so the
+        # sidebar's ActionManager can render the new page's actions. The
+        # queue coalesces this with the media-thread trigger above; each
+        # callback renders the live state, so the later completion wins.
+        self._queue_ui_page_sync()
 
         # Notify plugin actions. `page.json_path`, not active_page (same
         # rationale as initialize_actions above): a racing switch or close()

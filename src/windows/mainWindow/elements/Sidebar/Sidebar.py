@@ -203,7 +203,22 @@ class Sidebar(Adw.NavigationPage):
         self.main_stack.set_transition_duration(200)
 
     def update(self):
-        self.load_for_identifier(self.active_identifier, self.active_state)
+        identifier = self.active_identifier
+        state = self.active_state
+        # Refresh follows the input's OWN current state: the remembered
+        # active_state can belong to a previous page's input (page changes
+        # keep the sidebar selection), and replaying it would repaint the
+        # device from a UI-refresh path (KeyEditor.load_for_identifier calls
+        # c_input.set_state) and ERROR-spam whenever the new page's input
+        # has fewer states. User-driven state selection still passes its
+        # state explicitly through load_for_*.
+        controller = self.main_window.get_active_controller()
+        if controller is not None and identifier is not None:
+            c_input = controller.get_input(identifier)
+            if c_input is not None:
+                state = c_input.state
+                self.active_state = state
+        self.load_for_identifier(identifier, state)
 
 
 class KeyEditor(Gtk.Box):
