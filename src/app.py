@@ -88,6 +88,16 @@ class App(Adw.Application):
 
     def on_activate(self, app):
         log.trace("running: on_activate")
+        if getattr(self, "main_win", None) is not None:
+            # Remote activation: a second launch was forwarded here by
+            # GApplication. Rebuilding the window would orphan every
+            # gl.app.main_win consumer and the controllers' cached UI
+            # bindings (issue #158, field 2026-07-16: the replacement was
+            # also never presented because the boot argv had -b, so preview
+            # pushes dirty-marked forever). The user just launched the app,
+            # so present the existing window regardless of the boot argv.
+            self.main_win.present()
+            return
         self.main_win = MainWindow(application=app, deck_manager=self.deck_manager)
         if not gl.argparser.parse_args().b:
             self.main_win.present()
