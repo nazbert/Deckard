@@ -75,6 +75,15 @@ class DeckStack(Gtk.Stack):
         deck_number, deck_type = attr
 
         page = DeckStackChild(self, deck_controller)
+        # Bind the controller to its UI child by reference at creation time
+        # (issue #156): resolving this later by stack-child NAME re-reads the
+        # serial from the device and silently misses forever if either read
+        # was wrong (USB contention at boot) or the window was rebuilt.
+        # Re-binding here also heals a controller whose previous child
+        # belonged to a replaced widget tree; the grid cache is reset so it
+        # re-resolves under the new child.
+        deck_controller.own_deck_stack_child = page
+        deck_controller.own_key_grid = None
         self.add_titled(page, deck_number, deck_type)
 
         page.page_settings.deck_config.grid.select_key(0, 0)
@@ -89,12 +98,16 @@ class DeckStack(Gtk.Stack):
         
         deck_type = deck_controller.deck.deck_type()
         try:
-            serial_number = deck_controller.deck.get_serial_number()
+            # The controller's cached accessor, not a fresh device read: this
+            # string becomes the stack-child name, and every consumer must
+            # agree on one value even if a later device read would differ
+            # (issue #156).
+            serial_number = deck_controller.serial_number()
         except Exception as e:
             log.error(e)
             return
         self.deck_numbers.append(serial_number)
-        deck_number = str(deck_controller.deck.get_serial_number())
+        deck_number = str(serial_number)
 
         if deck_type not in self.deck_names:
             self.deck_names.append(deck_type)
