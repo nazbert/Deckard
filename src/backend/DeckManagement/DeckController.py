@@ -1576,22 +1576,25 @@ class DeckController:
         controller_input.load_from_input_dict(input_dict, update)
 
     def update_ui_on_page_change(self):
-        # Update ui
-        if recursive_hasattr(gl, "app.main_win.sidebar"):
-            try:
-                # gl.app.main_win.header_bar.page_selector.update_selected()
-                settings_page = gl.app.main_win.leftArea.deck_stack.get_visible_child().page_settings.settings_page
-                settings_group = settings_page.settings_group
-                background_group = settings_page.background_group
-
-                # Update ui
-                settings_group.brightness.load_defaults_from_page()
-                settings_group.screensaver.load_defaults_from_page()
-                background_group.media_row.load_defaults_from_page()
-
-                gl.app.main_win.sidebar.update()
-            except AttributeError as e:
-                log.error(f"{e} -> This is okay if you just activated your first deck.")
+        # Refresh the sidebar so the selected input's editor shows the NEW
+        # page's action configuration. This is all that is left of the
+        # original sync: the settings/background groups it also poked predate
+        # the settings restructure -- the page-scoped group variants are
+        # unreferenced, the deck-scoped rows reload on map, and
+        # BackgroundMediaRow.load_defaults_from_page is a deliberate dead
+        # early-return. The old accessor chain (...page_settings.
+        # settings_page) died on AttributeError on EVERY call -- swallowed by
+        # a blanket except as first-deck noise -- so none of it, the sidebar
+        # update included, ever ran (issue #157). No except wrapper anymore:
+        # this runs on the GLib main loop, where a real failure reaches the
+        # central hooks (#80) instead of being mislabeled.
+        if not recursive_hasattr(gl, "app.main_win.sidebar"):
+            return
+        # The sidebar mirrors the VISIBLE deck's selected input; a page
+        # change on a background deck must not reload it.
+        if gl.app.main_win.leftArea.deck_stack.get_visible_child() is not self.get_own_deck_stack_child():
+            return
+        gl.app.main_win.sidebar.update()
 
     def close_image_ressources(self):
         """Releases every input's media (key/dial images+videos) plus the
