@@ -1952,14 +1952,30 @@ class DeckController:
             return self.own_deck_stack_child
         
         if not recursive_hasattr(gl, "app.main_win.leftArea.deck_stack"): return
-        serial_number = self.deck.get_serial_number()
         deck_stack = gl.app.main_win.leftArea.deck_stack
-        deck_stack_child = deck_stack.get_child_by_name(serial_number)
-        if deck_stack_child == None:
-            return
-        
-        self.own_deck_stack_child = deck_stack_child
-        return deck_stack_child
+        # Identity scan instead of get_child_by_name(get_serial_number()):
+        # the name is a device-read string frozen at add_page time, and
+        # matching it against a fresh device read misses forever -- silently,
+        # previews then only dirty-mark -- if either read was wrong (issue
+        # #156). remove_page already matches children by controller identity;
+        # this is the same contract. Normally add_page pre-binds the ref and
+        # this scan never runs; it covers children created before this
+        # controller learned about them.
+        for page in deck_stack.get_pages():
+            if page is None:
+                # Racing a main-thread stack mutation: ListModel iteration
+                # snapshots len once, so removed trailing indices yield
+                # None. Only trailing entries can be None -- stop.
+                break
+            deck_stack_child = page.get_child()
+            if getattr(deck_stack_child, "deck_controller", None) is self:
+                # Publish only if still unbound: a stale scan (e.g. over a
+                # replaced window's stack) must not clobber add_page's
+                # fresh bind for the new widget tree.
+                if self.own_deck_stack_child is None:
+                    self.own_deck_stack_child = deck_stack_child
+                return self.own_deck_stack_child
+        return
     
     def _write_blank_frames(self) -> None:
         """Writes blank key images (+ touchscreen) directly to the device.

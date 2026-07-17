@@ -74,8 +74,25 @@ class DeckStack(Gtk.Stack):
             return
         deck_number, deck_type = attr
 
+        # Clear any previous binding BEFORE constructing the new child
+        # (issue #156): KeyGrid.__init__ runs load_from_changes() during
+        # construction, and its touchscreen branch replays dirty markers
+        # against deck_controller.own_deck_stack_child -- on a window
+        # rebuild that still points at the ORPHANED old child, which would
+        # consume the markers into dead widgets and leave the new screenbar
+        # with nothing to replay on map. Unbound, that replay defers and
+        # the markers survive for the new widgets.
+        deck_controller.own_deck_stack_child = None
+        deck_controller.own_key_grid = None
         page = DeckStackChild(self, deck_controller)
         self.add_titled(page, deck_number, deck_type)
+        # Bind by reference only once the child is actually in the stack:
+        # resolving by stack-child NAME re-read the serial from the device
+        # and silently missed forever if either read was wrong (USB
+        # contention at boot) or the window was rebuilt. Binding after
+        # add_titled also means an exception mid-construction can never
+        # leave the controller bound to a child that is not in the stack.
+        deck_controller.own_deck_stack_child = page
 
         page.page_settings.deck_config.grid.select_key(0, 0)
 
@@ -89,12 +106,16 @@ class DeckStack(Gtk.Stack):
         
         deck_type = deck_controller.deck.deck_type()
         try:
-            serial_number = deck_controller.deck.get_serial_number()
+            # The controller's cached accessor, not a fresh device read: this
+            # string becomes the stack-child name, and every consumer must
+            # agree on one value even if a later device read would differ
+            # (issue #156).
+            serial_number = deck_controller.serial_number()
         except Exception as e:
             log.error(e)
             return
         self.deck_numbers.append(serial_number)
-        deck_number = str(deck_controller.deck.get_serial_number())
+        deck_number = str(serial_number)
 
         if deck_type not in self.deck_names:
             self.deck_names.append(deck_type)

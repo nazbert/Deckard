@@ -114,7 +114,9 @@ def check_deck_name_dedup() -> None:
             deck_type=lambda: "Stream Deck MK.2",
             get_serial_number=lambda: serial,
         )
-        return Obj(deck=deck)
+        # get_page_attributes reads the controller's cached serial accessor,
+        # not the device, since the issue #156 fix (one read, one truth).
+        return Obj(deck=deck, serial_number=lambda: serial)
 
     _, first = DeckStack.get_page_attributes(stub, make_controller("SN1"))
     _, second = DeckStack.get_page_attributes(stub, make_controller("SN2"))
