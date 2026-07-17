@@ -48,7 +48,9 @@ installs its scrubbing patcher (issue #105) so these hooks can never route
 an unredacted traceback into the sinks.
 """
 import faulthandler
+import fcntl
 import os
+import shutil
 import signal
 import sys
 import tempfile
@@ -155,16 +157,23 @@ def _scrub_fault_log(path: str) -> None:
     CURRENT session stays raw on disk until the next boot.
 
     Streams line-by-line (dumps are line-oriented and every scrub() pattern
-    is single-line) so a years-old multi-boot file cannot balloon memory,
-    and rewrites via a per-process tmp + os.replace so a crash mid-scrub
-    cannot destroy the previous crash's evidence. The tmp is a unique
-    mkstemp name in the SAME directory: same-dir keeps os.replace atomic,
-    and the unique name means two near-simultaneous boots (redirect_
-    faulthandler runs before the DBus single-instance probe) cannot collide
-    on a shared tmp path. The source mode is copied onto the tmp before the
-    replace so a user who locked the log down (0600) does not silently get
-    it widened to the umask default. Best-effort: any failure is logged and
-    swallowed -- a scrub problem must never block startup."""
+    is single-line) so a years-old multi-boot file cannot balloon memory:
+    the scrubbed content goes to a unique same-dir mkstemp tmp first, then
+    is copied back over the original IN PLACE. In place, not os.replace
+    (issue #159): replace swaps the inode, which strands every already-
+    RUNNING instance's registered faulthandler fd on the unlinked old file
+    -- a booting secondary (this runs before the single-instance gate) then
+    silently redirected the primary's future crash/SIGQUIT dumps into a
+    file nothing can find. Same-inode rewrite keeps live fds valid, and
+    mode/ownership untouched (nothing is re-created). The flock makes the
+    read-scrub-writeback a critical section, so two near-simultaneous boots
+    serialize instead of interleaving partial writes; scrubbing is
+    idempotent, so the second boot re-scrubbing is a no-op. Tradeoff
+    (accepted): a crash mid-writeback can leave a partially rewritten file,
+    where the old atomic replace kept it intact -- but the replace is
+    exactly what broke running instances, and this file is best-effort
+    diagnostics. Any failure is logged and swallowed -- a scrub problem
+    must never block startup."""
     if not os.path.exists(path):
         return
     tmp_path = None
@@ -172,13 +181,18 @@ def _scrub_fault_log(path: str) -> None:
         fd, tmp_path = tempfile.mkstemp(
             dir=os.path.dirname(path), prefix="faulthandler.", suffix=".scrub"
         )
-        with open(path, "r", errors="replace") as src, os.fdopen(fd, "w") as dst:
-            for line in src:
-                dst.write(scrub(line))
-        # mkstemp creates 0600; keep the existing log's mode so a locked-down
-        # dump is not silently widened by the scrub (the Page.py idiom).
-        os.chmod(tmp_path, os.stat(path).st_mode & 0o777)
-        os.replace(tmp_path, path)
+        with open(path, "r+", errors="replace") as log_file:
+            fcntl.flock(log_file.fileno(), fcntl.LOCK_EX)
+            with os.fdopen(fd, "w+") as dst:
+                for line in log_file:
+                    dst.write(scrub(line))
+                dst.flush()
+                dst.seek(0)
+                log_file.seek(0)
+                shutil.copyfileobj(dst, log_file)
+                log_file.truncate()
+        os.unlink(tmp_path)
+        tmp_path = None
     except Exception as e:
         if tmp_path is not None:
             try:
@@ -210,9 +224,11 @@ def redirect_faulthandler(directory: str) -> None:
         path = os.path.join(directory, "faulthandler.log")
         # Previous sessions' dumps bypassed the #105 redaction layer
         # (C-level fd writes); scrub them BEFORE opening the append fd, so
-        # faulthandler attaches to the rewritten file rather than a
-        # replaced, unlinked inode. Dumps from THIS session stay raw until
-        # the next boot -- see _scrub_fault_log for why that is accepted.
+        # this boot's marker lands after the rewritten content. The scrub is
+        # in-place (same inode -- issue #159), so it is also safe while
+        # other instances hold registered fds on the file. Dumps from THIS
+        # session stay raw until the next boot -- see _scrub_fault_log for
+        # why that is accepted.
         _scrub_fault_log(path)
         f = open(path, "a", buffering=1)
         # Crash dumps are only read after a restart: append + boot markers,
