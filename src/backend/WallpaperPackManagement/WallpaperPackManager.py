@@ -33,6 +33,10 @@ class WallpaperPackManager:
         packs = {}
         os.makedirs(os.path.join(gl.DATA_PATH, "wallpapers"), exist_ok=True)
         for pack in os.listdir(os.path.join(gl.DATA_PATH, "wallpapers")):
+            if pack.startswith("."):
+                # Transient install-swap trees (StoreBackend._swap_into_place)
+                # and other hidden entries are not packs.
+                continue
             wallpaper_pack = WallpaperPack(os.path.join(gl.DATA_PATH, "wallpapers", pack))
             if wallpaper_pack.is_valid:
                 packs[pack] =  wallpaper_pack

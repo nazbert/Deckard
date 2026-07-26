@@ -918,11 +918,83 @@ class StoreBackend:
                     return True
         return False
 
-    async def download_repo(self, repo_url:str, directory:str, commit_sha:str = None, branch_name:str = None):
+    @staticmethod
+    def _remove_leftover(path: str) -> None:
+        """Remove a transient swap tree (or stray file/symlink) if present."""
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path, ignore_errors=True)
+        elif os.path.lexists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def _staged_tree_id_matches(self, staging_tree: str, expected_id: str) -> bool:
+        """Single choke point for the staged-manifest identity check: when
+        the caller knows which asset id it is installing (the id also names
+        the install dir), the downloaded tree's manifest must agree -- a
+        catalog/repo drift or hostile manifest must never be swapped over
+        the installed pack."""
+        if expected_id is None:
+            return True
+        try:
+            with open(os.path.join(staging_tree, "manifest.json")) as f:
+                staged_id = json.load(f).get("id")
+        except (OSError, ValueError) as e:
+            log.error(f"Staged download has no readable manifest.json ({e}) -- refusing to install as {expected_id!r}")
+            return False
+        if staged_id != expected_id:
+            log.error(f"Staged download identifies as {staged_id!r}, expected {expected_id!r} -- refusing to install")
+            return False
+        return True
+
+    def _swap_into_place(self, staging_tree: str, directory: str) -> None:
+        """Replace `directory` with the fully staged tree, deleting the old
+        install only after the new one is in place.
+
+        The staged tree is first moved next to the destination -- the only
+        possibly cross-filesystem step (PLUGIN_DIR can be env-overridden
+        onto another device), and it runs while the old install is still
+        fully intact. The two renames that follow are same-parent and
+        therefore atomic. The transient siblings are dot-prefixed so the
+        plugin/pack directory scanners never pick a crash leftover up as a
+        real install; leftovers are swept on the next install of the same
+        asset."""
+        parent = os.path.dirname(os.path.abspath(directory))
+        name = os.path.basename(os.path.normpath(directory))
+        os.makedirs(parent, exist_ok=True)
+        new_tree = os.path.join(parent, f".{name}.deckard-new")
+        old_tree = os.path.join(parent, f".{name}.deckard-old")
+        self._remove_leftover(new_tree)
+        self._remove_leftover(old_tree)
+
+        shutil.move(staging_tree, new_tree)
+        moved_old_aside = False
+        try:
+            if os.path.lexists(directory):
+                os.replace(directory, old_tree)
+                moved_old_aside = True
+            os.replace(new_tree, directory)
+        except Exception:
+            # Put the old install back before surfacing the failure.
+            if moved_old_aside and not os.path.lexists(directory):
+                os.replace(old_tree, directory)
+            shutil.rmtree(new_tree, ignore_errors=True)
+            raise
+        self._remove_leftover(old_tree)
+
+    async def download_repo(self, repo_url:str, directory:str, commit_sha:str = None, branch_name:str = None, expected_id:str = None):
         """Returns 200 on success, 404 for a hard failure (e.g. git missing
-        on the devel clone path), or NoConnectionError."""
+        on the devel clone path), 400 for a staged tree that fails the
+        expected_id manifest check, or NoConnectionError.
+
+        The install is transactional: the new tree is downloaded, extracted,
+        validated and VERSION-stamped in a staging area first, then swapped
+        into `directory` via _swap_into_place -- the previously installed
+        tree is deleted only after the new one is in place, so a failure
+        anywhere leaves the old install untouched."""
         if not is_flatpak() and gl.argparser.parse_args().devel:
-            return await self.clone_repo(repo_url, directory, commit_sha, branch_name)
+            return await self.clone_repo(repo_url, directory, commit_sha, branch_name, expected_id)
 
 
         username = self.get_user_name(repo_url)
@@ -975,17 +1047,19 @@ class StoreBackend:
                 shutil.rmtree(extracted_folder)
             shutil.unpack_archive(zip_path, os.path.join(gl.DATA_PATH, "cache"))
 
-            # Reset destination folder
-            if os.path.isdir(directory):
-                shutil.rmtree(directory)
-            if os.path.isfile(directory):
-                os.remove(directory)
-            os.makedirs(directory, exist_ok=True)
+            # Validate and complete the STAGED tree before it can reach the
+            # install location. VERSION must exist before the swap: a tree
+            # without it reads as local_sha None ("not installed"), so a
+            # crash after the swap but before a late VERSION write would
+            # leave an install that is never retried.
+            if not self._staged_tree_id_matches(extracted_folder, expected_id):
+                return 400
+            with open(os.path.join(extracted_folder, "VERSION"), "w") as f:
+                f.write(sha)
 
-            for name in os.listdir(extracted_folder):
-                shutil.move(os.path.join(extracted_folder, name), directory)
+            self._swap_into_place(extracted_folder, directory)
         except Exception as e:
-            log.error(f"Failed to extract {projectname}: {e}")
+            log.error(f"Failed to extract/install {projectname}: {e}")
             return NoConnectionError()
         finally:
             # Best-effort: never leave the archive or extracted temp folder behind,
@@ -997,15 +1071,10 @@ class StoreBackend:
                 pass
             if extracted_folder is not None and os.path.isdir(extracted_folder):
                 shutil.rmtree(extracted_folder, ignore_errors=True)
-        
-        ## Write version
-        path = os.path.join(directory, "VERSION")
-        with open(path, "w") as f:
-            f.write(sha)
-        
+
         return 200
     
-    async def clone_repo(self, repo_url:str, local_path:str, commit_sha:str = None, branch_name:str = None):
+    async def clone_repo(self, repo_url:str, local_path:str, commit_sha:str = None, branch_name:str = None, expected_id:str = None):
         if commit_sha is not None:
             # Use the main branch for the initial clone
             branch_name = None
@@ -1028,35 +1097,48 @@ class StoreBackend:
             log.error("Git is not installed on this system. Please install it.")
             return 404
 
-        # Remove folder if it already exists
-        shutil.rmtree(local_path, ignore_errors=True)
+        # Same transactional contract as download_repo: clone and prepare in
+        # a staging dir under cache/, then swap -- the old rmtree-first flow
+        # destroyed the existing install before the clone could fail.
+        staging = os.path.join(gl.DATA_PATH, "cache", f".clone-staging.{os.path.basename(os.path.normpath(local_path))}")
+        os.makedirs(os.path.join(gl.DATA_PATH, "cache"), exist_ok=True)
+        self._remove_leftover(staging)
 
-        # Clone the repository at the newest stage on the default branch
-        await self.subp_call(["git", "clone", repo_url, local_path])
+        try:
+            # Clone the repository at the newest stage on the default branch
+            rc = await self.subp_call(["git", "clone", repo_url, staging])
+            if rc != 0 or not os.path.isdir(staging):
+                log.error(f"git clone of {repo_url} failed with exit code {rc}")
+                return 404
 
-        # Add repository to the safe directory list to avoid dubious ownership warnings
-        # FIXME: Check if not already added
-        await self.subp_call(["git", "config", "--global", "--add", "safe.directory", os.path.abspath(local_path)])
+            # Add repository to the safe directory list to avoid dubious ownership warnings
+            # FIXME: Check if not already added
+            await self.subp_call(["git", "config", "--global", "--add", "safe.directory", os.path.abspath(local_path)])
 
-        # Run git pull to create .git/FETCH_HEAD. This allows us to check for available updates.
-        # `git -C <dir>` (argv, no shell) instead of the old
-        # `os.system("cd '<dir>' && git pull")` which built a shell command line.
-        await self.subp_call(["git", "-C", local_path, "pull"])
+            # Run git pull to create .git/FETCH_HEAD. This allows us to check for available updates.
+            # `git -C <dir>` (argv, no shell) instead of the old
+            # `os.system("cd '<dir>' && git pull")` which built a shell command line.
+            await self.subp_call(["git", "-C", staging, "pull"])
 
+            # Set repository to the given commit_sha
+            if commit_sha is not None:
+                await self.subp_call(["git", "-C", staging, "reset", "--hard", commit_sha])
+            elif branch_name is not None:
+                await self.subp_call(["git", "-C", staging, "switch", branch_name])
 
-        ## Write version
-        path = os.path.join(local_path, "VERSION")
-        with open(path, "w") as f:
-            f.write(commit_sha or branch_name)
+            ## Write version
+            with open(os.path.join(staging, "VERSION"), "w") as f:
+                f.write(commit_sha or branch_name)
 
-        # Set repository to the given commit_sha
-        if commit_sha is not None:
-            await self.subp_call(["git", "-C", local_path, "reset", "--hard", commit_sha])
-            return 200
+            if not self._staged_tree_id_matches(staging, expected_id):
+                return 400
 
-        if branch_name is not None:
-            await self.subp_call(["git", "-C", local_path, "switch", branch_name])
-            return 200
+            self._swap_into_place(staging, local_path)
+        except Exception as e:
+            log.error(f"Failed to stage devel clone of {repo_url}: {e}")
+            return NoConnectionError()
+        finally:
+            self._remove_leftover(staging)
 
         return 200
 
@@ -1064,14 +1146,14 @@ class StoreBackend:
         url = plugin_data.github
 
         if not self.is_safe_asset_id(plugin_data.plugin_id):
-            # The id names the install dir (which download_repo rmtree-resets)
+            # The id names the install dir (which download_repo swap-replaces)
             # -- a traversal id like "../../.." must never reach that join.
             log.error(f"Refusing to install plugin with unsafe id {plugin_data.plugin_id!r} from {url}")
             return 400
 
         local_path = os.path.join(gl.PLUGIN_DIR, plugin_data.plugin_id)
 
-        response = await self.download_repo(repo_url=url, directory=local_path, commit_sha=plugin_data.commit_sha, branch_name=plugin_data.branch)
+        response = await self.download_repo(repo_url=url, directory=local_path, commit_sha=plugin_data.commit_sha, branch_name=plugin_data.branch, expected_id=plugin_data.plugin_id)
 
         # Bail before running install scripts or reloading plugins over a
         # missing or partial tree.
@@ -1079,6 +1161,18 @@ class StoreBackend:
             return response
         if response != 200:
             return 404
+
+        # UPDATE case: the new tree is already swapped in; deregister the
+        # old version now (sys.modules purge included) so load_plugins
+        # below imports the new code. Deregistering only AFTER a successful
+        # download means a failed update leaves the old version on disk AND
+        # registered -- the old deregister-first flow needed a recovery
+        # reload to undo its own damage.
+        if gl.plugin_manager.get_plugin_by_id(plugin_data.plugin_id) is not None:
+            try:
+                self.uninstall_plugin(plugin_data.plugin_id, remove_from_pages=False, remove_files=False)
+            except Exception as e:
+                log.error(f"Deregistering the old version of {plugin_data.plugin_id} failed: {e}")
 
         # Run install script if present. Make sure to use python binary used to run this process to not break venv dependency installations.
         # List form without a shell: an f-string command both broke on spaces
@@ -1237,9 +1331,11 @@ class StoreBackend:
 
         icon_path = os.path.join(gl.DATA_PATH, "icons", icon_data.icon_id)
 
-        await self.uninstall_icon(icon_data)
-
-        return await self.download_repo(repo_url=icon_data.github, directory=icon_path, commit_sha=icon_data.commit_sha)
+        # No pre-delete (B-06): download_repo stages and validates the new
+        # pack and only replaces the installed one at swap time -- the old
+        # uninstall-first flow permanently lost the pack when the download
+        # failed mid-update.
+        return await self.download_repo(repo_url=icon_data.github, directory=icon_path, commit_sha=icon_data.commit_sha, expected_id=icon_data.icon_id)
 
     async def uninstall_icon(self, icon_data:IconData):
         folder_name = icon_data.icon_id
@@ -1256,9 +1352,8 @@ class StoreBackend:
 
         wallpaper_path = os.path.join(gl.DATA_PATH, "wallpapers", wallpaper_data.wallpaper_id)
 
-        await self.uninstall_wallpaper(wallpaper_data)
-
-        return await self.download_repo(repo_url=wallpaper_data.github, directory=wallpaper_path, commit_sha=wallpaper_data.commit_sha)
+        # No pre-delete (B-06) -- see install_icon.
+        return await self.download_repo(repo_url=wallpaper_data.github, directory=wallpaper_path, commit_sha=wallpaper_data.commit_sha, expected_id=wallpaper_data.wallpaper_id)
 
     async def uninstall_wallpaper(self, wallpaper_data:WallpaperData):
         folder_name = wallpaper_data.wallpaper_id
@@ -1275,9 +1370,8 @@ class StoreBackend:
 
         wallpaper_path = os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", sd_plus_bar_wallpaper_data.id)
 
-        await self.uninstall_sd_plus_bar_wallpaper(sd_plus_bar_wallpaper_data)
-
-        return await self.download_repo(repo_url=sd_plus_bar_wallpaper_data.github, directory=wallpaper_path, commit_sha=sd_plus_bar_wallpaper_data.commit_sha)
+        # No pre-delete (B-06) -- see install_icon.
+        return await self.download_repo(repo_url=sd_plus_bar_wallpaper_data.github, directory=wallpaper_path, commit_sha=sd_plus_bar_wallpaper_data.commit_sha, expected_id=sd_plus_bar_wallpaper_data.id)
 
     async def uninstall_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper_data:SDPlusBarWallpaperData):
         folder_name = sd_plus_bar_wallpaper_data.id
@@ -1286,25 +1380,6 @@ class StoreBackend:
             return 400
         if os.path.exists(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", folder_name)):
             shutil.rmtree(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", folder_name))
-
-    def reload_installed_plugins(self) -> None:
-        """Re-register whatever plugins are on disk and refresh UI/pages --
-        the same post-install plumbing install_plugin runs. Recovery path
-        for a failed UPDATE: update flows deregister the old version
-        (uninstall_plugin(remove_files=False)) before the fallible download,
-        and a failure used to leave the plugin unregistered until restart
-        even though its files were untouched."""
-        gl.plugin_manager.load_plugins()
-        gl.plugin_manager.init_plugins()
-        gl.plugin_manager.generate_action_index()
-
-        if recursive_hasattr(gl, "app.main_win.sidebar.action_chooser"):
-            GLib.idle_add(gl.app.main_win.sidebar.action_chooser.plugin_group.update)
-
-        for controller in gl.deck_manager.deck_controller:
-            if getattr(controller, "active_page", None) is not None:
-                controller.active_page.load_action_objects()
-                controller.load_page(controller.active_page)
 
     async def get_plugin_for_id(self, plugin_id):
         plugins = await self.get_all_plugins_async()
@@ -1356,24 +1431,15 @@ class StoreBackend:
         if isinstance(plugins_to_update, NoConnectionError):
             return plugins_to_update
         n_updated = 0
-        any_failed = False
         for plugin in plugins_to_update:
-            try:
-                self.uninstall_plugin(plugin.plugin_id, remove_from_pages=False, remove_files=False)
-            except Exception as e:
-                log.error(e)
+            # install_plugin deregisters the old version only after its
+            # download succeeded -- a failed update leaves the old version
+            # on disk AND registered, so no recovery pass is needed.
             result = await self.install_plugin(plugin)
             if result is True:
                 n_updated += 1
             else:
                 log.error(f"Failed to update plugin {plugin.plugin_id}: {result!r}")
-                any_failed = True
-
-        if any_failed:
-            # The failed installs happened AFTER their uninstall_plugin
-            # deregistered the (still on-disk) old versions -- re-register
-            # them so they keep working instead of vanishing until restart.
-            self.reload_installed_plugins()
 
         return n_updated
 

@@ -12,8 +12,11 @@ backend, exercised WITHOUT network:
 
 The contract is now: install_plugin success is exactly True;
 download_repo/install_icon/install_wallpaper success is exactly 200;
-update_all_* count only real successes; a failed plugin update triggers
-reload_installed_plugins() so the old version keeps working.
+update_all_* count only real successes. Since the transactional-install
+redesign (gl#82) update_all_plugins never deregisters anything itself:
+install_plugin deregisters the old version only AFTER its download
+succeeded, so a failed update leaves the old version on disk AND
+registered and no recovery reload exists.
 """
 import asyncio
 
@@ -72,7 +75,7 @@ def test_install_plugin_failure_propagates_and_skips_reload() -> None:
     )
 
 
-def test_update_all_plugins_counts_only_successes_and_recovers() -> None:
+def test_update_all_plugins_counts_only_successes_and_never_predeletes() -> None:
     fixtures.install_stub_globals()
     sb = _make_backend()
 
@@ -90,32 +93,21 @@ def test_update_all_plugins_counts_only_successes_and_recovers() -> None:
     async def fake_install(plugin_data, auto_update=False):
         return True if plugin_data is plugin_ok else NoConnectionError()
 
-    recovery_calls = []
-
     sb.get_plugins_to_update = fake_get_plugins_to_update
     sb.uninstall_plugin = fake_uninstall
     sb.install_plugin = fake_install
-    sb.reload_installed_plugins = lambda: recovery_calls.append(True)
 
     n = asyncio.run(sb.update_all_plugins())
     assert n == 1, f"only the ONE successful update may be counted, got {n!r}"
-    assert uninstalled == [("com_a_Ok", False), ("com_b_Bad", False)], (
-        "updates must deregister with remove_files=False"
+    assert uninstalled == [], (
+        "update_all_plugins must never deregister a plugin itself -- "
+        "install_plugin deregisters only after a good download (gl#82), "
+        f"got {uninstalled}"
     )
-    assert recovery_calls == [True], (
-        "a failed update must re-register the still-on-disk plugins "
-        f"(exactly once), got {len(recovery_calls)} recovery calls"
+    assert not hasattr(sb, "reload_installed_plugins"), (
+        "the deregister-first recovery reload is gone with the "
+        "transactional install -- nothing should resurrect it"
     )
-
-    # All successes: no recovery.
-    async def install_all_ok(plugin_data, auto_update=False):
-        return True
-
-    recovery_calls.clear()
-    sb.install_plugin = install_all_ok
-    n = asyncio.run(sb.update_all_plugins())
-    assert n == 2
-    assert recovery_calls == [], "no recovery reload when every update succeeded"
 
 
 def test_update_everything_checks_all_four_legs() -> None:
@@ -237,7 +229,7 @@ def test_install_icon_propagates_download_result() -> None:
 def main() -> None:
     fixtures.start_watchdog(30, label="scenario_store_install_contract")
     test_install_plugin_failure_propagates_and_skips_reload()
-    test_update_all_plugins_counts_only_successes_and_recovers()
+    test_update_all_plugins_counts_only_successes_and_never_predeletes()
     test_update_everything_checks_all_four_legs()
     test_update_all_sd_plus_bar_wallpapers_counts_only_successes()
     test_update_all_icons_counts_only_successes()

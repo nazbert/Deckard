@@ -1,24 +1,21 @@
 """
 B-06 pin (gl#62): the icon / wallpaper / SD+ bar-wallpaper "update" path
-deletes the installed pack BEFORE the fallible download and does not restore
-it on failure -- so a mid-download failure (429 throttle, offline warm-cache
-auto-update) leaves the pack permanently gone, its referencing keys broken,
-and (because local_sha becomes None) it is never retried.
+used to delete the installed pack BEFORE the fallible download with no
+restore on failure -- a mid-download failure (429 throttle, offline
+warm-cache auto-update) left the pack permanently gone, its referencing
+keys broken, and (because local_sha became None) it was never retried.
 
     async def install_icon(self, icon_data):
         ...
         await self.uninstall_icon(icon_data)          # rmtree FIRST
         return await self.download_repo(...)          # then the fallible fetch
 
-install_plugin got the opposite (delete-only-after-a-good-download) hardening
-on the branch; these three data-only wrappers did NOT (see B-06 in
-docs/deep-audit-2026-07-10.md, and the compatibility-gate comment in
-StoreBackend.py that only guards install_plugin). No source code is touched
-here: this scenario PINS today's data-losing behavior as forbidden. It is
-listed in run_all.py's EXPECTED_FAIL_UNTIL_M1 -- it FAILS against current code
-(the pack does not survive) and will flip to PASS the moment B-06 is fixed
-(e.g. by a transactional install, gl#82). If it starts passing unexpectedly,
-delete the EXPECTED_FAIL_UNTIL_M1 entry: the bug is fixed.
+FIXED by the transactional-install redesign (gl#82): download_repo now
+stages, validates and VERSION-stamps the new tree before swapping it over
+the installed one, and the three pack installers no longer pre-delete
+(their uninstall_* calls are gone). This scenario is the regression pin:
+a failing download must leave the installed pack byte-identical on disk.
+It sat in run_all.py's EXPECTED_FAIL_UNTIL_M1 while B-06 was open.
 
 No network: download_repo is stubbed to return NoConnectionError (the exact
 value a real mid-stream fetch fault produces), so the test isolates the

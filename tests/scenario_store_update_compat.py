@@ -81,15 +81,15 @@ def test_update_all_plugins_never_installs_incompatible() -> None:
     sb.get_all_plugins_async = fake_get_all_plugins_async
     sb.uninstall_plugin = fake_uninstall
     sb.install_plugin = fake_install
-    sb.reload_installed_plugins = lambda: None
 
     n = asyncio.run(sb.update_all_plugins())
     assert n == 1, f"exactly the one compatible update may be counted, got {n!r}"
     assert installed == ["com_b_Outdated"], (
         f"the incompatible plugin must never be installed, got installs {installed}"
     )
-    assert uninstalled == ["com_b_Outdated"], (
-        f"the incompatible plugin must never be deregistered either, got {uninstalled}"
+    assert uninstalled == [], (
+        "update_all_plugins must not deregister anything itself -- "
+        f"install_plugin deregisters only after a good download, got {uninstalled}"
     )
 
 

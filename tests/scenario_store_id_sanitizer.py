@@ -128,6 +128,7 @@ def test_install_script_runs_without_shell() -> None:
         def init_plugins(self): pass
         def generate_action_index(self): pass
         def get_plugins(self): return {}
+        def get_plugin_by_id(self, plugin_id, include_disabled=True): return None
 
     class StubSignalManager:
         def trigger_signal(self, *a, **k): pass
@@ -226,8 +227,9 @@ def test_clone_repo_rejects_injection_and_never_shells() -> None:
         # A correct fix passes argv lists; a regression to a shell string
         # would show up here as a str, which we forbid outright.
         assert isinstance(args, list), f"git must be invoked as argv list, got {args!r}"
-        # Stand in for `git clone`, which is what actually creates the dir
-        # (clone_repo rmtree's it first) -- so the later VERSION write works.
+        # Stand in for `git clone`, which is what actually creates the
+        # staging dir (clone_repo clones into cache/ and swaps at the end)
+        # -- so the later VERSION write and swap work.
         if len(args) >= 2 and args[1] == "clone":
             os.makedirs(args[-1], exist_ok=True)
         return 0
@@ -275,8 +277,17 @@ def test_clone_repo_rejects_injection_and_never_shells() -> None:
     switch_calls = [c for c in calls if len(c) >= 4 and c[3] == "switch"]
     assert switch_calls, f"expected an argv 'git switch' call, got {calls}"
     argv = switch_calls[0]
-    assert argv[:4] == ["git", "-C", local_path, "switch"], f"unexpected argv {argv!r}"
+    # Since gl#82 the clone is prepared in a staging dir under cache/ and
+    # swapped into local_path afterwards -- the -C target is the staging
+    # tree. The property under test is unchanged: argv list, no shell.
+    assert argv[:2] == ["git", "-C"] and argv[3] == "switch", f"unexpected argv {argv!r}"
+    assert argv[2].startswith(os.path.join(gl.DATA_PATH, "cache") + os.sep), (
+        f"clone must be prepared in the cache staging area, got {argv[2]!r}"
+    )
     assert argv[-1] == "release/1.5.0", "the validated branch must be passed as its own token"
+    assert os.path.isfile(os.path.join(local_path, "VERSION")), (
+        "the staged clone was not swapped into the install location"
+    )
 
 
 def test_download_repo_refuses_zip_slip_member() -> None:
