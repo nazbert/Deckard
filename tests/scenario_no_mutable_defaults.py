@@ -28,16 +28,18 @@ the linter and can be dropped, keeping only the Media behavioral check.
 """
 import ast
 import os
-import sys
 
-import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
+import fixtures  # must be first: isolates DATA_PATH
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 SCAN_ROOTS = ["src", "GtkHelper"]
 SCAN_FILES = ["main.py"]
 
-SKIP_PARTS = (".venv", ".claude", "__pycache__", "aur-deckard-git", "packaging")
+# Pruned from the walk below. Only directory *names* under the scan roots --
+# never matched against the absolute path, which may itself contain e.g.
+# ".claude" when the harness runs inside an agent worktree.
+SKIP_PARTS = (".venv", ".claude", "__pycache__")
 
 MUTABLE_NODES = (
     ast.List,
@@ -50,10 +52,6 @@ MUTABLE_NODES = (
 )
 
 
-def _skip(path: str) -> bool:
-    return any(part in path.split(os.sep) for part in SKIP_PARTS)
-
-
 def iter_python_files():
     for rel in SCAN_FILES:
         path = os.path.join(REPO_ROOT, rel)
@@ -64,17 +62,17 @@ def iter_python_files():
         root = os.path.join(REPO_ROOT, root_name)
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [d for d in dirnames if d not in SKIP_PARTS]
-            if _skip(dirpath):
-                continue
             for name in sorted(filenames):
                 if name.endswith(".py"):
                     yield os.path.join(dirpath, name)
 
 
-def find_offenders() -> list[tuple[str, int, str]]:
+def find_offenders() -> tuple[list[tuple[str, int, str]], int]:
     offenders: list[tuple[str, int, str]] = []
+    scanned = 0
 
     for path in sorted(iter_python_files()):
+        scanned += 1
         with open(path, "r", encoding="utf-8") as f:
             source = f.read()
         try:
@@ -94,18 +92,33 @@ def find_offenders() -> list[tuple[str, int, str]]:
                         (os.path.relpath(path, REPO_ROOT), default.lineno, node.name)
                     )
 
-    return offenders
+    return offenders, scanned
+
+
+# Tripwire against a vacuous pass: the scan once silently degraded to
+# main.py-only when path filtering matched a segment of the checkout's own
+# absolute path (agent worktrees live under .claude/). The tree has ~220
+# scannable files; well under that means the walk broke, not the tree shrank.
+MIN_SCANNED = 100
 
 
 def check_ast_scan() -> bool:
-    offenders = find_offenders()
+    offenders, scanned = find_offenders()
     if offenders:
         print(f"FAIL: {len(offenders)} mutable default argument(s) found:")
         for rel_path, lineno, func_name in offenders:
             print(f"  {rel_path}:{lineno} {func_name}")
         return False
 
-    print("PASS: no mutable default arguments in src/, GtkHelper/, main.py")
+    if scanned < MIN_SCANNED:
+        print(
+            f"FAIL: only {scanned} files scanned (expected >= {MIN_SCANNED}) "
+            f"-- the walk is broken, a clean result would be vacuous"
+        )
+        return False
+
+    print(f"PASS: no mutable default arguments in {scanned} files "
+          f"(src/, GtkHelper/, main.py)")
     return True
 
 
@@ -168,4 +181,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
