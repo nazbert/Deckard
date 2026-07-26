@@ -40,6 +40,7 @@ from loguru import logger as log
 import os
 
 # Import own modules
+from src.backend import timer_wheel
 from src.windows.mainWindow.mainWindow import MainWindow
 from src.windows.AssetManager.AssetManager import AssetManager
 from src.windows.Store.Store import Store
@@ -252,10 +253,7 @@ class App(Adw.Application):
         gl.deck_manager.stop_boot_rescan()
 
         # Force quit if normal quit is not possible
-        timer = threading.Timer(6, self.force_quit)
-        timer.name = "force_quit_timer"
-        timer.setDaemon(True)
-        timer.start()
+        timer_wheel.schedule(6, self.force_quit, name="force_quit_timer")
 
         # Detach the async (enqueue=True) log sinks now, before the slow
         # teardown below. Each owns a multiprocessing writer queue whose POSIX

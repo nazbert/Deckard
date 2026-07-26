@@ -24,6 +24,7 @@ from gi.repository import Gtk, Adw, Gdk, GLib, Pango
 
 import threading
 import globals as gl
+from src.backend import timer_wheel
 from loguru import logger as log
 
 class MissingRow(Adw.PreferencesRow):
@@ -113,8 +114,9 @@ class MissingRow(Adw.PreferencesRow):
         GLib.idle_add(self.add_css_class, "error")
         GLib.idle_add(self.set_sensitive, False)
 
-        # Hide error after 3s
-        threading.Timer(3, self.hide_install_error).start()
+        # Hide error after 3s -- via idle_add: hide_install_error mutates
+        # GTK widgets, and wheel callbacks fire on a worker thread.
+        timer_wheel.schedule(3, lambda: GLib.idle_add(self.hide_install_error), name="missing_row_hide_install_error")
 
     def hide_install_error(self):
         self.label.set_text(self.install_label)
