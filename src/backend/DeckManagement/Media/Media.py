@@ -1,23 +1,25 @@
+from dataclasses import dataclass, field
+
 from .ImageLayer import ImageLayer
 from PIL import Image
 from loguru import logger as log
 
 
+@dataclass(eq=False)
 class Media:
-    def __init__(self, size: float = 1.0, halign: float = 0.0, valign: float = 0.0, layers: list[ImageLayer] = []):
-        """
-        Initializes a new Media object.
+    """
+    A stack of image layers plus the placement of the composed result.
 
-        Args:
-            size (float, optional): The size of the media. Defaults to 1.0.
-            halign (float, optional): The horizontal alignment of the media. Defaults to 0.0.
-            valign (float, optional): The vertical alignment of the media. Defaults to 0.0.
-            layers (list[ImageLayer], optional): The list of image layers. Defaults to [].
-        """
-        self.layers: list[ImageLayer] = layers
-        self.size = size
-        self.halign = halign
-        self.valign = valign
+    Args:
+        size (float, optional): The size of the media. Defaults to 1.0.
+        halign (float, optional): The horizontal alignment of the media. Defaults to 0.0.
+        valign (float, optional): The vertical alignment of the media. Defaults to 0.0.
+        layers (list[ImageLayer], optional): The list of image layers. Defaults to an empty list.
+    """
+    size: float = 1.0
+    halign: float = 0.0
+    valign: float = 0.0
+    layers: list[ImageLayer] = field(default_factory=list)
 
     @classmethod
     def from_path(cls, path: str, size: float = 1.0, halign: float = 0.0, valign: float = 0.0):

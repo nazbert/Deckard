@@ -52,13 +52,16 @@ class ActionHolder:
         min_app_version: str = None,
         action_id: str = None,
         action_id_suffix: str = None,
-        action_support = {
-            Input.Key: ActionInputSupport.UNTESTED,
-            Input.Dial: ActionInputSupport.UNTESTED,
-            Input.Touchscreen: ActionInputSupport.UNTESTED
-        },
+        action_support: dict = None,
         *args, **kwargs):
-        
+
+        if action_support is None:
+            action_support = {
+                Input.Key: ActionInputSupport.UNTESTED,
+                Input.Dial: ActionInputSupport.UNTESTED,
+                Input.Touchscreen: ActionInputSupport.UNTESTED
+            }
+
         ## Verify variables
         if action_name in ["", None]:
             raise ValueError("Please specify an action name")
