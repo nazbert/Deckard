@@ -23,13 +23,13 @@ def main() -> None:
     # Pre-fix this raises ValueError out of MediaPlayerThread.__init__.
     controller, media_player, _ = fixtures.make_stub_controller(serial="envvar-1")
 
-    assert media_player._video_write_hz == 20.0, (
+    assert media_player._video_write_hz == 30.0, (
         f"malformed DECKARD_VIDEO_WRITE_HZ should fall back to the "
-        f"default 20.0, got {media_player._video_write_hz!r}"
+        f"default 30.0, got {media_player._video_write_hz!r}"
     )
-    assert abs(media_player._inter_write_yield - 0.0015) < 1e-12, (
+    assert media_player._inter_write_yield == 0.0, (
         f"malformed DECKARD_WRITE_YIELD_MS should fall back to the "
-        f"default 1.5ms, got {media_player._inter_write_yield!r}"
+        f"default 0, got {media_player._inter_write_yield!r}"
     )
     print("PASS: malformed env vars fall back to defaults without aborting init")
 
