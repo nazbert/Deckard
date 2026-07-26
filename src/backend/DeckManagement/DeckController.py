@@ -2424,6 +2424,10 @@ class Background:
         self._video_strip: Image.Image = None
 
         self.tiles: list[Image.Image] = [None] * deck_controller.deck.key_count()
+        # (tiles, (video md5, frame index)) for the frame `tiles` holds, or
+        # None for anything whose frame can't be named -- see
+        # get_identified_tile().
+        self._identified_tiles: tuple = None
 
     def set_image(self, image: "BackgroundImage", update: bool = True) -> None:
         self.image = image
@@ -2610,16 +2614,37 @@ class Background:
         kind, payload = self.prebuild_from_path(path, fps=fps, loop=loop, allow_keep=allow_keep)
         self.apply_prebuilt(kind, payload, fps=fps, loop=loop, update=update)
 
+    def get_identified_tile(self, key_index: int) -> tuple:
+        """(tile, (video md5, frame index)) for a video background, or None
+        when there is no tile whose frame can be named (image/blank
+        background, mid-rebuild, fallback frame). Tiles and identity are
+        published as ONE pair and handed out as one read, so a concurrent
+        update_tiles() can never let a caller pair this frame's pixels with
+        the next frame's identity -- update_tiles() runs on the media tick
+        but also on the GTK/screensaver threads (set_image/set_video/
+        apply_prebuilt), so the media thread is not its only writer."""
+        pair = self._identified_tiles
+        if pair is None:
+            return None
+        tiles, identity = pair
+        if key_index >= len(tiles):
+            return None
+        tile = tiles[key_index]
+        if tile is None:
+            return None
+        return tile, identity
+
     def update_tiles(self) -> None:
         # Old tiles are reclaimed by refcounting once unreferenced; closing them
         # here would race a concurrent composite still holding one.
         try:
+            identity = None
             if self.image is not None:
                 self.tiles = self.image.get_tiles(extend_touchscreen=self._extend_effective())
             elif self.video is not None:
                 # An extended video frame carries the strip slice as one extra
                 # entry after the key tiles (see BackgroundVideoCache).
-                entries = self.video.get_next_tiles()
+                entries, identity = self.video.get_next_tiles()
                 key_count = self.deck_controller.deck.key_count()
                 if self.video.extend_touchscreen and len(entries) > key_count:
                     self._video_strip = entries[key_count]
@@ -2627,6 +2652,7 @@ class Background:
                 self.tiles = entries
             else:
                 self.tiles = [self.deck_controller.generate_alpha_key() for _ in range(self.deck_controller.deck.key_count())]
+            self._identified_tiles = None if identity is None else (self.tiles, identity)
         except Exception:
             # A tile error must not kill the media thread; keep the old tiles.
             # Rate-limited: a broken video would otherwise log every frame.
@@ -2834,7 +2860,13 @@ class BackgroundVideo(BackgroundVideoCache):
 
         super().__init__(video_path, deck_controller=deck_controller, extend_touchscreen=extend_touchscreen)
 
-    def get_next_tiles(self) -> list[Image.Image]:
+    def get_next_tiles(self) -> tuple[list[Image.Image], tuple]:
+        """(tiles, identity) for the frame this tick lands on, where identity
+        is (video md5, source frame index) or None when the tiles' frame
+        can't be named (fallback/alpha payload). Returned as one pair so a
+        caller can never file one frame's pixels under another's identity --
+        the frame actually served is not always the one asked for (see
+        Mp4FrameCache.get_frame_and_index)."""
         if self.is_cache_complete():
             # Cache built -> any frame is a free lookup. Pick it by wall-clock so a
             # slow media loop drops frames (stays real-time) instead of playing the
@@ -2863,12 +2895,14 @@ class BackgroundVideo(BackgroundVideoCache):
             if self.active_frame >= self.n_frames and self.loop:
                 self.active_frame = 0
 
-        tiles =  self.get_tiles(self.active_frame)
+        tiles, frame_index = self.get_tiles_and_index(self.active_frame)
         try:
             copied_tiles = [tile.copy() for tile in tiles]
         except:
             copied_tiles = [None for _ in range(len(tiles))]
-        return copied_tiles
+            frame_index = None
+        identity = None if frame_index is None else (self.video_md5, frame_index)
+        return copied_tiles, identity
 
 class KeyGIF(SingleKeyAsset):
     def __init__(self, controller_key: "ControllerKey", gif_path: str, fps: int = 30, loop: bool = True):

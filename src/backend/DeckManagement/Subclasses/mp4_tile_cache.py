@@ -172,6 +172,7 @@ class Mp4FrameCache:
         self._cache_pos = 0  # index of the next frame _cache_cap will return
         self._last_entry: tuple[int, object] = None
         self.last_payload = None  # last good decode, served over a transient failure
+        self.last_payload_index: int = None  # source frame `last_payload` holds (see get_frame_and_index)
         self._adopt_failures = 0  # failed shared-cache adoptions (see _maybe_adopt_shared_cache)
 
         self.cap: cv2.VideoCapture = None
@@ -280,6 +281,16 @@ class Mp4FrameCache:
     # --- frame access ----------------------------------------------------
 
     def get_frame(self, n: int):
+        return self.get_frame_and_index(n)[0]
+
+    def get_frame_and_index(self, n: int):
+        """(payload, source frame index of that payload) -- the index is what
+        the payload actually IS, not what was asked for: requests are clamped
+        to the readable range, and a transient decode failure repeats the
+        last good frame. The index is None when the payload's provenance is
+        unknown (fallback frames, or a repeat served before any index was
+        established), so a caller keying a cache off it can never file one
+        frame's pixels under another frame's identity (#163)."""
         if not self._complete:
             self._maybe_adopt_shared_cache()
         with self.lock:
@@ -293,11 +304,19 @@ class Mp4FrameCache:
             # frame on a closed instance.
             if payload is not None:
                 self.last_payload = payload
-                return payload
-            # Keep showing the last good frame over a transient decode failure.
+                # _last_entry is the (clamped index, payload) pair whichever
+                # decode path just produced or replayed; identity is only
+                # claimed when it demonstrably describes THIS payload.
+                if self._last_entry is not None and self._last_entry[1] is payload:
+                    self.last_payload_index = self._last_entry[0]
+                else:
+                    self.last_payload_index = None
+                return payload, self.last_payload_index
+            # Keep showing the last good frame over a transient decode failure
+            # -- last_payload_index still describes it, so it stays valid.
             if self.last_payload is not None:
-                return self.last_payload
-        return self._fallback_payload()
+                return self.last_payload, self.last_payload_index
+        return self._fallback_payload(), None
 
     # After this many failed adoptions of a cache file the registry claims is
     # ready, give up on it: invalidate the entry so a future acquire() starts
@@ -503,6 +522,7 @@ class Mp4FrameCache:
             self._complete = False
             self._last_entry = None
             self.last_payload = None
+            self.last_payload_index = None
 
 
 # --------------------------------------------------------------------- #
