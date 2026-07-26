@@ -281,17 +281,13 @@ class KeyButton(Gtk.Frame):
         # Set media to key
         active_page = self.key_grid.deck_controller.active_page
 
-        page_coords = f"{self.coords[0]}x{self.coords[1]}"
-        
-        active_page.dict["keys"].setdefault(page_coords, {})
-        active_page.dict["keys"][page_coords].setdefault("states", {})
-        active_page.dict["keys"][page_coords]["states"].setdefault(str(self.state), {})
-        active_page.dict["keys"][page_coords]["states"][str(self.state)].setdefault("media", {
+        state_dict = self.identifier.ensure_state_dict(active_page, self.state)
+        state_dict.setdefault("media", {
             "path": None,
             "loop": True,
             "fps": 30
         })
-        active_page.dict["keys"][page_coords]["states"][str(self.state)]["media"]["path"] = internal_path
+        state_dict["media"]["path"] = internal_path
         # Save page
         active_page.save()
         key_index = self.key_grid.deck_controller.coords_to_index(self.coords)

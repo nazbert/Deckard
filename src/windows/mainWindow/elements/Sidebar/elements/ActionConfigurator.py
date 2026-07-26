@@ -273,14 +273,15 @@ class RemoveButton(Gtk.Button):
         page.fix_action_objects_order(self.action.input_ident)
 
         # Remove from page json
-        page.dict[self.action.input_ident.input_type][self.action.input_ident.json_identifier]["states"][str(self.action.state)]["actions"].pop(self.index)
+        state_dict = self.action.input_ident.get_state_dict(page, self.action.state)
+        state_dict["actions"].pop(self.index)
 
         #TODO: Also update if action before this one has the access
-        if self.action.input_ident.input_type == "keys" and page.dict[self.action.input_ident.input_type][self.action.input_ident.json_identifier]["states"][str(self.action.state)].get("image-control-action") == self.index:
-            if len(page.dict[self.action.input_ident.input_type][self.action.input_ident.json_identifier]["states"][str(self.action.state)]["actions"]) > 0:
-                page.dict[self.action.input_ident.input_type][self.action.input_ident.json_identifier]["states"][str(self.action.state)]["image-control-action"] = 0
+        if self.action.input_ident.input_type == "keys" and state_dict.get("image-control-action") == self.index:
+            if len(state_dict["actions"]) > 0:
+                state_dict["image-control-action"] = 0
             else:
-                page.dict[self.action.input_ident.input_type][self.action.input_ident.json_identifier]["states"][str(self.action.state)]["image-control-action"] = None
+                state_dict["image-control-action"] = None
 
         page.save()
 

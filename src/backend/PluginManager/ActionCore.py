@@ -475,7 +475,7 @@ class ActionCore(rpyc.Service):
         return image_control_index == self.get_own_action_index()
 
 
-        key_dict = self.input_ident.get_config(self.page).get("states", {}).get(str(self.state), {})
+        key_dict = self.input_ident.get_state_dict(self.page, self.state)
 
         if key_dict.get("image-control-action") is None:
             return False
@@ -499,7 +499,7 @@ class ActionCore(rpyc.Service):
     
     def has_custom_user_asset(self) -> bool:
         if not self.get_is_present(): return False
-        media = self.input_ident.get_config(self.page).get("states", {}).get(str(self.state), {}).get("media", {})
+        media = self.input_ident.get_state_dict(self.page, self.state).get("media", {})
         return media.get("path", None) is not None
     
     def get_own_action_index(self) -> int:

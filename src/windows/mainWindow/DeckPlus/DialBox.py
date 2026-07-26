@@ -386,10 +386,11 @@ class Dial(Gtk.Frame):
 
         dial = controller.get_input(self.identifier)
         
-        if str(dial.state) not in active_page.dict.get(self.identifier.input_type, {}).get(self.identifier.json_identifier, {}).get("states", {}):
+        states = self.identifier.get_states(active_page)
+        if str(dial.state) not in states:
             return
-        
-        del active_page.dict[self.identifier.input_type][self.identifier.json_identifier]["states"][str(dial.state)]
+
+        del states[str(dial.state)]
         active_page.save()
         active_page.load()
 
