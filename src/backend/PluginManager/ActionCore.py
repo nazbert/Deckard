@@ -252,7 +252,10 @@ class ActionCore(rpyc.Service):
         if hasattr(input_state, "media_owner_action"):
             input_state.media_owner_action = self
 
-    def set_background_color(self, color: list[int] = [0, 0, 0, 0], update: bool = True):
+    def set_background_color(self, color: list[int] = None, update: bool = True):
+        if color is None:
+            color = [0, 0, 0, 0]
+
         self.raise_error_if_not_ready()
 
         if not self.get_is_present(): return

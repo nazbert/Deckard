@@ -25,8 +25,11 @@ from src.windows.MultiDeckSelector.MultiDeckSelector import MultiDeckSelector
 import globals as gl
 
 class MultiDeckSelectorRow(Adw.ActionRow):
-    def __init__(self, source_window: Gtk.ApplicationWindow, title: str, subtitle: str, selected_deck_serials: list[str] = [], callback: callable = None):
+    def __init__(self, source_window: Gtk.ApplicationWindow, title: str, subtitle: str, selected_deck_serials: list[str] = None, callback: callable = None):
         super().__init__(title = title, subtitle = subtitle, activatable=True)
+
+        if selected_deck_serials is None:
+            selected_deck_serials = []
 
         self.source_window = source_window
         self.selected_deck_serials = selected_deck_serials

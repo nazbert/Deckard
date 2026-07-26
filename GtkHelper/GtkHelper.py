@@ -350,9 +350,12 @@ class AttributeRow(Adw.PreferencesRow):
         self.attribute_label.set_label(attr)
 
 class EntryDialog(Gtk.ApplicationWindow):
-    def __init__(self, parent_window, dialog_title:str, entry_heading:str = "Name:", default_text:str = None, confirm_label:str = "OK", forbid_answers:list[str] = [],
+    def __init__(self, parent_window, dialog_title:str, entry_heading:str = "Name:", default_text:str = None, confirm_label:str = "OK", forbid_answers:list[str] = None,
                  empty_warning:str = "The name cannot be empty", cancel_label:str = "Cancel", already_exists_warning:str = "This name already exists",
                  placeholder:str = None):
+        if forbid_answers is None:
+            forbid_answers = []
+
         self.default_text = default_text
         self.confirm_label = confirm_label
         self.entry_heading = entry_heading
@@ -453,10 +456,13 @@ class EntryDialog(Gtk.ApplicationWindow):
 class ErrorPage(Gtk.Box):
     def __init__(self, reload_func: callable = None,
                  error_text:str = "Error",
-                 reload_args = []):
+                 reload_args = None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL,
                          halign=Gtk.Align.CENTER,
                          valign=Gtk.Align.CENTER)
+
+        if reload_args is None:
+            reload_args = []
 
         self.reload_func = reload_func
         self.error_text = error_text

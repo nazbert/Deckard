@@ -24,13 +24,16 @@ import globals as gl
 
 class MultiDeckSelector(Gtk.ApplicationWindow):
     def __init__(self, application: Gtk.Application, source_window: Gtk.ApplicationWindow,
-                 selected_deck_serials: list[str] = [], callback: callable = None):
+                 selected_deck_serials: list[str] = None, callback: callable = None):
         super().__init__(application=application,
                          title=gl.lm.get("multi-deck-selector.title"),
                          transient_for=source_window,
                          modal=True,
                          default_width=350, default_height=350)
-        
+
+        if selected_deck_serials is None:
+            selected_deck_serials = []
+
         self.source_window = source_window
         self.selected_deck_serials = selected_deck_serials
         self.callback = callback
