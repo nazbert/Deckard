@@ -108,7 +108,10 @@ class ActionExpanderRow(BetterExpander):
         self.add_action_button = AddActionButtonRow(self).button
         self.add_row(self.add_action_button)
 
-    def add_action_row(self, action_name: str, action_id: str, action_category, action_object, comment: str, index: int, total_rows: int, controls_image: bool = False, controls_labels: list[bool] = [False, False, False], controls_background: bool = False):
+    def add_action_row(self, action_name: str, action_id: str, action_category, action_object, comment: str, index: int, total_rows: int, controls_image: bool = False, controls_labels: list[bool] = None, controls_background: bool = False):
+        if controls_labels is None:
+            controls_labels = [False, False, False]
+
         action_row = ActionRow(action_name, action_id, action_category, action_object, self.action_group.sidebar, comment, index, controls_image, controls_labels, controls_background, total_rows, self)
         self.add_row(action_row)
 
