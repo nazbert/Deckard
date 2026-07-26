@@ -68,7 +68,6 @@ import sys
 from loguru import logger as log
 import os
 import time
-import asyncio
 import threading
 
 import usb.core
@@ -252,7 +251,7 @@ def update_assets():
 
     log.info("Updating store assets")
     start = time.time()
-    number_of_installed_updates = asyncio.run(gl.store_backend.update_everything())
+    number_of_installed_updates = gl.store_backend.update_everything()
     if isinstance(number_of_installed_updates, NoConnectionError):
         log.error("Failed to update store assets")
         gl.notify.error("Failed to update store assets")

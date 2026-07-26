@@ -5,10 +5,10 @@ restore on failure -- a mid-download failure (429 throttle, offline
 warm-cache auto-update) left the pack permanently gone, its referencing
 keys broken, and (because local_sha became None) it was never retried.
 
-    async def install_icon(self, icon_data):
+    def install_icon(self, icon_data):
         ...
-        await self.uninstall_icon(icon_data)          # rmtree FIRST
-        return await self.download_repo(...)          # then the fallible fetch
+        self.uninstall_icon(icon_data)                # rmtree FIRST
+        return self.download_repo(...)                # then the fallible fetch
 
 FIXED by the transactional-install redesign (gl#82): download_repo now
 stages, validates and VERSION-stamps the new tree before swapping it over
@@ -21,7 +21,6 @@ No network: download_repo is stubbed to return NoConnectionError (the exact
 value a real mid-stream fetch fault produces), so the test isolates the
 "delete-then-fail" ordering, not the download itself.
 """
-import asyncio
 import os
 
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
@@ -68,12 +67,12 @@ def check_icon_pack_survives_failed_update() -> None:
                     commit_sha="b" * 40)
     pack = _seed_pack("icons", data.icon_id)
 
-    async def failing_download(**kwargs):
+    def failing_download(**kwargs):
         return NoConnectionError()
 
     sb.download_repo = failing_download
 
-    result = asyncio.run(sb.install_icon(data))
+    result = sb.install_icon(data)
     assert isinstance(result, NoConnectionError), (
         f"the failed download must surface, got {result!r}"
     )
@@ -87,12 +86,12 @@ def check_wallpaper_pack_survives_failed_update() -> None:
                          commit_sha="c" * 40)
     pack = _seed_pack("wallpapers", data.wallpaper_id)
 
-    async def failing_download(**kwargs):
+    def failing_download(**kwargs):
         return NoConnectionError()
 
     sb.download_repo = failing_download
 
-    asyncio.run(sb.install_wallpaper(data))
+    sb.install_wallpaper(data)
     _assert_pack_survived(pack, "wallpaper")
     print("PASS: wallpaper pack survives a failed update")
 
@@ -103,12 +102,12 @@ def check_sd_plus_pack_survives_failed_update() -> None:
                                   commit_sha="d" * 40)
     pack = _seed_pack("sd_plus_bar_wallpapers", data.id)
 
-    async def failing_download(**kwargs):
+    def failing_download(**kwargs):
         return NoConnectionError()
 
     sb.download_repo = failing_download
 
-    asyncio.run(sb.install_sd_plus_bar_wallpaper(data))
+    sb.install_sd_plus_bar_wallpaper(data)
     _assert_pack_survived(pack, "SD+ bar wallpaper")
     print("PASS: SD+ bar wallpaper pack survives a failed update")
 

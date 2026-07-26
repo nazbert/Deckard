@@ -16,7 +16,6 @@ URLs, exercised WITHOUT network:
    recreated. Now the parse is guarded AND StorePage re-arms itself
    (_loaded=False + error page) whenever a load fails.
 """
-import asyncio
 import time
 
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
@@ -33,7 +32,7 @@ def _make_backend() -> StoreBackend:
     return sb
 
 
-async def _fetch_fail(url):
+def _fetch_fail(url):
     return NoConnectionError()
 
 
@@ -42,7 +41,7 @@ def test_branch_is_str_when_offline_and_uncached() -> None:
     sb = _make_backend()
     sb.request_from_url = _fetch_fail
 
-    branch = asyncio.run(sb.get_official_store_branch())
+    branch = sb.get_official_store_branch()
     assert isinstance(branch, str) and branch, (
         f"offline+uncached must fall back to a str branch, got {branch!r}"
     )
@@ -51,7 +50,7 @@ def test_branch_is_str_when_offline_and_uncached() -> None:
         "has to be able to correct it"
     )
 
-    stores = asyncio.run(sb.get_stores())
+    stores = sb.get_stores()
     for url, b in stores:
         assert isinstance(b, str) and b, f"get_stores yielded non-str branch {b!r} for {url}"
 
@@ -69,7 +68,7 @@ def test_branch_survives_truncated_cached_versions_json() -> None:
     # ...then fail the live fetch so the stale fallback serves it.
     sb.request_from_url = _fetch_fail
 
-    branch = asyncio.run(sb.get_official_store_branch())
+    branch = sb.get_official_store_branch()
     assert isinstance(branch, str) and branch, (
         f"truncated cached versions.json must not break the branch contract, got {branch!r}"
     )
@@ -89,7 +88,7 @@ def test_custom_store_entries_are_sanitized() -> None:
     sb = _make_backend()
     sb.request_from_url = _fetch_fail
 
-    stores = asyncio.run(sb.get_stores())
+    stores = sb.get_stores()
     urls = [u for u, _ in stores]
     assert None not in urls, f"url-less custom store must be skipped, got {stores}"
     for url, b in stores:

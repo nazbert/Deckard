@@ -1,23 +1,24 @@
 """
-Regression test for gl#21 -- get_last_commit blocked the asyncio event loop
-inside the catalog gather, exercised WITHOUT network:
+Regression test for gl#21 -- get_last_commit serialized/evaded the store
+fetch path, exercised WITHOUT network:
 
-get_last_commit issued a synchronous requests.get() on the loop thread;
-prepare_plugin awaits it for every branch-pinned custom plugin inside
-process_store_data's gather, so each call serialized the WHOLE page load
-behind that request's latency (up to timeout=30 apiece) and evaded the
-fetch-limiter semaphore that 782a1dac routed every other fetch through.
-Its requests exceptions also raised straight through instead of returning
-NoConnectionError, bypassing the error contract every sibling fetch obeys.
+get_last_commit used to issue its requests.get() outside the shared fetch
+machinery: each call serialized the WHOLE page load behind that request's
+latency (up to timeout=30 apiece) and evaded the fetch-limiter semaphore
+that 782a1dac routed every other fetch through. Its requests exceptions
+also raised straight through instead of returning NoConnectionError,
+bypassing the error contract every sibling fetch obeys.
 
-The contract is now: the blocking round-trip runs via asyncio.to_thread
-under _fetch_limiter with timeout=30 (request_from_url's exact shape);
+The contract is now (post-#176 sync backend): catalog prepare_* tasks fan
+out on StoreBackend._prepare_pool so per-entry lookups overlap;
+get_last_commit runs under _fetch_limiter like every sibling fetch;
 network failures return NoConnectionError; prepare_plugin and
 download_repo isinstance-check it instead of interpolating an error
 object (or None) into further URLs.
 """
-import asyncio
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl  # noqa: F401
@@ -36,18 +37,21 @@ class FakeResponse:
 
 
 def _make_backend() -> StoreBackend:
-    import threading
     sb = StoreBackend.__new__(StoreBackend)  # skip __init__ (spawns a fetch thread)
     from src.backend.Store.StoreCache import StoreCache
     sb.store_cache = StoreCache()
     sb.official_authors = []
     sb._fetch_limiter = threading.Semaphore(StoreBackend.MAX_CONCURRENT_REQUESTS)
+    sb._prepare_pool = ThreadPoolExecutor(
+        max_workers=StoreBackend.MAX_CONCURRENT_REQUESTS,
+        thread_name_prefix="store-prepare-test",
+    )
     return sb
 
 
-def test_gathered_get_last_commit_calls_overlap() -> None:
-    """5 x 0.3s commit lookups gathered must run in ~one round-trip, not
-    serialize on the loop thread (fully serial would be >= 1.5s)."""
+def test_catalog_fanout_overlaps() -> None:
+    """5 x 0.3s commit lookups through process_store_data's pool must run
+    in ~one round-trip, not serialize (fully serial would be >= 1.5s)."""
     def slow_get(url, timeout=30):
         time.sleep(0.3)
         return FakeResponse()
@@ -56,64 +60,74 @@ def test_gathered_get_last_commit_calls_overlap() -> None:
     sb_module.requests.get = slow_get
     try:
         sb = _make_backend()
+        sb.get_stores = lambda: [("https://github.com/Example/Store", "main")]
+        sb.fetch_and_parse_store_json = (
+            lambda url, filename, branch, n_errors=0:
+            ([{"name": f"Repo{i}"} for i in range(5)], n_errors)
+        )
 
-        async def burst():
-            return await asyncio.gather(
-                *(sb.get_last_commit(f"https://github.com/Example/Repo{i}", "main")
-                  for i in range(5))
-            )
+        def prepare(entry, include_images, verified):
+            return sb.get_last_commit(f"https://github.com/Example/{entry['name']}", "main")
 
         start = time.monotonic()
-        results = asyncio.run(burst())
+        results = sb.process_store_data("Plugins.json", prepare, None, str)
         elapsed = time.monotonic() - start
     finally:
         sb_module.requests.get = real_get
 
     assert results == ["abc123"] * 5, f"expected 5 resolved shas, got {results!r}"
     assert elapsed < 1.0, (
-        f"5 x 0.3s commit lookups took {elapsed:.2f}s -- the blocking fetch "
-        f"is serializing the event loop (fully serial would be >=1.5s)"
+        f"5 x 0.3s commit lookups took {elapsed:.2f}s -- the catalog fan-out "
+        f"is serializing (fully serial would be >=1.5s)"
     )
 
 
-def test_loop_stays_responsive_during_lookup() -> None:
-    """While one commit lookup blocks in its round-trip, other coroutines on
-    the same loop must keep running -- this is exactly what the catalog
-    gather needs from every prepare_* sibling."""
-    def slow_get(url, timeout=30):
-        time.sleep(0.4)
+def test_lookup_respects_fetch_limiter() -> None:
+    """get_last_commit must take the shared fetch limiter like every
+    sibling fetch (the other half of gl#21: it used to evade it)."""
+    in_flight = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def tracking_get(url, timeout=30):
+        nonlocal in_flight, peak
+        with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+        time.sleep(0.1)
+        with lock:
+            in_flight -= 1
         return FakeResponse()
 
     real_get = sb_module.requests.get
-    sb_module.requests.get = slow_get
+    sb_module.requests.get = tracking_get
     try:
         sb = _make_backend()
-
-        async def run() -> int:
-            fetch = asyncio.ensure_future(
-                sb.get_last_commit("https://github.com/Example/Repo", "main")
+        sb._fetch_limiter = threading.Semaphore(2)
+        threads = [
+            threading.Thread(
+                target=sb.get_last_commit,
+                args=(f"https://github.com/Example/Repo{i}", "main"),
             )
-            ticks = 0
-            while not fetch.done():
-                await asyncio.sleep(0.02)
-                ticks += 1
-            await fetch
-            return ticks
-
-        ticks = asyncio.run(run())
+            for i in range(6)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
     finally:
         sb_module.requests.get = real_get
 
-    assert ticks >= 5, (
-        f"the event loop only ticked {ticks} times during a 0.4s lookup -- "
-        f"the blocking fetch is stalling every sibling coroutine"
+    assert peak <= 2, (
+        f"{peak} lookups ran concurrently inside a limiter of 2 -- "
+        f"get_last_commit is evading _fetch_limiter"
     )
 
 
 def test_network_failure_returns_no_connection_error() -> None:
     """A requests exception must come back as NoConnectionError (the
     contract every sibling fetch obeys), and prepare_plugin must propagate
-    it instead of raising out of the gather or fetching a manifest for an
+    it instead of raising out of the fan-out or fetching a manifest for an
     unresolved commit."""
     def failing_get(url, timeout=30):
         raise requests.exceptions.ConnectionError("boom: no route to host")
@@ -123,12 +137,12 @@ def test_network_failure_returns_no_connection_error() -> None:
     try:
         sb = _make_backend()
 
-        result = asyncio.run(sb.get_last_commit("https://github.com/Example/Repo", "main"))
+        result = sb.get_last_commit("https://github.com/Example/Repo", "main")
         assert isinstance(result, NoConnectionError), (
             f"a network failure must return NoConnectionError, got {result!r}"
         )
 
-        async def manifest_must_not_be_called(url, commit):
+        def manifest_must_not_be_called(url, commit):
             raise AssertionError(
                 "prepare_plugin must not fetch a manifest when the branch's "
                 "commit could not be resolved"
@@ -136,7 +150,7 @@ def test_network_failure_returns_no_connection_error() -> None:
 
         sb.get_manifest = manifest_must_not_be_called
         plugin = {"url": "https://github.com/Example/TestPlugin", "branch": "main"}
-        result = asyncio.run(sb.prepare_plugin(plugin))
+        result = sb.prepare_plugin(plugin)
         assert isinstance(result, NoConnectionError), (
             f"prepare_plugin must propagate the NoConnectionError, got {result!r}"
         )
@@ -158,24 +172,18 @@ def test_download_repo_guards_unresolved_sha() -> None:
     try:
         sb = _make_backend()
 
-        async def last_commit_nce(repo_url, branch_name="main"):
-            return NoConnectionError()
-
-        async def last_commit_none(repo_url, branch_name="main"):
-            return None
-
-        sb.get_last_commit = last_commit_nce
-        result = asyncio.run(sb.download_repo(
+        sb.get_last_commit = lambda repo_url, branch_name="main": NoConnectionError()
+        result = sb.download_repo(
             "https://github.com/Example/Repo", "/nonexistent/target", branch_name="main"
-        ))
+        )
         assert isinstance(result, NoConnectionError), (
             f"an unresolvable sha (offline) must propagate, got {result!r}"
         )
 
-        sb.get_last_commit = last_commit_none
-        result = asyncio.run(sb.download_repo(
+        sb.get_last_commit = lambda repo_url, branch_name="main": None
+        result = sb.download_repo(
             "https://github.com/Example/Repo", "/nonexistent/target", branch_name="main"
-        ))
+        )
         assert result == 404, (
             f"a branch with no commits must be a hard 404, got {result!r}"
         )
@@ -186,8 +194,8 @@ def test_download_repo_guards_unresolved_sha() -> None:
 
 def main() -> None:
     fixtures.start_watchdog(30, label="scenario_store_gather_offload")
-    test_gathered_get_last_commit_calls_overlap()
-    test_loop_stays_responsive_during_lookup()
+    test_catalog_fanout_overlaps()
+    test_lookup_respects_fetch_limiter()
     test_network_failure_returns_no_connection_error()
     test_download_repo_guards_unresolved_sha()
     print("scenario_store_gather_offload: PASS")

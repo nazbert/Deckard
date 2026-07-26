@@ -22,9 +22,9 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, Gdk, GLib, Pango
 
-import asyncio
 import threading
 import globals as gl
+from src.backend import timer_wheel
 from loguru import logger as log
 
 class MissingRow(Adw.PreferencesRow):
@@ -85,14 +85,14 @@ class MissingRow(Adw.PreferencesRow):
     @log.catch
     def install(self):
         # Get missing plugin from id
-        plugin = asyncio.run(gl.store_backend.get_plugin_for_id(self.action_id.split("::")[0]))
+        plugin = gl.store_backend.get_plugin_for_id(self.action_id.split("::")[0])
         if plugin is None:
             self.show_install_error()
             return
         # Install plugin. Success is exactly True -- checking only for 404
         # let NoConnectionError (and any other failure return) fall through
         # to the "installed" UI reset.
-        success = asyncio.run(gl.store_backend.install_plugin(plugin))
+        success = gl.store_backend.install_plugin(plugin)
         if success is not True:
             self.show_install_error()
             return
@@ -114,8 +114,9 @@ class MissingRow(Adw.PreferencesRow):
         GLib.idle_add(self.add_css_class, "error")
         GLib.idle_add(self.set_sensitive, False)
 
-        # Hide error after 3s
-        threading.Timer(3, self.hide_install_error).start()
+        # Hide error after 3s -- via idle_add: hide_install_error mutates
+        # GTK widgets, and wheel callbacks fire on a worker thread.
+        timer_wheel.schedule(3, lambda: GLib.idle_add(self.hide_install_error), name="missing_row_hide_install_error")
 
     def hide_install_error(self):
         self.label.set_text(self.install_label)

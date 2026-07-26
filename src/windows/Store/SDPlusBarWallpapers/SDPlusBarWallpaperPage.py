@@ -22,11 +22,9 @@ from gi.repository import Gtk, GLib
 
 # Import python modules
 import webbrowser as web
-import asyncio
 import os
 import shutil
 from loguru import logger as log
-import asyncio
 
 # Import own modules
 from src.windows.Store.StorePage import StorePage
@@ -53,7 +51,7 @@ class SDPlusBarWallpaperPage(StorePage):
     # show the error page and re-arm the tab for a retry.
     def load(self):
         self.set_loading()
-        wallpapers = asyncio.run(self.store.backend.get_all_sd_plus_bar_wallpapers())
+        wallpapers = self.store.backend.get_all_sd_plus_bar_wallpapers()
         if isinstance(wallpapers, NoConnectionError):
             self.show_connection_error()
             return
@@ -103,11 +101,11 @@ class SDPlusBarWallpaperPreview(StorePreview):
         self.set_description(description)
 
     def install(self):
-        asyncio.run(self.store.backend.install_sd_plus_bar_wallpaper(sd_plus_bar_wallpaper_data=self.wallpaper_data))
+        self.store.backend.install_sd_plus_bar_wallpaper(sd_plus_bar_wallpaper_data=self.wallpaper_data)
         self.set_install_state(1)
 
     def uninstall(self):
-        asyncio.run(self.store.backend.uninstall_sd_plus_bar_wallpaper(sd_plus_bar_wallpaper_data=self.wallpaper_data))
+        self.store.backend.uninstall_sd_plus_bar_wallpaper(sd_plus_bar_wallpaper_data=self.wallpaper_data)
         self.set_install_state(0)
 
     def update(self):

@@ -13,8 +13,6 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import gtk modules
-from asyncio import wrap_future
-import asyncio
 import os
 import threading
 import gi
@@ -340,12 +338,12 @@ class OnboardingScreen5(Gtk.Box):
         for i, plugin_data in enumerate(plugins):
             GLib.idle_add(self.onboarding_window.loading_box.progress_bar.set_text, f"Installing {plugin_data.plugin_name}")
             GLib.idle_add(self.onboarding_window.loading_box.progress_bar.set_fraction, i / len(plugins))
-            plugin = asyncio.run(gl.store_backend.get_plugin_for_id(plugin_data.plugin_id))
+            plugin = gl.store_backend.get_plugin_for_id(plugin_data.plugin_id)
             if plugin is None:
                 log.error(f"Onboarding: could not resolve {plugin_data.plugin_name} for install")
                 failed.append(plugin_data.plugin_name)
                 continue
-            result = asyncio.run(gl.store_backend.install_plugin(plugin))
+            result = gl.store_backend.install_plugin(plugin)
             if result is not True:
                 log.error(f"Onboarding: failed to install {plugin_data.plugin_name}: {result!r}")
                 failed.append(plugin_data.plugin_name)

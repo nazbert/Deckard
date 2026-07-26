@@ -18,7 +18,6 @@ The contract is now uniform across all four asset classes: each *_to_update
 skips (and reports) entries with is_compatible False; only a truly compatible
 outdated pack is offered and counted.
 """
-import asyncio
 
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl  # noqa: F401
@@ -69,12 +68,12 @@ def test_get_icons_to_update_skips_incompatible() -> None:
     fixtures.install_stub_globals()
     sb = _make_backend()
 
-    async def fake_get_all_icons():
+    def fake_get_all_icons():
         return _icon_catalog()
 
     sb.get_all_icons = fake_get_all_icons
 
-    to_update = asyncio.run(sb.get_icons_to_update())
+    to_update = sb.get_icons_to_update()
     assert not isinstance(to_update, NoConnectionError)
     ids = [i.icon_id for i in to_update]
     assert ids == ["com_b_Outdated"], (
@@ -86,19 +85,19 @@ def test_update_all_icons_never_installs_incompatible() -> None:
     fixtures.install_stub_globals()
     sb = _make_backend()
 
-    async def fake_get_all_icons():
+    def fake_get_all_icons():
         return _icon_catalog()
 
     installed: list[str] = []
 
-    async def fake_install_icon(icon_data):
+    def fake_install_icon(icon_data):
         installed.append(icon_data.icon_id)
         return 200
 
     sb.get_all_icons = fake_get_all_icons
     sb.install_icon = fake_install_icon
 
-    n = asyncio.run(sb.update_all_icons())
+    n = sb.update_all_icons()
     assert n == 1, f"exactly the one compatible icon update may be counted, got {n!r}"
     assert installed == ["com_b_Outdated"], (
         f"the incompatible icon pack must never be installed, got installs {installed}"
@@ -109,12 +108,12 @@ def test_get_wallpapers_to_update_skips_incompatible() -> None:
     fixtures.install_stub_globals()
     sb = _make_backend()
 
-    async def fake_get_all_wallpapers():
+    def fake_get_all_wallpapers():
         return _wallpaper_catalog()
 
     sb.get_all_wallpapers = fake_get_all_wallpapers
 
-    to_update = asyncio.run(sb.get_wallpapers_to_update())
+    to_update = sb.get_wallpapers_to_update()
     assert not isinstance(to_update, NoConnectionError)
     ids = [w.wallpaper_id for w in to_update]
     assert ids == ["com_b_Outdated"], (
@@ -126,12 +125,12 @@ def test_get_sd_plus_bar_wallpapers_to_update_skips_incompatible() -> None:
     fixtures.install_stub_globals()
     sb = _make_backend()
 
-    async def fake_get_all_sd_plus():
+    def fake_get_all_sd_plus():
         return _sd_plus_catalog()
 
     sb.get_all_sd_plus_bar_wallpapers = fake_get_all_sd_plus
 
-    to_update = asyncio.run(sb.get_sd_plus_bar_wallpapers_to_update())
+    to_update = sb.get_sd_plus_bar_wallpapers_to_update()
     assert not isinstance(to_update, NoConnectionError)
     ids = [w.id for w in to_update]
     assert ids == ["com_b_Outdated"], (

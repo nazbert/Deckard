@@ -2,11 +2,10 @@
 Regression test for "the store fails to load/display" -- the two backend
 failure modes that blanked the page, exercised WITHOUT network:
 
-1. process_store_data used a bare asyncio.gather(): ONE store entry whose
-   prepare_* coroutine raised killed the whole catalog; the exception then
-   died in the page's @log.catch load(), leaving the spinner up forever.
-   Now gathered with return_exceptions=True and filtered -- the healthy
-   entries survive.
+1. process_store_data used to let ONE raising store entry kill the whole
+   catalog; the exception then died in the page's @log.catch load(),
+   leaving the spinner up forever. Now each prepare_* future is collected
+   individually and filtered -- the healthy entries survive.
 
 2. get_remote_file(force_refetch=True) had no fallback: a failed fetch
    (offline, or raw.githubusercontent 429 rate limiting -- observed live on
@@ -17,14 +16,14 @@ failure modes that blanked the page, exercised WITHOUT network:
    renews, so it cannot bound staleness).
 
 Also pinned here:
-3. request_from_url must run its blocking fetch off the event loop --
-   otherwise the gathered prepare_* coroutines serialize behind each
+3. request_from_url calls must overlap up to the fetch limiter's cap --
+   otherwise the catalog's prepare_* tasks serialize behind each
    request's latency (measured as a 30s+ store spinner on a cold cache).
 4. prepare_plugin must list a plugin WITHOUT an image when only its
    thumbnail fetch fails.
 """
-import asyncio
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
@@ -40,16 +39,16 @@ class Item:
         self.name = name
 
 
-def test_gather_survives_poison_entry() -> None:
+def test_fanout_survives_poison_entry() -> None:
     sb = StoreBackend()
 
-    async def fake_get_stores():
+    def fake_get_stores():
         return [("https://example.invalid/store", "main")]
 
-    async def fake_fetch_and_parse(url, filename, branch, n_errors=0):
+    def fake_fetch_and_parse(url, filename, branch, n_errors=0):
         return [{"name": "good-1"}, {"name": "poison"}, {"name": "good-2"}], n_errors
 
-    async def fake_prepare(entry, include_images=True, verified=False):
+    def fake_prepare(entry, include_images=True, verified=False):
         if entry["name"] == "poison":
             raise RuntimeError("boom: one misconfigured store entry")
         return Item(entry["name"])
@@ -57,9 +56,7 @@ def test_gather_survives_poison_entry() -> None:
     sb.get_stores = fake_get_stores
     sb.fetch_and_parse_store_json = fake_fetch_and_parse
 
-    results = asyncio.run(
-        sb.process_store_data("Plugins.json", fake_prepare, None, Item)
-    )
+    results = sb.process_store_data("Plugins.json", fake_prepare, None, Item)
     assert not isinstance(results, NoConnectionError), "healthy entries must survive"
     names = sorted(item.name for item in results)
     assert names == ["good-1", "good-2"], (
@@ -71,29 +68,29 @@ def test_remote_file_falls_back_to_cache() -> None:
     sb = StoreBackend()
     repo = "https://github.com/StreamController/StreamController-Store"
 
-    async def fetch_ok(url):
+    def fetch_ok(url):
         class Resp:
             text = '[{"cached": "catalog"}]'
             content = text.encode()
         return Resp()
 
-    async def fetch_fail(url):
+    def fetch_fail(url):
         return NoConnectionError()
 
     # Seed the cache through a successful force_refetch...
     sb.request_from_url = fetch_ok
-    first = asyncio.run(sb.get_remote_file(repo, "Plugins.json", "main", force_refetch=True))
+    first = sb.get_remote_file(repo, "Plugins.json", "main", force_refetch=True)
     assert first == '[{"cached": "catalog"}]'
 
     # ...then fail every subsequent fetch (e.g. 429 rate limit).
     sb.request_from_url = fetch_fail
-    second = asyncio.run(sb.get_remote_file(repo, "Plugins.json", "main", force_refetch=True))
+    second = sb.get_remote_file(repo, "Plugins.json", "main", force_refetch=True)
     assert second == '[{"cached": "catalog"}]', (
         f"failed refetch must serve the cached copy, got {second!r}"
     )
 
     # With no cached copy at all, the failure still propagates.
-    third = asyncio.run(sb.get_remote_file(repo, "Missing.json", "main", force_refetch=True))
+    third = sb.get_remote_file(repo, "Missing.json", "main", force_refetch=True)
     assert isinstance(third, NoConnectionError), (
         f"uncached failure must stay NoConnectionError, got {third!r}"
     )
@@ -103,17 +100,17 @@ def test_fallback_respects_content_age() -> None:
     sb = StoreBackend()
     repo = "https://github.com/StreamController/StreamController-Store"
 
-    async def fetch_ok(url):
+    def fetch_ok(url):
         class Resp:
             text = "fresh-content"
             content = text.encode()
         return Resp()
 
-    async def fetch_fail(url):
+    def fetch_fail(url):
         return NoConnectionError()
 
     sb.request_from_url = fetch_ok
-    first = asyncio.run(sb.get_remote_file(repo, "AgeBound.json", "main", force_refetch=True))
+    first = sb.get_remote_file(repo, "AgeBound.json", "main", force_refetch=True)
     assert first == "fresh-content"
 
     key = sb.store_cache.generate_cache_string(repo, "AgeBound.json", "main", "text")
@@ -122,7 +119,7 @@ def test_fallback_respects_content_age() -> None:
     time.sleep(0.05)
 
     # A plain cached read renews only the last-use clock, never the fetched one.
-    cached = asyncio.run(sb.get_remote_file(repo, "AgeBound.json", "main"))
+    cached = sb.get_remote_file(repo, "AgeBound.json", "main")
     assert cached == "fresh-content"
     assert sb.store_cache.files[key]["fetched"] == fetched0, (
         "a cached READ must not advance the fetched clock -- that would let "
@@ -132,12 +129,12 @@ def test_fallback_respects_content_age() -> None:
 
     # Failed refetch with fresh content: served from cache.
     sb.request_from_url = fetch_fail
-    assert asyncio.run(sb.get_remote_file(repo, "AgeBound.json", "main", force_refetch=True)) == "fresh-content"
+    assert sb.get_remote_file(repo, "AgeBound.json", "main", force_refetch=True) == "fresh-content"
 
     # Failed refetch with content older than the bound: refused.
     sb.store_cache.files[key]["fetched"] = time.time() - (StoreCache.DAYS_TO_KEEP * 24 * 3600 + 60)
     sb.store_cache.set_files(sb.store_cache.files)
-    stale = asyncio.run(sb.get_remote_file(repo, "AgeBound.json", "main", force_refetch=True))
+    stale = sb.get_remote_file(repo, "AgeBound.json", "main", force_refetch=True)
     assert isinstance(stale, NoConnectionError), (
         f"content older than {StoreCache.DAYS_TO_KEEP} days must not be served, got {stale!r}"
     )
@@ -148,17 +145,17 @@ def test_prepare_plugin_survives_failed_thumbnail() -> None:
 
     sb = StoreBackend()
 
-    async def fake_manifest(url, commit):
+    def fake_manifest(url, commit):
         return {"id": "test_plugin", "name": "Test", "thumbnail": "store/thumb.png",
                 "version": "1.0", "descriptions": {}, "short-descriptions": {}}
 
-    async def fake_image(url, path, branch="main"):
+    def fake_image(url, path, branch="main"):
         return NoConnectionError()
 
-    async def fake_attribution(url, commit):
+    def fake_attribution(url, commit):
         return {}
 
-    async def fake_last_commit(url, branch):
+    def fake_last_commit(url, branch):
         return "abc123"
 
     sb.get_manifest = fake_manifest
@@ -168,7 +165,7 @@ def test_prepare_plugin_survives_failed_thumbnail() -> None:
     gl.lm = SimpleNamespace(get_custom_translation=lambda d: None)
 
     plugin = {"url": "https://github.com/Example/TestPlugin", "branch": "main"}
-    result = asyncio.run(sb.prepare_plugin(plugin, include_image=True, verified=True))
+    result = sb.prepare_plugin(plugin, include_image=True, verified=True)
     assert isinstance(result, PluginData), (
         f"a failed thumbnail fetch must not drop the plugin, got {result!r}"
     )
@@ -195,32 +192,30 @@ def test_fetches_run_concurrently() -> None:
     try:
         sb = StoreBackend()
 
-        async def burst():
-            return await asyncio.gather(
-                *(sb.request_from_url(f"https://example.invalid/{i}") for i in range(10))
-            )
-
-        start = time.monotonic()
-        results = asyncio.run(burst())
-        elapsed = time.monotonic() - start
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            start = time.monotonic()
+            results = list(pool.map(
+                lambda i: sb.request_from_url(f"https://example.invalid/{i}"), range(10)
+            ))
+            elapsed = time.monotonic() - start
     finally:
         sb_module.requests.get = real_get
 
     assert all(not isinstance(r, NoConnectionError) for r in results)
     # Liveness/non-serialization ceiling, deliberately generous: what this
-    # proves is that the 10 x 0.2s blocking fetches did NOT serialize the event
-    # loop (fully serial would be >=2.0s). Any ceiling comfortably under 2.0s
-    # preserves that proof; 1.8s buys headroom against a loaded CI runner
-    # without ever admitting a serialized run (#69 flake hardening).
+    # proves is that the 10 x 0.2s blocking fetches did NOT serialize behind
+    # the limiter (fully serial would be >=2.0s). Any ceiling comfortably
+    # under 2.0s preserves that proof; 1.8s buys headroom against a loaded
+    # CI runner without ever admitting a serialized run (#69 flake hardening).
     assert elapsed < 1.8, (
-        f"10 x 0.2s fetches took {elapsed:.2f}s -- the blocking fetch is "
-        f"serializing the event loop (fully serial would be >=2.0s)"
+        f"10 x 0.2s fetches took {elapsed:.2f}s -- fetches are "
+        f"serializing (fully serial would be >=2.0s)"
     )
 
 
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_store_resilience")
-    test_gather_survives_poison_entry()
+    test_fanout_survives_poison_entry()
     test_remote_file_falls_back_to_cache()
     test_fallback_respects_content_age()
     test_prepare_plugin_survives_failed_thumbnail()

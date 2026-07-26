@@ -18,7 +18,6 @@ install_plugin deregisters the old version only AFTER its download
 succeeded, so a failed update leaves the old version on disk AND
 registered and no recovery reload exists.
 """
-import asyncio
 
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl  # noqa: F401
@@ -51,22 +50,22 @@ def test_install_plugin_failure_propagates_and_skips_reload() -> None:
 
     sb = _make_backend()
 
-    async def download_nce(**kwargs):
+    def download_nce(**kwargs):
         return NoConnectionError()
 
-    async def download_404(**kwargs):
+    def download_404(**kwargs):
         return 404
 
     data = PluginData(github="https://github.com/test/test", plugin_id="com_test_Plugin")
 
     sb.download_repo = download_nce
-    result = asyncio.run(sb.install_plugin(data))
+    result = sb.install_plugin(data)
     assert isinstance(result, NoConnectionError), (
         f"failed download must propagate, got {result!r}"
     )
 
     sb.download_repo = download_404
-    result = asyncio.run(sb.install_plugin(data))
+    result = sb.install_plugin(data)
     assert result == 404, f"hard download failure must return 404, got {result!r}"
 
     assert plugin_manager.calls == [], (
@@ -82,7 +81,7 @@ def test_update_all_plugins_counts_only_successes_and_never_predeletes() -> None
     plugin_ok = PluginData(github="https://github.com/a/a", plugin_id="com_a_Ok")
     plugin_bad = PluginData(github="https://github.com/b/b", plugin_id="com_b_Bad")
 
-    async def fake_get_plugins_to_update():
+    def fake_get_plugins_to_update():
         return [plugin_ok, plugin_bad]
 
     uninstalled = []
@@ -90,14 +89,14 @@ def test_update_all_plugins_counts_only_successes_and_never_predeletes() -> None
     def fake_uninstall(plugin_id, remove_from_pages=False, remove_files=True):
         uninstalled.append((plugin_id, remove_files))
 
-    async def fake_install(plugin_data, auto_update=False):
+    def fake_install(plugin_data, auto_update=False):
         return True if plugin_data is plugin_ok else NoConnectionError()
 
     sb.get_plugins_to_update = fake_get_plugins_to_update
     sb.uninstall_plugin = fake_uninstall
     sb.install_plugin = fake_install
 
-    n = asyncio.run(sb.update_all_plugins())
+    n = sb.update_all_plugins()
     assert n == 1, f"only the ONE successful update may be counted, got {n!r}"
     assert uninstalled == [], (
         "update_all_plugins must never deregister a plugin itself -- "
@@ -113,34 +112,34 @@ def test_update_all_plugins_counts_only_successes_and_never_predeletes() -> None
 def test_update_everything_checks_all_four_legs() -> None:
     sb = _make_backend()
 
-    async def plugins_ok(): return 2
-    async def icons_ok(): return 1
-    async def wallpapers_fail(): return NoConnectionError()
-    async def sd_plus_ok(): return 4
+    def plugins_ok(): return 2
+    def icons_ok(): return 1
+    def wallpapers_fail(): return NoConnectionError()
+    def sd_plus_ok(): return 4
 
     sb.update_all_plugins = plugins_ok
     sb.update_all_icons = icons_ok
     sb.update_all_wallpapers = wallpapers_fail
     sb.update_all_sd_plus_bar_wallpapers = sd_plus_ok
 
-    result = asyncio.run(sb.update_everything())
+    result = sb.update_everything()
     assert isinstance(result, NoConnectionError), (
         f"a wallpapers-leg failure must surface as NoConnectionError "
         f"(it used to TypeError on the sum), got {result!r}"
     )
 
-    async def wallpapers_ok(): return 3
+    def wallpapers_ok(): return 3
     sb.update_all_wallpapers = wallpapers_ok
-    result = asyncio.run(sb.update_everything())
+    result = sb.update_everything()
     assert result == 10, (
         f"the sum must include the SD+ bar wallpapers leg (2+1+3+4), got {result!r}"
     )
 
     # An SD+-only failure must surface too -- before gl#22 the leg simply
     # did not exist, so SD+ bar packs were never auto-updated at all.
-    async def sd_plus_fail(): return NoConnectionError()
+    def sd_plus_fail(): return NoConnectionError()
     sb.update_all_sd_plus_bar_wallpapers = sd_plus_fail
-    result = asyncio.run(sb.update_everything())
+    result = sb.update_everything()
     assert isinstance(result, NoConnectionError), (
         f"an SD+-leg failure must surface as NoConnectionError, got {result!r}"
     )
@@ -158,30 +157,30 @@ def test_update_all_sd_plus_bar_wallpapers_counts_only_successes() -> None:
     wp_not_installed = SDPlusBarWallpaperData(github="https://github.com/d/sdplus", id="com_d_SDPlus",
                                               local_sha=None, commit_sha="new")
 
-    async def fake_get_all(*args, **kwargs):
+    def fake_get_all(*args, **kwargs):
         return [wp_ok, wp_bad, wp_current, wp_not_installed]
 
     installed = []
 
-    async def fake_install(wallpaper_data):
+    def fake_install(wallpaper_data):
         installed.append(wallpaper_data.id)
         return 200 if wallpaper_data is wp_ok else NoConnectionError()
 
     sb.get_all_sd_plus_bar_wallpapers = fake_get_all
     sb.install_sd_plus_bar_wallpaper = fake_install
 
-    n = asyncio.run(sb.update_all_sd_plus_bar_wallpapers())
+    n = sb.update_all_sd_plus_bar_wallpapers()
     assert n == 1, f"only the ONE successful SD+ update may be counted, got {n!r}"
     assert installed == ["com_a_SDPlus", "com_b_SDPlus"], (
         f"exactly the outdated installed packs may be reinstalled, got {installed}"
     )
 
     # Catalog failure propagates.
-    async def fake_get_all_fail(*args, **kwargs):
+    def fake_get_all_fail(*args, **kwargs):
         return NoConnectionError()
 
     sb.get_all_sd_plus_bar_wallpapers = fake_get_all_fail
-    result = asyncio.run(sb.update_all_sd_plus_bar_wallpapers())
+    result = sb.update_all_sd_plus_bar_wallpapers()
     assert isinstance(result, NoConnectionError)
 
 
@@ -191,16 +190,16 @@ def test_update_all_icons_counts_only_successes() -> None:
     icon_ok = IconData(github="https://github.com/a/icons", icon_id="com_a_Icons")
     icon_bad = IconData(github="https://github.com/b/icons", icon_id="com_b_Icons")
 
-    async def fake_get_icons_to_update():
+    def fake_get_icons_to_update():
         return [icon_ok, icon_bad]
 
-    async def fake_install_icon(icon_data):
+    def fake_install_icon(icon_data):
         return 200 if icon_data is icon_ok else NoConnectionError()
 
     sb.get_icons_to_update = fake_get_icons_to_update
     sb.install_icon = fake_install_icon
 
-    n = asyncio.run(sb.update_all_icons())
+    n = sb.update_all_icons()
     assert n == 1, f"only the ONE successful icon update may be counted, got {n!r}"
 
 
@@ -208,19 +207,19 @@ def test_install_icon_propagates_download_result() -> None:
     fixtures.install_stub_globals()
     sb = _make_backend()
 
-    async def download_ok(**kwargs):
+    def download_ok(**kwargs):
         return 200
 
-    async def download_fail(**kwargs):
+    def download_fail(**kwargs):
         return NoConnectionError()
 
     data = IconData(github="https://github.com/a/icons", icon_id="com_a_Icons")
 
     sb.download_repo = download_ok
-    assert asyncio.run(sb.install_icon(data)) == 200
+    assert sb.install_icon(data) == 200
 
     sb.download_repo = download_fail
-    result = asyncio.run(sb.install_icon(data))
+    result = sb.install_icon(data)
     assert isinstance(result, NoConnectionError), (
         f"install_icon must propagate the failed download, got {result!r}"
     )

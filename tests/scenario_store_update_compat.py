@@ -15,7 +15,6 @@ The contract is now: get_plugins_to_update skips (and reports) entries with
 is_compatible False, and PluginPreview.get_install_state_for reads an
 installed-but-incompatibly-outdated plugin as state 1 (installed), never 2.
 """
-import asyncio
 
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl  # noqa: F401
@@ -48,12 +47,12 @@ def test_get_plugins_to_update_skips_incompatible() -> None:
     fixtures.install_stub_globals()
     sb = _make_backend()
 
-    async def fake_get_all_plugins_async(include_images: bool = True):
+    def fake_get_all_plugins(include_images: bool = True):
         return _catalog()
 
-    sb.get_all_plugins_async = fake_get_all_plugins_async
+    sb.get_all_plugins = fake_get_all_plugins
 
-    to_update = asyncio.run(sb.get_plugins_to_update())
+    to_update = sb.get_plugins_to_update()
     assert not isinstance(to_update, NoConnectionError)
     ids = [p.plugin_id for p in to_update]
     assert ids == ["com_b_Outdated"], (
@@ -65,7 +64,7 @@ def test_update_all_plugins_never_installs_incompatible() -> None:
     fixtures.install_stub_globals()
     sb = _make_backend()
 
-    async def fake_get_all_plugins_async(include_images: bool = True):
+    def fake_get_all_plugins(include_images: bool = True):
         return _catalog()
 
     uninstalled: list[str] = []
@@ -74,15 +73,15 @@ def test_update_all_plugins_never_installs_incompatible() -> None:
     def fake_uninstall(plugin_id, remove_from_pages=False, remove_files=True):
         uninstalled.append(plugin_id)
 
-    async def fake_install(plugin_data, auto_update=False):
+    def fake_install(plugin_data, auto_update=False):
         installed.append(plugin_data.plugin_id)
         return True
 
-    sb.get_all_plugins_async = fake_get_all_plugins_async
+    sb.get_all_plugins = fake_get_all_plugins
     sb.uninstall_plugin = fake_uninstall
     sb.install_plugin = fake_install
 
-    n = asyncio.run(sb.update_all_plugins())
+    n = sb.update_all_plugins()
     assert n == 1, f"exactly the one compatible update may be counted, got {n!r}"
     assert installed == ["com_b_Outdated"], (
         f"the incompatible plugin must never be installed, got installs {installed}"

@@ -296,14 +296,8 @@ class Page:
                         thread.start()
                         add_threads.append(thread)
 
-        all_threads_finished = False
-        while not all_threads_finished:
-            all_threads_finished = True
-            for thread in add_threads:
-                if thread.is_alive():
-                    all_threads_finished = False
-                    break
-            time.sleep(0.02)
+        for thread in add_threads:
+            thread.join()
 
         all_old_objects: list[ActionCore] = []
         for type in loaded_action_objects:

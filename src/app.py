@@ -17,7 +17,6 @@ import multiprocessing
 import signal
 import sys
 import threading
-import asyncio
 import gi
 
 from src.windows.Store.ResponsibleNotesDialog import ResponsibleNotesDialog
@@ -41,6 +40,7 @@ from loguru import logger as log
 import os
 
 # Import own modules
+from src.backend import timer_wheel
 from src.windows.mainWindow.mainWindow import MainWindow
 from src.windows.AssetManager.AssetManager import AssetManager
 from src.windows.Store.Store import Store
@@ -253,10 +253,7 @@ class App(Adw.Application):
         gl.deck_manager.stop_boot_rescan()
 
         # Force quit if normal quit is not possible
-        timer = threading.Timer(6, self.force_quit)
-        timer.name = "force_quit_timer"
-        timer.setDaemon(True)
-        timer.start()
+        timer_wheel.schedule(6, self.force_quit, name="force_quit_timer")
 
         # Detach the async (enqueue=True) log sinks now, before the slow
         # teardown below. Each owns a multiprocessing writer queue whose POSIX
@@ -346,7 +343,7 @@ class App(Adw.Application):
     def _update_all_assets(self):
         self.set_working(True)
 
-        result = asyncio.run(gl.store_backend.update_everything())
+        result = gl.store_backend.update_everything()
 
         self.set_working(False)
 
@@ -365,7 +362,7 @@ class App(Adw.Application):
 
     @log.catch
     def _install_plugin(self, plugin_id: str):
-        plugin = asyncio.run(gl.store_backend.get_plugin_for_id(plugin_id=plugin_id))
+        plugin = gl.store_backend.get_plugin_for_id(plugin_id=plugin_id)
 
         self.set_working(True)
 
@@ -375,7 +372,7 @@ class App(Adw.Application):
             self.set_working(False)
             return
         
-        success = asyncio.run(gl.store_backend.install_plugin(plugin))
+        success = gl.store_backend.install_plugin(plugin)
         # Success is exactly True -- failure returns include truthy ints
         # (404/400), which "if not success" misread as installed.
         if success is not True:
