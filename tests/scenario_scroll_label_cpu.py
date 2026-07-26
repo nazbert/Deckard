@@ -38,7 +38,7 @@ import time
 import fixtures
 import globals as gl
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 WIDE_TEXT = "m" * 24
 
@@ -134,7 +134,14 @@ def check_multiline_no_phantom_scroll() -> None:
         while measure.textbbox((0, 0), line + "m", font=font)[2] <= available * 0.9:
             line += "m"
         text = f"{line}\n{line}"
-        _, _, single_line_w, _ = font.getbbox(text)
+        # Measure the premise with the BASIC layout engine: raqm >= 0.11
+        # refuses control characters (raqm_layout() fails on '\n'), while
+        # BASIC still counts the newline glyph toward the width like the old
+        # detector did -- and the harness must not depend on the host
+        # shaping stack (#184).
+        basic_font = ImageFont.truetype(
+            font.path, font.size, layout_engine=ImageFont.Layout.BASIC)
+        _, _, single_line_w, _ = basic_font.getbbox(text)
         assert single_line_w > available, (
             f"test premise broken: getbbox width {single_line_w} does not "
             f"exceed {available} -- pick a longer line")
