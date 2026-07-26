@@ -52,7 +52,7 @@ class ActionHolder:
         min_app_version: str = None,
         action_id: str = None,
         action_id_suffix: str = None,
-        action_support: dict = None,
+        action_support: dict[type[InputIdentifier], ActionInputSupport] = None,
         *args, **kwargs):
 
         if action_support is None:
