@@ -1112,8 +1112,11 @@ class StoreBackend:
                 return 404
 
             # Add repository to the safe directory list to avoid dubious ownership warnings
+            # -- both the final home and the staging clone, since the
+            # pull/reset/switch below now run in staging.
             # FIXME: Check if not already added
             await self.subp_call(["git", "config", "--global", "--add", "safe.directory", os.path.abspath(local_path)])
+            await self.subp_call(["git", "config", "--global", "--add", "safe.directory", os.path.abspath(staging)])
 
             # Run git pull to create .git/FETCH_HEAD. This allows us to check for available updates.
             # `git -C <dir>` (argv, no shell) instead of the old
@@ -1126,12 +1129,14 @@ class StoreBackend:
             elif branch_name is not None:
                 await self.subp_call(["git", "-C", staging, "switch", branch_name])
 
+            # Same order as download_repo: validate the staged tree first,
+            # then stamp VERSION, then swap.
+            if not self._staged_tree_id_matches(staging, expected_id):
+                return 400
+
             ## Write version
             with open(os.path.join(staging, "VERSION"), "w") as f:
                 f.write(commit_sha or branch_name)
-
-            if not self._staged_tree_id_matches(staging, expected_id):
-                return 400
 
             self._swap_into_place(staging, local_path)
         except Exception as e:

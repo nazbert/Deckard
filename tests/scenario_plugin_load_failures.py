@@ -335,6 +335,28 @@ def main() -> None:
     finally:
         gl.app = None
 
+    # --- #82 (deregister leg): remove_plugin_from_list must handle a plugin
+    # that lives ONLY in disabled_plugins. get_plugin_by_id defaults to
+    # include_disabled=True, so uninstall_plugin -- and since #82 the
+    # post-download update deregister inside install_plugin -- hands it
+    # version-gated plugins too; the old bare `del PluginBase.plugins[...]`
+    # raised KeyError there, aborting the deregister before the sys.modules
+    # purge (an updated-but-disabled plugin kept serving its old code). ---
+    disabled_plugin = pm.get_plugin_by_id("com_test_old_major", include_disabled=True)
+    assert disabled_plugin is not None
+    pm.remove_plugin_from_list(disabled_plugin)  # must not raise
+    assert "com_test_old_major" not in PluginBase.disabled_plugins, (
+        "deregistering a disabled plugin must remove its disabled_plugins entry"
+    )
+    assert "com_test_old_major" not in PluginBase.plugins
+
+    enabled_plugin = pm.get_plugin_by_id("com_test_good")
+    assert enabled_plugin is not None
+    pm.remove_plugin_from_list(enabled_plugin)
+    assert "com_test_good" not in PluginBase.plugins, (
+        "deregistering an enabled plugin must still remove it from plugins"
+    )
+
     print("scenario_plugin_load_failures: PASS")
 
 
