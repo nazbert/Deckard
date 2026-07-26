@@ -319,7 +319,13 @@ def check_send_notification_is_fully_idle() -> None:
         settings_reads.append(threading.current_thread())
         return {"ui": {"show-notifications": True}}
 
-    gl.settings_manager = types.SimpleNamespace(get_app_settings=get_app_settings)
+    # The stub mirrors SettingsManager's real shape: app() is an AppSettings
+    # view over get_app_settings(), so the read-tracking still observes every
+    # settings access whichever door the code under test uses.
+    from src.backend.SettingsManager import AppSettings
+    gl.settings_manager = types.SimpleNamespace(
+        get_app_settings=get_app_settings,
+        app=lambda: AppSettings(get_app_settings()))
     # super().send_notification resolves through the MRO to Gio.Application;
     # patching it there keeps the real method body under test while giving us
     # somewhere to observe the delivery (a real send needs a registered app).
@@ -352,7 +358,8 @@ def check_send_notification_is_fully_idle() -> None:
     settings_reads.clear()
     sends.clear()
     gl.settings_manager = types.SimpleNamespace(
-        get_app_settings=lambda: {"ui": {"show-notifications": False}})
+        get_app_settings=lambda: {"ui": {"show-notifications": False}},
+        app=lambda: AppSettings({"ui": {"show-notifications": False}}))
     call_from_worker(App.send_notification, app, "dialog-error-symbolic", "T", "B")
     pump()
     assert sends == [], "show-notifications=False must suppress the notification"

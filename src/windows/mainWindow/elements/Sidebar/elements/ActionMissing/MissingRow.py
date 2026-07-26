@@ -137,7 +137,7 @@ class MissingRow(Adw.PreferencesRow):
         ActionCore.teardown(action)
 
         # Remove from page json
-        page.dict[self.identifier.input_type][self.identifier.json_identifier]["states"][str(self.state)]["actions"].pop(self.index)
+        self.identifier.get_state_dict(page, self.state)["actions"].pop(self.index)
         page.save()
 
         # Reload configurator ui

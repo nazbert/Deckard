@@ -47,11 +47,10 @@ class ResponsibleNotesDialog(Adw.MessageDialog):
         self.connect("response", self.on_response)
 
     def on_response(self, dialog: Adw.MessageDialog, response: int) -> None:
-        app_settings = gl.settings_manager.get_app_settings()
+        app_settings = gl.settings_manager.app()
         agreed = (response == "agree")
-        app_settings.setdefault("store", {})
-        app_settings["store"]["responsibility-notes-agreed"] = agreed
-        gl.settings_manager.save_app_settings(app_settings)
+        app_settings.responsibility_notes_agreed = agreed
+        app_settings.save()
 
         if callable(self.callback):
             self.callback(agreed)

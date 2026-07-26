@@ -99,7 +99,7 @@ from locales.LocaleManager import LocaleManager
 from src.backend.MediaManager import MediaManager
 from src.backend.AssetManagerBackend import AssetManagerBackend
 from src.backend.PageManagement.PageManagerBackend import PageManagerBackend
-from src.backend.SettingsManager import SettingsManager
+from src.backend.SettingsManager import AppSettings, SettingsManager
 from src.backend.PluginManager.PluginManager import PluginManager
 from src.backend.IconPackManagement.IconPackManager import IconPackManager
 from src.backend.WallpaperPackManagement.WallpaperPackManager import WallpaperPackManager
@@ -241,7 +241,7 @@ def create_global_objects():
 @log.catch
 def update_assets():
     settings = gl.settings_manager.load_settings_from_file(os.path.join(gl.DATA_PATH, "settings", "settings.json"))
-    auto_update = settings.get("store", {}).get("auto-update", True)
+    auto_update = AppSettings(settings).auto_update
 
     if gl.argparser.parse_args().devel:
         auto_update = False
@@ -722,9 +722,7 @@ def main():
 
     create_global_objects()
 
-    app_settings = gl.settings_manager.get_app_settings()
-    auto_start = app_settings.get("system", {}).get("autostart", True)
-    setup_autostart(auto_start)
+    setup_autostart(gl.settings_manager.app().autostart)
     ensure_app_desktop_entry()
     
     create_cache_folder()

@@ -53,6 +53,7 @@ from types import SimpleNamespace
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
 import globals as gl
+from src.backend.DeckManagement.InputIdentifier import Input
 from src.windows.mainWindow.elements.Sidebar.elements.ActionManager import (
     ActionExpanderRow,
     ActionRow,
@@ -158,7 +159,9 @@ def make_world(action_ids, image_control=0, background_control=0,
         main_win=SimpleNamespace(get_active_controller=lambda: controller)
     )
 
-    identifier = SimpleNamespace(input_type="keys", json_identifier="0x0")
+    # A real identifier, not a duck-typed stand-in: reorder_actions reaches
+    # the page state through InputIdentifier's accessors.
+    identifier = Input.Key("0x0")
     add_button = SimpleNamespace(name="add-button")  # stands in for the Adw.ButtonRow
     expander = FakeExpander([], add_button, identifier, state=0)
     rows = [FakeRow(a, i, expander) for i, a in enumerate(action_ids)]

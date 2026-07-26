@@ -52,10 +52,9 @@ class DonateWindow(Adw.Dialog):
     def on_click_dont_show_again(self, widget):
         self.close()
 
-        app_settings = gl.settings_manager.get_app_settings()
-        app_settings.setdefault("general", {})
-        app_settings["general"]["show-donate-window"] = False
-        gl.settings_manager.save_app_settings(app_settings)
+        app_settings = gl.settings_manager.app()
+        app_settings.show_donate_window = False
+        app_settings.save()
 
     def on_click_close(self, widget):
         self.close()

@@ -1,9 +1,23 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 from enum import Enum
 
 if TYPE_CHECKING:
     from src.backend.PageManagement.Page import Page
     from src.backend.DeckManagement.DeckController import DeckController, ControllerInput
+
+
+# Shape of one entry under an input's "states" map in a page json.
+# Annotation only -- the accessors below hand back the live dicts. Written
+# with the functional syntax because the control keys are hyphenated.
+StateDict = TypedDict("StateDict", {
+    "actions": list[dict],
+    "media": dict,
+    "labels": dict,
+    "background": dict,
+    "image-control-action": "int | None",
+    "label-control-actions": list,
+    "background-control-action": "int | None",
+}, total=False)
 
 
 class InputIdentifier:
@@ -17,7 +31,37 @@ class InputIdentifier:
 
     def get_dict(self, d):
         return d.get(self.input_type, {}).get(self.json_identifier)
-    
+
+    # -- page state accessors ------------------------------------------
+    #
+    # State keys in a page json are strings (Page.save writes self.dict
+    # verbatim); int keys are legitimate only in the in-memory
+    # action_objects registry. str(state) below is the single place that
+    # coercion happens, so callers can pass either. Every one of these
+    # returns the LIVE nested dict/list -- callers mutate in place and
+    # page.save() writes self.dict wholesale.
+
+    def get_states(self, page: "Page") -> dict:
+        return self.get_config(page).get("states", {})
+
+    def get_state_dict(self, page: "Page", state) -> dict:
+        return self.get_states(page).get(str(state), {})
+
+    def get_actions(self, page: "Page", state) -> list:
+        return self.get_state_dict(page, state).get("actions", [])
+
+    def get_action_entry(self, page: "Page", state, index: int) -> dict | None:
+        actions = self.get_actions(page, state)
+        if 0 <= index < len(actions):
+            return actions[index]
+        return None
+
+    def ensure_state_dict(self, page: "Page", state) -> dict:
+        """Like get_state_dict, but creates the input/states/state chain so
+        the returned dict is actually part of the page."""
+        input_dict = page.dict.setdefault(self.input_type, {}).setdefault(self.json_identifier, {})
+        return input_dict.setdefault("states", {}).setdefault(str(state), {})
+
     def get_controller_input(self, controller: "DeckController") -> "ControllerInput":
         return controller.get_input(self)
     

@@ -139,7 +139,7 @@ class StoreBackend:
             log.warning(f"Failed to fetch official authors, using fallback: {e}")
 
     async def get_stores(self) -> list[tuple[str, str]]:
-        settings = gl.settings_manager.get_app_settings()
+        settings = gl.settings_manager.app()
 
         stores = []
         branch = await self.get_official_store_branch()
@@ -152,8 +152,8 @@ class StoreBackend:
         log.info(f"Official store branch: {branch}")
         stores.append((self.STORE_REPO_URL, branch))
 
-        if settings.get("store", {}).get("enable-custom-stores", False):
-            for store in settings.get("store", {}).get("custom-stores", {}):
+        if settings.enable_custom_stores:
+            for store in settings.custom_stores:
                 url = store.get("url")
                 if not url:
                     continue
@@ -170,11 +170,11 @@ class StoreBackend:
         return stores
     
     def get_custom_plugins(self) -> list[tuple[str, str]]:
-        settings = gl.settings_manager.get_app_settings()
+        settings = gl.settings_manager.app()
 
         plugins = []
-        if settings.get("store", {}).get("enable-custom-plugins", False):
-            for plugin in settings.get("store", {}).get("custom-plugins", []):
+        if settings.enable_custom_plugins:
+            for plugin in settings.custom_plugins:
                 plugins.append((plugin.get("url"), plugin.get("branch")))
 
         return plugins

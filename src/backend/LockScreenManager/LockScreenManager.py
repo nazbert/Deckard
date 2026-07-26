@@ -60,8 +60,7 @@ class LockScreenManager:
         gl.screen_locked = active
 
         if active:
-            settings = gl.settings_manager.get_app_settings()
-            if not settings.get("system", {}).get("lock-on-lock-screen", True):
+            if not gl.settings_manager.app().lock_on_lock_screen:
                 return
 
         if active == self.locked:

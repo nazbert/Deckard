@@ -16,7 +16,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 import gi
 
 from src.backend.DeckManagement.InputIdentifier import Input, InputIdentifier
-from src.backend.DeckManagement.HelperMethods import add_default_keys
 from src.windows.Settings.PluginSettingsWindow.PluginSettingsWindow import PluginSettingsWindow
 
 gi.require_version("Gtk", "4.0")
@@ -225,7 +224,7 @@ class ActionExpanderRow(BetterExpander):
         if controller is None:
             return
 
-        state_dict = controller.active_page.dict[self.active_identifier.input_type][self.active_identifier.json_identifier]["states"][str(self.active_state)]
+        state_dict = self.active_identifier.get_state_dict(controller.active_page, self.active_state)
 
         actions = state_dict["actions"]
         reordered = self.reorder_index_after(copy(actions), move_index, after_index)
@@ -695,8 +694,7 @@ class AddActionButtonRow:
         if active_page is None:
             return
         
-        add_default_keys(active_page.dict, [self.expander.active_identifier.input_type, self.expander.active_identifier.json_identifier, "states", str(self.expander.active_state)])
-        state_dict = active_page.dict[self.expander.active_identifier.input_type][self.expander.active_identifier.json_identifier]["states"][str(self.expander.active_state)]
+        state_dict = self.expander.active_identifier.ensure_state_dict(active_page, self.expander.active_state)
         state_dict.setdefault("actions", [])
 
         # Add action
@@ -728,8 +726,7 @@ class AddActionButtonRow:
         action = last_row.action_object
 
         # Open Action Config Screen
-        settings = gl.settings_manager.get_app_settings()
-        if settings.get("ui", {}).get("auto-open-action-config", True):
+        if gl.settings_manager.app().auto_open_action_config:
             if action and action.has_configuration:
                 gl.app.main_win.sidebar.action_configurator.load_for_action(last_row.action_object, last_row.index)
                 gl.app.main_win.sidebar.show_action_configurator()
