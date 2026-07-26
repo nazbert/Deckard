@@ -169,18 +169,18 @@ class Page:
             input_class = getattr(sys.modules["src.backend.DeckManagement.DeckController"], input_type.controller_class_name)
             input_type_name = input_type.input_type
             for key in input_class.Available_Identifiers(self.deck_controller.deck):
-                for state in self.dict.get(input_type_name, {}).get(key, {}).get("states", {}):
+                input_ident = Input.FromTypeIdentifier(input_type_name, key)
+                for state in input_ident.get_states(self):
                     try:
+                        # action_objects is keyed by int state; the page json
+                        # is keyed by str. A state key that isn't a number
+                        # has no place in either.
                         state = int(state)
                     except ValueError:
                         continue
-                    for i, action in enumerate(self.dict[input_type_name][key]["states"][str(state)].get("actions", [])):
+                    for i, action in enumerate(input_ident.get_actions(self, state)):
                         if action.get("id") is None:
                             continue
-
-                        input_ident = Input.FromTypeIdentifier(input_type_name, key)
-                        # input_action_objects = input_ident.get_dict(new_action_objects)
-                        # input_action_objects.setdefault(state, {})
 
                         action_object = self.get_new_action_object(
                             # loaded_action_objects=self.action_objects,
@@ -252,12 +252,12 @@ class Page:
         self.action_objects = {}
         for input_type in Input.KeyTypes:
             for input_identifier in self.dict.get(input_type, {}):
-                for state in self.dict[input_type][input_identifier].get("states", {}):
+                input_ident = Input.FromTypeIdentifier(input_type, input_identifier)
+                for state in input_ident.get_states(self):
                     state = int(state)
-                    input_ident = Input.FromTypeIdentifier(input_type, input_identifier)
-                    if "actions" not in input_ident.get_config(self.dict)["states"][str(state)]:
+                    if "actions" not in input_ident.get_state_dict(self, state):
                         continue
-                    for i, action in enumerate(input_ident.get_config(self.dict)["states"][str(state)]["actions"]):
+                    for i, action in enumerate(input_ident.get_actions(self, state)):
                         if action.get("id") is None:
                             continue
 
@@ -520,11 +520,12 @@ class Page:
         if action_object is None:
             raise ValueError("Could not find action object")
         
-        for state in self.dict.get(action_object.input_ident.input_type, {}).get(action_object.input_ident.json_identifier, {}).get("states", {}):
-            for i, action_dict in enumerate(self.dict[action_object.input_ident.input_type][action_object.input_ident.json_identifier]["states"][state].get("actions", [])):
-                if self.action_objects.get(action_object.input_ident.input_type, {}).get(action_object.input_ident.json_identifier, {}).get(int(state), {}).get(i) is action_object:
+        ident = action_object.input_ident
+        for state in ident.get_states(self):
+            for i, action_dict in enumerate(ident.get_actions(self, state)):
+                if self.get_action(ident, int(state), i) is action_object:
                     return action_dict
-                
+
         return {}
                 
     def set_action_dict(self, action_object = None, identifier: InputIdentifier = None, state: int = None, index: int = None, action_dict: dict = None):
@@ -542,10 +543,12 @@ class Page:
         # NB: the loop variable must not be named `action_dict` -- it used to
         # shadow the parameter, turning the assignment below into a no-op
         # self-assignment (issue #55).
-        for state in self.dict.get(action_object.input_ident.input_type, {}).get(action_object.input_ident.json_identifier, {}).get("states", {}):
-            for i, _existing_dict in enumerate(self.dict[action_object.input_ident.input_type][action_object.input_ident.json_identifier]["states"][state].get("actions", [])):
-                if self.action_objects.get(action_object.input_ident.input_type, {}).get(action_object.input_ident.json_identifier, {}).get(int(state), {}).get(i) is action_object:
-                    self.dict[action_object.input_ident.input_type][action_object.input_ident.json_identifier]["states"][state]["actions"][i] = action_dict
+        ident = action_object.input_ident
+        for state in ident.get_states(self):
+            actions = ident.get_actions(self, state)
+            for i, _existing_dict in enumerate(actions):
+                if self.get_action(ident, int(state), i) is action_object:
+                    actions[i] = action_dict
                     break
 
         self.save()
@@ -553,45 +556,12 @@ class Page:
     def get_action_settings(self, action_object = None, identifier: InputIdentifier = None, state: int = None, index: int = None):
         action_dict = self.get_action_dict(action_object, identifier, state, index)
         return action_dict.get("settings", {})
-        # Arg validation
-        if action_object is None:
-            if None in (identifier, state, index):
-                raise ValueError("Please pass an identifier, state and index or an action object")
-            
-        if action_object is None:
-            action_object = self.get_action(identifier, state, index)
 
-        if action_object is None:
-            raise ValueError("Could not find action object")
 
-        for state in self.dict.get(action_object.input_ident.input_type, {}).get(action_object.input_ident.json_identifier, {}).get("states", {}):
-            for i, action_dict in enumerate(self.dict[action_object.input_ident.input_type][action_object.input_ident.json_identifier]["states"][state].get("actions", [])):
-                if self.action_objects.get(action_object.input_ident.input_type, {}).get(action_object.input_ident.json_identifier, {}).get(int(state), {})[i] is action_object:
-                    return action_dict["settings"]
-        return {}
-    
     def set_action_settings(self, action_object = None, identifier: InputIdentifier = None, state: int = None, index: int = None, settings: dict = None):
         action_dict = self.get_action_dict(action_object, identifier, state, index)
         action_dict["settings"] = settings
         self.set_action_dict(action_object, identifier, state, index, action_dict)
-        return
-        # Arg validation
-        if action_object is None:
-            if None in (identifier, state, index):
-                raise ValueError("Please pass an identifier, state and index or an action object")
-            
-        if action_object is None:
-            action_object = self.get_action(identifier, state, index)
-
-        if action_object is None:
-            raise ValueError("Could not find action object")
-
-        for state in self.dict.get(action_object.input_ident.input_type, {}).get(action_object.input_ident.json_identifier, {}).get("states", {}):
-            for i, action_dict in enumerate(self.dict[action_object.input_ident.input_type][action_object.input_ident.json_identifier]["states"][state].get("actions", [])):
-                if self.action_objects.get(action_object.input_ident.input_type, {}).get(action_object.input_ident.json_identifier, {}).get(int(state), {})[i] is action_object:
-                    action_dict["settings"] = settings
-
-        self.save()
 
     def get_action_event_assignments(self, action_object = None, identifier: InputIdentifier = None, state: int = None, index: int = None):
         action_dict = self.get_action_dict(action_object, identifier, state, index)
