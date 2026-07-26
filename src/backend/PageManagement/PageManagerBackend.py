@@ -71,7 +71,7 @@ class PageManagerBackend:
         # touching the spinner) silently grew the live budget by one, since
         # this constructor hardcoded 3 instead of applying the +1 (design
         # doc bug 35).
-        n_cached_pages = self.settings_manager.get_app_settings().get("performance", {}).get("n-cached-pages", 3)
+        n_cached_pages = self.settings_manager.app().n_cached_pages
         self.max_pages = int(n_cached_pages) + 1
         self.page_number = 0
 

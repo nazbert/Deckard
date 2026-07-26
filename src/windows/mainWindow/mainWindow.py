@@ -69,7 +69,7 @@ class MainWindow(Adw.ApplicationWindow):
             self.add_css_class("devel")
 
     def on_close(self, *args, **kwargs):
-        keep_running = gl.settings_manager.get_app_settings().get("system", {}).get("keep-running")
+        keep_running = gl.settings_manager.app().keep_running
         if keep_running is None:
             dialog = KeepRunningDialog(self, self.on_close)
             dialog.present()

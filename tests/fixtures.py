@@ -98,6 +98,10 @@ class StubSettingsManager:
     def get_app_settings(self) -> dict:
         return self._app_settings
 
+    def app(self):
+        from src.backend.SettingsManager import AppSettings
+        return AppSettings(self._app_settings)
+
     def get_deck_settings(self, serial_number: str) -> dict:
         return self._deck_settings.setdefault(serial_number, {})
 

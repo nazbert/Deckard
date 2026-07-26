@@ -130,7 +130,7 @@ class DeckManager:
             self.flatpak_disconnect_thread.start()
 
         self.remote_deck_manager = RemoteDeckManager(self)
-        if gl.settings_manager.get_app_settings().get("dev", {}).get("n-remote-decks", 0) > 0:
+        if gl.settings_manager.app().n_remote_decks > 0:
             self.load_remote_decks()
 
 

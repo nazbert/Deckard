@@ -728,8 +728,7 @@ class AddActionButtonRow:
         action = last_row.action_object
 
         # Open Action Config Screen
-        settings = gl.settings_manager.get_app_settings()
-        if settings.get("ui", {}).get("auto-open-action-config", True):
+        if gl.settings_manager.app().auto_open_action_config:
             if action and action.has_configuration:
                 gl.app.main_win.sidebar.action_configurator.load_for_action(last_row.action_object, last_row.index)
                 gl.app.main_win.sidebar.show_action_configurator()

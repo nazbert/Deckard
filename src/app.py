@@ -71,14 +71,13 @@ class App(Adw.Application):
         icon_theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
         icon_theme.add_search_path(os.path.join(gl.top_level_dir, "Assets", "icons"))
 
-        app_settings = gl.settings_manager.get_app_settings()
-        
-        allow_white_mode = app_settings.get("ui", {}).get("allow-white-mode", False)
+        app_settings = gl.settings_manager.app()
+
+        allow_white_mode = app_settings.allow_white_mode
 
         # increment app launches
-        app_settings.setdefault("general", {})
-        app_settings["general"]["app-launches"] = app_settings["general"].get("app-launches", 0) + 1
-        gl.settings_manager.save_app_settings(app_settings)
+        app_settings.app_launches = app_settings.app_launches + 1
+        app_settings.save()
 
         self.style_manager = self.get_style_manager()
         if allow_white_mode:
@@ -191,11 +190,11 @@ class App(Adw.Application):
             return
         gl.showed_donate_window = True
 
-        app_settings = gl.settings_manager.get_app_settings()
-        
-        if not app_settings.get("general", {}).get("show-donate-window", True):
+        app_settings = gl.settings_manager.app()
+
+        if not app_settings.show_donate_window:
             return
-        if app_settings.get("general", {}).get("app-launches", 0) < 4:
+        if app_settings.app_launches < 4:
             return
         if hasattr(self, "onboarding"):
             return
@@ -409,8 +408,7 @@ class App(Adw.Application):
         parent_send = super().send_notification
 
         def _send() -> bool:
-            show_notifications = gl.settings_manager.get_app_settings().get("ui", {}).get("show-notifications", True)
-            if not show_notifications:
+            if not gl.settings_manager.app().show_notifications:
                 return GLib.SOURCE_REMOVE
 
             notif = Gio.Notification()
@@ -539,8 +537,7 @@ class App(Adw.Application):
             button=("Install", "app.install-plugin", GLib.Variant.new_string(plugin_id))
         )
     def open_store(self, callback_agreed: bool = None) -> None:
-        app_settings = gl.settings_manager.get_app_settings()
-        agreed = app_settings.get("store", {}).get("responsibility-notes-agreed", False)
+        agreed = gl.settings_manager.app().responsibility_notes_agreed
 
         if not agreed:
             if callback_agreed is None:

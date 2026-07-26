@@ -40,8 +40,7 @@ class TrayIcon(DBusTrayIcon):
         self.show_store_action = main_win.menu_button.open_store_action
         self.show_settings_action = main_win.menu_button.open_settings_action
         self.quit_app_action = main_win.menu_button.quit_action
-        app_settings = gl.settings_manager.get_app_settings()
-        show_now = app_settings.get("ui",{}).get("tray-icon", True)
+        show_now = gl.settings_manager.app().tray_icon
         if show_now:
             self.register()
 
