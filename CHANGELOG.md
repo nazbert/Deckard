@@ -7,6 +7,13 @@ bundle as a release asset.
 
 ## [Unreleased]
 
+### Fixed
+
+- Mutable default arguments across 8 sites, two of them on the plugin-facing
+  API (`ActionHolder.action_support`, `ActionCore.set_background_color`): the
+  shared default object leaked mutations between unrelated callers for the
+  lifetime of the process.
+
 ## [0.1.0] - 2026-07-14
 
 ### Added
