@@ -137,13 +137,10 @@ class PluginPreview(StorePreview):
         GLib.idle_add(self.set_install_state, 0)
 
     def update(self):
-        self.store.backend.uninstall_plugin(plugin_id=self.plugin_data.plugin_id, remove_from_pages=False,
-                                            remove_files=False)
-        if not self.install():
-            # The failed install left the still-on-disk old version
-            # deregistered -- re-register it so it keeps working instead of
-            # vanishing until restart.
-            self.store.backend.reload_installed_plugins()
+        # install_plugin deregisters the old version only after its download
+        # succeeded, so a failed update leaves the old version installed AND
+        # registered -- no recovery reload needed here.
+        self.install()
 
     def notify_install_failure(self):
         if gl.app is None:

@@ -314,7 +314,16 @@ class PluginManager:
         return self.get_plugins(include_disabled).get(plugin_id, {}).get("object", None)
             
     def remove_plugin_from_list(self, plugin_base: PluginBase):
-        del PluginBase.plugins[plugin_base.plugin_id]
+        # A plugin can live in either registry: version-gated ones exist only
+        # in disabled_plugins, and get_plugin_by_id (include_disabled=True,
+        # the default) hands them out too. The old bare
+        # `del PluginBase.plugins[...]` raised KeyError for those, aborting
+        # uninstall_plugin mid-way (registry entry kept, sys.modules purge
+        # skipped) -- which under the post-download deregister (#82) meant an
+        # update of a disabled plugin could keep serving the old code from
+        # the module cache.
+        PluginBase.plugins.pop(plugin_base.plugin_id, None)
+        PluginBase.disabled_plugins.pop(plugin_base.plugin_id, None)
 
     def get_plugin_id_from_action_id(self, action_id: str) -> str:
         if action_id is None:

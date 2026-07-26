@@ -6,7 +6,7 @@ download_repo's own extract/cleanup contract or install_plugin's
 delete-only-after-a-good-download behavior.
 
 download_repo is the single choke point every install_*/download_repo caller
-funnels through. Its contract (StoreBackend.py ~921-1006):
+funnels through. Its contract (transactional since gl#82):
 
   1. A network fault mid-stream removes the partial/zero-byte .zip from the
      cache instead of leaving it to poison the next run.
@@ -14,10 +14,13 @@ funnels through. Its contract (StoreBackend.py ~921-1006):
      and never leaves the extracted temp folder behind.
   3. An archive with unsafe (path-traversal) member names is refused before
      anything is unpacked.
-  4. The DESTINATION directory is reset only on the success path -- a fault
-     before/at extraction leaves any pre-existing install untouched. This is
-     the install_plugin-shaped safety that install_icon/wallpaper/sd_plus
-     lack (that gap is B-06, pinned separately in
+  4. The DESTINATION is replaced only by _swap_into_place, with a fully
+     staged, validated, VERSION-stamped tree; the old install is renamed
+     aside (restorable) and deleted only after the new tree is in place. A
+     failure at ANY point -- download, extraction, expected_id manifest
+     validation, even the swap renames themselves -- leaves the
+     pre-existing install byte-for-byte intact. All four asset types ride
+     on this (B-06's pre-delete flow is gone; pinned in
      scenario_store_b06_pack_survival.py).
 
 The `requests.get` call is monkeypatched to serve bytes from a local file
@@ -276,11 +279,12 @@ def test_traversal_member_is_refused() -> None:
 
 
 def test_download_fault_leaves_existing_install_intact() -> None:
-    """download_repo resets the destination only AFTER a good download+
-    extract (StoreBackend.py ~978-983). A fault before that must leave a
-    pre-existing install byte-for-byte intact. This is exactly the
-    install_plugin-shaped safety the icon/wallpaper/sd_plus install_* wrappers
-    do NOT have (they rmtree first -- B-06)."""
+    """download_repo touches the destination only at swap time, AFTER a good
+    download + extract + validation (the gl#82 transactional install). A
+    fault before that must leave a pre-existing install byte-for-byte
+    intact. Since gl#82 the icon/wallpaper/sd_plus install_* wrappers ride
+    on this same safety instead of pre-deleting (B-06, pinned in
+    scenario_store_b06_pack_survival.py)."""
     sb = _make_backend()
     dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_Existing")
     os.makedirs(dest, exist_ok=True)
@@ -304,6 +308,132 @@ def test_download_fault_leaves_existing_install_intact() -> None:
     print("PASS: a failed download leaves the existing install intact (download_repo)")
 
 
+def _hidden_swap_siblings(parent: str) -> list[str]:
+    """Transient swap trees (_swap_into_place) left behind in `parent`."""
+    if not os.path.isdir(parent):
+        return []
+    return [e for e in os.listdir(parent) if ".deckard-new" in e or ".deckard-old" in e]
+
+
+def _seed_install(dest: str, content: str = "previous good install") -> str:
+    os.makedirs(dest, exist_ok=True)
+    sentinel = os.path.join(dest, "keep.txt")
+    with open(sentinel, "w") as f:
+        f.write(content)
+    return sentinel
+
+
+def test_swap_failure_restores_existing_install() -> None:
+    """If the final atomic rename of the staged tree fails, _swap_into_place
+    must put the old install back (it was only renamed aside, never deleted)
+    and clean up its transient siblings."""
+    sb = _make_backend()
+    dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_SwapFail")
+    sentinel = _seed_install(dest)
+
+    real_replace = store_mod.os.replace
+
+    def failing_replace(src, dst):
+        # Fail exactly the swap-in of the staged tree; the aside-rename of
+        # the old install and the restore rename must still work.
+        if src.endswith(".deckard-new"):
+            raise OSError("simulated rename failure")
+        return real_replace(src, dst)
+
+    prev = _install_fake_get(_chunk(_good_zip_bytes()))
+    store_mod.os.replace = failing_replace
+    try:
+        result = asyncio.run(sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA))
+    finally:
+        store_mod.os.replace = real_replace
+        _restore_get(prev)
+
+    assert isinstance(result, NoConnectionError), (
+        f"a failed swap must surface as a failure, got {result!r}"
+    )
+    assert os.path.isfile(sentinel), (
+        "the old install was not restored after the swap-in rename failed"
+    )
+    with open(sentinel) as f:
+        assert f.read() == "previous good install", "restored install corrupted"
+    assert _hidden_swap_siblings(os.path.dirname(dest)) == [], (
+        "transient swap trees left behind after a failed swap"
+    )
+    print("PASS: a failed swap-in restores the old install")
+
+
+def test_manifest_id_mismatch_refused_old_install_intact() -> None:
+    """expected_id is the staged-tree choke point: a downloaded tree whose
+    manifest.json id disagrees with the id the catalog promised (which also
+    names the install dir) must be refused with 400 before it can replace
+    the installed pack."""
+    sb = _make_backend()
+    dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_IdMismatch")
+    sentinel = _seed_install(dest)
+
+    zip_bytes = _good_zip_bytes(files={"manifest.json": b'{"id": "com_evil_Other"}'})
+    prev = _install_fake_get(_chunk(zip_bytes))
+    try:
+        result = asyncio.run(sb.download_repo(
+            repo_url=REPO_URL, directory=dest, commit_sha=SHA,
+            expected_id="com_test_IdMismatch"))
+    finally:
+        _restore_get(prev)
+
+    assert result == 400, f"an id-mismatched tree must be refused with 400, got {result!r}"
+    assert os.path.isfile(sentinel), "old install lost over a refused (mismatched) download"
+    with open(sentinel) as f:
+        assert f.read() == "previous good install"
+    assert _cache_zips() == [], f"zip litter after a refused download: {_cache_zips()}"
+    assert not _extract_folder_left("repo-abc"), "staged tree left in cache after refusal"
+    print("PASS: a manifest-id mismatch is refused and the old install survives")
+
+
+def test_update_replaces_pack_and_stamps_version_in_staging() -> None:
+    """The happy-path update: the staged tree must already carry VERSION when
+    it reaches the swap (a swapped-in tree without VERSION reads as 'not
+    installed' and is never retried), the old content must be fully replaced,
+    and no transient trees may remain."""
+    sb = _make_backend()
+    dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_Replace")
+    sentinel = _seed_install(dest, content="old version file")
+
+    real_swap = sb._swap_into_place
+    staged_version: list[str] = []
+
+    def spying_swap(staging_tree, directory):
+        version_path = os.path.join(staging_tree, "VERSION")
+        assert os.path.isfile(version_path), (
+            "VERSION must be stamped on the STAGED tree before the swap"
+        )
+        with open(version_path) as f:
+            staged_version.append(f.read())
+        return real_swap(staging_tree, directory)
+
+    sb._swap_into_place = spying_swap
+
+    zip_bytes = _good_zip_bytes(files={"manifest.json": b'{"id": "com_test_Replace"}',
+                                       "new.txt": b"new content"})
+    prev = _install_fake_get(_chunk(zip_bytes))
+    try:
+        result = asyncio.run(sb.download_repo(
+            repo_url=REPO_URL, directory=dest, commit_sha=SHA,
+            expected_id="com_test_Replace"))
+    finally:
+        _restore_get(prev)
+
+    assert result == 200, f"a well-formed update must return 200, got {result!r}"
+    assert staged_version == [SHA], "swap ran without a VERSION-stamped staging tree"
+    assert not os.path.exists(sentinel), "old install contents survived the replace"
+    assert os.path.isfile(os.path.join(dest, "new.txt")), "new tree not swapped in"
+    with open(os.path.join(dest, "VERSION")) as f:
+        assert f.read() == SHA
+    assert _hidden_swap_siblings(os.path.dirname(dest)) == [], (
+        "transient swap trees left behind after a successful update"
+    )
+    print("PASS: an update swaps a VERSION-stamped staged tree over the old pack")
+
+
 def main() -> None:
     fixtures.start_watchdog(30, label="scenario_store_install_fs")
     _force_release_download_path()
@@ -314,6 +444,9 @@ def main() -> None:
     test_corrupt_archive_returns_error_and_cleans_up()
     test_traversal_member_is_refused()
     test_download_fault_leaves_existing_install_intact()
+    test_swap_failure_restores_existing_install()
+    test_manifest_id_mismatch_refused_old_install_intact()
+    test_update_replaces_pack_and_stamps_version_in_staging()
     print("PASS: scenario_store_install_fs")
 
 

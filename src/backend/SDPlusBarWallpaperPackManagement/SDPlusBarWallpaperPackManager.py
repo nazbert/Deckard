@@ -33,6 +33,10 @@ class SDPlusBarWallpaperPackManager:
         packs = {}
         os.makedirs(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers"), exist_ok=True)
         for pack in os.listdir(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers")):
+            if pack.startswith("."):
+                # Transient install-swap trees (StoreBackend._swap_into_place)
+                # and other hidden entries are not packs.
+                continue
             wallpaper_pack = SDPlusBarWallpaperPack(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", pack))
             if wallpaper_pack.is_valid:
                 packs[pack] =  wallpaper_pack

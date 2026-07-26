@@ -34,6 +34,10 @@ class IconPackManager:
         packs = {}
         os.makedirs(os.path.join(gl.DATA_PATH, "icons"), exist_ok=True)
         for pack in os.listdir(os.path.join(gl.DATA_PATH, "icons")):
+            if pack.startswith("."):
+                # Transient install-swap trees (StoreBackend._swap_into_place)
+                # and other hidden entries are not packs.
+                continue
             icon_pack = IconPack(os.path.join(gl.DATA_PATH, "icons", pack))
             if icon_pack.is_valid:
                 packs[pack] = icon_pack

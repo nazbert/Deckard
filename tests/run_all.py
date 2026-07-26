@@ -31,11 +31,6 @@ TESTS_DIR = Path(__file__).resolve().parent
 # one-line reason instead of weakening its assertions.
 EXPECTED_FAIL_UNTIL_M1: dict[str, str] = {
     # "scenario_example.py": "needs the M1 control queue",
-    "scenario_store_b06_pack_survival.py": (
-        "B-06 unfixed: install_icon/wallpaper/sd_plus rmtree the installed "
-        "pack before the fallible download and never restore it on failure "
-        "(gl#62 / transactional-install gl#82). Flips to PASS once fixed."
-    ),
 }
 
 
