@@ -47,10 +47,22 @@ class Notify:
         if gl.app is None:
             # Drained on the main thread by App.on_activate once the window
             # is up; re-entering _dispatch then takes the branch below.
-            gl.app_loading_finished_tasks.append(
-                lambda: self._dispatch(is_error, text, title)
-            )
-            return
+            #
+            # The append races the drain: on_activate may set gl.app and
+            # finish popping the queue between our None-check and our
+            # append, stranding the task forever. After appending, re-check
+            # and try to take the task back -- list.remove/pop are atomic
+            # under the GIL, so exactly one side ends up owning it: either
+            # the drain popped it (remove raises ValueError; the drain
+            # delivers) or we reclaim it here and deliver ourselves.
+            task = lambda: self._dispatch(is_error, text, title)
+            gl.app_loading_finished_tasks.append(task)
+            if gl.app is None:
+                return
+            try:
+                gl.app_loading_finished_tasks.remove(task)
+            except ValueError:
+                return
         GLib.idle_add(self._deliver, is_error, text, title)
 
     def _deliver(self, is_error: bool, text: str, title: str) -> bool:

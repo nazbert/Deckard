@@ -178,19 +178,95 @@ def check_pre_app_deferral(notify) -> None:
         f"drain, got {gl.app_loading_finished_tasks}"
     )
 
-    # Now do exactly what App.on_activate does: publish the app, then drain.
+    # Now do exactly what App.on_activate does: publish the app, then drain
+    # by atomic pop (this mirrors app.py -- keep the two in sync).
     app = Recorder(visible=True)
     gl.app = app
-    for task in gl.app_loading_finished_tasks:
-        task()
-    gl.app_loading_finished_tasks.clear()
+    while gl.app_loading_finished_tasks:
+        gl.app_loading_finished_tasks.pop(0)()
     pump()
 
     assert [(kind, text) for kind, text, _ in app.toasts] == [
         ("error", "1 plugin failed to load -- check the logs")
     ], f"the deferred report never landed: {app.toasts}"
 
+    # A task that appends another task while the drain runs must get the
+    # nested task drained too -- the old iterate-then-clear drain silently
+    # discarded it (cleared unrun).
+    ran: list[str] = []
+    gl.app_loading_finished_tasks.append(
+        lambda: (ran.append("outer"),
+                 gl.app_loading_finished_tasks.append(lambda: ran.append("nested")))
+    )
+    while gl.app_loading_finished_tasks:
+        gl.app_loading_finished_tasks.pop(0)()
+    assert ran == ["outer", "nested"], (
+        f"a task appended during the drain was dropped: {ran}"
+    )
+
     print("PASS: pre-app calls defer onto app_loading_finished_tasks")
+
+
+class _FlipOnAppend(list):
+    """Simulates the racing interleaving deterministically: the moment the
+    facade appends its deferred task, on_activate has already published the
+    app (and, in the drain_owns variant, drains before the facade can take
+    the task back)."""
+
+    def __init__(self, app, drain_before_remove: bool = False):
+        super().__init__()
+        self._app = app
+        self._drain_before_remove = drain_before_remove
+
+    def append(self, task):
+        gl.app = self._app  # on_activate's publish, racing our append
+        super().append(task)
+
+    def remove(self, task):
+        if self._drain_before_remove:
+            # The drain wins the race to the task: pop-and-run everything
+            # before the facade's reclaim attempt goes through.
+            while self:
+                self.pop(0)()
+        super().remove(task)
+
+
+def check_drain_race_exactly_once(notify) -> None:
+    """The append-vs-drain TOCTOU (#183 review): gl.app flips between the
+    facade's None-check and its append. Whichever side ends up owning the
+    task, the report must be delivered exactly once -- the pre-fix facade
+    stranded it in the list forever (silent loss of boot-time reports)."""
+    original_tasks = gl.app_loading_finished_tasks
+
+    # Interleaving A: the drain has already finished when the append lands.
+    # The facade must notice and reclaim the task itself.
+    app = Recorder(visible=True)
+    gl.app = None
+    gl.app_loading_finished_tasks = _FlipOnAppend(app)
+    try:
+        call_from_worker(notify.error, "boot-window report")
+        assert list(gl.app_loading_finished_tasks) == [], (
+            "the task was stranded on the queue after the drain finished"
+        )
+        pump()
+        assert [(kind, text) for kind, text, _ in app.toasts] == [
+            ("error", "boot-window report")
+        ], f"reclaimed delivery wrong or missing: {app.toasts}"
+
+        # Interleaving B: the drain pops the task before the facade's
+        # reclaim. The reclaim must back off -- exactly one delivery, not two.
+        app2 = Recorder(visible=True)
+        gl.app = None
+        gl.app_loading_finished_tasks = _FlipOnAppend(app2, drain_before_remove=True)
+        call_from_worker(notify.error, "boot-window report")
+        pump()
+        assert [(kind, text) for kind, text, _ in app2.toasts] == [
+            ("error", "boot-window report")
+        ], f"drain-owned delivery must happen exactly once: {app2.toasts}"
+    finally:
+        gl.app_loading_finished_tasks = original_tasks
+
+    print("PASS: append-vs-drain race delivers exactly once (both interleavings)")
 
 
 def check_decision_is_made_on_the_main_thread(notify) -> None:
@@ -295,6 +371,7 @@ def main() -> None:
         check_hidden_window_falls_back(notify)
         check_no_main_win_falls_back(notify)
         check_pre_app_deferral(notify)
+        check_drain_race_exactly_once(notify)
         check_decision_is_made_on_the_main_thread(notify)
         check_send_notification_is_fully_idle()
     finally:

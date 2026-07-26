@@ -133,12 +133,17 @@ class App(Adw.Application):
 
         self.add_signals()
 
-        # Do tasks
+        # Do tasks. Drain by atomic pop, not iterate-then-clear: background
+        # threads (gl.notify) race their appends against this drain, and a
+        # task appended mid-iteration would be cleared unrun. pop(0) makes
+        # every task owned by exactly one side -- this loop or the appender's
+        # post-append reclaim (see Notify._dispatch) -- and a task that
+        # appends further tasks while running gets those drained too.
         gl.app = self
-        for task in gl.app_loading_finished_tasks:
+        while gl.app_loading_finished_tasks:
+            task = gl.app_loading_finished_tasks.pop(0)
             if callable(task):
                 task()
-        gl.app_loading_finished_tasks.clear()
         change_page_action = Gio.SimpleAction.new("change_page", GLib.VariantType("as")) # as = array of strings
         change_page_action.connect("activate", self.on_change_page)
         self.add_action(change_page_action)
