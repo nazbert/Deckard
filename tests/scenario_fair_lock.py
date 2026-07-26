@@ -19,7 +19,9 @@ Covers:
   (d) non-blocking acquire, timeout, and release-when-unlocked semantics
       match what a threading.Lock stand-in has to provide, and a timed-out
       waiter never wedges the queue behind its abandoned ticket.
-  (e) the install guard swaps a stock transport mutex, is idempotent, and
+  (e) DeckController.__init__ installs the lock, and does it before open()
+      starts the library's reader thread.
+  (f) the install guard swaps a stock transport mutex, is idempotent, and
       no-ops on every shape it cannot prove safe (no transport device at
       all -- FakeDeck/RemoteDeck; a transport without a mutex attribute --
       library drift; a mutex that is currently held).
@@ -196,8 +198,47 @@ class _StubDeck:
         self.device = device
 
 
+def check_install_happens_before_open() -> None:
+    """Integration tier: the swap has to be wired into DeckController.__init__
+    AND land before open() starts the library's reader thread -- swapping a
+    mutex that is already in use could put two threads in hidapi at once."""
+    import globals as gl
+    from faulty_fake_deck import FaultyFakeDeck
+
+    # A deck with no transport at all (every FakeDeck) must still construct.
+    plain = fixtures.make_headless_controller(serial="fairlock-noop")
+    fixtures.teardown(plain)
+
+    class _ProbeDeck(FaultyFakeDeck):
+        """A FakeDeck carrying a transport shaped like the real one."""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.device = _StubTransport(threading.Lock())
+            self.mutex_type_at_open = None
+
+        def open(self, *args, **kwargs):
+            self.mutex_type_at_open = type(self.device.mutex)
+            return super().open(*args, **kwargs)
+
+    from src.backend.DeckManagement.DeckController import DeckController
+
+    probe = _ProbeDeck(serial_number="fairlock-probe", deck_type="Fake Deck")
+    controller = DeckController(gl.deck_manager, probe)
+    gl.deck_manager.deck_controller.append(controller)
+    try:
+        assert probe.mutex_type_at_open is FairLock, (
+            f"the transport mutex was {probe.mutex_type_at_open} when open() "
+            f"started the reader thread -- the install is missing or too late"
+        )
+        assert isinstance(probe.device.mutex, FairLock), "the swap did not stick"
+    finally:
+        fixtures.teardown(controller)
+
+    print("PASS: DeckController installs the FIFO lock before opening the deck")
+
+
 def check_install_guards() -> None:
-    fixtures.install_stub_globals()
     from src.backend.DeckManagement.DeckController import _install_fair_transport_lock
     from faulty_fake_deck import FaultyFakeDeck
 
@@ -244,6 +285,7 @@ def main() -> None:
     check_hot_loop_cannot_starve_a_waiter()
     check_exception_path_releases()
     check_lock_protocol_semantics()
+    check_install_happens_before_open()
     check_install_guards()
 
     print("PASS: scenario_fair_lock")
