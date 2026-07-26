@@ -310,36 +310,23 @@ class MainWindow(Adw.ApplicationWindow):
 
     def show_info_toast(self, text: str) -> None:
         # Safe to call from any thread
-        GLib.idle_add(self._add_toast, text, Adw.ToastPriority.NORMAL)
+        GLib.idle_add(self._add_toast, text, Adw.ToastPriority.NORMAL, 3)
 
     def show_error_toast(self, text: str) -> None:
-        # Safe to call from any thread
-        GLib.idle_add(self._add_toast, text, Adw.ToastPriority.HIGH)
+        # Safe to call from any thread. Errors linger longer and jump the
+        # queue -- they explain missing functionality (e.g. plugins that
+        # failed to load), and callers reach this from background threads
+        # (plugin/store loads).
+        GLib.idle_add(self._add_toast, text, Adw.ToastPriority.HIGH, 7)
 
-    def _add_toast(self, text: str, priority: Adw.ToastPriority) -> bool:
+    def _add_toast(self, text: str, priority: Adw.ToastPriority, timeout: int) -> bool:
         toast = Adw.Toast(
             title=text,
-            timeout=3,
+            timeout=timeout,
             priority=priority
         )
         self.toast_overlay.add_toast(toast)
         return GLib.SOURCE_REMOVE
-
-    def show_error_toast(self, text: str) -> None:
-        # Errors linger longer and jump the queue -- they explain missing
-        # functionality (e.g. plugins that failed to load). Callers reach this
-        # from background threads (plugin/store loads), so marshal onto the
-        # GTK main thread; NOTE: MR !12 also adds this method (with the same
-        # marshalling) -- whichever of !12/!14 merges second keeps one copy.
-        def _add() -> bool:
-            toast = Adw.Toast(
-                title=text,
-                timeout=7,
-                priority=Adw.ToastPriority.HIGH
-            )
-            self.toast_overlay.add_toast(toast)
-            return False
-        GLib.idle_add(_add)
 
     def get_active_controller(self) -> DeckController:
         if not recursive_hasattr(self, "leftArea.deck_stack"): return

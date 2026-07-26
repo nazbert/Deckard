@@ -7,16 +7,20 @@ thread -- constructing an Adw.Toast and calling add_toast off the GTK main
 thread.
 
 Guards:
-  1. show_error_toast exists.
+  1. show_error_toast exists, and is defined exactly ONCE (#182: a second
+     definition shadowed the first, so whichever copy lost was dead code
+     and the surviving behaviour depended on definition order).
   2. Both toast methods, called from a worker thread (as update_assets
      does), touch the toast overlay ONLY via the GLib main context -- no
      off-main add_toast, and the marshalled work lands with the right
-     title/priority once the main thread drains the context.
+     title/priority/timeout once the main thread drains the context.
 
 The methods are driven unbound with a duck-typed `self` (a real MainWindow
 needs a display); the marshalling path itself -- GLib.idle_add into the
 default main context -- is real.
 """
+import ast
+import os
 import threading
 import types
 
@@ -53,6 +57,25 @@ def main() -> None:
         "MainWindow.show_error_toast is missing -- main.py update_assets' "
         "error path raises AttributeError and the user never sees the failure"
     )
+
+    # 1b (#182). Duplicate definitions are invisible at runtime -- the last
+    # one silently wins -- so pin the count in the source instead.
+    source_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "src", "windows", "mainWindow", "mainWindow.py")
+    with open(source_path) as f:
+        tree = ast.parse(f.read(), filename=source_path)
+    definitions: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "MainWindow":
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    definitions[item.name] = definitions.get(item.name, 0) + 1
+    for name in ("show_error_toast", "show_info_toast", "_add_toast"):
+        assert definitions.get(name) == 1, (
+            f"MainWindow.{name} is defined {definitions.get(name)} times -- a "
+            f"shadowed duplicate makes the live behaviour depend on definition "
+            f"order (#182)"
+        )
 
     fake_win = FakeWindowSelf()
     # Bind the real toast internals onto the duck-typed window so the
@@ -102,6 +125,12 @@ def main() -> None:
     assert "3 assets updated" in by_title, f"info toast missing: {list(by_title)}"
     assert by_title["Failed to update store assets"].get_priority() == Adw.ToastPriority.HIGH
     assert by_title["3 assets updated"].get_priority() == Adw.ToastPriority.NORMAL
+    # The error toast's longer dwell was the behaviour of the surviving
+    # duplicate (#182); folding the two definitions together must keep it.
+    assert by_title["Failed to update store assets"].get_timeout() == 7, (
+        "error toasts must linger 7s -- they explain missing functionality"
+    )
+    assert by_title["3 assets updated"].get_timeout() == 3
 
     print("PASS: scenario_toast_threadsafe")
 
