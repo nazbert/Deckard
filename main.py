@@ -105,6 +105,7 @@ from src.backend.IconPackManagement.IconPackManager import IconPackManager
 from src.backend.WallpaperPackManagement.WallpaperPackManager import WallpaperPackManager
 from src.backend.SDPlusBarWallpaperPackManagement.SDPlusBarWallpaperPackManager import SDPlusBarWallpaperPackManager
 from src.backend.Store.StoreBackend import StoreBackend, NoConnectionError
+from src.backend.notify import Notify
 from autostart import setup_autostart, ensure_app_desktop_entry
 from src.Signals.SignalManager import SignalManager
 from src.backend.WindowGrabber.WindowGrabber import WindowGrabber
@@ -202,6 +203,11 @@ def create_global_objects():
     gl.gnome_extensions = GnomeExtensions()
 
     gl.settings_manager = SettingsManager()
+
+    # Before anything that can report to the user -- the plugin load below is
+    # the earliest caller, and the facade's desktop-notification fallback
+    # reads the app settings.
+    gl.notify = Notify()
 
     gl.signal_manager = SignalManager()
 
