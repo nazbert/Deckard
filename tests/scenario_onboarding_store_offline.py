@@ -101,14 +101,19 @@ def check_recommendations_offline() -> None:
 
 def check_install_failures_toast() -> None:
     from src.windows.Onboarding.OnboardingWindow import OnboardingScreen5
+    from src.backend.notify import Notify
 
     toasts = []
     gl.app = types.SimpleNamespace(
         main_win=types.SimpleNamespace(
             show=lambda: None,
+            is_visible=lambda: True,
             show_error_toast=lambda body: toasts.append(body),
         )
     )
+    # The real facade, not a stub: the onboarding path reports through
+    # gl.notify now, and its main-thread routing is part of what's under test.
+    gl.notify = Notify()
 
     async def get_plugin_for_id(plugin_id):
         return None  # unresolvable -> install failure

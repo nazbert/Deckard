@@ -143,11 +143,9 @@ class PluginPreview(StorePreview):
         self.install()
 
     def notify_install_failure(self):
-        if gl.app is None:
-            return
         name = self.plugin_data.plugin_name or self.plugin_data.plugin_id
-        gl.app.send_notification("dialog-information-symbolic", "Plugin install failed",
-                                 f"The plugin {name} could not be installed")
+        gl.notify.error(f"The plugin {name} could not be installed",
+                        title="Plugin install failed")
 
     def on_click_main(self, button: Gtk.Button):
         self.plugin_page.set_info_visible(True)

@@ -255,8 +255,7 @@ def update_assets():
     number_of_installed_updates = asyncio.run(gl.store_backend.update_everything())
     if isinstance(number_of_installed_updates, NoConnectionError):
         log.error("Failed to update store assets")
-        if hasattr(gl.app, "main_win"):
-            gl.app.main_win.show_error_toast("Failed to update store assets")
+        gl.notify.error("Failed to update store assets")
         return
     log.info(f"Updating {number_of_installed_updates} store assets took {time.time() - start} seconds")
 
@@ -264,8 +263,7 @@ def update_assets():
         return
 
     # Show toast in ui
-    if hasattr(gl.app, "main_win"):
-        gl.app.main_win.show_info_toast(f"{number_of_installed_updates} assets updated")
+    gl.notify.info(f"{number_of_installed_updates} assets updated")
 
 @log.catch
 def reset_all_decks():

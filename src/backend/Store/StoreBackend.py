@@ -1245,17 +1245,7 @@ class StoreBackend:
         body = f"{name} was installed but is disabled: {detail}"
         log.warning(f"Install of {plugin_id}: {body}")
 
-        if gl.app is not None:
-            def _notify():
-                gl.app.send_notification(
-                    "dialog-information-symbolic",
-                    "Plugin disabled",
-                    body,
-                )
-                # Explicit: a truthy return would make GLib re-run this
-                # forever (the SignalManager trampoline lesson, #56 item 1).
-                return False
-            GLib.idle_add(_notify)
+        gl.notify.info(body, title="Plugin disabled")
         return True
 
     def uninstall_plugin(self, plugin_id:str, remove_from_pages:bool = False, remove_files:bool = True) -> bool:
