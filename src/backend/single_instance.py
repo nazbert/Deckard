@@ -41,6 +41,12 @@ REPLY_ALREADY_OWNER = 4
 # never closed by GDBus, so on the real boot path this reference is the
 # documentation of that requirement; it also pins an injected private
 # connection (tests). Assigned only on a successful claim.
+#
+# GApplication registers the app id over this same shared connection later
+# in boot -- deliberate: the lock name and the app id are distinct names on
+# one connection (owning the lock never demotes the GApplication primary,
+# verified by scenario_single_instance_lock), and both drop together when
+# the process's connection goes away.
 _lock_bus = None
 
 
