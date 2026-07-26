@@ -5,8 +5,6 @@ import sys
 from loguru import logger as log
 import threading
 
-from gi.repository import GLib
-
 # Import own modules
 from src.backend.PluginManager.ActionHolder import ActionHolder
 from src.backend.PluginManager.PluginBase import PluginBase
@@ -206,11 +204,9 @@ class PluginManager:
             call()
 
     def show_load_errors_notification(self):
-        """Surfaces plugin load failures as an in-app error toast. Safe to
-        call from any thread and at any point during startup: before the app
-        exists the toast is deferred via gl.app_loading_finished_tasks (which
-        on_activate drains on the main thread once the window is up),
-        afterwards it is dispatched through GLib.idle_add."""
+        """Surfaces plugin load failures to the user. Safe to call from any
+        thread and at any point during startup -- gl.notify handles the
+        startup deferral and the main-thread marshalling."""
         with self._load_errors_lock:
             n_failed = len(self.load_errors)
         if n_failed == 0:
@@ -221,15 +217,7 @@ class PluginManager:
         else:
             body = f"{n_failed} plugins failed to load -- check the logs for details"
 
-        def call():
-            main_win = getattr(gl.app, "main_win", None) if gl.app is not None else None
-            if main_win is not None:
-                main_win.show_error_toast(body)
-
-        if gl.app is None:
-            gl.app_loading_finished_tasks.append(call)
-        else:
-            GLib.idle_add(call)
+        gl.notify.error(body, title="Plugins")
 
     @staticmethod
     def _get_plugin_folder_from_subclass(subclass) -> str:

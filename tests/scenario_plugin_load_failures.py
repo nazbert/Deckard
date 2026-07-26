@@ -132,8 +132,13 @@ def main() -> None:
 
     from src.backend.PluginManager.PluginBase import PluginBase
     from src.backend.PluginManager.PluginManager import PluginManager
+    from src.backend.notify import Notify
 
     seed_plugins()
+
+    # main.create_global_objects() installs this before the plugin load; the
+    # load-failure report goes through it.
+    gl.notify = Notify()
 
     pm = PluginManager()
     gl.plugin_manager = pm

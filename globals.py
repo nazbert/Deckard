@@ -81,6 +81,7 @@ if TYPE_CHECKING:
     from src.backend.WallpaperPackManagement.WallpaperPackManager import WallpaperPackManager
     from src.backend.SDPlusBarWallpaperPackManagement.SDPlusBarWallpaperPackManager import SDPlusBarWallpaperPackManager
     from src.backend.Store.StoreBackend import StoreBackend
+    from src.backend.notify import Notify
     from src.Signals.SignalManager import SignalManager
     from src.backend.WindowGrabber.WindowGrabber import WindowGrabber
     from src.backend.GnomeExtensions import GnomeExtensions
@@ -111,6 +112,7 @@ icon_pack_manager: "IconPackManager" = None
 wallpaper_pack_manager: "WallpaperPackManager" = None
 sd_plus_bar_wallpaper_pack_manager: "SDPlusBarWallpaperPackManager" = None
 store_backend: "StoreBackend" = None
+notify: "Notify" = None  # thread-safe UI notification facade; see src/backend/notify.py
 pyro_daemon: "Pyro5.api.Daemon" = None  # never actually set/read (P3.2 grep); Pyro5 stays TYPE_CHECKING-only
 signal_manager: "SignalManager" = None
 window_grabber: "WindowGrabber" = None

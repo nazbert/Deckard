@@ -358,17 +358,16 @@ class OnboardingScreen5(Gtk.Box):
         if failed:
             # The progress-bar text above dies with the closing window; the
             # user otherwise lands in the main window with no plugins and no
-            # explanation (issue #118). Toast on the surviving main window.
-            def _notify_failures():
-                main_win = getattr(gl.app, "main_win", None)
-                if main_win is not None:
-                    main_win.show_error_toast(
-                        f"Failed to install {len(failed)} plugin"
-                        f"{'s' if len(failed) != 1 else ''} "
-                        f"({', '.join(failed)}) -- you can retry from the Store"
-                    )
-                return False
-            GLib.idle_add(_notify_failures)
+            # explanation (issue #118). Reported on the surviving main
+            # window, which the idle_add(show) above has already queued --
+            # gl.notify's own idle runs after it, so the window is up by the
+            # time this is delivered.
+            gl.notify.error(
+                f"Failed to install {len(failed)} plugin"
+                f"{'s' if len(failed) != 1 else ''} "
+                f"({', '.join(failed)}) -- you can retry from the Store",
+                title="Plugin install failed"
+            )
 
 
 class DiscordOnboardingScreen(Gtk.Box):
