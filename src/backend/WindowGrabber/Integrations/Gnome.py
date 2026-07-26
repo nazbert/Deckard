@@ -27,9 +27,7 @@ from loguru import logger as log
 import globals as gl
 
 import gi
-
-if not gl.IS_MAC:
-    import dbus
+from gi.repository import Gio
 
 # Import typing
 from typing import TYPE_CHECKING
@@ -40,9 +38,7 @@ class Gnome(Integration):
     def __init__(self, window_grabber: "WindowGrabber"):
         super().__init__(window_grabber=window_grabber)
 
-        self.bus = None
         self.proxy = None
-        self.interface = None
         if not gl.IS_MAC:
             self.connect_dbus()
 
@@ -60,13 +56,31 @@ class Gnome(Integration):
         if gl.IS_MAC:
             return
         try:
-            self.bus = dbus.SessionBus()
-            self.proxy = self.bus.get_object("org.gnome.Shell", "/org/gnome/Shell/Extensions/StreamController")
-            self.interface = dbus.Interface(self.proxy, "org.gnome.Shell.Extensions.StreamController")
-            self.interface.connect_to_signal("FocusedWindowChanged", self.on_window_changed)
+            self.proxy = Gio.DBusProxy.new_for_bus_sync(
+                Gio.BusType.SESSION,
+                Gio.DBusProxyFlags.NONE,
+                None,
+                "org.gnome.Shell",
+                "/org/gnome/Shell/Extensions/StreamController",
+                "org.gnome.Shell.Extensions.StreamController",
+                None
+            )
+            # A GDBusProxy is constructed happily for a name nobody owns, so
+            # without this the extension being absent would read as connected
+            # and every window query would raise instead of returning empty.
+            if self.proxy.get_name_owner() is None:
+                self.proxy = None
+                raise RuntimeError("nothing owns org.gnome.Shell on the session bus")
+            self.proxy.connect("g-signal", self.on_dbus_signal)
         except Exception as e:
             log.error(f"Failed to connect to D-Bus: {e}")
             pass
+
+
+    def on_dbus_signal(self, proxy, sender_name: str, signal_name: str, parameters) -> None:
+        if signal_name != "FocusedWindowChanged":
+            return
+        self.on_window_changed(parameters.unpack()[0])
 
 
     def on_window_changed(self, answer: str) -> None:
@@ -79,7 +93,7 @@ class Gnome(Integration):
             return []
         
         try:
-            answer = json.loads(self.interface.GetAllWindows())
+            answer = json.loads(self.call("GetAllWindows"))
         except:
             return []
         windows: list[Window] = []
@@ -95,12 +109,15 @@ class Gnome(Integration):
         if not self.get_is_connected():
             return None
         try:
-            answer = json.loads(self.interface.GetFocusedWindow())
+            answer = json.loads(self.call("GetFocusedWindow"))
         except:
             return None
         wm_class = answer.get("wm_class")
-        title = answer.get("title") 
+        title = answer.get("title")
         return Window(wm_class, title)
-    
+
+    def call(self, method_name: str) -> str:
+        return self.proxy.call_sync(method_name, None, Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
+
     def get_is_connected(self) -> bool:
-        return None not in (self.bus, self.proxy, self.interface)
+        return self.proxy is not None

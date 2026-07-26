@@ -15,41 +15,59 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 # Import globals first to get IS_MAC
 import globals as gl
 
-if not gl.IS_MAC:
-    import dbus
+from gi.repository import Gio, GLib
 
 from loguru import logger as log
 
 class GnomeExtensions:
     def __init__(self):
-        self.bus = None
         self.proxy = None
-        self.interface = None
         self.connect_dbus()
 
     def connect_dbus(self) -> None:
         if gl.IS_MAC:
             return
         try:
-            self.bus = dbus.SessionBus()
-            self.proxy = self.bus.get_object("org.gnome.Shell", "/org/gnome/Shell")
-            self.interface = dbus.Interface(self.proxy, "org.gnome.Shell.Extensions")
+            self.proxy = Gio.DBusProxy.new_for_bus_sync(
+                Gio.BusType.SESSION,
+                Gio.DBusProxyFlags.NONE,
+                None,
+                "org.gnome.Shell",
+                "/org/gnome/Shell",
+                "org.gnome.Shell.Extensions",
+                None
+            )
+            # A GDBusProxy is constructed happily for a name nobody owns, so
+            # off GNOME the failure would otherwise surface much later, out of
+            # the calls below that have no error path. The owner check keeps
+            # "not connected" where it used to be.
+            if self.proxy.get_name_owner() is None:
+                self.proxy = None
+                raise RuntimeError("nothing owns org.gnome.Shell on the session bus")
         except Exception as e:
             log.error(f"Failed to connect to D-Bus: {e}")
             pass
 
     def get_is_connected(self) -> bool:
-        return None not in (self.bus, self.proxy, self.interface)
-    
+        return self.proxy is not None
+
     def get_installed_extensions(self) -> list[str]:
         extensions: list[str] = []
         if not self.get_is_connected(): return extensions
 
-        for extension in self.interface.ListExtensions():
+        # a{sa{sv}} keyed by uuid; iterating the reply dict yields the uuids,
+        # exactly what the dict-like dbus-python reply yielded.
+        reply = self.proxy.call_sync("ListExtensions", None, Gio.DBusCallFlags.NONE, -1, None)
+        for extension in reply.unpack()[0]:
             extensions.append(extension)
         return extensions
 
     def request_installation(self, uuid: str) -> bool:
         if not self.get_is_connected(): return False
-        response = self.interface.InstallRemoteExtension(uuid)
+        # Default timeout on purpose: GNOME Shell only answers this once the
+        # user has dismissed its install confirmation dialog.
+        reply = self.proxy.call_sync(
+            "InstallRemoteExtension", GLib.Variant("(s)", (uuid,)), Gio.DBusCallFlags.NONE, -1, None
+        )
+        response = reply.unpack()[0]
         return True if response == "successful" else False
