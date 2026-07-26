@@ -19,22 +19,44 @@ import time
 
 import fixtures  # noqa: F401  -- sys.path setup for src imports
 
-try:
-    import dbus
-except ImportError:
-    print("SKIP: dbus-python not available")
-    print("PASS: scenario_single_instance_lock")
-    raise SystemExit(0)
+from gi.repository import Gio, GLib
 
 from src.backend import single_instance
+
+
+def private_bus() -> Gio.DBusConnection:
+    """A fresh connection to the session bus, distinct from every other one.
+
+    Gio.bus_get_sync() hands out a process-wide SHARED connection, which the
+    daemon would see as a single owner -- useless for racing claims against
+    each other. new_for_address_sync() opens its own, and exit-on-close is
+    cleared so the deliberate close_sync() below can never take the test
+    process down with it.
+    """
+    address = Gio.dbus_address_get_for_bus_sync(Gio.BusType.SESSION, None)
+    conn = Gio.DBusConnection.new_for_address_sync(
+        address,
+        Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+        None,
+        None,
+    )
+    conn.set_exit_on_close(False)
+    return conn
+
+
+def close_bus(conn: Gio.DBusConnection) -> None:
+    try:
+        conn.close_sync(None)
+    except Exception:
+        pass
 
 
 def main() -> None:
     fixtures.start_watchdog(30, label="scenario_single_instance_lock")
     try:
-        bus_a = dbus.SessionBus(private=True)
-        bus_b = dbus.SessionBus(private=True)
-    except dbus.exceptions.DBusException as e:
+        bus_a = private_bus()
+        bus_b = private_bus()
+    except GLib.Error as e:
         print(f"SKIP: no session bus available ({e})")
         print("PASS: scenario_single_instance_lock")
         return
@@ -56,7 +78,7 @@ def main() -> None:
 
         # 4. --close-running path: with wait_seconds, a claim succeeds once
         # the owner releases (connection close drops the name).
-        threading.Timer(0.5, bus_a.close).start()
+        threading.Timer(0.5, close_bus, args=(bus_a,)).start()
         start = time.monotonic()
         assert single_instance.claim(app_id, bus=bus_b, wait_seconds=5.0) is True, (
             "claim did not succeed after the owner released the lock"
@@ -71,7 +93,7 @@ def main() -> None:
         results_lock = threading.Lock()
 
         def racer():
-            b = dbus.SessionBus(private=True)
+            b = private_bus()
             won = single_instance.claim(race_id, bus=b)
             with results_lock:
                 results.append((won, b))
@@ -87,17 +109,11 @@ def main() -> None:
             "the daemon-serialized exclusion is broken"
         )
         for _, b in results:
-            try:
-                b.close()
-            except Exception:
-                pass
+            close_bus(b)
 
         print("PASS: lock is atomic (8-way race: 1 winner), idempotent for the owner, and released on exit")
     finally:
-        try:
-            bus_b.close()
-        except Exception:
-            pass
+        close_bus(bus_b)
 
     print("PASS: scenario_single_instance_lock")
 
