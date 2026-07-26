@@ -48,11 +48,10 @@ class KeepRunningDialog(Adw.MessageDialog):
         self.connect("response", self.on_response)
 
     def on_response(self, dialog: Adw.MessageDialog, response: str) -> None:
-        app_settings = gl.settings_manager.get_app_settings()
+        app_settings = gl.settings_manager.app()
         keep_runnning = (response == "yes")
-        app_settings.setdefault("system", {})
-        app_settings["system"]["keep-running"] = keep_runnning
-        gl.settings_manager.save_app_settings(app_settings)
+        app_settings.keep_running = keep_runnning
+        app_settings.save()
 
         if callable(self.callback):
             self.callback(keep_runnning)

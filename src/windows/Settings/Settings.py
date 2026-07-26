@@ -133,25 +133,22 @@ class UIPageGroup(Adw.PreferencesGroup):
 
 
     def on_trayicon_row_toggled(self, *args):
-        self.settings.settings_json.setdefault("ui", {})
-        self.settings.settings_json["ui"]["tray-icon"] = self.trayicon_row.get_active()
+        self.settings.app.tray_icon = self.trayicon_row.get_active()
 
         self.settings.save_json()
-        if self.settings.settings_json["ui"]["tray-icon"]:
+        if self.settings.app.tray_icon:
             gl.tray_icon.start()
         else:
             gl.tray_icon.stop()
 
     def on_emulate_row_toggled(self, *args):
-        self.settings.settings_json.setdefault("key-grid", {})
-        self.settings.settings_json["key-grid"]["emulate-at-double-click"] = self.emulate_row.get_active()
+        self.settings.app.emulate_at_double_click = self.emulate_row.get_active()
 
         # Save
         self.settings.save_json()
 
     def on_enable_fps_warnings_row_toggled(self, *args):
-        self.settings.settings_json.setdefault("warnings", {})
-        self.settings.settings_json["warnings"]["enable-fps-warnings"] = self.enable_fps_warnings_row.get_active()
+        self.settings.app.enable_fps_warnings = self.enable_fps_warnings_row.get_active()
 
         # Save
         self.settings.save_json()
@@ -161,8 +158,7 @@ class UIPageGroup(Adw.PreferencesGroup):
             controller.media_player.set_show_fps_warnings(self.enable_fps_warnings_row.get_active())
 
     def on_allow_white_mode_toggled(self, *args):
-        self.settings.settings_json.setdefault("ui", {})
-        self.settings.settings_json["ui"]["allow-white-mode"] = self.allow_white_mode.get_active()
+        self.settings.app.allow_white_mode = self.allow_white_mode.get_active()
 
         if self.allow_white_mode.get_active():
             gl.app.style_manager.set_color_scheme(Adw.ColorScheme.PREFER_DARK)
@@ -173,15 +169,13 @@ class UIPageGroup(Adw.PreferencesGroup):
         self.settings.save_json()
 
     def on_show_notifications_toggled(self, *args):
-        self.settings.settings_json.setdefault("ui", {})
-        self.settings.settings_json["ui"]["show-notifications"] = self.show_notifications.get_active()
+        self.settings.app.show_notifications = self.show_notifications.get_active()
 
         # Save
         self.settings.save_json()
 
     def on_auto_config_row_toggled(self, *args):
-        self.settings.settings_json.setdefault("ui", {})
-        self.settings.settings_json["ui"]["auto-open-action-config"] = self.auto_config_row.get_active()
+        self.settings.app.auto_open_action_config = self.auto_config_row.get_active()
 
         # Save
         self.settings.save_json()
@@ -219,8 +213,7 @@ class FakeDecksGroup(Adw.PreferencesGroup):
 
     def on_n_fake_decks_row_changed(self, *args):
         #FIXME: For some reason this gets called twice
-        self.settings.settings_json.setdefault("dev", {})
-        self.settings.settings_json["dev"]["n-fake-decks"] = self.n_fake_decks_row.get_value()
+        self.settings.app.n_fake_decks = self.n_fake_decks_row.get_value()
 
         # Save
         self.settings.save_json()
@@ -251,13 +244,11 @@ class RemoteDecksGroup(Adw.PreferencesGroup):
     def on_row_changed(self, *args):
         #FIXME: For some reason this gets called twice
         n_decks = self.n_remote_decks_row.get_value()
-        app_settings = gl.settings_manager.get_app_settings()
-
-        app_settings.setdefault("dev", {})
-        app_settings["dev"]["n-remote-decks"] = n_decks
+        app_settings = gl.settings_manager.app()
+        app_settings.n_remote_decks = n_decks
 
         # Save
-        gl.settings_manager.save_app_settings(app_settings)
+        app_settings.save()
 
         if n_decks > 0:
             gl.deck_manager.load_remote_decks()
@@ -389,8 +380,7 @@ class GeneralPageGroup(Adw.PreferencesGroup):
         self.rolling_labels.set_active(app.rolling_labels)
 
     def on_n_fake_decks_row_changed(self, *args):
-        self.settings.settings_json.setdefault("general", {})
-        self.settings.settings_json["general"]["hold-time"] = self.hold_time_row.get_value()
+        self.settings.app.hold_time = self.hold_time_row.get_value()
 
         for controller in gl.deck_manager.deck_controller:
             controller.hold_time = self.hold_time_row.get_value()
@@ -402,8 +392,7 @@ class GeneralPageGroup(Adw.PreferencesGroup):
         gl.deck_manager.load_fake_decks()
 
     def on_rolling_labels_changed(self, *args):
-        self.settings.settings_json.setdefault("general", {})
-        self.settings.settings_json["general"]["rolling-labels"] = self.rolling_labels.get_active()
+        self.settings.app.rolling_labels = self.rolling_labels.get_active()
 
         # Save
         self.settings.save_json()
@@ -459,8 +448,7 @@ class FontRow(Adw.ActionRow):
         gl.settings_manager.font_defaults["font-weight"] = weight
         gl.settings_manager.font_defaults["font-style"] = style
 
-        self.font_page_group.settings.settings_json.setdefault("general", {})
-        self.font_page_group.settings.settings_json["general"]["default-font"] = gl.settings_manager.font_defaults
+        self.font_page_group.settings.app.default_font = gl.settings_manager.font_defaults
         gl.settings_manager.save_font_defaults()
 
         self.font_page_group.settings.save_json()
@@ -486,8 +474,7 @@ class FontColorRow(Adw.ActionRow):
         font_color = widget.get_rgba()
 
         gl.settings_manager.font_defaults["font-color"] = gdk_color_to_values(font_color)
-        self.font_page_group.settings.settings_json.setdefault("general", {})
-        self.font_page_group.settings.settings_json["general"]["default-font"] = gl.settings_manager.font_defaults
+        self.font_page_group.settings.app.default_font = gl.settings_manager.font_defaults
         gl.settings_manager.save_font_defaults()
 
         threading.Thread(target=gl.page_manager.reload_all_pages, daemon=True, name="reload-all-pages").start()
@@ -511,8 +498,7 @@ class FontOutlineColorRow(Adw.ActionRow):
         outline_color = widget.get_rgba()
 
         gl.settings_manager.font_defaults["outline-color"] = gdk_color_to_values(outline_color)
-        self.font_page_group.settings.settings_json.setdefault("general", {})
-        self.font_page_group.settings.settings_json["general"]["default-font"] = gl.settings_manager.font_defaults
+        self.font_page_group.settings.app.default_font = gl.settings_manager.font_defaults
         gl.settings_manager.save_font_defaults()
 
         threading.Thread(target=gl.page_manager.reload_all_pages, daemon=True, name="reload-all-pages").start()
@@ -537,8 +523,7 @@ class FontOutlineWidthRow:
         outline_width = widget.get_value()
 
         gl.settings_manager.font_defaults["outline-width"] = outline_width
-        self.font_page_group.settings.settings_json.setdefault("general", {})
-        self.font_page_group.settings.settings_json["general"]["default-font"] = gl.settings_manager.font_defaults
+        self.font_page_group.settings.app.default_font = gl.settings_manager.font_defaults
         gl.settings_manager.save_font_defaults()
 
         threading.Thread(target=gl.page_manager.reload_all_pages, daemon=True, name="reload-all-pages").start()
@@ -580,8 +565,7 @@ class StorePageGroup(Adw.PreferencesGroup):
         self.auto_update.set_active(self.settings.app.auto_update)
 
     def on_auto_update_toggled(self, *args):
-        self.settings.settings_json.setdefault("store", {})
-        self.settings.settings_json["store"]["auto-update"] = self.auto_update.get_active()
+        self.settings.app.auto_update = self.auto_update.get_active()
 
         # Save
         self.settings.save_json()
@@ -608,11 +592,10 @@ class CustomContentGroup(BetterPreferencesGroup):
         self.load_config_values()
 
     def on_toggle_enable(self, switch: Gtk.Switch, *args):
-        settings = gl.settings_manager.get_app_settings()
-        settings.setdefault("store", {})
-        settings["store"][self.enable_key] = switch.get_active()
+        settings = gl.settings_manager.app()
+        settings.set("store", self.enable_key, switch.get_active())
 
-        gl.settings_manager.save_app_settings(settings)
+        settings.save()
 
     def add_row(self, i: int, url: str, branch: str):
         self.add(CustomContentEntry(content_group=self, i=i, url=url, branch=branch))
@@ -731,8 +714,7 @@ class PerformancePageGroup(Adw.PreferencesGroup):
         self.cache_videos.set_active(app.cache_videos)
 
     def on_n_cached_pages_changed(self, *args):
-        self.settings.settings_json.setdefault("performance", {})
-        self.settings.settings_json["performance"]["n-cached-pages"] = int(self.n_cached_pages.get_value())
+        self.settings.app.n_cached_pages = int(self.n_cached_pages.get_value())
 
         # Save
         self.settings.save_json()
@@ -741,8 +723,7 @@ class PerformancePageGroup(Adw.PreferencesGroup):
         gl.page_manager.set_pages_to_cache(int(self.n_cached_pages.get_value()))
 
     def on_cache_videos_toggled(self, *args):
-        self.settings.settings_json.setdefault("performance", {})
-        self.settings.settings_json["performance"]["cache-videos"] = self.cache_videos.get_active()
+        self.settings.app.cache_videos = self.cache_videos.get_active()
 
         # Save
         self.settings.save_json()
@@ -787,15 +768,13 @@ class SystemGroup(Adw.PreferencesGroup):
         self.lock_on_lock_screen.set_active(app.lock_on_lock_screen)
 
     def on_keep_running_toggled(self, *args):
-        self.settings.settings_json.setdefault("system", {})
-        self.settings.settings_json["system"]["keep-running"] = self.keep_running.get_active()
+        self.settings.app.keep_running = self.keep_running.get_active()
 
         # Save
         self.settings.save_json()
 
     def on_autostart_toggled(self, *args):
-        self.settings.settings_json.setdefault("system", {})
-        self.settings.settings_json["system"]["autostart"] = self.autostart.get_active()
+        self.settings.app.autostart = self.autostart.get_active()
 
         setup_autostart(self.autostart.get_active())
 
@@ -803,8 +782,7 @@ class SystemGroup(Adw.PreferencesGroup):
         self.settings.save_json()
 
     def on_lock_on_lock_screen_toggled(self, *args):
-        self.settings.settings_json.setdefault("system", {})
-        self.settings.settings_json["system"]["lock-on-lock-screen"] = self.lock_on_lock_screen.get_active()
+        self.settings.app.lock_on_lock_screen = self.lock_on_lock_screen.get_active()
 
         # Save
         self.settings.save_json()
