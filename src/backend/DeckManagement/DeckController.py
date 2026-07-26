@@ -51,6 +51,7 @@ from src.backend.DeckManagement.Subclasses.ScreenSaver import ScreenSaver
 from src.backend.DeckManagement.Subclasses.SingleKeyAsset import SingleKeyAsset
 from src.backend.DeckManagement.Subclasses.background_video_cache import BackgroundVideoCache
 from src.backend.DeckManagement.Subclasses.encoded_image_cache import EncodedImageCache
+from src.backend.DeckManagement.Subclasses.native_tile_cache import NativeTileCache, native_tile_cache_max_bytes
 from src.backend.DeckManagement.Subclasses.media_pipeline_profiler import media_prof
 from src.backend.mem_telemetry import page_switches
 from src.backend import timer_wheel
@@ -79,7 +80,13 @@ import globals as gl
 import io
 
 
-def encode_native_key(deck, image: "Image.Image", quality: int = 90) -> bytes:
+# JPEG quality every key native is encoded at. Named because it is part of
+# the native tile cache key: bytes encoded at one quality must never be
+# served for another.
+KEY_ENCODE_QUALITY = 90
+
+
+def encode_native_key(deck, image: "Image.Image", quality: int = KEY_ENCODE_QUALITY) -> bytes:
     """PILHelper.to_native_key_format with tunable JPEG quality (the library
     hardcodes q100): smaller JPEGs mean fewer serial USB HID writes per key."""
     fmt = deck.key_image_format()
@@ -974,6 +981,7 @@ class DeckController:
         self._serial_number: str = None
         self._key_image_size: tuple[int] = None
         self._touchscreen_image_size: tuple[int] = None
+        self._native_key_format_sig: tuple = None
 
         # Open the deck - why store it as self.deck? So that self.get_alive() returns True in get_deck_settings
         self.deck = deck
@@ -1110,6 +1118,10 @@ class DeckController:
         # Encoded key images keyed by (composite hash, rotation): repeated
         # frames (looping background video) skip conversion + JPEG encode.
         self.encode_memo = EncodedImageCache(max_bytes=32 * 1024 * 1024)
+        # The same natives keyed by FRAME IDENTITY for the passthrough path
+        # (#163): a bare key over a video background skips the tobytes+hash
+        # as well, so a warmed loop costs a dict lookup per key.
+        self.native_tile_cache = NativeTileCache(max_bytes=native_tile_cache_max_bytes())
 
         # Bounded thread pool for action callbacks (tick/update/ready/event),
         # sized so every input can run its on_tick concurrently.
@@ -1387,6 +1399,31 @@ class DeckController:
             size = max(size[0], 72), max(size[1], 72)
         self._key_image_size = size
         return size
+
+    def native_key_format_sig(self) -> tuple:
+        """Hashable signature of the deck's native key image format. Part of
+        every native tile cache key, so bytes encoded for one device format
+        can never be served for another; memoized because the driver's
+        format is fixed for the life of the device (the user-facing rotation
+        is NOT part of it -- that lives on BetterDeck and is keyed
+        separately)."""
+        if self._native_key_format_sig is None:
+            fmt = self.deck.key_image_format()
+            self._native_key_format_sig = (
+                tuple(fmt["size"]), fmt["format"], tuple(fmt["flip"]), fmt["rotation"],
+            )
+        return self._native_key_format_sig
+
+    def clear_encoded_key_caches(self) -> None:
+        """Drops every cached native key image -- the pixel-hash encode memo
+        AND the frame-identity native tiles. Called wherever the content
+        those entries were encoded from is orphaned wholesale: a background
+        content change, a rotation change, or teardown. getattr-guarded
+        because Background is constructed before either cache exists."""
+        for cache_name in ("encode_memo", "native_tile_cache"):
+            cache = getattr(self, cache_name, None)
+            if cache is not None:
+                cache.clear()
 
     def get_touchscreen_image_size(self) -> tuple[int]:
         if self._touchscreen_image_size is not None:
@@ -1911,6 +1948,10 @@ class DeckController:
 
     def set_rotation(self, value):
         self.deck.set_rotation(value)
+        # Rotation is part of both native cache keys, so nothing stale can
+        # be served -- this is memory hygiene: every entry encoded for the
+        # old rotation is dead the moment it changes.
+        self.clear_encoded_key_caches()
 
         self.own_key_grid = None
 
@@ -2309,9 +2350,7 @@ class DeckController:
                 self.close_image_ressources()
             except Exception:
                 log.opt(exception=True).warning("Failed to close image resources during close()")
-            encode_memo = getattr(self, "encode_memo", None)
-            if encode_memo is not None:
-                encode_memo.clear()
+            self.clear_encoded_key_caches()
             if media_player is not None:
                 media_player.image_tasks.clear()
                 media_player.tasks.clear()
@@ -2436,14 +2475,13 @@ class Background:
         self.video = None
         self._touchscreen_slice = None
         self._video_strip = None
-        # mem-plan P2.5: a content change orphans the whole encode memo --
+        # mem-plan P2.5: a content change orphans every cached native --
         # every entry was keyed against the OLD background's composited
-        # pixels/hashes, none of which can ever hit again. Left uncleared,
-        # a full (32MB) memo from the previous background would simply sit
-        # there dead until LRU eviction happened to churn through it.
-        encode_memo = getattr(self.deck_controller, "encode_memo", None)
-        if encode_memo is not None:
-            encode_memo.clear()
+        # pixels/hashes (or its frames). Left uncleared, a full memo from
+        # the previous background would simply sit there dead until LRU
+        # eviction happened to churn through it.
+        self._identified_tiles = None
+        self.deck_controller.clear_encoded_key_caches()
         gc.collect()
 
         self.update_tiles()
@@ -2458,10 +2496,11 @@ class Background:
         self._touchscreen_slice = None
         self._video_strip = None
         # mem-plan P2.5: see set_image()'s comment -- same reasoning applies
-        # to a video-to-video (or image-to-video) content change.
-        encode_memo = getattr(self.deck_controller, "encode_memo", None)
-        if encode_memo is not None:
-            encode_memo.clear()
+        # to a video-to-video (or image-to-video) content change. The md5 in
+        # a native tile key already makes a source swap collision-free; the
+        # clear is what stops the old video's frames lingering.
+        self._identified_tiles = None
+        self.deck_controller.clear_encoded_key_caches()
         gc.collect()
 
         self.update_tiles()
@@ -4262,6 +4301,19 @@ class ControllerKey(ControllerInput):
         # invalidates this paint at the present boundary.
         page = self.deck_controller.active_page
         config_gen = self.config_gen
+
+        # Frame-identity fast path (#163): a passthrough key over a video
+        # background composites to exactly the shared tile, so its native
+        # bytes are a pure function of the frame it came from -- no pixels
+        # have to be serialized, hashed or re-encoded to know what belongs
+        # on the device. Steady-state playback of a loop is then a dict
+        # lookup plus the USB write.
+        if self.deck_controller.native_tile_cache.enabled and self._tile_passthrough_ok(self.get_active_state()):
+            identified = self.deck_controller.background.get_identified_tile(self.index)
+            if identified is not None:
+                self._update_from_tile_identity(identified, page, config_gen, force)
+                return
+
         if media_prof:
             _t0 = time.perf_counter()
         image = self.get_current_image()
@@ -4288,13 +4340,7 @@ class ControllerKey(ControllerInput):
             memo_key = (img_hash, self.deck_controller.deck.get_rotation())
             native_image = self.deck_controller.encode_memo.get(memo_key)
             if native_image is None:
-                # Handle transparency properly - composite RGBA onto RGB to preserve smooth edges
-                if image.mode == "RGBA":
-                    rgb_background = Image.new("RGB", image.size, (0, 0, 0))
-                    rgb_background.paste(image, (0, 0), image)
-                    rgb_image = rgb_background.rotate(self.deck_controller.deck.get_rotation())
-                else:
-                    rgb_image = image.convert("RGB").rotate(self.deck_controller.deck.get_rotation())
+                rgb_image = self._to_rotated_rgb(image)
                 native_image = encode_native_key(self.deck_controller.deck, rgb_image)
                 rgb_image.close()
                 self.deck_controller.encode_memo.put(memo_key, native_image)
@@ -4307,6 +4353,64 @@ class ControllerKey(ControllerInput):
             self.deck_controller.media_player.add_image_task(self.index, native_image, page=page, config_gen=config_gen, controller_key=self, img_hash=img_hash)
 
         self.set_ui_key_image(image)
+
+    def _to_rotated_rgb(self, image: Image.Image) -> Image.Image:
+        """The device-ready RGB form of a composited key image. Handles
+        transparency properly - composites RGBA onto RGB to preserve smooth
+        edges. Never mutates `image` (both branches build a new one), which
+        is what lets the frame-identity path pass the SHARED background tile
+        in without copying it first."""
+        rotation = self.deck_controller.deck.get_rotation()
+        if image.mode == "RGBA":
+            rgb_background = Image.new("RGB", image.size, (0, 0, 0))
+            rgb_background.paste(image, (0, 0), image)
+            return rgb_background.rotate(rotation)
+        return image.convert("RGB").rotate(rotation)
+
+    def _update_from_tile_identity(self, identified: tuple, page, config_gen, force: bool) -> None:
+        """Presents a passthrough key straight from its frame identity (see
+        update()). `identified` is the (tile, (video md5, frame index)) pair
+        Background handed out as one read."""
+        tile, (video_md5, frame_index) = identified
+
+        if media_prof:
+            _t0 = time.perf_counter()
+
+        # Stands in for the pixel hash wherever the present-boundary
+        # bookkeeping uses one: stable for a frame, distinct across frames
+        # and keys. The skip still needs BOTH the last presented hash
+        # (_last_img_hash, set in the task's run()) and the last enqueued
+        # one to match -- either alone can be stale (dropped paint /
+        # in-flight revert) and would wrongly skip the correcting repaint.
+        img_hash = hash(("vidtile", video_md5, frame_index, self.index))
+        if (not force and img_hash == getattr(self, '_last_img_hash', None)
+                and img_hash == getattr(self, '_last_enqueued_hash', None)):
+            if media_prof:
+                media_prof.count("hash_skip")
+            return
+
+        if self.deck_controller.is_visual():
+            cache_key = (video_md5, frame_index, self.index,
+                         self.deck_controller.deck.get_rotation(),
+                         KEY_ENCODE_QUALITY,
+                         self.deck_controller.native_key_format_sig())
+            native_image = self.deck_controller.native_tile_cache.get(cache_key)
+            if native_image is None:
+                rgb_image = self._to_rotated_rgb(tile)
+                native_image = encode_native_key(self.deck_controller.deck, rgb_image)
+                rgb_image.close()
+                self.deck_controller.native_tile_cache.put(cache_key, native_image)
+                if media_prof:
+                    media_prof.add("encode", time.perf_counter() - _t0)
+                    media_prof.count("native_id_miss")
+            elif media_prof:
+                media_prof.count("native_id_hit")
+            self._last_enqueued_hash = img_hash
+            self.deck_controller.media_player.add_image_task(self.index, native_image, page=page, config_gen=config_gen, controller_key=self, img_hash=img_hash)
+
+        # The in-app preview still wants a PIL image, and the tile is shared
+        # with every other reader of this frame -- hand the UI its own copy.
+        self.set_ui_key_image(copy(tile))
 
     def get_active_state(self) -> "ControllerKeyState":
         return super().get_active_state()
@@ -4424,26 +4528,33 @@ class ControllerKey(ControllerInput):
         # that triggers a page change would otherwise pin the old page.
         self.deck_controller.mark_page_ready_to_clear(True, pressed_page)
 
-    def get_current_image(self) -> Image.Image:
-        state = self.get_active_state()
-
-        background_color = self.get_active_state().background_manager.get_composed_color()
-
-        # A key with no color layer, media, labels, or markers composites to
-        # exactly the shared background tile; return a copy of it directly
-        # (matters per-frame over an animated background).
-        if (background_color[-1] == 0
+    def _tile_passthrough_ok(self, state: "ControllerKeyState") -> bool:
+        """Whether this key composites to exactly the shared background tile
+        -- no color layer, media, labels, or markers over it. Gates both the
+        composite fast path (get_current_image) and the frame-identity fast
+        path (update); one definition so the two can never disagree about
+        which keys are bare."""
+        return (state.background_manager.get_composed_color()[-1] == 0
                 and state._overlay is None
                 and state.key_image is None
                 and state.key_video is None
                 and not state.label_manager.get_has_visible_labels()
                 and not self.is_pressed()
-                and not (self.has_unavailable_action() and not self.deck_controller.screen_saver.showing)):
+                and not (self.has_unavailable_action() and not self.deck_controller.screen_saver.showing))
+
+    def get_current_image(self) -> Image.Image:
+        state = self.get_active_state()
+
+        # A bare key's composite IS the shared background tile; return a copy
+        # of it directly (matters per-frame over an animated background).
+        if self._tile_passthrough_ok(state):
             tile = self.deck_controller.background.tiles[self.index]
             if tile is not None:
                 if media_prof:
                     media_prof.count("tile_passthrough")
                 return copy(tile)
+
+        background_color = state.background_manager.get_composed_color()
 
         if media_prof:
             _t0 = time.perf_counter()
