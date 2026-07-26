@@ -37,6 +37,7 @@ from loguru import logger as log
 
 # Import own modules
 from src.backend.DeckManagement.BetterDeck import BetterDeck
+from src.backend.DeckManagement.fair_lock import FairLock
 from src.backend.DeckManagement.HelperMethods import *
 from src.backend.DeckManagement.ImageHelpers import *
 from src.backend.DeckManagement.InputIdentifier import Input, InputEvent, InputIdentifier
@@ -269,6 +270,52 @@ def _env_float(name: str, default: float) -> float:
     except ValueError:
         log.warning(f"Ignoring malformed {name}={raw!r}; using the default {default}")
         return default
+
+
+def _install_fair_transport_lock(deck) -> bool:
+    """Swaps the transport's per-device mutex for a FIFO one (issue #164).
+
+    The library guards every read, write and feature report of a device with
+    `deck.device.mutex`, a stock threading.Lock. Unfair ordering there lets a
+    write burst out-race the HID read poll, which is what dial input
+    starvation is. The swap is a single attribute assignment on an object
+    this process owns; the library is neither vendored nor patched, so an
+    upstream rename degrades to today's behaviour (unfair lock, env knobs
+    still available) rather than to broken -- hence every guard below returns
+    False instead of raising.
+
+    MUST run before `deck.open()`: that is what starts the reader thread, so
+    before it no thread can be inside the old lock and the swap cannot leave
+    two threads in hidapi at once. The reopen path (resume from suspend)
+    reuses the same Device instance, so the FIFO lock survives suspend
+    cycles without a reinstall. Returns whether the FIFO lock is installed."""
+    device = getattr(deck, "device", None)
+    if device is None:
+        # FakeDeck / RemoteDeck and friends have no HID transport to order.
+        log.info(f"Deck {type(deck).__name__} has no transport device; "
+                 f"keeping the stock lock")
+        return False
+
+    mutex = getattr(device, "mutex", None)
+    if mutex is None:
+        log.warning(f"Transport {type(device).__name__} has no mutex attribute; "
+                    f"skipping the fair transport lock (library drift?)")
+        return False
+
+    if isinstance(mutex, FairLock):
+        return True
+
+    locked = getattr(mutex, "locked", None)
+    if callable(locked) and locked():
+        # Only reachable if this ever moves after open(): swapping a held
+        # lock would let the holder and a new acquirer into hidapi together.
+        log.warning("Transport mutex is held; skipping the fair transport lock")
+        return False
+
+    device.mutex = FairLock()
+    log.info(f"Installed the fair (FIFO) transport lock on "
+             f"{type(device).__name__}")
+    return True
 
 
 class MediaPlayerThread(threading.Thread):
@@ -918,6 +965,10 @@ class DeckController:
 
         # Open the deck - why store it as self.deck? So that self.get_alive() returns True in get_deck_settings
         self.deck = deck
+        # Order the transport mutex FIFO before open() starts the reader
+        # thread -- see _install_fair_transport_lock for why the ordering of
+        # these two lines is load-bearing.
+        _install_fair_transport_lock(deck)
         # Resume-from-suspend handle reopen is the library's only mode now
         # (plan §9.1, decided 2026-07-04) -- always on.
         self.deck.open(True)

@@ -19,6 +19,10 @@ Covers:
   (d) non-blocking acquire, timeout, and release-when-unlocked semantics
       match what a threading.Lock stand-in has to provide, and a timed-out
       waiter never wedges the queue behind its abandoned ticket.
+  (e) the install guard swaps a stock transport mutex, is idempotent, and
+      no-ops on every shape it cannot prove safe (no transport device at
+      all -- FakeDeck/RemoteDeck; a transport without a mutex attribute --
+      library drift; a mutex that is currently held).
 """
 import threading
 import time
@@ -181,6 +185,58 @@ def check_lock_protocol_semantics() -> None:
     print("PASS: non-blocking, timeout and release-unlocked semantics hold")
 
 
+class _StubTransport:
+    def __init__(self, mutex=None):
+        if mutex is not None:
+            self.mutex = mutex
+
+
+class _StubDeck:
+    def __init__(self, device=None):
+        self.device = device
+
+
+def check_install_guards() -> None:
+    fixtures.install_stub_globals()
+    from src.backend.DeckManagement.DeckController import _install_fair_transport_lock
+    from faulty_fake_deck import FaultyFakeDeck
+
+    stock = threading.Lock()
+    deck = _StubDeck(_StubTransport(stock))
+    assert _install_fair_transport_lock(deck), "stock transport mutex was not swapped"
+    installed = deck.device.mutex
+    assert isinstance(installed, FairLock), f"mutex is {type(installed).__name__}"
+
+    # Idempotent: a second pass must not hand the transport a fresh lock
+    # (which would be exactly the swap-while-held hazard the guard exists
+    # to avoid, were this ever called twice).
+    assert _install_fair_transport_lock(deck)
+    assert deck.device.mutex is installed, "install replaced an existing FairLock"
+
+    # No transport device: FakeDeck, RemoteDeck, anything non-HID.
+    assert not _install_fair_transport_lock(_StubDeck(None)), (
+        "install claimed success on a deck with no transport"
+    )
+    assert not _install_fair_transport_lock(
+        FaultyFakeDeck(serial_number="fairlock-fake", deck_type="Fake Deck")
+    ), "install claimed success on a FakeDeck"
+
+    # Library drift: a transport whose mutex attribute is gone.
+    assert not _install_fair_transport_lock(_StubDeck(_StubTransport())), (
+        "install claimed success on a transport with no mutex"
+    )
+
+    # A held mutex must never be swapped out from under its holder.
+    held = threading.Lock()
+    held.acquire()
+    held_deck = _StubDeck(_StubTransport(held))
+    assert not _install_fair_transport_lock(held_deck), "install swapped a held mutex"
+    assert held_deck.device.mutex is held, "held mutex was replaced anyway"
+    held.release()
+
+    print("PASS: install guard swaps a stock mutex and no-ops on every other shape")
+
+
 def main() -> None:
     fixtures.start_watchdog(WATCHDOG_SECONDS, label="scenario_fair_lock")
 
@@ -188,6 +244,7 @@ def main() -> None:
     check_hot_loop_cannot_starve_a_waiter()
     check_exception_path_releases()
     check_lock_protocol_semantics()
+    check_install_guards()
 
     print("PASS: scenario_fair_lock")
 
