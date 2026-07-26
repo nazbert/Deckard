@@ -53,7 +53,7 @@ def main() -> None:
     deck = controller.deck
     touch = controller.inputs[Input.Touchscreen][0]
     hz = media_player._video_write_hz
-    assert hz == 20.0, f"fixture sanity: expected the default 20Hz budget, got {hz}"
+    assert hz == 30.0, f"fixture sanity: expected the default 30Hz budget, got {hz}"
 
     # --- 1. A tick-rate flood must be capped to the _video_write_hz budget. ---
     deck.clear_journal()

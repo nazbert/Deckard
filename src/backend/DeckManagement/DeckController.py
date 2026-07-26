@@ -341,17 +341,22 @@ class MediaPlayerThread(threading.Thread):
         self.deck_controller: DeckController = deck_controller
         self.FPS = 30 # Max refresh rate of the internal displays
 
-        # Cap how often a background video repaints the device. The Stream Deck
-        # transport serializes all reads and writes on one mutex; a back-to-back
-        # write flood can out-race the 20Hz HID read poll for it (the lock is
-        # unfair), so dial encoder events arrive coalesced and lag badly. The
-        # inter-write yield below guarantees the reader a mutex slot inside
-        # bulk batches. 20 is the measured sweet spot: 30 was validated on
-        # dedup-friendly content (mostly-static tiles, ~80 writes/s) but a
-        # high-entropy video defeats tile dedup entirely (~270 candidate
-        # writes/s) and drags the media loop to ~19fps; 20 sustains 26+ loop
-        # fps on that same worst case. 0 disables the cap.
-        self._video_write_hz = _env_float("DECKARD_VIDEO_WRITE_HZ", 20.0)
+        # Cap how often a background video repaints the device. This used to
+        # be a starvation defense: the transport serializes all reads and
+        # writes of a deck on one mutex, and with an unfair lock a write
+        # flood out-raced the 20Hz HID read poll, so dial events arrived
+        # coalesced. The FIFO transport lock (issue #164,
+        # _install_fair_transport_lock) is the guarantee now -- the reader
+        # waits at most for the chunk in flight -- so this cap is only a
+        # rate alignment: the same gate drives the repaint DECISION at
+        # `now - _last_video_write < min_gap` below, i.e. it governs render
+        # cost as well as write cost, and rendering above the loop rate
+        # (FPS) buys nothing. Hence 30, not unlimited. Render cost on
+        # high-entropy content (tile dedup can't skip anything, ~270
+        # candidate writes/s) is the native-tile-cache issue's problem, not
+        # this knob's. 0 disables the cap; the env var stays a field
+        # bisection tool -- set it back to 20 to reproduce the old pacing.
+        self._video_write_hz = _env_float("DECKARD_VIDEO_WRITE_HZ", 30.0)
         self._last_video_write = 0.0
         # The same budget caps ALL touchscreen writes at the write point in
         # perform_media_player_tasks (dial-state videos and scrolling labels
@@ -360,9 +365,12 @@ class MediaPlayerThread(threading.Thread):
         self._last_touch_write = 0.0
 
         # Inter-write yield inside bulk batches (seconds); see the comment in
-        # perform_media_player_tasks. This pacing is the mechanism that keeps
-        # the HID reader responsive at the 30Hz default above.
-        self._inter_write_yield = _env_float("DECKARD_WRITE_YIELD_MS", 1.5) / 1000.0
+        # perform_media_player_tasks. Off by default now that transport
+        # acquisitions are ordered: the yield existed purely to hand the
+        # reader a mutex slot, which FIFO ordering grants it anyway. The
+        # machinery stays so the env var can restore the old pacing (1.5) in
+        # the field without a rebuild.
+        self._inter_write_yield = _env_float("DECKARD_WRITE_YIELD_MS", 0.0) / 1000.0
 
         self.running = False
         self.media_ticks = 0
@@ -515,8 +523,9 @@ class MediaPlayerThread(threading.Thread):
         if video is not None:
             if video.page is self.deck_controller.active_page:
                 has_bg_video = True
-                # Rate-limit the video's device writes so the flood
-                # doesn't starve the HID read thread (see _video_write_hz).
+                # Rate-limit the video's repaints to the write budget (see
+                # _video_write_hz) -- this gate decides whether the frame is
+                # rendered at all, not just written.
                 min_gap = 1.0 / self._video_write_hz if self._video_write_hz > 0 else 0
                 if start - self._last_video_write >= min_gap:
                     video_repaint = True
@@ -893,19 +902,22 @@ class MediaPlayerThread(threading.Thread):
             if task.page is active_page:
                 task.run()
 
-        # Bulk-batch write pacing (plan §9.2 experiment): a video-frame
-        # repaint lands as a burst of back-to-back writes, and the transport
-        # serializes reads and writes on one mutex -- the writer releasing
-        # and immediately re-acquiring can repeatedly out-race the waiting
-        # 20Hz HID read poll (the dial-starvation mechanism). A small forced
-        # yield between BULK writes guarantees the reader a mutex slot,
-        # which is what makes raising DECKARD_VIDEO_WRITE_HZ safe.
-        # Interactive paints (small batches) stay unpaced: no added latency.
-        # Yield every YIELD_STRIDE-th bulk write, not every write: the HID
-        # read poll runs at 20Hz, so it needs ONE mutex window per ~50ms --
-        # a slot every few writes (~3ms of holds) is ample, and per-write
-        # yields cost ~12ms per video frame on high-entropy content where
-        # dedup can't skip anything (measured: loop 19fps on a busy video).
+        # Bulk-batch write pacing, off by default since issue #164: a
+        # video-frame repaint lands as a burst of back-to-back writes, and
+        # the transport serializes reads and writes of a deck on one mutex,
+        # so with an unfair lock the writer could release and immediately
+        # re-acquire ahead of the waiting 20Hz HID read poll (the
+        # dial-starvation mechanism). Forcing a yield between BULK writes
+        # handed the reader a mutex slot; the FIFO transport lock hands it
+        # one by construction, so DECKARD_WRITE_YIELD_MS now defaults to 0
+        # and this loop is a straight write. The machinery stays because the
+        # yield is the field bisection tool if dial latency ever regresses:
+        # 1.5 restores the old pacing without a rebuild. Interactive paints
+        # (small batches) were never paced. The stride exists because the
+        # read poll needs ONE mutex window per ~50ms, not one per write --
+        # per-write yields cost ~12ms per video frame on high-entropy
+        # content where dedup can't skip anything (measured: loop 19fps on a
+        # busy video).
         bulk = len(image_batch) >= self.BULK_BATCH_THRESHOLD
         writes_since_yield = 0
         for task in image_batch:
