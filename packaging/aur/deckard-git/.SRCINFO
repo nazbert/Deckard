@@ -10,7 +10,6 @@ pkgbase = deckard-git
 	makedepends = gobject-introspection
 	makedepends = glib2
 	makedepends = cairo
-	makedepends = dbus
 	makedepends = meson
 	makedepends = ninja
 	depends = python313

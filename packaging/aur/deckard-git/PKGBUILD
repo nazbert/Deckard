@@ -14,7 +14,7 @@
 # Trade-offs: larger install; pip fetches
 # from PyPI during build() (unavoidable with pinned wheels — a `-git` convenience
 # package, not a reproducible fully-declared-sources build); the compiled sdists
-# (PyGObject/pycairo/dbus-python) link system glib2/cairo/dbus, so a soname bump
+# (PyGObject/pycairo) link system glib2/cairo, so a soname bump
 # there needs a rebuild.
 #
 # After editing, regenerate .SRCINFO:  makepkg --printsrcinfo > .SRCINFO
@@ -49,7 +49,7 @@ depends=(
   'xdg-desktop-portal'          # portal service libportal talks to (autostart/bg)
   'libpulse'                    # pulsectl (VolumeMixer/Audio plugins)
   'gstreamer' 'gst-plugins-base' # GTK media; add -good/-libav if a codec is missing
-  'dbus'                        # dbus-python / dasbus IPC + API service
+  'dbus'                        # session bus behind the GDBus IPC + dasbus API service
 )
 
 # A portal backend must be present for autostart/file-chooser to work; which one
@@ -64,12 +64,12 @@ optdepends=(
 )
 
 # Build: headers/tools for the sdist-only wheels (PyGObject, pycairo,
-# dbus-python, evdev, indexed_bzip2). pip build-isolation pulls the Python
+# evdev, indexed_bzip2). pip build-isolation pulls the Python
 # backends; these provide the C libs + .pc files they compile against.
 makedepends=(
   'git'
   'gobject-introspection'       # dev files + g-ir-scanner for PyGObject
-  'glib2' 'cairo' 'dbus'        # -dev headers ship in the base packages on Arch
+  'glib2' 'cairo'               # -dev headers ship in the base packages on Arch
   'meson' 'ninja'
 )
 

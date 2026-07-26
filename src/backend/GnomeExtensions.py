@@ -55,8 +55,7 @@ class GnomeExtensions:
         extensions: list[str] = []
         if not self.get_is_connected(): return extensions
 
-        # a{sa{sv}} keyed by uuid; iterating the reply dict yields the uuids,
-        # exactly what the dict-like dbus-python reply yielded.
+        # a{sa{sv}} keyed by uuid; iterating the reply dict yields the uuids.
         reply = self.proxy.call_sync("ListExtensions", None, Gio.DBusCallFlags.NONE, -1, None)
         for extension in reply.unpack()[0]:
             extensions.append(extension)
