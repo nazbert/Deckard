@@ -86,10 +86,7 @@ cv2.setNumThreads(2)
 # Import globals first to get IS_MAC
 import globals as gl
 
-if not gl.IS_MAC:
-    import dbus
-    import dbus.service
-    from dbus.mainloop.glib import DBusGMainLoop
+from gi.repository import Gio, GLib
 
 # Import own modules
 from src.app import App
@@ -290,70 +287,120 @@ def reset_all_decks():
         except:
             log.error("Failed to reset deck, maybe it's already connected to another instance? Skipping...")
 
+# Every CLI-side D-Bus call carries this instead of the 25s bus default:
+# without it a wedged instance that accepts but never replies blocks startup
+# for that long.
+DBUS_CALL_TIMEOUT_MS = 5000
+
+
+def name_has_owner(session_bus: Gio.DBusConnection, name: str) -> bool:
+    """Is `name` owned on the session bus right now?
+
+    Asking the bus daemon (and with NO_AUTO_START) is what keeps a probe a
+    probe: addressing a well-known name directly would D-Bus-activate it.
+    """
+    return session_bus.call_sync(
+        "org.freedesktop.DBus",
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus",
+        "NameHasOwner",
+        GLib.Variant("(s)", (name,)),
+        GLib.VariantType("(b)"),
+        Gio.DBusCallFlags.NO_AUTO_START,
+        DBUS_CALL_TIMEOUT_MS,
+        None
+    ).unpack()[0]
+
+
+def activate_action(session_bus: Gio.DBusConnection, name: str, object_path: str,
+                    action: str, parameter: GLib.Variant = None) -> None:
+    """Invoke one of the running instance's GActions over org.gtk.Actions."""
+    session_bus.call_sync(
+        name,
+        object_path,
+        "org.gtk.Actions",
+        "Activate",
+        GLib.Variant("(sava{sv})", (action, [] if parameter is None else [parameter], {})),
+        None,
+        Gio.DBusCallFlags.NO_AUTO_START,
+        DBUS_CALL_TIMEOUT_MS,
+        None
+    )
+
+
+def is_no_reply(error: GLib.Error) -> bool:
+    """The peer took the call and never answered.
+
+    Two distinct shapes carry that meaning: a NoReply the bus hands back, and
+    the timeout GDBus raises client-side when the reply never lands. Both
+    leave the caller in the same position, so both are matched here.
+    """
+    if Gio.DBusError.get_remote_error(error) == "org.freedesktop.DBus.Error.NoReply":
+        return True
+    return error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.TIMED_OUT)
+
+
 def quit_running():
     if gl.IS_MAC:
         return
-        
-    log.info("Checking if another instance is running")
-    session_bus = dbus.SessionBus()
-    obj: dbus.BusObject = None
-    action_interface: dbus.Interface = None
-    try:
-        obj = session_bus.get_object(appinfo.APP_ID, appinfo.DBUS_OBJECT_PATH)
-        action_interface = dbus.Interface(obj, "org.gtk.Actions")
-    except dbus.exceptions.DBusException as e:
-        log.info("No other instance running, continuing")
-        # Expected path on every normal launch -- not an error.
-        log.debug(e)
-    except ValueError as e:
-        log.info("The last instance has not been properly closed, continuing... This may cause issues")
 
-    if None not in [obj, action_interface]:
+    log.info("Checking if another instance is running")
+    session_bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    running = False
+    try:
+        running = name_has_owner(session_bus, appinfo.APP_ID)
+    except GLib.Error as e:
+        # A probe that cannot complete reads as "nobody home", exactly as a
+        # failed lookup did before: booting is the safer outcome than refusing
+        # to start over a bus hiccup.
+        log.debug(e)
+    if not running:
+        # Expected path on every normal launch -- not an error.
+        log.info("No other instance running, continuing")
+
+    if running:
         if gl.argparser.parse_args().close_running:
             log.info("Closing running instance")
             try:
-                action_interface.Activate("quit", [], [])
-            except dbus.exceptions.DBusException as e:
-                if "org.freedesktop.DBus.Error.NoReply" in str(e):
+                activate_action(session_bus, appinfo.APP_ID, appinfo.DBUS_OBJECT_PATH, "quit")
+            except GLib.Error as e:
+                if is_no_reply(e):
                     log.error("Could not close running instance: " + str(e))
                     sys.exit(0)
             time.sleep(5)
 
         else:
-            action_interface.Activate("reopen", [], [])
+            activate_action(session_bus, appinfo.APP_ID, appinfo.DBUS_OBJECT_PATH, "reopen")
             log.info("Already running, exiting")
             sys.exit(0)
 
     # Transition guard for the rename (docs/rename-deckard-plan.md, Phase 2):
     # a pre-rename build still owning the old bus name is invisible to the
     # gate above, and reset_all_decks() below would USB-reset decks it owns.
-    # Probe with NameHasOwner, never get_object: get_object on a well-known
-    # name activates it, which for the old id could START an upstream install
-    # via its D-Bus service file -- the very race this guard exists to
-    # prevent. NameHasOwner==False (the normal case) is also the effective
-    # sunset: once nothing owns the old name, this is a single cheap no-op
-    # round trip per launch.
+    # Probe with NameHasOwner, and never address the old name directly:
+    # a plain call to a well-known name activates it, which for the old id
+    # could START an upstream install via its D-Bus service file -- the very
+    # race this guard exists to prevent. NameHasOwner==False (the normal case)
+    # is also the effective sunset: once nothing owns the old name, this is a
+    # single cheap no-op round trip per launch.
     try:
-        if not session_bus.name_has_owner(appinfo.OLD_APP_ID):
+        if not name_has_owner(session_bus, appinfo.OLD_APP_ID):
             return
-    except (dbus.exceptions.DBusException, ValueError) as e:
+    except GLib.Error as e:
         log.debug(f"Could not probe the pre-rename bus name: {e}")
         return
     log.warning("Pre-rename StreamController instance detected on the session bus; asking it to quit")
     try:
-        old_obj = session_bus.get_object(appinfo.OLD_APP_ID, appinfo.OLD_DBUS_OBJECT_PATH)
-        # Explicit timeout: without it a wedged old instance that accepts but
-        # never replies would block startup for dbus-python's ~25s default.
-        dbus.Interface(old_obj, "org.gtk.Actions").Activate("quit", [], [], timeout=5.0)
-    except (dbus.exceptions.DBusException, ValueError) as e:
+        activate_action(session_bus, appinfo.OLD_APP_ID, appinfo.OLD_DBUS_OBJECT_PATH, "quit")
+    except GLib.Error as e:
         log.error(f"Could not close the pre-rename instance: {e}")
         return
     # Poll (bounded) for it to drop the name instead of a flat 5s sleep.
     for _ in range(25):
         try:
-            if not session_bus.name_has_owner(appinfo.OLD_APP_ID):
+            if not name_has_owner(session_bus, appinfo.OLD_APP_ID):
                 break
-        except (dbus.exceptions.DBusException, ValueError):
+        except GLib.Error:
             break
         time.sleep(0.2)
 
@@ -368,14 +415,14 @@ def hand_off_to_lock_owner(closing: bool = False):
     instance, so if it is still alive after the grace period, fail loudly
     instead of presenting its window."""
     log.info("Another launch holds the single-instance lock; handing off")
-    session_bus = dbus.SessionBus()
+    session_bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     owner_seen = False
     for _ in range(50):  # up to 10 s for the winner to finish booting
         try:
-            if session_bus.name_has_owner(appinfo.APP_ID):
+            if name_has_owner(session_bus, appinfo.APP_ID):
                 owner_seen = True
                 break
-        except (dbus.exceptions.DBusException, ValueError):
+        except GLib.Error:
             break
         # The winner may have crashed mid-boot and released the lock (its
         # connection died): take it over rather than stranding the user's
@@ -386,7 +433,7 @@ def hand_off_to_lock_owner(closing: bool = False):
             return
         time.sleep(0.2)
     if not owner_seen:
-        # Never get_object an ownerless well-known name: it would D-Bus-
+        # Never address an ownerless well-known name: it would D-Bus-
         # activate a service file if one ever ships (same rule as the
         # pre-rename probe in quit_running()).
         log.error("Timed out waiting for the winning launch to appear; exiting with no instance running")
@@ -395,9 +442,8 @@ def hand_off_to_lock_owner(closing: bool = False):
         log.error("--close-running: the running instance did not exit within the grace period")
         sys.exit(1)
     try:
-        obj = session_bus.get_object(appinfo.APP_ID, appinfo.DBUS_OBJECT_PATH)
-        dbus.Interface(obj, "org.gtk.Actions").Activate("reopen", [], [], timeout=5.0)
-    except (dbus.exceptions.DBusException, ValueError) as e:
+        activate_action(session_bus, appinfo.APP_ID, appinfo.DBUS_OBJECT_PATH, "reopen")
+    except GLib.Error as e:
         log.warning(f"Could not hand off to the winning instance: {e}")
     sys.exit(0)
 
@@ -624,31 +670,28 @@ def make_api_calls():
             print("  STATE_NUMBER: State to change to (e.g., 0, 1, 2)", file=sys.stderr)
             sys.exit(1)
     
-    session_bus = dbus.SessionBus()
-    obj: dbus.BusObject = None
-    action_interface: dbus.Interface = None
+    session_bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    running = False
     try:
-        obj = session_bus.get_object(appinfo.APP_ID, appinfo.DBUS_OBJECT_PATH)
-        action_interface = dbus.Interface(obj, "org.gtk.Actions")
-    except dbus.exceptions.DBusException as e:
-        obj = None
-    except ValueError as e:
-        obj = None
+        running = name_has_owner(session_bus, appinfo.APP_ID)
+    except GLib.Error:
+        running = False
 
     # Handle page change requests
     if has_page_requests:
         for serial_number, page_name in args.change_page:
-            if None in [obj, action_interface] or args.close_running:
+            if not running or args.close_running:
                 gl.api_page_requests[serial_number] = page_name
             else:
                 # Other instance is running - call dbus interfaces
-                action_interface.Activate("change_page", [[serial_number, page_name]], [])
+                activate_action(session_bus, appinfo.APP_ID, appinfo.DBUS_OBJECT_PATH,
+                                "change_page", GLib.Variant("as", [serial_number, page_name]))
                 return True
 
     # Handle state change requests
     if has_state_requests:
         for serial_number, page_name, coords, state_number in args.change_state:
-            if None in [obj, action_interface] or args.close_running:
+            if not running or args.close_running:
                 try:
                     state_num = int(state_number)
                     gl.api_state_requests[serial_number] = {
@@ -661,7 +704,8 @@ def make_api_calls():
                     sys.exit(1)
             else:
                 # Other instance is running - call dbus interfaces
-                action_interface.Activate("change_state", [[serial_number, page_name, coords, state_number]], [])
+                activate_action(session_bus, appinfo.APP_ID, appinfo.DBUS_OBJECT_PATH,
+                                "change_state", GLib.Variant("as", [serial_number, page_name, coords, state_number]))
                 return True
 
     return False
@@ -698,7 +742,6 @@ def main():
                     'GSK_RENDERER=ngl to your "/etc/environment" file')
 
     if not gl.IS_MAC:
-        DBusGMainLoop(set_as_default=True)
         # Dbus
         quit_running()
         # quit_running() catches a fully-booted instance; two launches booting
