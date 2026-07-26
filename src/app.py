@@ -397,19 +397,30 @@ class App(Adw.Application):
                           body: str,
                           button: tuple[str, str, GLib.Variant] = None,
                           category: str = "im.error") -> None:
-        show_notifications = gl.settings_manager.get_app_settings().get("ui", {}).get("show-notifications", True)
-        if not show_notifications:
-            return
+        """Safe to call from any thread: the ENTIRE body runs on the GTK main
+        thread. Marshalling only the final super() call left the settings read
+        and the Gio.Notification construction on the caller's thread, and most
+        callers are background threads (store installs, plugin loads)."""
+        parent_send = super().send_notification
 
-        notif = Gio.Notification()
-        notif.set_icon(Gio.Icon.new_for_string(icon_name))
-        notif.set_category(category)
-        notif.set_title(title)
-        notif.set_body(body)
-        if button:
-            notif.add_button_with_target(button[0], button[1], button[2])
+        def _send() -> bool:
+            show_notifications = gl.settings_manager.get_app_settings().get("ui", {}).get("show-notifications", True)
+            if not show_notifications:
+                return GLib.SOURCE_REMOVE
 
-        GLib.idle_add(super().send_notification, appinfo.APP_ID, notif)
+            notif = Gio.Notification()
+            notif.set_icon(Gio.Icon.new_for_string(icon_name))
+            notif.set_category(category)
+            notif.set_title(title)
+            notif.set_body(body)
+            if button:
+                notif.add_button_with_target(button[0], button[1], button[2])
+
+            parent_send(appinfo.APP_ID, notif)
+            return GLib.SOURCE_REMOVE
+
+        GLib.idle_add(_send)
+
     def on_change_page(self, action, data: GLib.Variant, *args):
         """
         page_name can be either the name or the path of the page
