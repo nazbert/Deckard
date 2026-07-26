@@ -14,7 +14,6 @@ The contract is now uniform across all four preparers: a failed
 thumbnail/asset fetch lists the entry without an image; only a failed
 MANIFEST (no id/name to list) still drops it.
 """
-import asyncio
 from types import SimpleNamespace
 
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
@@ -25,23 +24,28 @@ from src.windows.Store.StoreData import IconData, SDPlusBarWallpaperData, Wallpa
 
 
 def _make_backend() -> StoreBackend:
+    from concurrent.futures import ThreadPoolExecutor
     sb = StoreBackend.__new__(StoreBackend)  # skip __init__ (spawns a fetch thread)
     from src.backend.Store.StoreCache import StoreCache
     sb.store_cache = StoreCache()
     sb.official_authors = []
+    sb._prepare_pool = ThreadPoolExecutor(
+        max_workers=StoreBackend.MAX_CONCURRENT_REQUESTS,
+        thread_name_prefix="store-prepare-test",
+    )
     return sb
 
 
 def _stub_asset_fetches(sb: StoreBackend, manifest: dict) -> None:
     """Stubs every remote fetch a prepare_* coroutine performs, with the
     thumbnail fetch failing like a 429/offline does."""
-    async def fake_manifest(url, commit):
+    def fake_manifest(url, commit):
         return dict(manifest)
 
-    async def fake_image(url, path, branch="main"):
+    def fake_image(url, path, branch="main"):
         return NoConnectionError()
 
-    async def fake_attribution(url, commit):
+    def fake_attribution(url, commit):
         return {}
 
     sb.get_manifest = fake_manifest
@@ -61,7 +65,7 @@ def test_prepare_icon_survives_failed_thumbnail() -> None:
     sb = _make_backend()
     _stub_asset_fetches(sb, _MANIFEST)
 
-    result = asyncio.run(sb.prepare_icon(dict(_ENTRY)))
+    result = sb.prepare_icon(dict(_ENTRY))
     assert isinstance(result, IconData), (
         f"a failed thumbnail fetch must not drop the icon pack, got {result!r}"
     )
@@ -74,7 +78,7 @@ def test_prepare_wallpaper_survives_failed_thumbnail() -> None:
     sb = _make_backend()
     _stub_asset_fetches(sb, _MANIFEST)
 
-    result = asyncio.run(sb.prepare_wallpaper(dict(_ENTRY)))
+    result = sb.prepare_wallpaper(dict(_ENTRY))
     assert isinstance(result, WallpaperData), (
         f"a failed thumbnail fetch must not drop the wallpaper, got {result!r}"
     )
@@ -86,7 +90,7 @@ def test_prepare_sd_plus_bar_wallpaper_survives_failed_thumbnail() -> None:
     sb = _make_backend()
     _stub_asset_fetches(sb, _MANIFEST)
 
-    result = asyncio.run(sb.prepare_sd_plus_bar_wallpaper(dict(_ENTRY)))
+    result = sb.prepare_sd_plus_bar_wallpaper(dict(_ENTRY))
     assert isinstance(result, SDPlusBarWallpaperData), (
         f"a failed thumbnail fetch must not drop the SD+ bar wallpaper, got {result!r}"
     )
@@ -102,13 +106,13 @@ def test_catalog_keeps_entry_with_failed_thumbnail() -> None:
     good = {"url": "https://github.com/Example/GoodPack", "commits": {"1.5.0": "good"}}
     poison = {"url": "https://github.com/Example/PoisonPack", "commits": {"1.5.0": "poison"}}
 
-    async def fake_get_stores():
+    def fake_get_stores():
         return [("https://github.com/Example/store", "main")]
 
-    async def fake_fetch_and_parse(url, filename, branch, n_errors=0):
+    def fake_fetch_and_parse(url, filename, branch, n_errors=0):
         return [good, poison], n_errors
 
-    async def fake_manifest(url, commit):
+    def fake_manifest(url, commit):
         pack = "GoodPack" if "GoodPack" in url else "PoisonPack"
         return {"id": f"com_example_{pack}", "name": pack,
                 "version": "1.0", "thumbnail": "store/thumb.png"}
@@ -116,12 +120,12 @@ def test_catalog_keeps_entry_with_failed_thumbnail() -> None:
     class FakeImage:
         pass
 
-    async def fake_image(url, path, branch="main"):
+    def fake_image(url, path, branch="main"):
         if "PoisonPack" in url:
             return NoConnectionError()
         return FakeImage()
 
-    async def fake_attribution(url, commit):
+    def fake_attribution(url, commit):
         return {}
 
     sb.get_stores = fake_get_stores
@@ -131,9 +135,7 @@ def test_catalog_keeps_entry_with_failed_thumbnail() -> None:
     sb.get_attribution = fake_attribution
     gl.lm = SimpleNamespace(get_custom_translation=lambda d: None)
 
-    results = asyncio.run(
-        sb.process_store_data(StoreBackend.ICON_FILE, sb.prepare_icon, None, IconData)
-    )
+    results = sb.process_store_data(StoreBackend.ICON_FILE, sb.prepare_icon, None, IconData)
     assert not isinstance(results, NoConnectionError)
     ids = sorted(icon.icon_id for icon in results)
     assert ids == ["com_example_GoodPack", "com_example_PoisonPack"], (

@@ -13,7 +13,6 @@ Now StoreBackend.is_safe_asset_id whitelists ids at every join site
 (rejecting, not normalizing), and the install scripts run as argv lists
 without a shell. All network-free: download_repo is stubbed.
 """
-import asyncio
 import os
 import sys
 
@@ -73,7 +72,7 @@ def test_install_plugin_rejects_traversal_id() -> None:
     sb = _make_backend()
     download_calls = []
 
-    async def fake_download_repo(**kwargs):
+    def fake_download_repo(**kwargs):
         download_calls.append(kwargs)
         return 200
 
@@ -81,7 +80,7 @@ def test_install_plugin_rejects_traversal_id() -> None:
 
     for evil in ["../../..", "/etc", "../sibling", None]:
         data = PluginData(github="https://github.com/evil/evil", plugin_id=evil)
-        result = asyncio.run(sb.install_plugin(data))
+        result = sb.install_plugin(data)
         assert result == 400, f"unsafe plugin id {evil!r} must be refused, got {result!r}"
 
     assert download_calls == [], (
@@ -98,12 +97,12 @@ def test_uninstall_icon_rejects_traversal_id() -> None:
     os.makedirs(sentinel, exist_ok=True)
 
     # "icons/.." IS gl.DATA_PATH -- the old code would rmtree the whole data dir.
-    result = asyncio.run(sb.uninstall_icon(IconData(icon_id="..")))
+    result = sb.uninstall_icon(IconData(icon_id=".."))
     assert result == 400, f"traversal icon id must be refused, got {result!r}"
     assert os.path.isdir(gl.DATA_PATH), "data dir must survive a traversal uninstall id"
     assert os.path.isdir(sentinel), "sibling dirs must survive a traversal uninstall id"
 
-    result = asyncio.run(sb.uninstall_wallpaper(WallpaperData(wallpaper_id="../sentinel")))
+    result = sb.uninstall_wallpaper(WallpaperData(wallpaper_id="../sentinel"))
     assert result == 400, f"traversal wallpaper id must be refused, got {result!r}"
     assert os.path.isdir(sentinel), "targeted sibling must survive a traversal uninstall id"
 
@@ -114,7 +113,7 @@ def test_install_script_runs_without_shell() -> None:
     plugin_id = "com_test_ScriptPlugin"
     local_path = os.path.join(gl.PLUGIN_DIR, plugin_id)
 
-    async def fake_download_repo(**kwargs):
+    def fake_download_repo(**kwargs):
         os.makedirs(kwargs["directory"], exist_ok=True)
         with open(os.path.join(kwargs["directory"], "__install__.py"), "w") as f:
             f.write("pass\n")
@@ -146,9 +145,9 @@ def test_install_script_runs_without_shell() -> None:
 
     backend_module.subprocess.run = capture_run
     try:
-        result = asyncio.run(sb.install_plugin(PluginData(
+        result = sb.install_plugin(PluginData(
             github="https://github.com/test/test", plugin_id=plugin_id,
-        )))
+        ))
     finally:
         backend_module.subprocess.run = real_run
 
@@ -222,7 +221,7 @@ def test_clone_repo_rejects_injection_and_never_shells() -> None:
 
     calls = []
 
-    async def fake_subp_call(args):
+    def fake_subp_call(args):
         calls.append(args)
         # A correct fix passes argv lists; a regression to a shell string
         # would show up here as a str, which we forbid outright.
@@ -234,7 +233,7 @@ def test_clone_repo_rejects_injection_and_never_shells() -> None:
             os.makedirs(args[-1], exist_ok=True)
         return 0
 
-    async def fake_os_sys(args):
+    def fake_os_sys(args):
         # os_sys is os.system -- it must NEVER be reached with catalog values
         # on the clone path anymore.
         raise AssertionError(f"os_sys (shell) must not be used on the clone path: {args!r}")
@@ -244,17 +243,17 @@ def test_clone_repo_rejects_injection_and_never_shells() -> None:
 
     # 1) Injected branch: refused, no git call, no side effect.
     injected_branch = f"main; touch {marker}"
-    result = asyncio.run(sb.clone_repo("https://github.com/evil/evil",
-                                       os.path.join(gl.PLUGIN_DIR, "victim"),
-                                       commit_sha=None, branch_name=injected_branch))
+    result = sb.clone_repo("https://github.com/evil/evil",
+                           os.path.join(gl.PLUGIN_DIR, "victim"),
+                           commit_sha=None, branch_name=injected_branch)
     assert result == 400, f"injected branch must be refused, got {result!r}"
     assert calls == [], f"no git call may happen for an injected branch, got {calls}"
     assert not os.path.exists(marker), "injected command must never create its marker"
 
     # 2) Injected commit sha: refused likewise.
-    result = asyncio.run(sb.clone_repo("https://github.com/evil/evil",
-                                       os.path.join(gl.PLUGIN_DIR, "victim"),
-                                       commit_sha=f"deadbeef; touch {marker}", branch_name=None))
+    result = sb.clone_repo("https://github.com/evil/evil",
+                           os.path.join(gl.PLUGIN_DIR, "victim"),
+                           commit_sha=f"deadbeef; touch {marker}", branch_name=None)
     assert result == 400, f"injected commit sha must be refused, got {result!r}"
     assert not os.path.exists(marker), "injected command must never create its marker"
 
@@ -269,8 +268,8 @@ def test_clone_repo_rejects_injection_and_never_shells() -> None:
     backend_module.shutil.which = lambda name: "/usr/bin/git" if name == "git" else real_which(name)
     try:
         local_path = os.path.join(gl.PLUGIN_DIR, "clean")
-        result = asyncio.run(sb.clone_repo("https://github.com/x/y", local_path,
-                                           commit_sha=None, branch_name="release/1.5.0"))
+        result = sb.clone_repo("https://github.com/x/y", local_path,
+                               commit_sha=None, branch_name="release/1.5.0")
     finally:
         backend_module.shutil.which = real_which
     assert result == 200, f"clean clone must succeed, got {result!r}"

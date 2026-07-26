@@ -17,7 +17,6 @@ import multiprocessing
 import signal
 import sys
 import threading
-import asyncio
 import gi
 
 from src.windows.Store.ResponsibleNotesDialog import ResponsibleNotesDialog
@@ -346,7 +345,7 @@ class App(Adw.Application):
     def _update_all_assets(self):
         self.set_working(True)
 
-        result = asyncio.run(gl.store_backend.update_everything())
+        result = gl.store_backend.update_everything()
 
         self.set_working(False)
 
@@ -365,7 +364,7 @@ class App(Adw.Application):
 
     @log.catch
     def _install_plugin(self, plugin_id: str):
-        plugin = asyncio.run(gl.store_backend.get_plugin_for_id(plugin_id=plugin_id))
+        plugin = gl.store_backend.get_plugin_for_id(plugin_id=plugin_id)
 
         self.set_working(True)
 
@@ -375,7 +374,7 @@ class App(Adw.Application):
             self.set_working(False)
             return
         
-        success = asyncio.run(gl.store_backend.install_plugin(plugin))
+        success = gl.store_backend.install_plugin(plugin)
         # Success is exactly True -- failure returns include truthy ints
         # (404/400), which "if not success" misread as installed.
         if success is not True:

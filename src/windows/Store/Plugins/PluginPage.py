@@ -22,7 +22,6 @@ from gi.repository import Gtk, Adw, GLib, Gio, Gdk, GObject, GdkPixbuf
 
 # Import python modules
 import webbrowser as web
-import asyncio
 from loguru import logger as log
 
 # Import own modules
@@ -123,7 +122,7 @@ class PluginPreview(StorePreview):
         install actually succeeded. Success is `result is True` -- failure
         returns (404/400 ints, NoConnectionError) used to be discarded and
         the button flipped to 'installed' anyway."""
-        result = asyncio.run(self.store.backend.install_plugin(plugin_data=self.plugin_data))
+        result = self.store.backend.install_plugin(plugin_data=self.plugin_data)
         if result is not True:
             log.error(f"Failed to install plugin {self.plugin_data.plugin_id}: {result!r}")
             self.notify_install_failure()

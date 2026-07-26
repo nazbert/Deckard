@@ -22,11 +22,9 @@ from gi.repository import Gtk, Adw, GLib, Gio, Gdk, GObject, GdkPixbuf
 
 # Import python modules
 import webbrowser as web
-import asyncio
 import os
 import shutil
 from loguru import logger as log
-import asyncio
 
 # Import own modules
 from src.windows.Store.StorePage import StorePage
@@ -55,7 +53,7 @@ class IconPage(StorePage):
     # show the error page and re-arm the tab for a retry.
     def load(self):
         self.set_loading()
-        icons: list[IconData] = asyncio.run(self.store.backend.get_all_icons())
+        icons: list[IconData] = self.store.backend.get_all_icons()
         if isinstance(icons, NoConnectionError):
             self.show_connection_error()
             return
@@ -109,11 +107,11 @@ class IconPreview(StorePreview):
         self.set_description(description)
 
     def install(self):
-        asyncio.run(self.store.backend.install_icon(icon_data=self.icon_data))
+        self.store.backend.install_icon(icon_data=self.icon_data)
         self.set_install_state(1)
 
     def uninstall(self):
-        asyncio.run(self.store.backend.uninstall_icon(icon_data=self.icon_data))
+        self.store.backend.uninstall_icon(icon_data=self.icon_data)
         self.set_install_state(0)
 
     def update(self):

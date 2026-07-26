@@ -18,7 +18,7 @@ import sys
 import zipfile
 import requests
 import json
-import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
 from io import BytesIO
 from loguru import logger as log
@@ -115,10 +115,16 @@ class StoreBackend:
     def __init__(self):
         self.store_cache = StoreCache()
 
-        # threading (not asyncio) semaphore: StoreBackend methods run under a
-        # fresh asyncio.run() per store page load thread, and an
-        # asyncio.Semaphore cannot be shared across event loops.
+        # Shared by every fetch path: catalog prepare_* tasks on
+        # _prepare_pool plus direct calls from UI worker threads (installs,
+        # updates) -- caps process-wide store HTTP concurrency.
         self._fetch_limiter = threading.Semaphore(self.MAX_CONCURRENT_REQUESTS)
+
+        # Fan-out pool for process_store_data's catalog prepare_* tasks.
+        # Sized to the fetch cap -- more workers would only queue on
+        # _fetch_limiter. Nothing running ON the pool ever submits to it
+        # (prepare_* doesn't re-enter), so it cannot starve itself.
+        self._prepare_pool = ThreadPoolExecutor(max_workers=self.MAX_CONCURRENT_REQUESTS, thread_name_prefix="store-prepare")
 
         self.official_store_branch_cache: str = None
 
@@ -131,18 +137,18 @@ class StoreBackend:
     def _fetch_official_authors_background(self):
         """Fetches official authors in a background thread and updates self.official_authors."""
         try:
-            authors = asyncio.run(self.get_official_authors())
+            authors = self.get_official_authors()
             if not isinstance(authors, NoConnectionError):
                 self.official_authors = authors
                 log.info(f"Official authors updated: {authors}")
         except Exception as e:
             log.warning(f"Failed to fetch official authors, using fallback: {e}")
 
-    async def get_stores(self) -> list[tuple[str, str]]:
+    def get_stores(self) -> list[tuple[str, str]]:
         settings = gl.settings_manager.app()
 
         stores = []
-        branch = await self.get_official_store_branch()
+        branch = self.get_official_store_branch()
         if not isinstance(branch, str) or not branch:
             # get_official_store_branch guarantees a str; keep the invariant
             # enforced at this boundary anyway -- a non-str branch would end
@@ -179,7 +185,7 @@ class StoreBackend:
 
         return plugins
     
-    async def get_official_store_branch(self) -> str:
+    def get_official_store_branch(self) -> str:
         """Always returns a str branch name. On any failure (fetch failed
         AND cache too stale, truncated/corrupt versions.json) it falls back
         to STORE_BRANCH -- returning an error object here used to leak into
@@ -189,7 +195,7 @@ class StoreBackend:
         """
         if self.official_store_branch_cache is not None:
             return self.official_store_branch_cache
-        versions_file = await self.get_remote_file(self.STORE_REPO_URL, "versions.json", branch_name="versions", force_refetch=True)
+        versions_file = self.get_remote_file(self.STORE_REPO_URL, "versions.json", branch_name="versions", force_refetch=True)
         if isinstance(versions_file, NoConnectionError) or versions_file is None:
             log.warning(f"Could not fetch versions.json; falling back to store branch {self.STORE_BRANCH}")
             return self.STORE_BRANCH
@@ -211,28 +217,21 @@ class StoreBackend:
         self.official_store_branch_cache = v
         return v
 
-    async def request_from_url(self, url: str) -> requests.Response:
-        # The blocking fetch (connection AND body read) runs in a worker
-        # thread: process_store_data gathers dozens of prepare_* coroutines,
-        # and a blocking requests.get() on the event loop would serialize
-        # every one of them behind each request's latency.
-        def _fetch() -> requests.Response | None:
+    def request_from_url(self, url: str) -> requests.Response:
+        # Callers run on worker threads (the prepare pool, UI install
+        # threads). Connection AND body read stay inside the limiter, which
+        # is what keeps a catalog load from presenting as a scrape burst.
+        try:
             with self._fetch_limiter:
                 req = requests.get(url, stream=True, timeout=30)
                 try:
                     if req.status_code == 200:
-                        req.content  # read the body while still in the worker thread
+                        req.content  # read the body while the connection is open
                         return req
                     log.error(f"Request to {url} failed with status code {req.status_code}")
-                    return None
+                    return NoConnectionError()
                 finally:
                     req.close()  # content stays cached on the Response
-
-        try:
-            req = await asyncio.to_thread(_fetch)
-            if req is None:
-                return NoConnectionError()
-            return req
         except requests.exceptions.RequestException as e:
             log.error(e)
             return NoConnectionError()
@@ -252,7 +251,7 @@ class StoreBackend:
         repo_url = repo_url.replace("github.com", "raw.githubusercontent.com")
         return f"{repo_url}/{branch_name}/{file_path}"
 
-    async def get_remote_file(self, repo_url: str, file_path: str, branch_name: str = "main", data_type: str = "text", force_refetch: bool = False):
+    def get_remote_file(self, repo_url: str, file_path: str, branch_name: str = "main", data_type: str = "text", force_refetch: bool = False):
         """
         This function retrieves the content of a remote file from a GitHub repository.
 
@@ -294,7 +293,7 @@ class StoreBackend:
 
         url = self.build_url(repo_url, file_path, branch_name)
 
-        answer = await self.request_from_url(url)
+        answer = self.request_from_url(url)
 
         if isinstance(answer, NoConnectionError):
             # Fetch failed (offline, or raw.githubusercontent rate-limiting
@@ -327,15 +326,13 @@ class StoreBackend:
         elif data_type == "content":
             return answer.content
         
-    async def get_last_commit(self, repo_url: str, branch_name: str = "main"):
+    def get_last_commit(self, repo_url: str, branch_name: str = "main"):
         """Resolves the tip sha of a branch via the GitHub API.
 
-        The blocking round-trip runs in a worker thread under the fetch
-        semaphore: prepare_plugin awaits this inside the catalog gather for
-        every branch-pinned custom plugin, and a synchronous requests.get()
-        on the loop thread serialized the whole page load behind each call's
-        latency (up to timeout=30 apiece) while also evading the fetch
-        limiter every sibling fetch goes through.
+        Runs under the fetch semaphore like every sibling fetch --
+        prepare_plugin calls this for every branch-pinned custom plugin
+        during the catalog fan-out, and an uncapped requests.get() here
+        would evade the limiter.
 
         Returns the sha str, None when the branch resolves to no commits
         (non-200 answer, empty/unparseable commit list), or NoConnectionError
@@ -345,12 +342,9 @@ class StoreBackend:
         """
         url = f"https://api.github.com/repos/{self.get_user_name(repo_url)}/{self.get_repo_name(repo_url)}/commits?sha={branch_name}&per_page=1"
 
-        def _fetch() -> requests.Response:
-            with self._fetch_limiter:
-                return requests.get(url, timeout=30)
-
         try:
-            response = await asyncio.to_thread(_fetch)
+            with self._fetch_limiter:
+                response = requests.get(url, timeout=30)
         except requests.exceptions.RequestException as e:
             log.error(f"Failed to fetch the last commit of {repo_url}@{branch_name}: {e}")
             return NoConnectionError()
@@ -367,16 +361,16 @@ class StoreBackend:
             return None
         return commits[0].get("sha")
     
-    async def get_official_authors(self) -> list:
-        authors_json = await self.get_remote_file(self.STORE_REPO_URL, "OfficialAuthors.json", self.STORE_BRANCH, force_refetch=True)
+    def get_official_authors(self) -> list:
+        authors_json = self.get_remote_file(self.STORE_REPO_URL, "OfficialAuthors.json", self.STORE_BRANCH, force_refetch=True)
         if isinstance(authors_json, NoConnectionError):
             return authors_json
         authors_json = json.loads(authors_json)
         return authors_json
     
-    async def fetch_and_parse_store_json(self, url: str, filename: str, branch: str, n_stores_with_errors: int = 0):
+    def fetch_and_parse_store_json(self, url: str, filename: str, branch: str, n_stores_with_errors: int = 0):
         try:
-            store_file_json = await self.get_remote_file(url, filename, branch, force_refetch=True)
+            store_file_json = self.get_remote_file(url, filename, branch, force_refetch=True)
             if isinstance(store_file_json, NoConnectionError):
                 n_stores_with_errors += 1
                 return None, n_stores_with_errors
@@ -387,21 +381,21 @@ class StoreBackend:
             log.error(e)
             return None, n_stores_with_errors
 
-    async def process_store_data(self, filename: str, process_func: callable, get_custom_func: callable, data_class, include_images=True):
+    def process_store_data(self, filename: str, process_func: callable, get_custom_func: callable, data_class, include_images=True):
         n_stores_with_errors = 0
         data_list = []
 
-        stores = await self.get_stores()
+        stores = self.get_stores()
 
         for url, branch in stores:
-            store_file_json, n_stores_with_errors = await self.fetch_and_parse_store_json(url, filename, branch, n_stores_with_errors)
+            store_file_json, n_stores_with_errors = self.fetch_and_parse_store_json(url, filename, branch, n_stores_with_errors)
             if store_file_json is not None:
                 data_list.extend(store_file_json)
 
         if n_stores_with_errors >= len(stores):
             return NoConnectionError()
 
-        prepare_tasks = [process_func(data, include_images, True) for data in data_list]
+        futures = [self._prepare_pool.submit(process_func, data, include_images, True) for data in data_list]
 
         if get_custom_func is not None:
             for url, branch in get_custom_func():
@@ -409,42 +403,44 @@ class StoreBackend:
                     "url": url,
                     "branch": branch
                 }
-                prepare_tasks.append(process_func(asset, include_images, False))
+                futures.append(self._prepare_pool.submit(process_func, asset, include_images, False))
 
-        # return_exceptions: one misbehaving store entry must not raise out of
-        # the gather and blank the whole page (the page's @log.catch load()
-        # would swallow it and leave the spinner up forever).
-        results = await asyncio.gather(*prepare_tasks, return_exceptions=True)
-        for result in results:
-            if isinstance(result, BaseException):
-                log.error(f"Store item preparation failed: {result!r}")
+        # Collect per-future: one misbehaving store entry must not raise out
+        # of the fan-out and blank the whole page (the page's @log.catch
+        # load() would swallow it and leave the spinner up forever).
+        results = []
+        for future in futures:
+            try:
+                results.append(future.result())
+            except Exception as e:
+                log.error(f"Store item preparation failed: {e!r}")
         results = [result for result in results if isinstance(result, data_class)]
 
         return results
 
-    async def get_all_plugins_async(self, include_images: bool = True) -> int:
-        return await self.process_store_data(self.PLUGIN_FILE, self.prepare_plugin, self.get_custom_plugins, PluginData, include_images)
+    def get_all_plugins(self, include_images: bool = True) -> list[PluginData]:
+        return self.process_store_data(self.PLUGIN_FILE, self.prepare_plugin, self.get_custom_plugins, PluginData, include_images)
 
-    async def get_all_icons(self) -> int:
-        return await self.process_store_data(self.ICON_FILE, self.prepare_icon, None, IconData)
+    def get_all_icons(self) -> int:
+        return self.process_store_data(self.ICON_FILE, self.prepare_icon, None, IconData)
 
-    async def get_all_wallpapers(self) -> int:
-        return await self.process_store_data(self.WALLPAPERS_FILE, self.prepare_wallpaper, None, WallpaperData)
+    def get_all_wallpapers(self) -> int:
+        return self.process_store_data(self.WALLPAPERS_FILE, self.prepare_wallpaper, None, WallpaperData)
     
-    async def get_all_sd_plus_bar_wallpapers(self) -> int:
-        return await self.process_store_data(self.SDPLUSWALLPAPERS_FILE, self.prepare_sd_plus_bar_wallpaper, None, SDPlusBarWallpaperData)
+    def get_all_sd_plus_bar_wallpapers(self) -> int:
+        return self.process_store_data(self.SDPLUSWALLPAPERS_FILE, self.prepare_sd_plus_bar_wallpaper, None, SDPlusBarWallpaperData)
     
-    async def get_manifest(self, url:str, commit:str) -> dict:
+    def get_manifest(self, url:str, commit:str) -> dict:
         # url = self.build_url(url, "manifest.json", commit)
-        manifest = await self.get_remote_file(url, "manifest.json", commit)
+        manifest = self.get_remote_file(url, "manifest.json", commit)
         if isinstance(manifest, NoConnectionError):
             return manifest
         if manifest is None:
             return
         return json.loads(manifest)
 
-    async def get_attribution(self, url:str, commit:str) -> dict:
-        result = await self.get_remote_file(url, "attribution.json", commit)
+    def get_attribution(self, url:str, commit:str) -> dict:
+        result = self.get_remote_file(url, "attribution.json", commit)
         if isinstance(result, NoConnectionError):
             return {}
         
@@ -453,7 +449,7 @@ class StoreBackend:
         except (json.decoder.JSONDecodeError, TypeError) as e:
             return {}
 
-    async def prepare_plugin(self, plugin, include_image: bool = True, verified: bool = False):
+    def prepare_plugin(self, plugin, include_image: bool = True, verified: bool = False):
         url = plugin["url"]
 
         # Check if suitable version is available
@@ -470,7 +466,7 @@ class StoreBackend:
 
         branch = plugin.get("branch")
         if branch is not None:
-            commit = await self.get_last_commit(url, branch)
+            commit = self.get_last_commit(url, branch)
             if isinstance(commit, NoConnectionError):
                 # NoConnectionError is falsy: letting it fall through would
                 # fetch the manifest at `branch` but store the error object
@@ -478,7 +474,7 @@ class StoreBackend:
                 log.error(f"Could not resolve the last commit of {url}@{branch} due to NoConnectionError")
                 return commit
 
-        manifest = await self.get_manifest(url, commit or branch)
+        manifest = self.get_manifest(url, commit or branch)
         if isinstance(manifest, NoConnectionError):
             log.error(f"manifest failed to load due to NoConnectionError for repository {url}")
             return manifest
@@ -489,18 +485,18 @@ class StoreBackend:
         image = None
         thumbnail_path = manifest.get("thumbnail")
         if include_image:
-            image = await self.get_web_image(url, thumbnail_path, commit or branch)
+            image = self.get_web_image(url, thumbnail_path, commit or branch)
             if isinstance(image, NoConnectionError):
                 # A missing/rate-limited thumbnail must not drop the plugin --
                 # list it without an image.
                 image = None
         
-        attribution = await self.get_attribution(url, commit or branch)
+        attribution = self.get_attribution(url, commit or branch)
         if isinstance(attribution, NoConnectionError):
             return attribution
         attribution = attribution.get("generic", {}) #TODO: Choose correct attribution
 
-        stargazers = await self.get_stargazers(url)
+        stargazers = self.get_stargazers(url)
 
         author = self.get_user_name(url)
 
@@ -518,7 +514,7 @@ class StoreBackend:
             official=author in self.official_authors or False,
             commit_sha=commit,
             branch=branch,
-            local_sha=await self.get_local_sha_for_id(gl.PLUGIN_DIR, manifest.get("id")),
+            local_sha=self.get_local_sha_for_id(gl.PLUGIN_DIR, manifest.get("id")),
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
             repository_name=self.get_repo_name(url),
@@ -559,15 +555,15 @@ class StoreBackend:
         except Exception as e:
             raise RuntimeError(f"Unable to retrieve git commit hash: {e}")
     
-    async def get_local_sha_for_id(self, base_dir: str, asset_id) -> str:
+    def get_local_sha_for_id(self, base_dir: str, asset_id) -> str:
         """get_local_sha guarded by the asset-id whitelist: an unsafe or
         missing manifest id never probes the filesystem and simply reads as
         'not installed' (None)."""
         if not self.is_safe_asset_id(asset_id):
             return None
-        return await self.get_local_sha(os.path.join(base_dir, asset_id))
+        return self.get_local_sha(os.path.join(base_dir, asset_id))
 
-    async def get_local_sha(self, git_dir: str):
+    def get_local_sha(self, git_dir: str):
         if not os.path.exists(git_dir):
             return
         
@@ -586,7 +582,7 @@ class StoreBackend:
         with open(version_file_path, "r") as f:
             return f.read().strip()
     
-    async def prepare_icon(self, icon, include_image: bool = True, verified: bool = False):
+    def prepare_icon(self, icon, include_image: bool = True, verified: bool = False):
         if not include_image:
             raise NotImplementedError("Not yet implemented") #TODO
         if "url" not in icon:
@@ -604,16 +600,16 @@ class StoreBackend:
                 return NoCompatibleVersion
         commit = icon["commits"][version]
 
-        manifest = await self.get_manifest(url, commit)
+        manifest = self.get_manifest(url, commit)
         if isinstance(manifest, NoConnectionError):
             return manifest
-        attribution = await self.get_attribution(url, commit)
+        attribution = self.get_attribution(url, commit)
         if isinstance(attribution, NoConnectionError):
             return attribution
         attribution = attribution.get("generic", {}) #TODO: Choose correct attribution
 
         thumbnail_path = manifest.get("thumbnail")
-        image = await self.get_web_image(url, thumbnail_path, commit)
+        image = self.get_web_image(url, thumbnail_path, commit)
         if isinstance(image, NoConnectionError):
             # A missing/rate-limited thumbnail must not drop the pack from
             # the catalog -- list it without an image, like prepare_plugin.
@@ -621,7 +617,7 @@ class StoreBackend:
 
         author = self.get_user_name(url)
 
-        stargazers = await self.get_stargazers(url)
+        stargazers = self.get_stargazers(url)
         if isinstance(stargazers, NoConnectionError):
             return stargazers
         
@@ -638,7 +634,7 @@ class StoreBackend:
             author=author or None,  # Formerly: user_name
             official=author in self.official_authors or False,
             commit_sha=commit,
-            local_sha=await self.get_local_sha_for_id(os.path.join(gl.DATA_PATH, "icons"), manifest.get("id")),
+            local_sha=self.get_local_sha_for_id(os.path.join(gl.DATA_PATH, "icons"), manifest.get("id")),
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
             repository_name=self.get_repo_name(url),
@@ -661,7 +657,7 @@ class StoreBackend:
         )
 
     
-    async def prepare_wallpaper(self, wallpaper, include_image: bool = True, verified: bool = False):
+    def prepare_wallpaper(self, wallpaper, include_image: bool = True, verified: bool = False):
         if not include_image:
             raise NotImplementedError("Not yet implemented") #TODO
         if "url" not in wallpaper:
@@ -679,18 +675,18 @@ class StoreBackend:
                 return NoCompatibleVersion
         commit = wallpaper["commits"][version]
 
-        manifest = await self.get_manifest(url, commit)
+        manifest = self.get_manifest(url, commit)
         if isinstance(manifest, NoConnectionError):
             return manifest
 
         thumbnail_path = manifest.get("thumbnail")
-        image = await self.get_web_image(url, thumbnail_path, commit)
+        image = self.get_web_image(url, thumbnail_path, commit)
         if isinstance(image, NoConnectionError):
             # A missing/rate-limited thumbnail must not drop the wallpaper
             # from the catalog -- list it without an image, like
             # prepare_plugin.
             image = None
-        attribution = await self.get_attribution(url, commit)
+        attribution = self.get_attribution(url, commit)
         if isinstance(attribution, NoConnectionError):
             return attribution
         attribution = attribution.get("generic", {}) #TODO: Choose correct attribution
@@ -710,7 +706,7 @@ class StoreBackend:
             author=author or None,  # Formerly: user_name
             official=author in self.official_authors or False,
             commit_sha=commit,
-            local_sha=await self.get_local_sha_for_id(os.path.join(gl.DATA_PATH, "wallpapers"), manifest.get("id")),
+            local_sha=self.get_local_sha_for_id(os.path.join(gl.DATA_PATH, "wallpapers"), manifest.get("id")),
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
             repository_name=self.get_repo_name(url),
@@ -732,7 +728,7 @@ class StoreBackend:
             verified=verified
         )
 
-    async def prepare_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper, include_image: bool = True, verified: bool = False):
+    def prepare_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper, include_image: bool = True, verified: bool = False):
         if not include_image:
             raise NotImplementedError("Not yet implemented") #TODO
         if "url" not in sd_plus_bar_wallpaper:
@@ -749,18 +745,18 @@ class StoreBackend:
                 return NoCompatibleVersion
         commit = sd_plus_bar_wallpaper["commits"][version]
         
-        manifest = await self.get_manifest(url, commit)
+        manifest = self.get_manifest(url, commit)
         if isinstance(manifest, NoConnectionError):
             return manifest
         
         thumbnail_path = manifest.get("thumbnail")
-        image = await self.get_web_image(url, thumbnail_path, commit)
+        image = self.get_web_image(url, thumbnail_path, commit)
         if isinstance(image, NoConnectionError):
             # A missing/rate-limited thumbnail must not drop the SD+ bar
             # wallpaper from the catalog -- list it without an image, like
             # prepare_plugin.
             image = None
-        attribution = await self.get_attribution(url, commit)
+        attribution = self.get_attribution(url, commit)
         if isinstance(attribution, NoConnectionError):
             return attribution
         attribution = attribution.get("generic", {}) #TODO: Choose correct attribution
@@ -780,7 +776,7 @@ class StoreBackend:
             author=author or None,  # Formerly: user_name
             official=author in self.official_authors or False,
             commit_sha=commit,
-            local_sha=await self.get_local_sha_for_id(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers"), manifest.get("id")),
+            local_sha=self.get_local_sha_for_id(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers"), manifest.get("id")),
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
             repository_name=self.get_repo_name(url),
@@ -802,13 +798,12 @@ class StoreBackend:
             verified=verified
         )
 
-    async def get_web_image(self, url: str, path: str, branch: str = "main") -> Image:
-        # `except Exception`, NOT bare `except:` -- the bare form also
-        # swallowed asyncio.CancelledError (a BaseException), so cancelling
-        # a store load made its image tasks report "no image" instead of
-        # actually cancelling.
+    def get_web_image(self, url: str, path: str, branch: str = "main") -> Image:
+        # `except Exception`, NOT bare `except:` -- the bare form would
+        # also swallow BaseExceptions (SystemExit, KeyboardInterrupt) out
+        # of a pool worker.
         try:
-            result = await self.get_remote_file(url, path, branch, data_type="content")
+            result = self.get_remote_file(url, path, branch, data_type="content")
         except Exception as e:
             log.error(f"Failed to fetch image {path} from {url}: {e}")
             return
@@ -820,7 +815,7 @@ class StoreBackend:
             log.warning(f"Could not decode image {path} from {url}: {e}")
             return
     
-    async def get_stargazers(self, repo_url: str) -> int:
+    def get_stargazers(self, repo_url: str) -> int:
         "Deactivated for now because of rate limits"
         return 0
 
@@ -836,9 +831,6 @@ class StoreBackend:
         if len(split) < 3:
             return
         return split[2]
-    
-    def get_all_plugins(self, include_images: bool = True) -> list[PluginData]:
-        return asyncio.run(self.get_all_plugins_async(include_images))
     
     def get_newest_compatible_version(self, available_versions: list[str]) -> str:
         if gl.exact_app_version_check:
@@ -865,10 +857,10 @@ class StoreBackend:
         return available_versions[max_index]
 
     ## Install
-    async def subp_call(self, args):
+    def subp_call(self, args):
         return subprocess.call(args)
     
-    async def os_sys(self, args):
+    def os_sys(self, args):
         return os.system(args)
     
     def get_main_folder_of_zip(self, zip_path: str) -> str:
@@ -983,7 +975,7 @@ class StoreBackend:
             raise
         self._remove_leftover(old_tree)
 
-    async def download_repo(self, repo_url:str, directory:str, commit_sha:str = None, branch_name:str = None, expected_id:str = None):
+    def download_repo(self, repo_url:str, directory:str, commit_sha:str = None, branch_name:str = None, expected_id:str = None):
         """Returns 200 on success, 404 for a hard failure (e.g. git missing
         on the devel clone path), 400 for a staged tree that fails the
         expected_id manifest check, or NoConnectionError.
@@ -994,7 +986,7 @@ class StoreBackend:
         tree is deleted only after the new one is in place, so a failure
         anywhere leaves the old install untouched."""
         if not is_flatpak() and gl.argparser.parse_args().devel:
-            return await self.clone_repo(repo_url, directory, commit_sha, branch_name, expected_id)
+            return self.clone_repo(repo_url, directory, commit_sha, branch_name, expected_id)
 
 
         username = self.get_user_name(repo_url)
@@ -1002,7 +994,7 @@ class StoreBackend:
         sha = commit_sha
         if commit_sha is None and branch_name is not None:
             # Used to write the version
-            sha = await self.get_last_commit(repo_url, branch_name)
+            sha = self.get_last_commit(repo_url, branch_name)
             if isinstance(sha, NoConnectionError):
                 return sha
             if sha is None:
@@ -1074,7 +1066,7 @@ class StoreBackend:
 
         return 200
     
-    async def clone_repo(self, repo_url:str, local_path:str, commit_sha:str = None, branch_name:str = None, expected_id:str = None):
+    def clone_repo(self, repo_url:str, local_path:str, commit_sha:str = None, branch_name:str = None, expected_id:str = None):
         if commit_sha is not None:
             # Use the main branch for the initial clone
             branch_name = None
@@ -1106,7 +1098,7 @@ class StoreBackend:
 
         try:
             # Clone the repository at the newest stage on the default branch
-            rc = await self.subp_call(["git", "clone", repo_url, staging])
+            rc = self.subp_call(["git", "clone", repo_url, staging])
             if rc != 0 or not os.path.isdir(staging):
                 log.error(f"git clone of {repo_url} failed with exit code {rc}")
                 return 404
@@ -1115,19 +1107,19 @@ class StoreBackend:
             # -- both the final home and the staging clone, since the
             # pull/reset/switch below now run in staging.
             # FIXME: Check if not already added
-            await self.subp_call(["git", "config", "--global", "--add", "safe.directory", os.path.abspath(local_path)])
-            await self.subp_call(["git", "config", "--global", "--add", "safe.directory", os.path.abspath(staging)])
+            self.subp_call(["git", "config", "--global", "--add", "safe.directory", os.path.abspath(local_path)])
+            self.subp_call(["git", "config", "--global", "--add", "safe.directory", os.path.abspath(staging)])
 
             # Run git pull to create .git/FETCH_HEAD. This allows us to check for available updates.
             # `git -C <dir>` (argv, no shell) instead of the old
             # `os.system("cd '<dir>' && git pull")` which built a shell command line.
-            await self.subp_call(["git", "-C", staging, "pull"])
+            self.subp_call(["git", "-C", staging, "pull"])
 
             # Set repository to the given commit_sha
             if commit_sha is not None:
-                await self.subp_call(["git", "-C", staging, "reset", "--hard", commit_sha])
+                self.subp_call(["git", "-C", staging, "reset", "--hard", commit_sha])
             elif branch_name is not None:
-                await self.subp_call(["git", "-C", staging, "switch", branch_name])
+                self.subp_call(["git", "-C", staging, "switch", branch_name])
 
             # Same order as download_repo: validate the staged tree first,
             # then stamp VERSION, then swap.
@@ -1147,7 +1139,7 @@ class StoreBackend:
 
         return 200
 
-    async def install_plugin(self, plugin_data:PluginData, auto_update: bool = False):
+    def install_plugin(self, plugin_data:PluginData, auto_update: bool = False):
         url = plugin_data.github
 
         if not self.is_safe_asset_id(plugin_data.plugin_id):
@@ -1158,7 +1150,7 @@ class StoreBackend:
 
         local_path = os.path.join(gl.PLUGIN_DIR, plugin_data.plugin_id)
 
-        response = await self.download_repo(repo_url=url, directory=local_path, commit_sha=plugin_data.commit_sha, branch_name=plugin_data.branch, expected_id=plugin_data.plugin_id)
+        response = self.download_repo(repo_url=url, directory=local_path, commit_sha=plugin_data.commit_sha, branch_name=plugin_data.branch, expected_id=plugin_data.plugin_id)
 
         # Bail before running install scripts or reloading plugins over a
         # missing or partial tree.
@@ -1319,7 +1311,7 @@ class StoreBackend:
     # unsafe ids (icon/wallpaper packs are data-only; a traversal id would
     # hand them filesystem-wide delete with no code execution involved).
 
-    async def install_icon(self, icon_data:IconData):
+    def install_icon(self, icon_data:IconData):
         if not self.is_safe_asset_id(icon_data.icon_id):
             log.error(f"Refusing to install icon pack with unsafe id {icon_data.icon_id!r} from {icon_data.github}")
             return 400
@@ -1330,9 +1322,9 @@ class StoreBackend:
         # pack and only replaces the installed one at swap time -- the old
         # uninstall-first flow permanently lost the pack when the download
         # failed mid-update.
-        return await self.download_repo(repo_url=icon_data.github, directory=icon_path, commit_sha=icon_data.commit_sha, expected_id=icon_data.icon_id)
+        return self.download_repo(repo_url=icon_data.github, directory=icon_path, commit_sha=icon_data.commit_sha, expected_id=icon_data.icon_id)
 
-    async def uninstall_icon(self, icon_data:IconData):
+    def uninstall_icon(self, icon_data:IconData):
         folder_name = icon_data.icon_id
         if not self.is_safe_asset_id(folder_name):
             log.error(f"Refusing to uninstall icon pack with unsafe id {folder_name!r}")
@@ -1340,7 +1332,7 @@ class StoreBackend:
         if os.path.exists(os.path.join(gl.DATA_PATH, "icons", folder_name)):
             shutil.rmtree(os.path.join(gl.DATA_PATH, "icons", folder_name))
 
-    async def install_wallpaper(self, wallpaper_data:WallpaperData):
+    def install_wallpaper(self, wallpaper_data:WallpaperData):
         if not self.is_safe_asset_id(wallpaper_data.wallpaper_id):
             log.error(f"Refusing to install wallpaper with unsafe id {wallpaper_data.wallpaper_id!r} from {wallpaper_data.github}")
             return 400
@@ -1348,9 +1340,9 @@ class StoreBackend:
         wallpaper_path = os.path.join(gl.DATA_PATH, "wallpapers", wallpaper_data.wallpaper_id)
 
         # No pre-delete (B-06) -- see install_icon.
-        return await self.download_repo(repo_url=wallpaper_data.github, directory=wallpaper_path, commit_sha=wallpaper_data.commit_sha, expected_id=wallpaper_data.wallpaper_id)
+        return self.download_repo(repo_url=wallpaper_data.github, directory=wallpaper_path, commit_sha=wallpaper_data.commit_sha, expected_id=wallpaper_data.wallpaper_id)
 
-    async def uninstall_wallpaper(self, wallpaper_data:WallpaperData):
+    def uninstall_wallpaper(self, wallpaper_data:WallpaperData):
         folder_name = wallpaper_data.wallpaper_id
         if not self.is_safe_asset_id(folder_name):
             log.error(f"Refusing to uninstall wallpaper with unsafe id {folder_name!r}")
@@ -1358,7 +1350,7 @@ class StoreBackend:
         if os.path.exists(os.path.join(gl.DATA_PATH, "wallpapers", folder_name)):
             shutil.rmtree(os.path.join(gl.DATA_PATH, "wallpapers", folder_name))
 
-    async def install_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper_data:SDPlusBarWallpaperData):
+    def install_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper_data:SDPlusBarWallpaperData):
         if not self.is_safe_asset_id(sd_plus_bar_wallpaper_data.id):
             log.error(f"Refusing to install SD+ bar wallpaper with unsafe id {sd_plus_bar_wallpaper_data.id!r} from {sd_plus_bar_wallpaper_data.github}")
             return 400
@@ -1366,9 +1358,9 @@ class StoreBackend:
         wallpaper_path = os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", sd_plus_bar_wallpaper_data.id)
 
         # No pre-delete (B-06) -- see install_icon.
-        return await self.download_repo(repo_url=sd_plus_bar_wallpaper_data.github, directory=wallpaper_path, commit_sha=sd_plus_bar_wallpaper_data.commit_sha, expected_id=sd_plus_bar_wallpaper_data.id)
+        return self.download_repo(repo_url=sd_plus_bar_wallpaper_data.github, directory=wallpaper_path, commit_sha=sd_plus_bar_wallpaper_data.commit_sha, expected_id=sd_plus_bar_wallpaper_data.id)
 
-    async def uninstall_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper_data:SDPlusBarWallpaperData):
+    def uninstall_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper_data:SDPlusBarWallpaperData):
         folder_name = sd_plus_bar_wallpaper_data.id
         if not self.is_safe_asset_id(folder_name):
             log.error(f"Refusing to uninstall SD+ bar wallpaper with unsafe id {folder_name!r}")
@@ -1376,15 +1368,15 @@ class StoreBackend:
         if os.path.exists(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", folder_name)):
             shutil.rmtree(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", folder_name))
 
-    async def get_plugin_for_id(self, plugin_id):
-        plugins = await self.get_all_plugins_async()
+    def get_plugin_for_id(self, plugin_id):
+        plugins = self.get_all_plugins()
         for plugin in plugins:
             if plugin.plugin_id == plugin_id:
                 return plugin
             
     ## Updates
-    async def get_plugins_to_update(self):
-        plugins =  await self.get_all_plugins_async()
+    def get_plugins_to_update(self):
+        plugins =  self.get_all_plugins()
         if isinstance(plugins, NoConnectionError):
             return plugins
 
@@ -1418,11 +1410,11 @@ class StoreBackend:
 
         return plugins_to_update
     
-    async def update_all_plugins(self) -> int:
+    def update_all_plugins(self) -> int:
         """
         Returns number of SUCCESSFULLY updated plugins
         """
-        plugins_to_update = await self.get_plugins_to_update()
+        plugins_to_update = self.get_plugins_to_update()
         if isinstance(plugins_to_update, NoConnectionError):
             return plugins_to_update
         n_updated = 0
@@ -1430,7 +1422,7 @@ class StoreBackend:
             # install_plugin deregisters the old version only after its
             # download succeeded -- a failed update leaves the old version
             # on disk AND registered, so no recovery pass is needed.
-            result = await self.install_plugin(plugin)
+            result = self.install_plugin(plugin)
             if result is True:
                 n_updated += 1
             else:
@@ -1438,8 +1430,8 @@ class StoreBackend:
 
         return n_updated
 
-    async def get_icons_to_update(self):
-        icons = await self.get_all_icons()
+    def get_icons_to_update(self):
+        icons = self.get_all_icons()
         if isinstance(icons, NoConnectionError):
             return icons
 
@@ -1467,16 +1459,16 @@ class StoreBackend:
 
         return icons_to_update
     
-    async def update_all_icons(self) -> int:
+    def update_all_icons(self) -> int:
         """
         Returns number of SUCCESSFULLY updated icons
         """
-        icons_to_update = await self.get_icons_to_update()
+        icons_to_update = self.get_icons_to_update()
         if isinstance(icons_to_update, NoConnectionError):
             return icons_to_update
         n_updated = 0
         for icon in icons_to_update:
-            result = await self.install_icon(icon)
+            result = self.install_icon(icon)
             if result == 200:
                 n_updated += 1
             else:
@@ -1484,8 +1476,8 @@ class StoreBackend:
 
         return n_updated
     
-    async def get_wallpapers_to_update(self):
-        wallpapers = await self.get_all_wallpapers()
+    def get_wallpapers_to_update(self):
+        wallpapers = self.get_all_wallpapers()
         if isinstance(wallpapers, NoConnectionError):
             return wallpapers
 
@@ -1513,16 +1505,16 @@ class StoreBackend:
 
         return wallpapers_to_update
 
-    async def update_all_wallpapers(self) -> int:
+    def update_all_wallpapers(self) -> int:
         """
         Returns number of SUCCESSFULLY updated wallpapers
         """
-        wallpapers_to_update = await self.get_wallpapers_to_update()
+        wallpapers_to_update = self.get_wallpapers_to_update()
         if isinstance(wallpapers_to_update, NoConnectionError):
             return wallpapers_to_update
         n_updated = 0
         for wallpaper in wallpapers_to_update:
-            result = await self.install_wallpaper(wallpaper)
+            result = self.install_wallpaper(wallpaper)
             if result == 200:
                 n_updated += 1
             else:
@@ -1530,8 +1522,8 @@ class StoreBackend:
 
         return n_updated
 
-    async def get_sd_plus_bar_wallpapers_to_update(self):
-        wallpapers = await self.get_all_sd_plus_bar_wallpapers()
+    def get_sd_plus_bar_wallpapers_to_update(self):
+        wallpapers = self.get_all_sd_plus_bar_wallpapers()
         if isinstance(wallpapers, NoConnectionError):
             return wallpapers
 
@@ -1559,16 +1551,16 @@ class StoreBackend:
 
         return wallpapers_to_update
 
-    async def update_all_sd_plus_bar_wallpapers(self) -> int:
+    def update_all_sd_plus_bar_wallpapers(self) -> int:
         """
         Returns number of SUCCESSFULLY updated SD+ bar wallpapers
         """
-        wallpapers_to_update = await self.get_sd_plus_bar_wallpapers_to_update()
+        wallpapers_to_update = self.get_sd_plus_bar_wallpapers_to_update()
         if isinstance(wallpapers_to_update, NoConnectionError):
             return wallpapers_to_update
         n_updated = 0
         for wallpaper in wallpapers_to_update:
-            result = await self.install_sd_plus_bar_wallpaper(wallpaper)
+            result = self.install_sd_plus_bar_wallpaper(wallpaper)
             if result == 200:
                 n_updated += 1
             else:
@@ -1576,16 +1568,16 @@ class StoreBackend:
 
         return n_updated
 
-    async def update_everything(self) -> int:
+    def update_everything(self) -> int:
         """
         Returns number of SUCCESSFULLY updated assets, or NoConnectionError
         """
-        n_plugins = await self.update_all_plugins()
-        n_icons = await self.update_all_icons()
-        n_wallpapers = await self.update_all_wallpapers()
+        n_plugins = self.update_all_plugins()
+        n_icons = self.update_all_icons()
+        n_wallpapers = self.update_all_wallpapers()
         # SD+ bar wallpaper packs used to have NO update leg at all -- they
         # were installed once and never auto-updated.
-        n_sd_plus = await self.update_all_sd_plus_bar_wallpapers()
+        n_sd_plus = self.update_all_sd_plus_bar_wallpapers()
 
         # Every leg must be checked -- a NoConnectionError leaking into the
         # sum below used to raise TypeError (and n_wallpapers wasn't checked

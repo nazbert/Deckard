@@ -22,7 +22,6 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, Gdk, GLib, Pango
 
-import asyncio
 import threading
 import globals as gl
 from loguru import logger as log
@@ -85,14 +84,14 @@ class MissingRow(Adw.PreferencesRow):
     @log.catch
     def install(self):
         # Get missing plugin from id
-        plugin = asyncio.run(gl.store_backend.get_plugin_for_id(self.action_id.split("::")[0]))
+        plugin = gl.store_backend.get_plugin_for_id(self.action_id.split("::")[0])
         if plugin is None:
             self.show_install_error()
             return
         # Install plugin. Success is exactly True -- checking only for 404
         # let NoConnectionError (and any other failure return) fall through
         # to the "installed" UI reset.
-        success = asyncio.run(gl.store_backend.install_plugin(plugin))
+        success = gl.store_backend.install_plugin(plugin)
         if success is not True:
             self.show_install_error()
             return

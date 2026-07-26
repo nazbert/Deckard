@@ -115,7 +115,7 @@ def check_install_failures_toast() -> None:
     # gl.notify now, and its main-thread routing is part of what's under test.
     gl.notify = Notify()
 
-    async def get_plugin_for_id(plugin_id):
+    def get_plugin_for_id(plugin_id):
         return None  # unresolvable -> install failure
 
     gl.store_backend = types.SimpleNamespace(get_plugin_for_id=get_plugin_for_id)

@@ -12,7 +12,6 @@ Writers on the same cache key serialize on a per-file lock. Legacy entries
 without "fetched" fall back to the cache file's mtime instead of the
 ever-renewed "date" (the circular clock). All network-free.
 """
-import asyncio
 import os
 import threading
 import time
@@ -113,17 +112,17 @@ def test_stale_fallback_serves_last_good_content() -> None:
     sb = StoreBackend.__new__(StoreBackend)  # skip __init__ (spawns a fetch thread)
     sb.store_cache = StoreCache()
 
-    async def fetch_ok(url):
+    def fetch_ok(url):
         class Resp:
             text = '[{"good": "catalog"}]'
             content = text.encode()
         return Resp()
 
-    async def fetch_fail(url):
+    def fetch_fail(url):
         return NoConnectionError()
 
     sb.request_from_url = fetch_ok
-    first = asyncio.run(sb.get_remote_file(REPO, "Wallpapers.json", "main", force_refetch=True))
+    first = sb.get_remote_file(REPO, "Wallpapers.json", "main", force_refetch=True)
     assert first == '[{"good": "catalog"}]'
 
     # Crash a rewrite of the same key mid-write (bypassing get_remote_file,
@@ -136,7 +135,7 @@ def test_stale_fallback_serves_last_good_content() -> None:
         pass
 
     sb.request_from_url = fetch_fail
-    second = asyncio.run(sb.get_remote_file(REPO, "Wallpapers.json", "main", force_refetch=True))
+    second = sb.get_remote_file(REPO, "Wallpapers.json", "main", force_refetch=True)
     assert second == '[{"good": "catalog"}]', (
         f"stale fallback must serve the last COMMITTED copy, got {second!r}"
     )

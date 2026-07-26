@@ -27,7 +27,6 @@ The `requests.get` call is monkeypatched to serve bytes from a local file
 (or raise) -- no socket is ever opened. Extraction/cleanup run against the
 real shutil/zipfile machinery in the isolated temp DATA_PATH.
 """
-import asyncio
 import io
 import os
 import zipfile
@@ -156,7 +155,7 @@ def test_successful_install_cleans_cache_and_writes_version() -> None:
 
     prev = _install_fake_get(_chunk(_good_zip_bytes()))
     try:
-        result = asyncio.run(sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA))
+        result = sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA)
     finally:
         _restore_get(prev)
 
@@ -179,7 +178,7 @@ def test_network_fault_midstream_removes_partial_zip() -> None:
     # .zip is already on disk at that point.
     prev = _install_fake_get(_chunk(_good_zip_bytes(), n=64), raise_at_chunk=1)
     try:
-        result = asyncio.run(sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA))
+        result = sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA)
     finally:
         _restore_get(prev)
 
@@ -203,7 +202,7 @@ def test_http_error_before_open_creates_no_archive() -> None:
     # raise_for_status fires before open("wb"): no file is created at all.
     prev = _install_fake_get(_chunk(_good_zip_bytes()), raise_on_status=True)
     try:
-        result = asyncio.run(sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA))
+        result = sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA)
     finally:
         _restore_get(prev)
 
@@ -220,7 +219,7 @@ def test_fault_before_first_chunk_removes_zero_byte_archive() -> None:
     # -- a genuine zero-byte archive on disk that the except-branch must reap.
     prev = _install_fake_get(_chunk(_good_zip_bytes()), raise_at_chunk=0)
     try:
-        result = asyncio.run(sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA))
+        result = sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA)
     finally:
         _restore_get(prev)
 
@@ -243,7 +242,7 @@ def test_corrupt_archive_returns_error_and_cleans_up() -> None:
 
     prev = _install_fake_get([corrupt])
     try:
-        result = asyncio.run(sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA))
+        result = sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA)
     finally:
         _restore_get(prev)
 
@@ -263,7 +262,7 @@ def test_traversal_member_is_refused() -> None:
 
     prev = _install_fake_get(_chunk(_traversal_zip_bytes()))
     try:
-        result = asyncio.run(sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA))
+        result = sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA)
     finally:
         _restore_get(prev)
 
@@ -294,7 +293,7 @@ def test_download_fault_leaves_existing_install_intact() -> None:
 
     prev = _install_fake_get(_chunk(_good_zip_bytes(), n=64), raise_at_chunk=1)
     try:
-        result = asyncio.run(sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA))
+        result = sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA)
     finally:
         _restore_get(prev)
 
@@ -343,7 +342,7 @@ def test_swap_failure_restores_existing_install() -> None:
     prev = _install_fake_get(_chunk(_good_zip_bytes()))
     store_mod.os.replace = failing_replace
     try:
-        result = asyncio.run(sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA))
+        result = sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA)
     finally:
         store_mod.os.replace = real_replace
         _restore_get(prev)
@@ -374,9 +373,9 @@ def test_manifest_id_mismatch_refused_old_install_intact() -> None:
     zip_bytes = _good_zip_bytes(files={"manifest.json": b'{"id": "com_evil_Other"}'})
     prev = _install_fake_get(_chunk(zip_bytes))
     try:
-        result = asyncio.run(sb.download_repo(
+        result = sb.download_repo(
             repo_url=REPO_URL, directory=dest, commit_sha=SHA,
-            expected_id="com_test_IdMismatch"))
+            expected_id="com_test_IdMismatch")
     finally:
         _restore_get(prev)
 
@@ -416,9 +415,9 @@ def test_update_replaces_pack_and_stamps_version_in_staging() -> None:
                                        "new.txt": b"new content"})
     prev = _install_fake_get(_chunk(zip_bytes))
     try:
-        result = asyncio.run(sb.download_repo(
+        result = sb.download_repo(
             repo_url=REPO_URL, directory=dest, commit_sha=SHA,
-            expected_id="com_test_Replace"))
+            expected_id="com_test_Replace")
     finally:
         _restore_get(prev)
 
