@@ -127,6 +127,11 @@ class BackgroundVideoCache(Mp4FrameCache):
     def get_tiles(self, n: int) -> list[Image.Image]:
         return self.get_frame(n)
 
+    def get_tiles_and_index(self, n: int) -> tuple[list[Image.Image], int]:
+        """get_tiles() plus the source frame index those tiles actually come
+        from (None when unknown) -- see Mp4FrameCache.get_frame_and_index."""
+        return self.get_frame_and_index(n)
+
     def _payload_from_bgr(self, frame_bgr: np.ndarray) -> list[Image.Image]:
         canvas = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
         entries = [
