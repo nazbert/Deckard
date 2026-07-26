@@ -139,8 +139,18 @@ def _migration_lock(new_root: str):
 
 def _old_instance_running() -> bool:
     try:
-        import dbus
-        return bool(dbus.SessionBus().name_has_owner(OLD_ID))
+        from gi.repository import Gio, GLib
+        return bool(Gio.bus_get_sync(Gio.BusType.SESSION, None).call_sync(
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "NameHasOwner",
+            GLib.Variant("(s)", (OLD_ID,)),
+            GLib.VariantType("(b)"),
+            Gio.DBusCallFlags.NO_AUTO_START,
+            5000,
+            None
+        ).unpack()[0])
     except Exception as e:
         _log(f"could not probe the session bus for a pre-rename instance ({e}); assuming none")
         return False

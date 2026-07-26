@@ -8,7 +8,7 @@ build-commands:
 - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
   --prefix=${FLATPAK_DEST} --no-build-isolation annotated-types async-lru bcrypt blinker
   cairocffi CairoSVG certifi cffi charset-normalizer click cloudpickle colorama contourpy
-  cssselect2 cycler dasbus dbus-python decorator defusedxml distlib dnspython evdev
+  cssselect2 cycler dasbus decorator defusedxml distlib dnspython evdev
   filelock fonttools fuzzywuzzy get-video-properties gitdb h2 hpack hyperframe idna
   imageio imageio-ffmpeg indexed-bzip2 itsdangerous Jinja2 joblib kiwisolver Levenshtein
   linkify-it-py loguru markdown-it-py MarkupSafe matplotlib mdit-py-plugins mdurl
@@ -156,9 +156,6 @@ sources:
 - type: file
   url: https://files.pythonhosted.org/packages/e1/b4/4d55b9359bc34d56b29b943b378331dd8aaea6db6d0543e5d97fed4b1af7/dasbus-1.7-py3-none-any.whl
   sha256: 0a9433e9e72c2c865fa2d5ef824ac4ef49b540cf57f6396e515c2f314e5c14cd
-- type: file
-  url: https://files.pythonhosted.org/packages/c1/d3/6be85a9c772d6ebba0cc3ab37390dd6620006dcced758667e0217fb13307/dbus-python-1.3.2.tar.gz
-  sha256: ad67819308618b5069537be237f8e68ca1c7fcc95ee4a121fe6845b1418248f8
 - type: file
   url: https://files.pythonhosted.org/packages/4e/8c/f3147f5c4b73e7550fe5f9352eaa956ae838d5c51eb58e7a25b9f3e2643b/decorator-5.2.1-py3-none-any.whl
   sha256: d316bb415a2d9e2d2b3abcc4084c6502fc09240e292cd76a76afc106a1c8e04a

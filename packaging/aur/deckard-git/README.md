@@ -21,7 +21,7 @@ Notes:
 - Depends on the AUR **`python313`** package (see below).
 - `build()` downloads the pinned deps from PyPI (unavoidable with pinned wheels);
   this is a `-git` convenience package, not a fully-declared-sources build.
-- First build is slow: PyGObject/pycairo/dbus-python compile from sdist, and
+- First build is slow: PyGObject/pycairo compile from sdist, and
   numpy/opencv/matplotlib are large wheels.
 
 ## Publishing to the AUR
