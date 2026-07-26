@@ -113,6 +113,11 @@ class AppSettings:
             return default
 
     def set(self, section: str, key: str, value) -> None:
+        # The same typo tripwire get() has: DEFAULTS is the schema, and a
+        # misspelled key would otherwise be written silently and never read
+        # back.
+        if key not in DEFAULTS[section]:
+            raise KeyError(f"{section}.{key} is not in the app-settings DEFAULTS table")
         self.data.setdefault(section, {})
         self.data[section][key] = value
 

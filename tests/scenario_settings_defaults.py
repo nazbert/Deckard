@@ -242,6 +242,35 @@ def check_round_trip_through_the_underlying_dict() -> None:
     print("PASS: accessors read/write through the wrapped dict")
 
 
+def check_unknown_keys_rejected_both_ways() -> None:
+    """DEFAULTS is the schema on writes too: get() already raised KeyError
+    for a (section, key) outside the table, but set() silently wrote a
+    misspelled key that no reader would ever find. Both directions must
+    trip; the runtime-computed keys CustomContentGroup actually uses must
+    keep working."""
+    app = AppSettings({})
+
+    for section, key in (("general", "hold-tmie"), ("nope", "hold-time")):
+        try:
+            app.get(section, key)
+            raise AssertionError(f"get({section!r}, {key!r}) did not raise")
+        except KeyError:
+            pass
+        try:
+            app.set(section, key, 1)
+            raise AssertionError(f"set({section!r}, {key!r}) did not raise")
+        except KeyError:
+            pass
+    assert app.data == {}, f"a rejected write still mutated the dict: {app.data}"
+
+    # The generic path CustomContentGroup depends on stays open.
+    for runtime_key in ("enable-custom-stores", "enable-custom-plugins"):
+        app.set("store", runtime_key, True)
+        assert app.get("store", runtime_key) is True
+
+    print("PASS: unknown keys raise KeyError on get and set")
+
+
 def check_wraps_the_shared_and_snapshot_dicts() -> None:
     """SettingsManager.app() must wrap the shared cached dict itself, so a
     write through the accessor is visible to raw readers before the save."""
@@ -268,5 +297,6 @@ if __name__ == "__main__":
     check_keep_running_tri_state()
     check_mutable_defaults_are_not_shared()
     check_round_trip_through_the_underlying_dict()
+    check_unknown_keys_rejected_both_ways()
     check_wraps_the_shared_and_snapshot_dicts()
     print("\nALL PASS: scenario_settings_defaults")

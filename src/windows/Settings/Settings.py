@@ -213,7 +213,9 @@ class FakeDecksGroup(Adw.PreferencesGroup):
 
     def on_n_fake_decks_row_changed(self, *args):
         #FIXME: For some reason this gets called twice
-        self.settings.app.n_fake_decks = self.n_fake_decks_row.get_value()
+        # int(): the SpinRow hands back a float, the setting is a count
+        # (same treatment as n-cached-pages).
+        self.settings.app.n_fake_decks = int(self.n_fake_decks_row.get_value())
 
         # Save
         self.settings.save_json()
@@ -243,7 +245,9 @@ class RemoteDecksGroup(Adw.PreferencesGroup):
 
     def on_row_changed(self, *args):
         #FIXME: For some reason this gets called twice
-        n_decks = self.n_remote_decks_row.get_value()
+        # int(): the SpinRow hands back a float, the setting is a count
+        # (same treatment as n-cached-pages).
+        n_decks = int(self.n_remote_decks_row.get_value())
         app_settings = gl.settings_manager.app()
         app_settings.n_remote_decks = n_decks
 
