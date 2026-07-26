@@ -21,8 +21,7 @@ if TYPE_CHECKING:
 # Import globals first to get IS_MAC
 import globals as gl
 
-if not gl.IS_MAC:
-    import dbus
+from gi.repository import Gio
 
 from loguru import logger as log
 
@@ -30,6 +29,7 @@ class GnomeLockScreenDetector(LockScreenDetector):
     def __init__(self, lock_screen_manager: "LockScreenManager"):
         self.lock_screen_manager: "LockScreenManager" = lock_screen_manager
 
+        self.bus = None
         self.setup_dbus()
 
     def screen_saver_active_changed(self, active):
@@ -37,22 +37,29 @@ class GnomeLockScreenDetector(LockScreenDetector):
 
         self.lock_screen_manager.lock(active)
 
+    def on_dbus_signal(self, connection, sender_name, object_path, interface_name, signal_name, parameters):
+        self.screen_saver_active_changed(parameters.unpack()[0])
+
     def setup_dbus(self):
         if gl.IS_MAC:
             return
         try:
-            # Use the D-Bus MainLoop with glib integration
-            dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+            # Connect to the Session Bus. Kept referenced: the subscription
+            # below lives exactly as long as the connection does.
+            self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
 
-            # Connect to the Session Bus
-            bus = dbus.SessionBus()
-
-            # Define the signal to listen to
-            bus.add_signal_receiver(
-                self.screen_saver_active_changed,
-                dbus_interface="org.gnome.ScreenSaver",
-                signal_name="ActiveChanged",
-                path="/org/gnome/ScreenSaver"
+            # Define the signal to listen to. setup() runs on the manager's
+            # daemon thread, which has no thread-default main context, so
+            # GDBus dispatches the callback on the global default one -- the
+            # GTK main loop, same as the old glib mainloop integration.
+            self.bus.signal_subscribe(
+                None,
+                "org.gnome.ScreenSaver",
+                "ActiveChanged",
+                "/org/gnome/ScreenSaver",
+                None,
+                Gio.DBusSignalFlags.NONE,
+                self.on_dbus_signal
             )
         except Exception as e:
             log.error(f"Failed to connect to D-Bus: {e}")
