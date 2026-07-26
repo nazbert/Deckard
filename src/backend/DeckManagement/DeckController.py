@@ -1083,6 +1083,19 @@ class DeckController:
         self._background_load_lock = threading.Lock()
         self._bg_future = None
 
+        # Native (encoded) key image caches. Initialized before the inputs
+        # and the background: the paint path dereferences both directly, and
+        # a background change clears them, so neither may lag behind
+        # anything that can paint.
+        #
+        # encode_memo: keyed by (composite hash, rotation) -- repeated frames
+        # (looping background video) skip conversion + JPEG encode.
+        self.encode_memo = EncodedImageCache(max_bytes=32 * 1024 * 1024)
+        # native_tile_cache: the same natives keyed by FRAME IDENTITY for the
+        # passthrough path (#163) -- a bare key over a video background skips
+        # the tobytes+hash too, so a warmed loop costs a dict lookup per key.
+        self.native_tile_cache = NativeTileCache(max_bytes=native_tile_cache_max_bytes())
+
         self.inputs = {}
         for i in Input.All:
             self.inputs[i] = []
@@ -1114,14 +1127,6 @@ class DeckController:
         # tooling (DECKARD_ASSERT_DEVICE_OWNER; BetterDeck.py). A
         # no-op unless that env var is set -- harness/dev tooling only.
         self.deck.set_expected_writer(self.media_player)
-
-        # Encoded key images keyed by (composite hash, rotation): repeated
-        # frames (looping background video) skip conversion + JPEG encode.
-        self.encode_memo = EncodedImageCache(max_bytes=32 * 1024 * 1024)
-        # The same natives keyed by FRAME IDENTITY for the passthrough path
-        # (#163): a bare key over a video background skips the tobytes+hash
-        # as well, so a warmed loop costs a dict lookup per key.
-        self.native_tile_cache = NativeTileCache(max_bytes=native_tile_cache_max_bytes())
 
         # Bounded thread pool for action callbacks (tick/update/ready/event),
         # sized so every input can run its on_tick concurrently.
@@ -1418,8 +1423,8 @@ class DeckController:
         """Drops every cached native key image -- the pixel-hash encode memo
         AND the frame-identity native tiles. Called wherever the content
         those entries were encoded from is orphaned wholesale: a background
-        content change, a rotation change, or teardown. getattr-guarded
-        because Background is constructed before either cache exists."""
+        content change, a rotation change, or teardown. getattr-guarded so a
+        close() after a half-finished __init__ still sweeps what exists."""
         for cache_name in ("encode_memo", "native_tile_cache"):
             cache = getattr(self, cache_name, None)
             if cache is not None:
