@@ -76,7 +76,17 @@ def unix_signal_add(priority, signum, callback) -> bool:
             add = GLibUnix.signal_add
         except (ImportError, ValueError, AttributeError):
             return False
-    add(priority, signum, callback)
+    try:
+        add(priority, signum, callback)
+    except Exception as e:
+        # Resolving the symbol is not the same as it working: a signum
+        # g_unix_signal_add refuses, a GLib built without UNIX signal support,
+        # or an argument-marshalling mismatch between the two spellings all
+        # raise here. Degrading is this helper's entire contract -- letting it
+        # escape would propagate out of App.__init__ and abort startup, which
+        # is a far worse outcome than a Python-level handler.
+        log.warning(f"Could not install a GLib unix-signal source for {signum}: {e}")
+        return False
     return True
 
 
@@ -285,9 +295,28 @@ class App(Adw.Application):
         # App exists, or is internally guarded.
         main_win = getattr(self, "main_win", None)
         if main_win is not None:
-            main_win.destroy()
+            try:
+                main_win.destroy()
+            except Exception as e:
+                # main_win is published by MainWindow.__init__'s first
+                # statement, before the build can still fail (see
+                # on_activate), so this can be a half-built window.
+                log.warning(f"Failed to destroy the main window during shutdown: {e}")
 
-        gl.signal_manager.trigger_signal(Signals.AppQuit)
+        # Guarded for the same reason as the window teardown above, and it
+        # matters more here: SignalManager.trigger_signal invokes AppQuit
+        # handlers synchronously and *unwrapped*, so one third-party plugin
+        # raising in its quit hook aborts on_quit right here -- before
+        # close_all() (a deck left open fails the next startup with
+        # TransportError(-1)), before terminate_all_backends() (the orphaned
+        # backends this issue is about) and before the force_quit watchdog
+        # below is even armed. With the _quit_started latch above, that abort
+        # is now permanent: every later quit route (tray, Gio "quit" action,
+        # Ctrl+C, TERM) takes the early return instead of retrying.
+        try:
+            gl.signal_manager.trigger_signal(Signals.AppQuit)
+        except Exception as e:
+            log.warning(f"An AppQuit handler failed during shutdown: {e}")
 
         gl.threads_running = False
 
@@ -382,6 +411,33 @@ class App(Adw.Application):
             log.warning(f"Failed to terminate plugin backends during force quit: {e}")
         os._exit(1)
 
+    def _on_unix_signal(self, *args):
+        """SIGTERM/SIGHUP entry point. Runs on_quit, then keeps the source.
+
+        Not just `on_quit` itself, because of the return value. A unix-signal
+        source whose callback returns falsy is destroyed, and GLib restores
+        SIG_DFL for that signum along with it (verified: the *next* TERM then
+        kills the process outright). on_quit normally never returns -- but its
+        _quit_started latch does, so once a teardown is in flight every
+        further TERM/HUP would fall through the latch, return None, disarm the
+        handler, and hand the next signal back to the default disposition,
+        killing the process mid-teardown with the backends still running --
+        precisely the failure issue #169 is about. SOURCE_CONTINUE keeps the
+        source armed for as long as the process lives.
+
+        Deliberately not reused for the Gio "quit" action or the
+        GLib.idle_add(on_quit) routes (mainWindow.on_close, the hamburger
+        menu): on an idle source a truthy return means "run me again", which
+        would spin the main loop. on_quit's plain None is right for those.
+
+        An exception from on_quit is *not* swallowed: it propagates, GLib
+        drops the source, and a follow-up TERM hard-kills. That escalation is
+        wanted -- a deterministically broken teardown must not leave the app
+        immune to TERM.
+        """
+        self.on_quit()
+        return GLib.SOURCE_CONTINUE
+
     def register_signal_handlers(self):
         # SIGINT stays a Python-level handler: PyGObject's wakeup-fd bridge
         # makes it fire promptly under the GLib loop, and having a custom
@@ -395,10 +451,11 @@ class App(Adw.Application):
         # terminate_all_backends(), without which the backends (own session,
         # so no killpg reaches them) are orphaned. Registered here rather than
         # at loop start: GLib installs its sigaction immediately, so a signal
-        # arriving before the loop runs is held pending, not lost. The return
-        # value is moot -- on_quit never returns (os._exit).
+        # arriving before the loop runs is held pending, not lost. Routed via
+        # _on_unix_signal rather than on_quit directly -- see its docstring
+        # for why the source's return value is not moot.
         for signum in (signal.SIGTERM, signal.SIGHUP):
-            if unix_signal_add(GLib.PRIORITY_DEFAULT, signum, self.on_quit):
+            if unix_signal_add(GLib.PRIORITY_DEFAULT, signum, self._on_unix_signal):
                 continue
             # No introspectable unix-signal source on this GLib. A Python-level
             # handler still runs the full teardown (that is what matters here);
@@ -407,7 +464,7 @@ class App(Adw.Application):
                 f"No GLib unix-signal source available for {signum}; falling "
                 f"back to a Python-level handler"
             )
-            signal.signal(signum, self.on_quit)
+            signal.signal(signum, self._on_unix_signal)
 
     def add_signals(self):
         self.update_all_assets_action = Gio.SimpleAction.new("update-all-assets", None)
