@@ -24,11 +24,12 @@ import math
 import json
 import re
 from urllib.parse import urlparse
+from loguru import logger as log
 from PIL import Image
 
 import gi
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Pango
+from gi.repository import Gdk, Gio, GLib, Pango
 
 from src.backend.DeckManagement import font_resolver
 from src.backend.atomic_json import atomic_write_json
@@ -366,9 +367,20 @@ def run_command(command):
     p.start()
 
 def open_web(url):
+    """Open a URL in the user's default browser.
+
+    Uses Gio rather than shelling out to xdg-open: GLib routes the call
+    through the OpenURI portal when sandboxed, so this works in the flatpak
+    without `flatpak-spawn --host`, and a URL containing shell metacharacters
+    can no longer become a command.
+    """
     if not url.startswith("http"):
         url = f"https://{url}"
-    run_command(f"xdg-open {url}")
+    try:
+        Gio.AppInfo.launch_default_for_uri(url, None)
+    except GLib.Error as e:
+        # The shell path failed silently; Gio raises, so say so.
+        log.error(f"Failed to open URL {url}: {e}")
 
 def svg_string_to_pil(svg_string, width: int = 96, height: int = 96):
     """
