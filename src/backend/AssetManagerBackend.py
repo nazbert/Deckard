@@ -309,8 +309,26 @@ class AssetManagerBackend(list):
                 return -1
 
             os.makedirs(os.path.join(gl.DATA_PATH, "cache", "downloads"), exist_ok=True)
-            # Download file from url
-            path = download_file(url=url, path=os.path.join(gl.DATA_PATH, "cache", "downloads"))
+            # Download file from url. Since #168 download_file RAISES on a
+            # network failure or an HTTP error status instead of writing the
+            # error page into the asset cache -- catch it here, or the
+            # import worker thread dies on an ordinary bad link and the user
+            # is told nothing at all (the Chooser's drop path runs this on a
+            # bare thread; KeyGrid's runs it on the GTK main thread).
+            try:
+                path = download_file(url=url, path=os.path.join(gl.DATA_PATH, "cache", "downloads"))
+            except Exception as e:
+                log.opt(exception=True).error(f"Could not download asset from {url}: {e}")
+                dial = Gtk.AlertDialog(
+                    message="The download failed.",
+                    detail="The image or video could not be downloaded. Check the url and your connection.",
+                    modal=True
+                )
+                GLib.idle_add(dial.show)
+                # None, not -1: KeyGrid.handle_file_drop only bails on None
+                # and would otherwise write the sentinel into the key's
+                # media path.
+                return None
 
         if path == None:
             return
