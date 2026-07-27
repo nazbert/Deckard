@@ -10,13 +10,13 @@ target-version = "py313"   # deployment floor: flatpak GNOME 50 runtime / AUR py
 
 [tool.ruff.lint]
 select = [
-  "F401",  # unused imports (autofixed in this MR)
-  "E711",  # == None / != None (fixed in this MR)
-  "E712",  # == True / == False (fixed in this MR)
+  "F401",  # unused imports
+  "E711",  # == None / != None
+  "E712",  # == True / == False
   "B006",  # mutable default args — locks in MR !73 / #167
-  "F541",  # f-strings without placeholders (autofixed in this MR)
-  # "E722" — added by the bare-except sweep MR (refs #139)
-  # "B030" — added by the bare-except sweep MR
+  "F541",  # f-strings without placeholders
+  "E722",  # bare `except:` — the house style of #139
+  "B030",  # `except` handlers that aren't exception classes/tuples
 ]
 
 [tool.mypy]
