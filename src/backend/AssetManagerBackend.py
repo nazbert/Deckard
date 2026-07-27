@@ -329,7 +329,7 @@ class AssetManagerBackend(list):
                 # media path.
                 return None
 
-        if path == None:
+        if path is None:
             return
         if not os.path.exists(path):
             return
@@ -342,7 +342,7 @@ class AssetManagerBackend(list):
             GLib.idle_add(dial.show)
             return
         asset_id = gl.asset_manager_backend.add(asset_path=path)
-        if asset_id == None:
+        if asset_id is None:
             return
         
         asset = self.get_by_id(asset_id)

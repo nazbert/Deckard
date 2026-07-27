@@ -170,7 +170,7 @@ class ActionExpanderRow(BetterExpander):
         #TODO: Fix this function, it does not work
         # return
         if hasattr(self, "preview"):
-            if self.preview != None:
+            if self.preview is not None:
                 # self.reorder_child_after(self.preview, self.get_rows()[index])
                 GLib.idle_add(self.reorder_child_after, self.preview, self.get_rows()[index])
                 return
@@ -595,7 +595,7 @@ class ActionRow(Adw.ActionRow):
         self.expander.update_indices()
 
     def init_dnd(self):
-        if self.index == None:
+        if self.index is None:
             return
         # DnD Source
         dnd_source = Gtk.DragSource()

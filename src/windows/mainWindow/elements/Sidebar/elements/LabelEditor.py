@@ -236,7 +236,7 @@ class LabelRow(Adw.PreferencesRow):
             return
         page = controller.active_page
 
-        if page == None:
+        if page is None:
             #TODO: Show error
             return
         

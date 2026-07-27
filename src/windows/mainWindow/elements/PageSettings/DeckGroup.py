@@ -93,7 +93,7 @@ class Brightness(Adw.PreferencesRow):
         self.load_defaults_from_page()
 
     def set_scale_from_page(self, page):
-        if page == None:
+        if page is None:
             self.scale.set_sensitive(False)
             self.main_box.append(Gtk.Label(label="Error", hexpand=True, xalign=0, css_classes=["red-color"]))
             return
@@ -346,7 +346,7 @@ class Screensaver(Adw.PreferencesRow):
                                         reload_inputs=False)
 
     def set_thumbnail(self, file_path):
-        if file_path == None:
+        if file_path is None:
             return
 
         image = gl.media_manager.get_thumbnail(file_path)

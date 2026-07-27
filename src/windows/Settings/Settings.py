@@ -765,7 +765,7 @@ class SystemGroup(Adw.PreferencesGroup):
         app = self.settings.app
         # keep-running is tri-state (None == never asked); the switch only
         # reflects an explicit True.
-        self.keep_running.set_active(app.keep_running == True)
+        self.keep_running.set_active(app.keep_running is True)
         self.autostart.set_active(app.autostart)
         self.lock_on_lock_screen.set_active(app.lock_on_lock_screen)
 

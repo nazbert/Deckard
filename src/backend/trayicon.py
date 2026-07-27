@@ -179,7 +179,7 @@ class DBusMenuService(DBusService):
     @staticmethod
     def getItemsFlat(items, idToItems):
         for item in items:
-            if item.get('hidden', False) == True:
+            if item.get('hidden', False):
                 continue
 
             idToItems[item['id']] = item
@@ -213,7 +213,7 @@ class DBusMenuService(DBusService):
 
     @staticmethod
     def itemToDbus(item, recursion_depth):
-        if item.get('hidden', False) == True:
+        if item.get('hidden', False):
             return None
 
         props = DBusMenuService.itemPropsToDbus(item)
@@ -228,7 +228,7 @@ class DBusMenuService(DBusService):
 
     def findItemWithParent(self, parent_id, items):
         for item in items:
-            if item.get('hidden', False) == True:
+            if item.get('hidden', False):
                 continue
             if 'children' in item:
                 if item['id'] == parent_id:

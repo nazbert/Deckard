@@ -207,7 +207,7 @@ class BackgroundMediaRow(Adw.PreferencesRow):
         gl.app.let_user_select_asset(default_path=media_path, callback_func=self.set_deck_background)
 
     def set_thumbnail(self, file_path):
-        if file_path == None:
+        if file_path is None:
             self.media_selector_image.clear()
             return
         if file_path is None:

@@ -483,7 +483,7 @@ class EventAssignerRow(Adw.ComboRow):
         for i in range(model.get_n_items()):
             e = model.get_item(i)
             if event_assigner is None:
-                if e.id == None:
+                if e.id is None:
                     self.set_selected(i)
                     self._connect_signal()
                     return

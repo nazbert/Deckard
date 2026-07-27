@@ -2178,7 +2178,7 @@ class DeckController:
             return self.own_key_grid
         
         deck_stack_child = self.get_own_deck_stack_child()
-        if deck_stack_child == None:
+        if deck_stack_child is None:
             return
         
         self.own_key_grid = deck_stack_child.page_settings.deck_config.grid

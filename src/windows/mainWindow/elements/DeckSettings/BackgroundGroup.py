@@ -169,7 +169,7 @@ class BackgroundMediaRow(Adw.PreferencesRow):
         return
         if not hasattr(self.settings_page.deck_page.deck_controller, "active_page"):
             return
-        if self.settings_page.deck_page.deck_controller.active_page == None:
+        if self.settings_page.deck_page.deck_controller.active_page is None:
             return
         
         original_values = None

@@ -456,7 +456,7 @@ class Screensaver(Adw.PreferencesRow):
             self.settings_page.deck_controller.screen_saver.set_brightness(scale.get_value())
 
     def set_thumbnail(self, file_path):
-        if file_path == None:
+        if file_path is None:
             return
         if not os.path.isfile(file_path):
             return

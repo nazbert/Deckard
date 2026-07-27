@@ -114,7 +114,7 @@ def has_dict_recursive(dictionary: dict, *args):
     working_dict = dictionary
     for arg in args:
         working_dict = working_dict.get(arg)
-        if working_dict == None:
+        if working_dict is None:
             return False
     return True
 

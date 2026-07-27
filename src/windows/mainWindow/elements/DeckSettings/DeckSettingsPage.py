@@ -37,7 +37,7 @@ class DeckSettingsPage(Gtk.Overlay):
         self.deck_controller = deck_controller
         self.deck_serial_number = deck_controller.deck.get_serial_number()
         self.build()
-        if self.deck_controller.active_page == None:
+        if self.deck_controller.active_page is None:
             # TODO: Fix: Error not showing up
             self.show_no_page_error()
             return
@@ -94,7 +94,7 @@ class DeckSettingsPage(Gtk.Overlay):
         self.error_box.append(self.retry_button)
 
     def on_retry_button_click(self, button):
-        if self.deck_controller.active_page == None:
+        if self.deck_controller.active_page is None:
             return
         
         self.clear()
