@@ -2942,8 +2942,9 @@ class BackgroundVideo(BackgroundVideoCache):
 
         tiles, frame_index = self.get_tiles_and_index(self.active_frame)
         try:
+            # The cache substitutes None for a tile it could not decode.
             copied_tiles = [tile.copy() for tile in tiles]
-        except:
+        except AttributeError:
             copied_tiles = [None for _ in range(len(tiles))]
             frame_index = None
         identity = None if frame_index is None else (self.video_md5, frame_index)
@@ -4854,9 +4855,11 @@ class ControllerKey(ControllerInput):
             self.deck_controller.ui_image_changes_while_hidden[self.identifier] = True
         else:
             try:
+                # Racing the check above: the grid can go away, and the button
+                # grid can be smaller than this key's coords mid-rebuild.
                 GLib.idle_add(self.deck_controller.get_own_key_grid().buttons[x][y].set_image, image)
-            except:
-                print(f"Failed to set ui key image for {self.identifier}")
+            except (AttributeError, IndexError):
+                log.opt(exception=True).warning(f"Failed to set ui key image for {self.identifier}")
         
     def get_own_ui_key(self) -> KeyButton:
         x, y = ControllerKey.Index_To_Coords(self.deck_controller.deck, self.index)
