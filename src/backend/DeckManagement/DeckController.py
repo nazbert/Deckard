@@ -41,6 +41,7 @@ from src.backend.DeckManagement.fair_lock import FairLock
 from src.backend.DeckManagement.HelperMethods import *
 from src.backend.DeckManagement.ImageHelpers import *
 from src.backend.DeckManagement.InputIdentifier import Input, InputEvent, InputIdentifier
+from src.backend.DeckManagement.Media.MediaConfig import MediaConfig
 from src.backend.DeckManagement.Subclasses.ActionPermissionManager import ActionPermissionManager
 from src.backend.DeckManagement.Subclasses.FakeDeck import FakeDeck
 from src.backend.DeckManagement.Subclasses.KeyImage import InputImage
@@ -4769,7 +4770,8 @@ class ControllerKey(ControllerInput):
 
             ## Load media
             if load_media:
-                path = state_dict.get("media", {}).get("path", None)
+                media = MediaConfig.from_dict(state_dict.get("media", {}))
+                path = media.path
                 if path not in ["", None]:
                     if is_image(path):
                         with Image.open(path) as image:
@@ -4791,15 +4793,15 @@ class ControllerKey(ControllerInput):
                             state.set_video(KeyGIF(
                                 controller_key=self,
                                 gif_path=path,
-                                loop=state_dict.get("media", {}).get("loop", True),
-                                fps=state_dict.get("media", {}).get("fps", 30)
+                                loop=media.loop,
+                                fps=media.fps
                             )) # GIFs always update
                         else:
                             state.set_video(InputVideo(
                                 controller_input=self,
                                 video_path=path,
-                                loop = state_dict.get("media", {}).get("loop", True),
-                                fps = state_dict.get("media", {}).get("fps", 30),
+                                loop=media.loop,
+                                fps=media.fps,
                                 # User-assigned media plays at the source's
                                 # speed; the dict fps (sidebar FPS row) is a
                                 # render cap. Plugin media via set_media keeps
@@ -4818,10 +4820,10 @@ class ControllerKey(ControllerInput):
                     # real set_key_image.
 
                 layout = ImageLayout(
-                    fill_mode=state_dict.get("media", {}).get("fill-mode"),
-                    size=state_dict.get("media", {}).get("size"),
-                    valign=state_dict.get("media", {}).get("valign"),
-                    halign=state_dict.get("media", {}).get("halign"),
+                    fill_mode=media.fill_mode,
+                    size=media.size,
+                    valign=media.valign,
+                    halign=media.halign,
                 )
                 state.layout_manager.set_page_layout(layout, update=False)
 
@@ -5243,7 +5245,8 @@ class ControllerDial(ControllerInput):
                 state.label_manager.set_page_label(label, key_label, update=False)
 
             ## Load media
-            path = state_dict.get("media", {}).get("path")
+            media = MediaConfig.from_dict(state_dict.get("media", {}))
+            path = media.path
             if path not in ["", None]:
                 if is_image(path):
                     image = InputImage(
@@ -5265,15 +5268,15 @@ class ControllerDial(ControllerInput):
                         state.set_video(KeyGIF(
                             controller_key=self,
                             gif_path=path,
-                            loop=state_dict.get("media", {}).get("loop", True),
-                            fps=state_dict.get("media", {}).get("fps", 30)
+                            loop=media.loop,
+                            fps=media.fps
                         )) # GIFs always update
                     else:
                         state.set_video(InputVideo(
                             controller_input=self,
                             video_path=path,
-                            loop = state_dict.get("media", {}).get("loop", True),
-                            fps = state_dict.get("media", {}).get("fps", 30),
+                            loop=media.loop,
+                            fps=media.fps,
                             # User-assigned media plays at the source's speed;
                             # the dict fps (sidebar FPS row) is a render cap.
                             # Plugin media via set_media keeps
@@ -5282,10 +5285,10 @@ class ControllerDial(ControllerInput):
                         )) # Videos always update
 
             layout = ImageLayout(
-                fill_mode=state_dict.get("media", {}).get("fill-mode"),
-                size=state_dict.get("media", {}).get("size"),
-                valign=state_dict.get("media", {}).get("valign"),
-                halign=state_dict.get("media", {}).get("halign"),
+                fill_mode=media.fill_mode,
+                size=media.size,
+                valign=media.valign,
+                halign=media.halign,
             )
             state.layout_manager.set_page_layout(layout, update=False)
 
