@@ -19,7 +19,7 @@ Checks (real dispatcher, thresholds patched down):
       (no regression from the accounting).
   4.  Backlog accounting does not leak when a batch raises before the
       observer loop (_get_loop failure): the finally's decrement still runs.
-  5.  A submit that fails because the executor is shut down rolls the
+  5.  A submit that fails because dispatch has been shut down rolls the
       increment back and re-raises.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
@@ -141,18 +141,18 @@ def main() -> int:
         return 1
     print("PASS: backlog does not leak when a batch raises before dispatch")
 
-    # 5) a submit that fails because the executor is shut down must roll the
+    # 5) a submit that fails because dispatch has been shut down must roll the
     # increment back and re-raise (not leave the count stuck +1 forever). This
     # is destructive to the lane, so it runs last.
     baseline = ed._backlog
-    ed._dispatch_executor.shutdown(wait=True)
+    ed.shutdown()
     raised = False
     try:
         ed.dispatch([lambda: None], (), {}, label="shutdown-probe")
     except RuntimeError:
         raised = True
     if not raised:
-        print("FAIL(5): dispatch after executor shutdown did not re-raise "
+        print("FAIL(5): dispatch after shutdown did not re-raise "
               "RuntimeError -- callers can't tell the batch was dropped")
         return 1
     if ed._backlog != baseline:
