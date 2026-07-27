@@ -2942,7 +2942,10 @@ class BackgroundVideo(BackgroundVideoCache):
 
         tiles, frame_index = self.get_tiles_and_index(self.active_frame)
         try:
-            # The cache substitutes None for a tile it could not decode.
+            # Defensive: every path through get_tiles_and_index() currently
+            # yields real Images (decoded tiles, the last good payload, or
+            # the alpha fallback), so this only fires if a future cache
+            # substitutes None for a tile it could not decode.
             copied_tiles = [tile.copy() for tile in tiles]
         except AttributeError:
             copied_tiles = [None for _ in range(len(tiles))]

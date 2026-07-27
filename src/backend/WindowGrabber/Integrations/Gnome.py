@@ -89,9 +89,13 @@ class Gnome(Integration):
         
         try:
             answer = json.loads(self.call("GetAllWindows"))
-        except (GLib.Error, json.JSONDecodeError):
-            # The extension can be gone (D-Bus error) or answer with something
-            # that isn't JSON.
+        except (GLib.Error, IndexError, TypeError, json.JSONDecodeError):
+            # The extension can be gone or the wrong version, so every step of
+            # call() is an assumption about a third-party interface we don't
+            # ship: GLib.Error (no such method/interface, or the call failed),
+            # IndexError (a reply body with no values -- call() indexes [0]),
+            # TypeError (a first value that isn't a string, which json.loads
+            # rejects), JSONDecodeError (a string that isn't JSON).
             return []
         windows: list[Window] = []
         
@@ -107,7 +111,8 @@ class Gnome(Integration):
             return None
         try:
             answer = json.loads(self.call("GetFocusedWindow"))
-        except (GLib.Error, json.JSONDecodeError):
+        except (GLib.Error, IndexError, TypeError, json.JSONDecodeError):
+            # Same set as get_all_windows() -- see the note there.
             return None
         wm_class = answer.get("wm_class")
         title = answer.get("title")
