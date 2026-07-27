@@ -235,6 +235,17 @@ class StoreBackend:
                         req.content  # read the body while the connection is open
                         return req
                     log.error(f"Request to {url} failed with status code {req.status_code}")
+                    # Read the error body too, even though it is discarded:
+                    # closing a streamed response whose body was never
+                    # consumed CLOSES the socket instead of handing it back
+                    # to the shared session's pool. A catalog is full of
+                    # legitimate 404s (attribution.json is optional, so most
+                    # entries miss it), and every one of them would otherwise
+                    # cost the next fetch a fresh TCP + TLS handshake --
+                    # exactly what the pooled session exists to avoid.
+                    # GitHub's error bodies are a few bytes; a 200 body from
+                    # the same host is already read unbounded above.
+                    req.content
                     return NoConnectionError()
                 finally:
                     req.close()  # content stays cached on the Response

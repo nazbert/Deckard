@@ -15,12 +15,18 @@ rest of the codebase now depends on:
      get_remote_file's stale-cache fallback working exactly as before.
   3. The session really pools: consecutive fetches ride one TCP connection
      instead of paying a fresh handshake each (~150 of them per store page
-     load).
+     load) -- including across the routine 404s a catalog is full of, which
+     only holds because StoreBackend.request_from_url drains the error body
+     before closing the response.
+  4. Only *statuses* are retried. `connect=0` keeps an unreachable host from
+     costing three timeouts instead of one, which matters most on the GTK
+     main thread (KeyGrid's drop handler downloads synchronously).
 
 Plus the download_to_file helper's contract: full body on success, and no
 partial/zero-byte file left behind when the transfer breaks mid-body.
 """
 import os
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -64,6 +70,8 @@ class _Handler(BaseHTTPRequestHandler):
 
         if self.path == "/ok":
             self._respond(200, b"ok")
+        elif self.path == "/pooled":
+            self._respond(200, b"{}")
         elif self.path == "/flaky":
             # 429, 429, then success -> exactly one retry budget's worth.
             if n > 2:
@@ -197,6 +205,71 @@ def test_session_is_shared_and_pooled(server, base) -> None:
     print("PASS: consecutive fetches reuse one pooled connection")
 
 
+def test_connect_failures_are_not_retried(server, base) -> None:
+    """`total=2` alone would spend the budget on connect errors too, which
+    buys nothing (a down host stays down) and triples the wall clock of every
+    offline failure -- including on the GTK main thread, where KeyGrid's drop
+    handler reaches HelperMethods.download_file synchronously. `connect=0`
+    keeps the status retries and drops that amplification."""
+    retry = http_client.get_session().adapters["https://"].max_retries
+    assert retry.connect == 0, (
+        f"connect retries must stay off, got connect={retry.connect!r} -- an "
+        f"offline download now blocks for 3x its timeout"
+    )
+    assert retry.total == 2, f"status retry budget changed: total={retry.total!r}"
+
+    # A port nobody listens on: the refusal itself is instant, so all the
+    # elapsed time an extra attempt could add is the retry ladder's backoff
+    # (~1.0s before the second retry). Measuring that is a behavioural check
+    # on top of the config assertion above.
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    dead_port = probe.getsockname()[1]
+    probe.close()
+
+    start = time.monotonic()
+    raised = None
+    try:
+        http_client.get(f"http://127.0.0.1:{dead_port}/", timeout=2)
+    except Exception as e:
+        raised = e
+    elapsed = time.monotonic() - start
+
+    assert raised is not None, "a refused connection must still raise"
+    assert elapsed < 0.5, (
+        f"a refused connection took {elapsed:.2f}s -- the connect error is "
+        f"being retried through the backoff ladder"
+    )
+    print("PASS: connect errors fail on the first attempt (status retries intact)")
+
+
+def test_non_200_returns_the_connection_to_the_pool(server, base) -> None:
+    """StoreBackend.request_from_url's non-200 branch must consume the error
+    body before closing. Closing a streamed response with an unread body
+    CLOSES the socket, so a catalog's routine 404s (attribution.json is
+    optional for most entries) would cost the next fetch a fresh TCP + TLS
+    handshake -- defeating the pooled session this module exists to provide."""
+    from src.backend.Store.StoreBackend import NoConnectionError, StoreBackend
+
+    sb = StoreBackend.__new__(StoreBackend)  # skip __init__ (spawns threads)
+    sb._fetch_limiter = threading.Semaphore(http_client.POOL_MAXSIZE)
+
+    assert sb.request_from_url(f"{base}/pooled").status_code == 200
+    answer = sb.request_from_url(f"{base}/absent")
+    assert isinstance(answer, NoConnectionError), (
+        f"a 404 must still map to NoConnectionError, got {answer!r}"
+    )
+    assert sb.request_from_url(f"{base}/pooled").status_code == 200
+
+    ports = _ports(server, "/pooled") + _ports(server, "/absent")
+    assert len(ports) == 3, f"expected 3 requests, saw {len(ports)}"
+    assert len(set(ports)) == 1, (
+        f"the fetches spanned {len(set(ports))} connections ({ports}) -- an "
+        f"unread non-200 body tore the pooled connection down"
+    )
+    print("PASS: a non-200 store fetch keeps the pooled connection alive")
+
+
 def test_download_to_file_writes_full_body(server, base) -> None:
     target = os.path.join(_SCRATCH, "download.bin")
 
@@ -255,6 +328,8 @@ def main() -> None:
         test_respects_retry_after(server, base)
         test_exhausted_retries_return_the_response(server, base)
         test_session_is_shared_and_pooled(server, base)
+        test_connect_failures_are_not_retried(server, base)
+        test_non_200_returns_the_connection_to_the_pool(server, base)
         test_download_to_file_writes_full_body(server, base)
         test_download_to_file_leaves_no_partial_file(server, base)
         test_download_to_file_rejects_error_status(server, base)
