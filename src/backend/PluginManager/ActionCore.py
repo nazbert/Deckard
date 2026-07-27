@@ -374,7 +374,7 @@ class ActionCore(rpyc.Service):
                       font_family: str = None, font_size = None, outline_width: int = None, outline_color: list[int] = None,
                       font_weight: int = None, font_style: str = None,
                       update: bool = True):
-        self.set_label(text, position="top", color=color, font_family=font_family, font_size=font_size,
+        self.set_label(text=text, position="top", color=color, font_family=font_family, font_size=font_size,
                        outline_width=outline_width, outline_color=outline_color,
                        font_weight=font_weight, font_style=font_style, update=update)
 
@@ -382,7 +382,7 @@ class ActionCore(rpyc.Service):
                       font_family: str = None, font_size = None, outline_width: int = None, outline_color: list[int] = None,
                       font_weight: int = None, font_style: str = None,
                       update: bool = True):
-        self.set_label(text, position="center", color=color, font_family=font_family, font_size=font_size,
+        self.set_label(text=text, position="center", color=color, font_family=font_family, font_size=font_size,
                        outline_width=outline_width, outline_color=outline_color,
                        font_weight=font_weight, font_style=font_style, update=update)
 
@@ -390,7 +390,7 @@ class ActionCore(rpyc.Service):
                       font_family: str = None, font_size = None, outline_width: int = None, outline_color: list[int] = None,
                       font_weight: int = None, font_style: str = None,
                       update: bool = True):
-        self.set_label(text, position="bottom", color=color, font_family=font_family, font_size=font_size,
+        self.set_label(text=text, position="bottom", color=color, font_family=font_family, font_size=font_size,
                        outline_width=outline_width, outline_color=outline_color,
                        font_weight=font_weight, font_style=font_style, update=update)
 

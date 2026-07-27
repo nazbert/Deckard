@@ -1,11 +1,13 @@
 """
 Pins MediaConfig.from_dict against the old inline media defaults (gl#174).
 
-The two state-load blocks in DeckController and ActionCore.set_media used to
-spell the "media" section defaults inline at every read
-(``state_dict.get("media", {}).get("loop", True)`` and friends), so the same
-key could drift between call sites. MediaConfig.from_dict is now the single
-extraction point; this scenario locks its defaults and key mapping to the
+The two state-load blocks in DeckController (ControllerKey and
+ControllerDial) used to spell the "media" section defaults inline at every
+read (``state_dict.get("media", {}).get("loop", True)`` and friends), so the
+same key could drift between call sites. MediaConfig.from_dict is now their
+single extraction point (ActionCore.set_media's kwarg defaults are the plugin
+API's own contract and deliberately stay where they are); this scenario locks
+its defaults and key mapping to the
 values those inline reads used, so a transcription slip fails here instead
 of silently changing which media a page loads.
 """
@@ -110,6 +112,7 @@ def check_explicit_none_survives() -> None:
 
 
 if __name__ == "__main__":
+    fixtures.start_watchdog(30, label="scenario_media_config")
     check_empty_dict_reads_as_defaults()
     check_field_set_matches_key_map()
     check_populated_dict_round_trips()
