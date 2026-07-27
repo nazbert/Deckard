@@ -97,7 +97,7 @@ class BackgroundVideoCache(Mp4FrameCache):
         # this single self-contained instance decides for itself whether to
         # build -- same "performance.cache-videos" read/behavior as before
         # the Mp4FrameCache extraction.
-        return gl.settings_manager.get_app_settings().get("performance", {}).get("cache-videos", True)
+        return gl.settings_manager.app().cache_videos
 
     def _remove_legacy_cache(self) -> None:
         # Pre-rewrite caches were bz2'd pickles of raw frame tiles — large
