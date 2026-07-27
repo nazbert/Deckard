@@ -57,6 +57,9 @@ class PluginBase(rpyc.Service):
         # deactivation/unload via on_disconnect).
         self._backend_launch_gen: int = 0
         self._backend_stop_requested: bool = False
+        # Set by register_backend (on an rpyc service thread, driven by the
+        # backend process) to wake wait_for_backend on the launching thread.
+        self._backend_ready = threading.Event()
 
         self.logger = gl.loggers.get("plugins", None)
 
@@ -903,6 +906,10 @@ class PluginBase(rpyc.Service):
         log.info(f"Launching backend: {command}")
         self._backend_stop_requested = False
         self._backend_launch_gen += 1
+        # Cleared here, after validation and before the spawn, so a relaunch
+        # waits for the NEW backend's registration rather than returning
+        # instantly on the previous one's.
+        self._backend_ready.clear()
         self.backend_process = subprocess.Popen(command, start_new_session=True)
         gl.plugin_manager.backend_processes.append(self.backend_process)
 
@@ -962,17 +969,19 @@ class PluginBase(rpyc.Service):
         """
         Waits for the backend to establish a connection.
 
-        This method repeatedly checks if the backend connection is established within the given number of tries.
+        Blocks until register_backend signals that the connection is up, or
+        until the timeout expires.
 
         Args:
-            tries (int, optional): The number of attempts to wait for the backend connection. Defaults to 3.
+            tries (int, optional): Timeout budget, in units of 0.1 s (so the
+                default 3 waits up to 0.3 s). Named `tries` because it used
+                to be a poll count; registration now wakes this thread
+                exactly, rather than on the next 0.1 s tick.
 
         Returns:
             None
         """
-        while tries > 0 and self.backend_connection is None:
-            time.sleep(0.1)
-            tries -= 1
+        self._backend_ready.wait(timeout=tries * 0.1)
 
     def register_backend(self, port: int) -> None:
         """
@@ -991,6 +1000,11 @@ class PluginBase(rpyc.Service):
         self.backend = self.backend_connection.root
 
         gl.plugin_manager.backends.append(self.backend_connection)
+
+        # Only after the connection attributes are in place: whoever
+        # wait_for_backend wakes goes straight for self.backend. Also before
+        # the plugin hook below, which may be slow.
+        self._backend_ready.set()
 
         # Exception-isolated: register_backend is invoked over rpyc by the
         # backend process itself -- a raising plugin hook must not blow up

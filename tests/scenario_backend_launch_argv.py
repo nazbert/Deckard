@@ -24,9 +24,15 @@ Both classes now go through PluginManager.build_backend_launch_command:
   (c) End-to-end: a real stub backend under a directory whose name contains
       a space is launched by ActionCore.launch_backend and registers back
       over rpyc. Pre-fix this cannot work: the shell splits the path.
+  (d) wait_for_backend waits on the Event that register_backend sets instead
+      of polling backend_connection in 0.1 s steps -- so it wakes exactly on
+      registration, while `tries` keeps its meaning as a tries * 0.1 s
+      timeout budget for the plugins that pass one.
 """
 import os
 import sys
+import threading
+import time
 import types
 
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
@@ -175,6 +181,7 @@ def _make_action() -> ActionCore:
     action.backend = None
     action.server = None
     action.backend_process = None
+    action._backend_ready = threading.Event()
     return action
 
 
@@ -211,6 +218,39 @@ def check_end_to_end_spaced_path(backend_path: str) -> None:
         )
 
 
+def check_wait_for_backend_event() -> None:
+    """wait_for_backend used to poll self.backend_connection in 0.1 s steps;
+    it waits on the Event that register_backend sets, so a registration that
+    lands mid-tick wakes it immediately instead of on the next tick. `tries`
+    keeps its meaning as a timeout budget of tries * 0.1 s."""
+    action = _make_action()
+
+    # Already registered -> returns at once, not on the next tick boundary.
+    action._backend_ready.set()
+    start = time.monotonic()
+    action.wait_for_backend()
+    elapsed = time.monotonic() - start
+    assert elapsed < 0.05, f"wait_for_backend slept {elapsed:.3f}s despite a ready backend"
+    print(f"PASS: wait_for_backend returns in {elapsed*1000:.1f}ms when the backend is ready")
+
+    # Never registers -> still bounded by tries * 0.1s.
+    action._backend_ready.clear()
+    start = time.monotonic()
+    action.wait_for_backend()
+    elapsed = time.monotonic() - start
+    assert 0.2 < elapsed < 1.5, f"default wait was {elapsed:.3f}s, expected ~0.3s"
+    print(f"PASS: wait_for_backend times out after {elapsed:.2f}s (tries=3 -> 0.3s)")
+
+    # A registration arriving mid-wait wakes it early -- the point of the Event.
+    action._backend_ready.clear()
+    threading.Timer(0.1, action._backend_ready.set).start()
+    start = time.monotonic()
+    action.wait_for_backend(tries=50)  # 5s budget
+    elapsed = time.monotonic() - start
+    assert elapsed < 1.0, f"wait_for_backend did not wake on the Event: {elapsed:.3f}s"
+    print(f"PASS: a mid-wait registration wakes wait_for_backend in {elapsed*1000:.0f}ms")
+
+
 def main() -> None:
     # Below run_all.py's per-scenario timeout, so a stall is reported here
     # (with a message) rather than as an opaque runner timeout.
@@ -221,6 +261,7 @@ def main() -> None:
     check_argv_shape(backend_path)
     check_path_validation(backend_path)
     check_end_to_end_spaced_path(backend_path)
+    check_wait_for_backend_event()
 
     print("PASS: scenario_backend_launch_argv")
 

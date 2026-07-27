@@ -14,7 +14,6 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 import threading
-import time
 from loguru import logger as log
 from copy import copy
 import subprocess
@@ -67,6 +66,9 @@ class ActionCore(rpyc.Service):
         self.backend: netref = None
         self.server: ThreadedServer = None
         self.backend_process: subprocess.Popen = None
+        # Set by register_backend (on an rpyc service thread, driven by the
+        # backend process) to wake wait_for_backend on the launching thread.
+        self._backend_ready = threading.Event()
 
         # (signal, callback) pairs registered by this action, disconnected on teardown.
         self._connected_signals: list[tuple] = []
@@ -631,15 +633,23 @@ class ActionCore(rpyc.Service):
         command = build_backend_launch_command(backend_path, venv_path, port, open_in_terminal)
 
         log.info(f"Launching backend: {command}")
+        # Cleared here, after validation and before the spawn, so a relaunch
+        # waits for the NEW backend's registration rather than returning
+        # instantly on the previous one's.
+        self._backend_ready.clear()
         self.backend_process = subprocess.Popen(command, start_new_session=True)
         gl.plugin_manager.backend_processes.append(self.backend_process)
 
         self.wait_for_backend()
 
     def wait_for_backend(self, tries: int = 3):
-        while tries > 0 and self.backend_connection is None:
-            time.sleep(0.1)
-            tries -= 1
+        """Block until the backend registers, up to tries * 0.1 seconds.
+
+        `tries` is kept (plugins call this with their own value) but is now a
+        timeout budget rather than a poll count -- registration wakes this
+        exactly instead of on the next 0.1 s tick.
+        """
+        self._backend_ready.wait(timeout=tries * 0.1)
 
     def register_backend(self, port: int):
         """
@@ -648,6 +658,9 @@ class ActionCore(rpyc.Service):
         self.backend_connection = rpyc.connect("localhost", port, config={"allow_public_attrs": True})
         self.backend = self.backend_connection.root
         gl.plugin_manager.backends.append(self.backend_connection)
+        # Only after the connection attributes are in place: whoever
+        # wait_for_backend wakes goes straight for self.backend.
+        self._backend_ready.set()
         self.on_backend_ready()
 
     def on_backend_ready(self):
