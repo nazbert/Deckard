@@ -16,13 +16,13 @@ from datetime import datetime
 from functools import lru_cache, wraps
 import hashlib
 from io import BytesIO
-import multiprocessing
 import os
 import subprocess
 import sys
 import math
 import json
 import re
+import threading
 from urllib.parse import urlparse
 from loguru import logger as log
 from PIL import Image
@@ -356,15 +356,32 @@ def sort_times(time_list):
 
 
 def run_command(command):
+    """Detach a shell command line and forget about it.
+
+    `command` is a COMMAND LINE, not an argv list: callers (including
+    plugins -- this is de-facto plugin API surface) rely on shell syntax
+    such as pipes, `&&` and variable expansion, and the flatpak prefix is
+    spliced in as a string. Do not "fix" this to shlex.split/argv; build
+    the argv yourself and call subprocess directly if you need that.
+
+    The command gets its own session, its stdio pointed at /dev/null and
+    ~ as its cwd, so it outlives us cleanly.
+    """
     if command is None:
         return
 
     if is_flatpak():
         command = "flatpak-spawn --host " + command
 
-    p = multiprocessing.Process(target=subprocess.Popen, args=[command], kwargs={
-                                "shell": True, "start_new_session": True, "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "cwd": os.path.expanduser("~")})
-    p.start()
+    process = subprocess.Popen(command, shell=True, start_new_session=True,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, cwd=os.path.expanduser("~"))
+    # This used to be a multiprocessing.Process wrapping the Popen -- a fork
+    # of the whole interpreter (GTK, plugins, deck threads and all) whose
+    # only job was to orphan the grandchild so nobody had to reap it. The
+    # direct child needs reaping instead, or it lingers as a zombie for the
+    # life of the app; one throwaway daemon thread per spawn does that.
+    threading.Thread(target=process.wait, name="run_command_reaper", daemon=True).start()
 
 def open_web(url):
     """Open a URL in the user's default browser.

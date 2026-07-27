@@ -13,7 +13,6 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import python modules
-import multiprocessing
 import signal
 import sys
 import threading
@@ -305,11 +304,10 @@ class App(Adw.Application):
                 if thread.is_alive():
                     log.error(f"Thread {thread.name} did not exit in time")
 
-        for child in multiprocessing.active_children():
-            child.terminate()
-
-        # Terminate plugin/action backend subprocesses (plain subprocess.Popen
-        # children, not multiprocessing, so not covered by the loop above).
+        # Terminate plugin/action backend subprocesses -- the only child
+        # processes we own. (This used to be preceded by a
+        # multiprocessing.active_children() terminate loop; the fork-per-spawn
+        # wrapper inside run_command was its only source and is gone.)
         gl.plugin_manager.terminate_all_backends()
 
         gl.tray_icon.stop()
