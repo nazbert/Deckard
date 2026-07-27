@@ -40,6 +40,7 @@ from src.backend.Store.StoreCache import StoreCache
 from src.backend.PluginManager.PluginBase import PluginBase
 from src.backend.DeckManagement.HelperMethods import recursive_hasattr
 from src.backend.atomic_json import atomic_write_json
+from src.backend import http_client
 
 # Import signals
 from src.Signals import Signals
@@ -69,7 +70,10 @@ class StoreBackend:
     # Cap concurrent GitHub fetches: enough to overlap the catalog's ~150
     # small requests (the fetch itself is what dominates store load time),
     # few enough not to present as a scrape burst to raw.githubusercontent.
-    MAX_CONCURRENT_REQUESTS = 10
+    # Aliased to the shared session's pool size so the semaphore cap and the
+    # connection pool can't drift apart -- a cap above the pool would make
+    # the surplus threads open throwaway connections.
+    MAX_CONCURRENT_REQUESTS = http_client.POOL_MAXSIZE
 
     # Whitelist for manifest-supplied asset ids (plugin/icon/wallpaper "id"
     # fields). These come from a REMOTE manifest.json and are used as single
@@ -220,10 +224,12 @@ class StoreBackend:
     def request_from_url(self, url: str) -> requests.Response:
         # Callers run on worker threads (the prepare pool, UI install
         # threads). Connection AND body read stay inside the limiter, which
-        # is what keeps a catalog load from presenting as a scrape burst.
+        # is what keeps a catalog load from presenting as a scrape burst --
+        # the shared session's 429/5xx retries happen inside the adapter, so
+        # they hold the same slot and cannot widen that burst either.
         try:
             with self._fetch_limiter:
-                req = requests.get(url, stream=True, timeout=30)
+                req = http_client.get(url, stream=True, timeout=30)
                 try:
                     if req.status_code == 200:
                         req.content  # read the body while the connection is open
@@ -344,7 +350,7 @@ class StoreBackend:
 
         try:
             with self._fetch_limiter:
-                response = requests.get(url, timeout=30)
+                response = http_client.get(url, timeout=30)
         except requests.exceptions.RequestException as e:
             log.error(f"Failed to fetch the last commit of {repo_url}@{branch_name}: {e}")
             return NoConnectionError()
