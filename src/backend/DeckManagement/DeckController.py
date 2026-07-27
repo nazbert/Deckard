@@ -423,7 +423,7 @@ class MediaPlayerThread(threading.Thread):
         self.fps: list[float] = []
         self.old_warning_state = False
 
-        self.show_fps_warnings = gl.settings_manager.get_app_settings().get("warnings", {}).get("enable-fps-warnings", True)
+        self.show_fps_warnings = gl.settings_manager.app().enable_fps_warnings
 
         # Loop-guard state (issue #1): this thread is the sole writer for
         # paints/brightness/Clear/ClearAndClose -- if it dies the deck is
@@ -1013,7 +1013,7 @@ class DeckController:
                 pass
             raise
         
-        self.hold_time: float = gl.settings_manager.get_app_settings().get("general", {}).get("hold-time", 0.5)
+        self.hold_time: float = gl.settings_manager.app().hold_time
         
         self.own_deck_stack_child: "DeckStackChild" = None
         self.own_key_grid: "KeyGridChild" = None
@@ -1177,7 +1177,7 @@ class DeckController:
 
 
         # If screen is locked start the screensaver - this happens when the deck gets reconnected during the screensaver
-        if gl.screen_locked and gl.settings_manager.get_app_settings().get("system", {}).get("lock-on-lock-screen", True):
+        if gl.screen_locked and gl.settings_manager.app().lock_on_lock_screen:
             self.allow_interaction = False
             self.screen_saver.show()
         else:
@@ -3330,7 +3330,7 @@ class LabelManager:
             return self._scroll_widths_cache
 
         widths: dict[str, int] = {}
-        rolling_labels_enabled = gl.settings_manager.get_app_settings().get("general", {}).get("rolling-labels", True)
+        rolling_labels_enabled = gl.settings_manager.app().rolling_labels
         if rolling_labels_enabled:
             available_width = self.get_available_width()
             labels = self.get_composed_labels()

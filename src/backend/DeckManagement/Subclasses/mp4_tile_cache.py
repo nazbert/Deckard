@@ -549,7 +549,7 @@ class KeyVideoCache(Mp4FrameCache):
 # --------------------------------------------------------------------- #
 
 def cache_videos_enabled() -> bool:
-    return gl.settings_manager.get_app_settings().get("performance", {}).get("cache-videos", True)
+    return gl.settings_manager.app().cache_videos
 
 
 class _TileCacheEntry:
