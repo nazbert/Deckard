@@ -59,9 +59,14 @@ return value or depends on the observers finishing before the call returns.
 
 Quit: lane runners are daemon threads, and their queues are abandoned rather
 than drained. shutdown() (from on_quit) stops accepting batches and wakes
-idle runners so they exit; anything still queued dies with the process, as it
-already did when quit os._exit()'d the old executor's queue. Nothing is
-joined, so a wedged observer cannot delay quit.
+every runner; a runner checks the flag both when idle and before taking its
+next batch, so a lane holding a backlog when quit arrives stops there instead
+of running plugin observers on into teardown. Anything still queued dies with
+the process, as it already did when quit os._exit()'d the old executor's
+queue. Nothing is joined, so a wedged observer cannot delay quit. dispatch()
+after shutdown raises DispatchShutdown; the fire-and-forget entry points
+(EventHolder.trigger_event, PluginSettings Observer.notify) swallow it, since
+plugin event sources keep firing until os._exit and cannot act on it.
 
 Residual: a lane's loop identity changes across an idle reap, so an observer
 that captured its running loop for a later call_soon_threadsafe would be
@@ -166,15 +171,51 @@ def _ensure_monitor() -> None:
                      daemon=True).start()
 
 
+def _monitor_tick() -> None:
+    # A function of its own, not an inline block, so the snapshot's strong
+    # lane references die with this frame instead of staying bound in the
+    # monitor loop's locals across the next sleep -- a dead holder's lane
+    # (and everything its queue still pins) must not be held alive for an
+    # extra monitor interval.
+    with _watch_lock:
+        lanes = list(_lanes)
+    for lane in lanes:
+        lane._check_wedge()
+
+
 def _monitor_loop() -> None:
     while True:
         time.sleep(_MONITOR_INTERVAL_S)
         if _shutdown:
             return
-        with _watch_lock:
-            lanes = list(_lanes)
-        for lane in lanes:
-            lane._check_wedge()
+        try:
+            _monitor_tick()
+        except Exception:
+            # This thread is spawned exactly once and never respawned
+            # (_monitor_started stays True for the process's life), so an
+            # escaping exception used to end wedge reporting permanently and
+            # near-silently -- and the watchdog is the only thing that makes
+            # a wedge attributable at all (issue #5). One bad tick must cost
+            # one tick. Sources are real if rare: a lane whose _check_wedge
+            # raises takes down reporting for every OTHER lane too, and on
+            # Python < 3.14 WeakSet iteration can race a GC-driven removal
+            # (the _remove callback runs on whichever thread drops the last
+            # reference, outside _watch_lock).
+            log.opt(exception=True).error("event dispatch watchdog tick failed")
+
+
+class DispatchShutdown(RuntimeError):
+    """Raised by dispatch() once shutdown() has run.
+
+    A RuntimeError subclass, so direct callers (and the pinned contract in
+    tests/scenario_dispatch_watchdog.py check 5) that expect a RuntimeError
+    are unaffected -- but a distinct type, so the plugin-facing entry points
+    can swallow exactly this and nothing else. `RuntimeError: can't start new
+    thread` out of _spawn_locked must still reach the caller; "you dispatched
+    while the app was quitting" must not, because trigger_event()/notify()
+    are fire-and-forget by contract and there is nothing a caller could do
+    with it.
+    """
 
 
 class Lane:
@@ -220,7 +261,7 @@ class Lane:
         if _shutdown:
             # Checked before the accounting below so a rejected batch cannot
             # leak a backlog count.
-            raise RuntimeError("event dispatch is shut down")
+            raise DispatchShutdown("event dispatch is shut down")
         _ensure_monitor()
         with _watch_lock:
             _backlog += 1
@@ -255,7 +296,7 @@ class Lane:
                 # Re-checked under the lock the runner exits on: shutdown()
                 # sets the flag before waking the lanes, so nothing can slip
                 # a fresh runner in behind it mid-teardown.
-                raise RuntimeError("event dispatch is shut down")
+                raise DispatchShutdown("event dispatch is shut down")
             self._pending.append(batch)
             if self._runner is not None:
                 self._cond.notify()
@@ -299,6 +340,19 @@ class Lane:
                             self._runner = None
                             return
                         self._cond.wait(remaining)
+                    if _shutdown:
+                        # Abandon what is queued rather than draining it --
+                        # the emptiness check above only covers an IDLE
+                        # runner, so without this a lane that was holding a
+                        # backlog when quit arrived kept running plugin
+                        # observers all the way to os._exit, against decks
+                        # that close_all() had already closed and log sinks
+                        # on_quit had already detached. Measured on this
+                        # branch before the fix: ~43k batches dispatched
+                        # after shutdown() returned. Same _runner discipline
+                        # as the reap path above.
+                        self._runner = None
+                        return
                     batch = self._pending.popleft()
                 try:
                     self._run_batch(*batch)
@@ -424,10 +478,12 @@ def shutdown() -> None:
     """Stops accepting new batches and wakes every lane runner so idle ones
     exit promptly.
 
-    Queued and in-flight batches are abandoned, not drained: runners are
-    daemon threads and quit ends in os._exit (src/app.py), so a wedged lane
-    can never delay shutdown. Calls to dispatch() after this raise
-    RuntimeError rather than silently dropping their batch.
+    Queued batches are abandoned, not drained: a woken runner returns instead
+    of taking another batch. In-flight batches are neither interrupted nor
+    waited for -- runners are daemon threads and quit ends in os._exit
+    (src/app.py), so a wedged lane can never delay shutdown. Calls to
+    dispatch() after this raise DispatchShutdown rather than silently
+    dropping their batch.
     """
     global _shutdown
     _shutdown = True

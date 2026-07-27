@@ -3,6 +3,8 @@ Author: G4PLS
 Year: 2024
 """
 
+from loguru import logger as log
+
 from src.backend.PluginManager import event_dispatch
 from src.Signals.weak_callbacks import CallbackRegistry
 
@@ -41,4 +43,11 @@ class Observer:
         # every observer through asyncio.gather/to_thread. Returning before
         # the observers run is not new either: a caller racing a *running*
         # loop already went down the `ensure_future` branch.
-        self._lane.dispatch(self.observers.snapshot(), args, kwargs)
+        try:
+            self._lane.dispatch(self.observers.snapshot(), args, kwargs)
+        except event_dispatch.DispatchShutdown:
+            # Same fire-and-forget reasoning as EventHolder.trigger_event:
+            # once on_quit has shut the dispatcher down, an asset mutation
+            # racing teardown must not raise out of a notify() no caller
+            # checks. Any other RuntimeError still propagates.
+            log.debug("Asset notification after dispatch shutdown; dropped")

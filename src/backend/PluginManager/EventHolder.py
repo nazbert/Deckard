@@ -56,4 +56,15 @@ class EventHolder:
         # argument (AudioControl's on_pulse_device_change reads it as
         # `args[0]` and the real pulsectl event as `args[1]`). Preserve that
         # contract here.
-        self._lane.dispatch(self.observers.snapshot(), (self.event_id, *args), kwargs, label=self.event_id)
+        try:
+            self._lane.dispatch(self.observers.snapshot(), (self.event_id, *args), kwargs, label=self.event_id)
+        except event_dispatch.DispatchShutdown:
+            # on_quit stopped the dispatcher, but plugin event sources keep
+            # running until os._exit -- AudioControl's pulse listener is a
+            # `while True: pulse.event_listen()` daemon thread whose callback
+            # calls this. Letting the shutdown error out of a documented
+            # fire-and-forget call would kill that thread with an uncaught
+            # RuntimeError (a CRITICAL traceback in logs.log) on every quit
+            # that races an event, for nothing a caller could act on. Any
+            # OTHER RuntimeError still propagates (see DispatchShutdown).
+            log.debug(f"Event {self.event_id} triggered after dispatch shutdown; dropped")
