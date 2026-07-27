@@ -20,7 +20,7 @@ from src.backend.PluginManager.ActionCore import ActionCore
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gdk, GLib, Pango
+from gi.repository import Gtk, Adw, GLib
 
 import threading
 import globals as gl

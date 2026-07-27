@@ -22,17 +22,12 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib
 
 # Import Python modules
-import cv2
-import threading
-from loguru import logger as log
-from math import floor
-from time import sleep
 
 # Import globals
 import globals as gl
 
 # Import own modules
-from src.backend.DeckManagement.ImageHelpers import image2pixbuf, is_transparent
+from src.backend.DeckManagement.ImageHelpers import image2pixbuf
 
 class DeckGroup(Adw.PreferencesGroup):
     def __init__(self, settings_page):

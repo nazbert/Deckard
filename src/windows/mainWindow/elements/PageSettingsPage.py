@@ -17,16 +17,14 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw
+from gi.repository import Gtk
 
 # Import Python modules 
-from loguru import logger as log
 
 # Import own modules
 from src.windows.mainWindow.elements.DeckConfig import DeckConfig
 
 # Import globals
-import globals as gl
 
 # Import typing
 from typing import TYPE_CHECKING

@@ -17,11 +17,9 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib, Gio, Gdk, GObject, GdkPixbuf
+from gi.repository import Gtk
 
 # Import Python modules
-from loguru import logger as log
-import os
 
 # Import typing
 from typing import TYPE_CHECKING

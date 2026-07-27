@@ -17,7 +17,6 @@ import os
 import gi
 
 from src.backend.DeckManagement.InputIdentifier import Input, InputIdentifier
-from src.backend.DeckManagement.DeckController import ControllerKey, DeckController
 from src.windows.mainWindow.elements.PageSelector import PageSelector
 from src.windows.mainWindow.elements.Sidebar.elements.StateSwitcher import StateSwitcher
 from src.windows.mainWindow.elements.Sidebar.elements.ScreenEditor import ScreenEditor

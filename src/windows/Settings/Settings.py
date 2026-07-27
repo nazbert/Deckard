@@ -28,9 +28,9 @@ import globals as gl
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gio, Pango
+from gi.repository import Gtk, Adw
 if not gl.IS_MAC:
-    from gi.repository import Xdp
+    pass
 
 import os
 

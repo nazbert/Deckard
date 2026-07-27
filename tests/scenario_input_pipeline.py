@@ -52,7 +52,6 @@ from fixtures import (
 )
 
 from StreamDeck.Devices.StreamDeck import DialEventType, TouchscreenEventType
-from src.backend.DeckManagement.BetterDeck import BetterDeck
 from src.backend.DeckManagement.InputIdentifier import Input
 from src.backend.PluginManager.ActionCore import ActionCore
 from src.backend.PluginManager.EventAssigner import EventAssigner

@@ -1,8 +1,6 @@
 from GtkHelper.ComboRow import ComboRow as Combo, BaseComboRowItem
 from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
 
-import gi
-from gi.repository import Gtk, Adw
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:

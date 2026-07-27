@@ -15,13 +15,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 # Import gtk modules
 import gi
 
-from GtkHelper.GtkHelper import BackButton
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw
 
 # Import Python modules 
-from loguru import logger as log
 
 # Import own modules
 from src.windows.mainWindow.elements.DeckSettings.DeckGroup import DeckGroup
@@ -29,7 +27,6 @@ from src.windows.mainWindow.elements.DeckSettings.BackgroundGroup import Backgro
 from src.windows.mainWindow.elements.DeckSettings.FakeDeckGroup import FakeDeckGroup
 
 # Import globals
-import globals as gl
 
 class DeckSettingsPage(Gtk.Overlay):
     def __init__(self, deck_stack_child, deck_controller, **kwargs):

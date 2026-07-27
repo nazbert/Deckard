@@ -1,7 +1,5 @@
 from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
 
-import gi
-from gi.repository import Gtk, Adw
 
 from typing import TYPE_CHECKING
 

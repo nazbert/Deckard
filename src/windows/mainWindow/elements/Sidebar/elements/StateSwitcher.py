@@ -13,7 +13,6 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
-from typing import Type
 from gi.repository import Gtk
 
 from src.backend.DeckManagement.DeckController import ControllerInput

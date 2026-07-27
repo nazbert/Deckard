@@ -2,13 +2,10 @@ from gi.repository import Gtk, Adw
 
 from typing import TYPE_CHECKING
 
-from src.backend.DeckManagement.InputIdentifier import Input
 from src.windows.mainWindow.elements.Sidebar.elements.ActionManager import ActionManager
 from src.windows.mainWindow.elements.Sidebar.elements.BackgroundEditor import BackgroundEditor
 from src.windows.mainWindow.elements.Sidebar.elements.StateSwitcher import StateSwitcher
-from src.windows.mainWindow.DeckPlus.ScreenBar import ScreenBarImage
 
-from PIL import Image
 
 if TYPE_CHECKING:
     from src.windows.mainWindow.elements.Sidebar.Sidebar import Sidebar

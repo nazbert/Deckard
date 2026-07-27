@@ -14,18 +14,16 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import gtk modules
 import threading
-import time
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib
+from gi.repository import GLib
 
 # Import own modules
 from src.windows.AssetManager.ChooserPage import ChooserPage
 from src.windows.AssetManager.IconPacks.Icons.IconFlowBox import WallpaperFlowBox
 from src.windows.AssetManager.IconPacks.Icons.IconPreview import IconPreview
-from src.windows.AssetManager.IconPacks.Preview import IconPackPreview
 
 # Import python modules
 import os

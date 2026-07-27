@@ -13,14 +13,12 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
-from re import sub
 import threading
 import time
 from src.backend.WindowGrabber.Integration import Integration
 from src.backend.WindowGrabber.Window import Window
 
 import subprocess
-import json
 from loguru import logger as log
 
 # Import globals first to get IS_MAC

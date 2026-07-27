@@ -18,18 +18,12 @@ from src.windows.Store.StoreData import IconData
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib, Gio, Gdk, GObject, GdkPixbuf
+from gi.repository import Gtk
 
 # Import python modules
-import webbrowser as web
-import os
-import shutil
-from loguru import logger as log
 
 # Import own modules
 from src.windows.Store.StorePage import StorePage
-from src.backend.DeckManagement.ImageHelpers import image2pixbuf
-from src.backend.DeckManagement.HelperMethods import is_video
 from src.windows.Store.Preview import StorePreview
 from src.backend.Store.StoreBackend import NoConnectionError
 

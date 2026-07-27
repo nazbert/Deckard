@@ -24,7 +24,6 @@ list:
 """
 import os
 import threading
-import time
 
 import fixtures
 import cv2

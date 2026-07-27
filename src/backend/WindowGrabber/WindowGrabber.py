@@ -13,13 +13,8 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
-from curses import window
-import json
 import os
 import re
-import subprocess
-import threading
-import time
 from loguru import logger as log
 
 import globals as gl

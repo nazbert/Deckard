@@ -18,7 +18,6 @@ from src.backend.LockScreenManager.Detectors.Gnome import GnomeLockScreenDetecto
 from src.backend.LockScreenManager.Detectors.Cinnamon import CinnamonLockScreenDetector
 from src.backend.LockScreenManager.Detectors.KDE import KDELockScreenDetector
 from src.backend.LockScreenManager.Detectors.Hyprland import HyprlandLockScreenDetector
-from src.backend.LockScreenManager.LockScreenDetector import LockScreenDetector
 from loguru import logger as log
 
 import globals as gl

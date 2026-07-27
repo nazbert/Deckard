@@ -29,7 +29,6 @@ import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
 import threading
 
-import globals as gl
 from fixtures import start_watchdog, wait_until
 
 from src.backend.PluginManager import event_dispatch

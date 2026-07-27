@@ -20,7 +20,6 @@ Runs on a REAL DeckController over the FaultyFakeDeck (no GTK), so activation
 goes through the real controller.load_page path, not a stub.
 """
 import json
-import os
 
 import fixtures
 import globals as gl

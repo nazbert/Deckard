@@ -45,7 +45,6 @@ from fixtures import (
 )
 
 from StreamDeck.Transport.Transport import TransportError
-from src.backend.DeckManagement.InputIdentifier import Input
 
 
 def test_lifecycle_seam() -> int:

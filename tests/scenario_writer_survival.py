@@ -44,7 +44,6 @@ from loguru import logger
 
 from src.backend.DeckManagement.DeckController import (
     ClearAndCloseMsg,
-    Input,
     SetBrightnessMsg,
 )
 

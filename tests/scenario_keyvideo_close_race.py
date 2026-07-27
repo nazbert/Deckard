@@ -41,7 +41,6 @@ import numpy as np
 
 import globals as gl
 from src.backend.DeckManagement.Subclasses.KeyVideo import InputVideo
-from src.backend.DeckManagement.Subclasses import mp4_tile_cache
 
 
 class RacyStubCache:

@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk, Adw, GLib
+from gi.repository import Gtk, GLib
 
 # Import Python modules
 import json
@@ -24,7 +24,6 @@ import os
 import shutil
 import uuid
 from loguru import logger as log
-from PIL import Image
 
 # Import own modules
 from src.backend.DeckManagement.HelperMethods import is_video, is_image, sha256, file_in_dir, create_empty_json, download_file, is_svg

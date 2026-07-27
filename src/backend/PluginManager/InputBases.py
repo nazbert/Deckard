@@ -1,7 +1,7 @@
 from abc import ABC
 
 from src.backend.PluginManager.EventAssigner import EventAssigner
-from src.backend.DeckManagement.InputIdentifier import Input, InputIdentifier
+from src.backend.DeckManagement.InputIdentifier import Input
 from src.backend.PluginManager.ActionCore import ActionCore
 
 # Event delivery always passes exactly one positional argument:

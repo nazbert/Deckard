@@ -12,16 +12,13 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
-import os
 # Import gtk modules
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gio
+from gi.repository import Adw
 
 # Import own modules
-from src.backend.WindowGrabber.Window import Window
-from GtkHelper.GtkHelper import BetterExpander, EntryDialog
 from src.windows.PageManager.elements.PageSelector import PageSelector
 from src.windows.PageManager.elements.PageEditor import PageEditor
 

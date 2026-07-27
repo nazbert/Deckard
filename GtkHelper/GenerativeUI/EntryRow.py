@@ -1,7 +1,6 @@
 from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
 
-import gi
-from gi.repository import Gtk, Adw, GLib
+from gi.repository import Adw, GLib
 
 from typing import TYPE_CHECKING, Callable
 from GtkHelper.GtkHelper import better_disconnect

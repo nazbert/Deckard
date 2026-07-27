@@ -1,19 +1,16 @@
 from functools import lru_cache
 import os
 import json
-import time
 
 from src.backend.DeckManagement.HelperMethods import recursive_hasattr
 from src.backend.atomic_json import atomic_write_json
 from src.windows.PageManager.Importer.StreamDeckUI.helper import font_family_from_path, hex_to_rgba255
 from src.windows.PageManager.Importer.StreamDeckUI.code_conv import parse_keys_as_keycodes
 
-from src.Signals import Signals
 from loguru import logger as log
 
 import globals as gl
 
-import gi
 from gi.repository import GLib
 
 class StreamDeckUIImporter:

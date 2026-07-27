@@ -18,12 +18,11 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gio, GLib
+from gi.repository import Gtk, Gio, GLib
 
 # Import own modules
 from GtkHelper.GtkHelper import EntryDialog
 from src.windows.PageManager.Importer.Importer import Importer
-import os
 
 # Import Python modules
 from loguru import logger as log

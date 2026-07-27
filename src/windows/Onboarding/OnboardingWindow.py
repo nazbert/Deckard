@@ -18,7 +18,6 @@ import threading
 import gi
 import subprocess
 from packaging import version
-import webbrowser as web
 from loguru import logger as log
 
 from GtkHelper.GtkHelper import LoadingScreen, run_on_main

@@ -18,13 +18,11 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib
 
 # Import own modules
 from src.windows.AssetManager.ChooserPage import ChooserPage
 from src.windows.AssetManager.SDPlusBarWallpaperPacks.SDPlusBarWallpaper.SDPlusBarWallpaperFlowBox import SDPlusBarWallpaperFlowBox
 from src.windows.AssetManager.SDPlusBarWallpaperPacks.SDPlusBarWallpaper.SDPlusBarWallpaperPreview import SDPlusBarWallpaperPreview
-from src.windows.AssetManager.IconPacks.Preview import IconPackPreview
 
 # Import python modules
 import os

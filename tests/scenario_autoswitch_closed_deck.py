@@ -18,7 +18,6 @@ auto-change page whose regex matches the foreground window and whose decks
 list targets the SECOND controller. The window-change event must still
 switch the second deck's page.
 """
-import json
 
 import fixtures
 import globals as gl

@@ -21,11 +21,10 @@ from src.backend.DeckManagement.HelperMethods import open_web
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gdk, GLib
+from gi.repository import Gtk, Adw, GLib
 
 # Import Python modules
 from loguru import logger as log
-import webbrowser as web
 
 # Import globals
 import globals as gl

@@ -1,7 +1,6 @@
 import json
 import os
 from typing import TYPE_CHECKING
-import argparse
 import sys
 import threading
 
@@ -59,7 +58,7 @@ if os.getenv("PLUGIN_DIR") is not None:
     sys.path.append(top_level_folder)
 
     if os.path.exists(os.path.join(DATA_PATH, "plugins")):
-        log.warning(f"You're using a plugin dir path outside of your data dir, but also have a plugin dir in the data dir. This may cause problems.")
+        log.warning("You're using a plugin dir path outside of your data dir, but also have a plugin dir in the data dir. This may cause problems.")
 
 os.makedirs(PLUGIN_DIR, exist_ok=True)
 

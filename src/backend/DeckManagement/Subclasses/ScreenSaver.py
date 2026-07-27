@@ -15,7 +15,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 # Import python modules
 import time
 from loguru import logger as log
-from copy import copy
 
 # Import typing
 from typing import TYPE_CHECKING
@@ -23,7 +22,7 @@ from typing import TYPE_CHECKING
 from src.backend.DeckManagement.InputIdentifier import Input
 from src.backend import timer_wheel
 if TYPE_CHECKING:
-    from src.backend.DeckManagement.DeckController import DeckController, ControllerKey, Background
+    from src.backend.DeckManagement.DeckController import DeckController, Background
 
 class ScreenSaver:
     def __init__(self, deck_controller: "DeckController"):

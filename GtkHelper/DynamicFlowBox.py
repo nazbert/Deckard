@@ -17,11 +17,10 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, GLib
+from gi.repository import Gtk
 
 # Import python modules
 from loguru import logger as log
-import threading
 from functools import cmp_to_key
 
 class DynamicFlowBox(Gtk.Box):

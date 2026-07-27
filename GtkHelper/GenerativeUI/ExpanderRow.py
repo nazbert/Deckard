@@ -1,11 +1,9 @@
-from functools import partial
 
 from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
 
-import gi
-from gi.repository import Gtk, Adw, GLib
+from gi.repository import Gtk
 
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 from GtkHelper.GtkHelper import better_disconnect, on_main
 
 if TYPE_CHECKING:

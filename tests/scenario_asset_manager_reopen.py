@@ -27,7 +27,6 @@ the GLib loop until every build reports finished before asserting.
 Needs a display (it builds real Adw/Gtk widgets); prints SKIP and exits 0 when
 GTK can't initialize, like a headless CI box.
 """
-import os
 
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
 import globals as gl

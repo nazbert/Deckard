@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from threading import Thread, Timer
 
 import psutil
-from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageSequence
+from PIL import Image, ImageDraw, ImageEnhance, ImageSequence
 from StreamDeck.Devices import StreamDeck
 from StreamDeck.Devices.StreamDeck import DialEventType, TouchscreenEventType
 from StreamDeck.Devices.StreamDeckPlus import StreamDeckPlus

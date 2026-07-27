@@ -20,7 +20,6 @@ trigger a plain Page.save() on the cached object -- the auto-change block
 must survive in the file.
 """
 import json
-import os
 
 import fixtures
 import globals as gl

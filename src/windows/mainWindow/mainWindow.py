@@ -31,11 +31,10 @@ from loguru import logger as log
 from src.windows.mainWindow.elements.KeepRunningDialog import KeepRunningDialog
 from src.windows.mainWindow.elements.leftArea import LeftArea
 from src.windows.mainWindow.elements.Sidebar.Sidebar import Sidebar
-from GtkHelper.GtkHelper import get_deepest_focused_widget, get_deepest_focused_widget_with_attr
+from GtkHelper.GtkHelper import get_deepest_focused_widget_with_attr
 from src.windows.mainWindow.elements.NoPagesError import NoPagesError
 from src.windows.mainWindow.elements.NoDecksError import NoDecksError
 from src.windows.mainWindow.deckSwitcher import DeckSwitcher
-from src.windows.mainWindow.elements.PageSelector import PageSelector
 from src.windows.mainWindow.elements.HeaderHamburgerMenuButton import HeaderHamburgerMenuButton
 from src.backend.DeckManagement.DeckController import DeckController
 from src.backend.PageManagement.Page import Page

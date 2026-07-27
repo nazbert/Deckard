@@ -17,14 +17,11 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw
+from gi.repository import Gtk
 
 # Import python modules
-import os
-import json
 
 # Import own modules
-from src.windows.AssetManager.IconPacks.Preview import IconPackPreview
 # Import typing
 
 from typing import TYPE_CHECKING

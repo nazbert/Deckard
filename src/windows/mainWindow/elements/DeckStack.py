@@ -18,17 +18,15 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw
+from gi.repository import Gtk
 
 # Import Python modules 
 from loguru import logger as log
 
 # Import globals
-import globals as gl
 
 # Import own modules
 from src.windows.mainWindow.elements.DeckStackChild import DeckStackChild
-from src.backend.DeckManagement.HelperMethods import recursive_hasattr
 
 # Import typing
 from typing import TYPE_CHECKING

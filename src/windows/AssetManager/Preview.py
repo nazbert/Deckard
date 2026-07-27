@@ -17,7 +17,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GdkPixbuf, GLib, Pango
+from gi.repository import Gtk, GdkPixbuf, GLib, Pango
 
 # Import python modules
 from loguru import logger as log

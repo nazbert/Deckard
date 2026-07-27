@@ -1,10 +1,8 @@
-from dataclasses import dataclass
 
 from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
 from GtkHelper.ColorButtonRow import ColorButtonRow as ColorDialog
 
-import gi
-from gi.repository import Gtk, Adw, Gio
+from gi.repository import Gtk
 
 from typing import TYPE_CHECKING, Callable
 

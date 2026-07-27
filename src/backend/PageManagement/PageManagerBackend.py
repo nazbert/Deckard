@@ -12,18 +12,13 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
-import dataclasses
 # Import Python modules
 import datetime
-import gc
 import os
 import shutil
-import json
 import threading
 import zipfile
-from copy import copy
 from signal import Signals
-import time
 from typing import Union
 
 from loguru import logger as log
@@ -33,8 +28,7 @@ from src.backend.DeckManagement.DeckController import DeckController
 
 # Import own modules
 from src.backend.PageManagement.Page import Page
-from src.backend.PageManagement.DummyPage import DummyPage
-from src.backend.DeckManagement.HelperMethods import get_sub_folders, natural_sort, natural_sort_by_filenames, recursive_hasattr, sort_times
+from src.backend.DeckManagement.HelperMethods import natural_sort_by_filenames
 from src.backend.atomic_json import atomic_write_json
 
 # Import globals

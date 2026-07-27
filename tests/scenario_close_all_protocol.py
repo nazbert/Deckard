@@ -22,7 +22,6 @@ closed device -- that's issue #59.)
 import time
 
 import fixtures
-import globals as gl
 
 from src.backend.DeckManagement.DeckManager import close_all_controllers
 

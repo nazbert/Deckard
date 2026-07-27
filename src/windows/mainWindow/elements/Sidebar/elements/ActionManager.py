@@ -15,7 +15,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 # Import gtk modules
 import gi
 
-from src.backend.DeckManagement.InputIdentifier import Input, InputIdentifier
+from src.backend.DeckManagement.InputIdentifier import InputIdentifier
 from src.windows.Settings.PluginSettingsWindow.PluginSettingsWindow import PluginSettingsWindow
 
 gi.require_version("Gtk", "4.0")
@@ -25,8 +25,6 @@ from gi.repository import Gtk, Adw, Gdk, GLib, Pango
 # Import Python modules
 from loguru import logger as log
 from copy import copy
-import asyncio
-import threading
 
 # Import globals
 import globals as gl

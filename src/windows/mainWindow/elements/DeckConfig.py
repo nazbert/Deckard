@@ -13,7 +13,6 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import gtk modules
-import threading
 import gi
 
 from src.backend.DeckManagement.InputIdentifier import Input
@@ -21,7 +20,7 @@ from src.backend.DeckManagement.InputIdentifier import Input
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw
+from gi.repository import Gtk
 
 # Import own modules
 from src.windows.mainWindow.elements.KeyGrid import KeyGrid
