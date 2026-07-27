@@ -208,7 +208,6 @@ localdev/
 ## UV
 .python-version
 uv.lock
-pyproject.toml
 
 
 .DS_Store

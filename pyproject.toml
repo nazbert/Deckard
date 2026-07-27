@@ -1,0 +1,28 @@
+# pyproject.toml — tool configuration ONLY, deliberately.
+# Deckard is not pip-installed anywhere: the flatpak manifest copies the tree
+# (io.github.nazbert.Deckard.yml: `cp . /app/bin/Deckard -r`), the AUR package
+# builds a venv from requirements.txt and copies the tree to /opt/deckard, and
+# the release flow reads the root VERSION file (release.config.mjs,
+# .gitlab-ci.yml build:flatpak). No [project]/[build-system] table on purpose.
+
+[tool.ruff]
+target-version = "py313"   # deployment floor: flatpak GNOME 50 runtime / AUR python313
+
+[tool.ruff.lint]
+select = [
+  "F401",  # unused imports (autofixed in this MR)
+  "E711",  # == None / != None (fixed in this MR)
+  "E712",  # == True / == False (fixed in this MR)
+  "B006",  # mutable default args — locks in MR !73 / #167
+  "F541",  # f-strings without placeholders (autofixed in this MR)
+  # "E722" — added by the bare-except sweep MR (refs #139)
+  # "B030" — added by the bare-except sweep MR
+]
+
+[tool.mypy]
+python_version = "3.13"
+files = ["src", "GtkHelper"]
+mypy_path = "."
+explicit_package_bases = true   # src/ has no __init__.py files; imports are `src.backend...` from repo root
+ignore_missing_imports = true   # dasbus, evdev, pulsectl, StreamDeck, ... ship no stubs
+implicit_optional = true        # large pre-PEP-484 population; ratchet later
