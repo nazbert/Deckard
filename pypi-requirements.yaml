@@ -9,12 +9,12 @@ build-commands:
   --prefix=${FLATPAK_DEST} --no-build-isolation annotated-types async-lru bcrypt blinker
   cairocffi CairoSVG certifi cffi charset-normalizer click cloudpickle colorama contourpy
   cssselect2 cycler dasbus decorator defusedxml distlib dnspython evdev
-  filelock fonttools fuzzywuzzy get-video-properties gitdb h2 hpack hyperframe idna
+  filelock fonttools fuzzywuzzy gitdb h2 hpack hyperframe idna
   imageio imageio-ffmpeg indexed-bzip2 itsdangerous Jinja2 joblib kiwisolver Levenshtein
   linkify-it-py loguru markdown-it-py MarkupSafe matplotlib mdit-py-plugins mdurl
   memray meson meson-python natsort nltk numpy opencv-python packaging patchelf pillow
   pip-review pipenv platformdirs plumbum proglog psutil pulsectl py-gcode-metadata
-  pycairo pyclip pycparser pydantic pydantic-core pyenchant Pygments PyGObject PyGObject-stubs
+  pycairo pycparser pydantic pydantic-core pyenchant Pygments PyGObject PyGObject-stubs
   pymongo pyparsing pyperclip pyproject-metadata Pyro5 pyspellchecker python-dateutil
   python-wayland-extra pyudev pyusb PyYAML RapidFuzz regex req2flatpak requests requirements-parser
   rich rpyc serpent setproctitle setuptools six smmap speedtest-cli streamcontroller-plugin-tools
@@ -188,9 +188,6 @@ sources:
   url: https://files.pythonhosted.org/packages/43/ff/74f23998ad2f93b945c0309f825be92e04e0348e062026998b5eefef4c33/fuzzywuzzy-0.18.0-py2.py3-none-any.whl
   sha256: 928244b28db720d1e0ee7587acf660ea49d7e4c632569cad4f1cd7e68a5f0993
 - type: file
-  url: https://files.pythonhosted.org/packages/a6/a7/78f3de52ff5a6a1998d7656f2a07456cb998b82c3ba5cc75c8bb1014f7b6/get_video_properties-0.1.1-py3-none-any.whl
-  sha256: 04d4f478a5211917e2a7e87ddfcb1c17734cddf8374494c3993bf825b7ad4192
-- type: file
   url: https://files.pythonhosted.org/packages/a0/61/5c78b91c3143ed5c14207f463aecfc8f9dbb5092fb2869baf37c273b2705/gitdb-4.0.12-py3-none-any.whl
   sha256: 67073e15955400952c6565cc3e707c554a4eea2e428946f7a4c162fab9bd9bcf
 - type: file
@@ -361,9 +358,6 @@ sources:
 - type: file
   url: https://files.pythonhosted.org/packages/07/4a/42b26390181a7517718600fa7d98b951da20be982a50cd4afb3d46c2e603/pycairo-1.27.0.tar.gz
   sha256: 5cb21e7a00a2afcafea7f14390235be33497a2cce53a98a19389492a60628430
-- type: file
-  url: https://files.pythonhosted.org/packages/7d/4f/4b02e2c232ddf694bca0baea3049b886eeb80ee3d89c415067f5191596c1/pyclip-0.7.0-py3-none-any.whl
-  sha256: a7b7ea2cfad2dd61e86a529af588d006070d3eb0bd32981afaee5215f4604fec
 - type: file
   url: https://files.pythonhosted.org/packages/13/a3/a812df4e2dd5696d1f351d58b8fe16a405b234ad2886a0dab9183fb78109/pycparser-2.22-py3-none-any.whl
   sha256: c3702b6d3dd8c7abc1afa565d7e63d53a1d0bd86cdc24edd75470f4de499cfcc
