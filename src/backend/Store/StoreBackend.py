@@ -1012,20 +1012,13 @@ class StoreBackend:
 
         zip_path = os.path.join(gl.DATA_PATH, "cache", f"{projectname}-{sha}.zip")
 
-        # Download
+        # Download. The helper creates the cache dir, raises on an HTTP error
+        # status, and reaps a partial/zero-byte archive itself, so a failed
+        # download can never leave something behind to poison the next run.
         try:
-            # Create cache dir
-            os.makedirs(os.path.join(gl.DATA_PATH, "cache"), exist_ok=True)
-            with requests.get(zip_url, stream=True, timeout=30) as r:
-                r.raise_for_status()
-                with open(zip_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
+            http_client.download_to_file(zip_url, zip_path, timeout=30)
         except Exception as e:
             log.error(e)
-            # Don't leave a partial/zero-byte archive behind for the next run.
-            if os.path.exists(zip_path):
-                os.remove(zip_path)
             return NoConnectionError()
         
         ## Extract
