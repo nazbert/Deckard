@@ -299,6 +299,13 @@ class App(Adw.Application):
         from GtkHelper.GtkHelper import shutdown_background_pool
         shutdown_background_pool()
 
+        # Stop accepting plugin-event batches, so a late trigger_event()
+        # can't spawn a fresh lane thread mid-teardown. Nothing is joined:
+        # lane runners are daemon threads, so a wedged observer cannot delay
+        # quit (issue #178).
+        from src.backend.PluginManager import event_dispatch
+        event_dispatch.shutdown()
+
         for thread in threading.enumerate():
             if thread is not threading.current_thread() and not thread.daemon:
                 thread.join(timeout=5)

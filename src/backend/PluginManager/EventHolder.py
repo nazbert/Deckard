@@ -41,14 +41,15 @@ class EventHolder:
         self.observers.remove(callback)
 
     def trigger_event(self, *args, **kwargs):
-        # Dispatch on the shared background thread instead of spinning up a
-        # new asyncio event loop (+ default executor) on every call --
-        # this is the hottest callback path in the app (AudioControl's
-        # PulseEvent fires per PulseAudio event, bursts of tens/sec) and the
-        # old per-call loop churned an epoll fd every time (bug 27). See
-        # event_dispatch.py for why returning before observers finish is
-        # safe for this call site.
-        #
+        """Fire-and-forget: queues this holder's current observers onto its
+        dispatch lane and returns immediately.
+
+        Returning does NOT mean the observers have run -- do not read it as
+        "delivered". They run afterwards, sequentially and in registration
+        order, on this holder's own lane (per-lane FIFO), so an observer that
+        blocks stalls this event source only; no ordering is guaranteed
+        relative to other holders' events. See event_dispatch.py.
+        """
         # NOTE: the old implementation called
         # `self._run_event(self.event_id, *args, **kwargs)`, which silently
         # prepended `self.event_id` as the observers' first positional

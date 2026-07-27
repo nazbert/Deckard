@@ -14,31 +14,59 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 ---
 
-Shared, single-threaded observer dispatcher for EventHolder and the
-AssetManager plugin-settings Observer (docs/memory-footprint-plan.md bug
-27): both used to build a brand new asyncio event loop (plus its lazily
-created default executor) on every single trigger -- churn that shows up
-directly in fd/thread telemetry during a PulseAudio event burst (AudioControl
-fires its PulseEvent holder tens of times/sec on volume changes).
+Observer dispatch for EventHolder and the AssetManager plugin-settings
+Observer, one lane per event source.
 
-One background daemon thread now owns one persistent event loop for the
-process's lifetime; every trigger_event()/notify() call hands its batch of
-observers to that thread instead of building its own loop. Dispatch within a
-batch is sequential (not fanned out across threads like the old
-`asyncio.to_thread` path) and every observer gets its own try/except -- each
-observer runs, and one failing observer never stops the rest (this is
-slightly *more* isolated than the pre-existing code, which only wrapped the
-non-coroutine branch in a try/except; every real observer in the plugin
-ecosystem today is an `async def`, so the old code would have let one
-raising observer blow up the whole batch via asyncio.gather).
+Both used to build a brand new asyncio event loop (plus its lazily created
+default executor) on every single trigger -- churn that shows up directly in
+fd/thread telemetry during a PulseAudio event burst, AudioControl firing its
+PulseEvent holder tens of times/sec on volume changes
+(docs/memory-footprint-plan.md bug 27). Instead, a trigger hands its batch of
+observers to a background thread that keeps one loop alive across events.
+
+That thread used to be ONE app-wide worker, which made a blocking observer
+everybody's problem: the pulsectl-wedge precedent parked the single worker
+and every plugin's events stalled behind it, unbounded (issue #5). Dispatch
+is now split into lanes (issue #178). Each EventHolder and each
+plugin-settings Observer owns one; a lane is serviced by at most one thread
+of its own, spawned lazily on its first event and reaped again after
+_IDLE_REAP_S of idleness (closing its loop, so an idle holder costs neither a
+thread nor an epoll fd). A wedged observer therefore parks exactly one daemon
+thread -- its own lane's -- and no other holder notices. There is no pool for
+the wedge to occupy, so there is also no worker-count cliff where the N-th
+simultaneous wedge quietly restores the app-wide stall.
+
+Residual coupling, by design: observers of the SAME holder share its lane, so
+one that blocks still delays that event source's other observers. Splitting a
+trigger's batch across lanes would fix that at the price of the
+registration-order FIFO plugins do rely on (pinned by
+tests/scenario_event_dispatch_contract.py) -- and consumers of one event
+source sharing its fate is the normal event-bus bargain. The watchdog below
+still names the individual observer, so the culprit stays identifiable.
+
+Ordering: batches run FIFO within a lane, and the observers of a batch run in
+registration order, sequentially (not fanned out across threads like the old
+`asyncio.to_thread` path), each in its own try/except -- one failing observer
+never stops the rest. Nothing is ordered ACROSS lanes; nothing usefully was,
+since dispatch is queue-and-return from arbitrary plugin threads and the
+submit order of two holders was always a race between their callers.
 
 trigger_event()/notify() return as soon as the batch is queued, before the
 observers necessarily run. This was already true in effect for the call site
 that matters: `PulseEvent.trigger_event()` is invoked synchronously from
 inside `pulse.event_listen()`'s own dispatch loop, and nothing reads a
-return value or depends on the observers finishing before the call returns
--- so queuing to the shared dispatcher preserves observable behavior while
-removing the per-call event-loop-plus-executor churn.
+return value or depends on the observers finishing before the call returns.
+
+Quit: lane runners are daemon threads, and their queues are abandoned rather
+than drained. shutdown() (from on_quit) stops accepting batches and wakes
+idle runners so they exit; anything still queued dies with the process, as it
+already did when quit os._exit()'d the old executor's queue. Nothing is
+joined, so a wedged observer cannot delay quit.
+
+Residual: a lane's loop identity changes across an idle reap, so an observer
+that captured its running loop for a later call_soon_threadsafe would be
+holding a closed one. No installed plugin does that (AudioControl, the only
+async-observer producer, does not).
 """
 import asyncio
 import threading
@@ -87,12 +115,12 @@ def _close_thread_loop() -> None:
 
 
 # --- wedge watchdog (issue #5) ----------------------------------------------
-# The single lane means one wedged observer (real precedent: a pulsectl call
-# blocking forever) stalls plugin-event delivery APP-WIDE while the queue
-# grows without bound -- and used to do so silently. The watchdog cannot
-# un-stall it (that is the per-holder-lanes refactor, issue #79); it makes
-# the incident loud and attributable: which observer, for how long, how much
-# queued behind it. Mirrors the tick loop's >10s stall warning.
+# A wedged observer (real precedent: a pulsectl call blocking forever) no
+# longer stalls the app -- its lane contains it -- but its own event source
+# is dead until it returns, and its queue grows without bound meanwhile. The
+# watchdog makes that loud and attributable: which lane, which observer, for
+# how long, how much queued behind it. Mirrors the tick loop's >10s stall
+# warning.
 _WEDGE_WARN_S = 10.0
 _WEDGE_REWARN_S = 30.0
 _MONITOR_INTERVAL_S = 5.0
@@ -378,14 +406,16 @@ _default_lane = Lane()
 
 def dispatch(observers: Iterable[Callable], args: tuple, kwargs: dict, label: str | None = None) -> None:
     """Queue `observers` for sequential, exception-isolated dispatch on the
-    shared background thread. Returns immediately; observers have not
-    necessarily run by the time this returns (see module docstring for why
+    shared default lane. Returns immediately; the observers have not
+    necessarily run by the time it does (see the module docstring for why
     that's safe here).
 
-    Cross-plugin coupling (issue #5): all plugins share this ONE dispatch
-    lane. A blocking observer delays every other plugin's events, not just
-    its own source's -- the watchdog above names the culprit after 10s and
-    warns when the backlog piles up. Plugins must not block in observers.
+    This is the lane for callers that do not own one. EventHolder and the
+    plugin-settings Observer each dispatch on a lane of their own (issue
+    #178), so a wedge there stays contained to that one event source;
+    everything queued here shares a lane and shares its fate. Plugins must
+    not block in observers either way -- the watchdog above names the culprit
+    after 10s and warns when the backlog piles up.
     """
     _default_lane.dispatch(observers, args, kwargs, label=label)
 
