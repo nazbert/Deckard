@@ -29,7 +29,7 @@ from src.windows.AssetManager.IconPacks.Preview import IconPackPreview
 
 # Import python modules
 import os
-from fuzzywuzzy import fuzz
+from rapidfuzz import fuzz
 from loguru import logger as log
 
 # Import typing

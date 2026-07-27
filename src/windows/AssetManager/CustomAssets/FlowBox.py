@@ -20,7 +20,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib
 
 # Import python modules
-from fuzzywuzzy import fuzz
+from rapidfuzz import fuzz
 import threading
 from loguru import logger as log
 

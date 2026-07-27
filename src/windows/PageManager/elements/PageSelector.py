@@ -30,7 +30,7 @@ from src.backend.DeckManagement.HelperMethods import natural_keys
 
 # Import python modules
 import os
-from fuzzywuzzy import fuzz
+from rapidfuzz import fuzz
 import re
 
 # Import globals
@@ -162,7 +162,7 @@ class PageSelector(Adw.NavigationPage):
     
     @staticmethod
     @lru_cache(maxsize=1000)
-    def calc_ratio(str1, str2) -> int:
+    def calc_ratio(str1, str2) -> float:
         # staticmethod so the cache keys only on the strings, not on self.
         return fuzz.ratio(str1.lower(), str2.lower())
 

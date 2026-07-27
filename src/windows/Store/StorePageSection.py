@@ -15,7 +15,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 import gi
 from gi.repository import Gtk, Adw
 
-from fuzzywuzzy import fuzz
+from rapidfuzz import fuzz
 
 class StorePageSection(Gtk.Stack):
     def __init__(self, *args, **kwargs):

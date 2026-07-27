@@ -26,7 +26,7 @@ from gi.repository import Gtk, Adw
 
 # Import Python modules
 from loguru import logger as log
-from fuzzywuzzy import fuzz, process
+from rapidfuzz import fuzz
 
 # Import own modules
 from src.backend.DeckManagement.HelperMethods import get_last_dir

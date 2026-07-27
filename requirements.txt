@@ -19,9 +19,9 @@ CairoSVG==2.7.1           # src/backend/DeckManagement/HelperMethods.py (svg2png
 dasbus==1.7               # src/api.py (DBus API service)
 evdev==1.9.1              # src/backend/PageManagement/Page.py, StreamDeckUI importer; also used by OSPlugin/VolumeMixer
 fonttools==4.56.0         # src/backend/DeckManagement/Subclasses/KeyLabel.py (symbol-font detection)
-fuzzywuzzy==0.18.0        # Store/AssetManager/ActionChooser/PageSelector search (9 call sites); also used by VolumeMixer plugin
+fuzzywuzzy==0.18.0        # ecosystem pin: VolumeMixer plugin (actions/Dial.py, actions/MuteKey.py) imports fuzzywuzzy and ships no requirements.txt of its own; app code migrated to rapidfuzz (#170)
 get-video-properties==0.1.1  # src/windows/AssetManager/InfoPage.py (import name: videoprops)
-Levenshtein==0.27.3       # ecosystem pin: fuzzywuzzy's own speedup backend (fuzzywuzzy/StringMatcher.py does `from Levenshtein import *`); without it every fuzzy search in Store/AssetManager/ActionChooser/PageSelector falls back to the slow pure-Python matcher and fuzzywuzzy logs a warning on first use
+Levenshtein==0.27.3       # ecosystem pin: fuzzywuzzy's own speedup backend (fuzzywuzzy/StringMatcher.py does `from Levenshtein import *`), and fuzzywuzzy itself stays only for VolumeMixer (see above); without it VolumeMixer's fuzzy matching falls back to the slow pure-Python matcher and fuzzywuzzy logs a warning on first use
 loguru==0.7.3             # logging, used throughout
 matplotlib==3.10.0        # ecosystem pin: OSPlugin imports matplotlib directly for its graph actions and ships no requirements.txt of its own; removal is blocked on an upstream OSPlugin release. The app's own font-rendering use of matplotlib is being replaced separately (perf/import-diet-fonts); the RSS win from that work lands regardless of this pin.
 numpy==2.2.3              # src/backend/DeckManagement/Subclasses/background_video_cache.py
@@ -33,6 +33,7 @@ pulsectl==24.12.0         # ecosystem pin: AudioSwitcher, AudioControl and Volum
 pyclip==0.7.0             # src/windows/Permissions/FlatpakPermissionRequest.py
 python-wayland-extra==0.7.0  # src/backend/Wayland/Wayland.py
 pyusb==1.3.1              # main.py, DeckManager.py (usb.core/usb.util)
+rapidfuzz==3.14.3         # Store/AssetManager/ActionChooser/PageSelector search (7 call sites); version matches the wheel already vendored via Levenshtein
 requests==2.32.3          # every app-side fetch goes through src/backend/http_client.py (shared Session + Retry); StoreBackend.py imports it for its exception/response types; also used by Clocks/MediaPlugin/Spotify plugins
 rpyc==6.0.1               # src/backend/PluginManager/ActionCore.py (plugin backend RPC)
 setproctitle==1.3.5       # main.py

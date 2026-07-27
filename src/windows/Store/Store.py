@@ -25,7 +25,6 @@ from gi.repository import Gtk, Adw, GLib, Gio, Gdk, GObject, GdkPixbuf
 # Import Python modules
 import threading
 from loguru import logger as log
-from fuzzywuzzy import fuzz
 import webbrowser as web
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
