@@ -18,6 +18,10 @@ holding is the *shape* of the results, not their exact values:
      (GTK's sort contract), even though the scores it compares are floats.
   5. The `@staticmethod` + `@lru_cache` wrapper shape used by
      `PageSelector.calc_ratio` still caches (it keys on the strings only).
+  6. A score that is *mathematically* exactly a call-site threshold survives
+     the filter. rapidfuzz computes an exact 20 as 19.999999999999996 (one ULP
+     low), so the two `>= 20` filters compare `round(score)` -- fuzzywuzzy's
+     own `intr()` semantics -- instead of the raw float.
 
 Pure functions: no GTK, no globals install, no deck.
 """
@@ -106,6 +110,33 @@ def test_sort_comparator_still_returns_int() -> None:
     print("PASS: float scores still produce int-returning GTK sort comparators")
 
 
+def test_threshold_boundary_is_rounded() -> None:
+    # Pairs whose exact indel ratio is a whole number sitting on a call-site
+    # threshold. fuzzywuzzy returned int(round(...)) and let them through;
+    # rapidfuzz's float can land one ULP below (19.999999999999996 for an exact
+    # 20), so StorePageSection.filter_func and both ActionChooser filters
+    # compare round(score). Without that, typing "n" in the action chooser
+    # dropped "Next Song", and "p" in the store dropped "OS Plugin".
+    exact = [
+        ("n", "next song", 20),
+        ("p", "os plugin", 20),
+        ("ad", "set default device", 20),
+        ("ab", "abcdefgh", 40),
+        ("abc", "abcdefghi", 50),
+    ]
+    for query, name, expected in exact:
+        raw = fuzz.ratio(query, name)
+        assert round(raw) == expected, f"{query}/{name}: round({raw}) != {expected}"
+        # An exact threshold must never come back *above* it -- that would mean
+        # rapidfuzz changed the scale, not just its rounding.
+        assert raw <= expected, f"{query}/{name}: {raw} overshoots the exact {expected}"
+        assert round(raw) >= expected, (
+            f"{query}/{name}: rounded score {round(raw)} would be filtered out at {expected}"
+        )
+
+    print("PASS: exact-threshold scores survive the filters once rounded")
+
+
 def test_cached_static_wrapper() -> None:
     # Same shape as PageSelector.calc_ratio: a staticmethod so the cache keys
     # on the strings only, never on self.
@@ -140,6 +171,7 @@ def main() -> None:
     test_exact_match_and_unrelated_scores()
     test_ranking_order()
     test_sort_comparator_still_returns_int()
+    test_threshold_boundary_is_rounded()
     test_cached_static_wrapper()
     print("ALL PASS: scenario_fuzzy_ranking")
 
