@@ -859,10 +859,7 @@ class StoreBackend:
     ## Install
     def subp_call(self, args):
         return subprocess.call(args)
-    
-    def os_sys(self, args):
-        return os.system(args)
-    
+
     def get_main_folder_of_zip(self, zip_path: str) -> str:
         extracted_folder_name = None
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
