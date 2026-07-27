@@ -879,31 +879,31 @@ class PluginBase(rpyc.Service):
 
         Args:
             backend_path (str): The path to the backend script to be executed.
-            venv_path (str, optional): The path to the virtual environment to activate. Defaults to None.
+            venv_path (str, optional): The path to the virtual environment whose
+                interpreter runs the backend. Defaults to None (this app's own).
             open_in_terminal (bool, optional): Whether to open the backend in a new terminal window. Defaults to False.
+
+        Raises:
+            ValueError: if backend_path is None or missing, or venv_path is
+                given but missing. This validation used to live only on
+                ActionCore.launch_backend (#56); a bad path here previously
+                went straight to Popen as garbage.
 
         Returns:
             None
         """
+        from src.backend.PluginManager.PluginManager import build_backend_launch_command
+
         self.start_server()
         port = self.server.port
 
-        # Construct the command to launch the backend
-        if open_in_terminal:
-            command = "gnome-terminal -- bash -c '"
-            if venv_path is not None:
-                command += f". {venv_path}/bin/activate && "
-            command += f"python3 {backend_path} --port={port}; exec $SHELL'"
-        else:
-            command = ""
-            if venv_path is not None:
-                command = f". {venv_path}/bin/activate && "
-            command += f"python3 {backend_path} --port={port}"
+        # Validates the paths (#56) and yields argv, not a shell string (#172).
+        command = build_backend_launch_command(backend_path, venv_path, port, open_in_terminal)
 
         log.info(f"Launching backend: {command}")
         self._backend_stop_requested = False
         self._backend_launch_gen += 1
-        self.backend_process = subprocess.Popen(command, shell=True, start_new_session=True)
+        self.backend_process = subprocess.Popen(command, start_new_session=True)
         gl.plugin_manager.backend_processes.append(self.backend_process)
 
         self.wait_for_backend()

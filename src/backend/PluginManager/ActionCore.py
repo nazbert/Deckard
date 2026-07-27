@@ -622,32 +622,16 @@ class ActionCore(rpyc.Service):
         self._release_backend_resources()
     
     def launch_backend(self, backend_path: str, venv_path: str = None, open_in_terminal: bool = False):
+        from src.backend.PluginManager.PluginManager import build_backend_launch_command
+
         self.start_server()
         port = self.server.port
 
-        if venv_path is not None:
-            if not os.path.exists(venv_path):
-                raise ValueError(f"Venv path does not exist: {venv_path}")
-        # The gate used to be inverted (`if backend_path is None:` guarding
-        # the exists() check), so None reached os.path.exists -> TypeError
-        # and a real-but-missing path sailed through to Popen (issue #56).
-        if backend_path is None or not os.path.exists(backend_path):
-            raise ValueError(f"Backend path does not exist: {backend_path}")
-
-        ## Launch
-        if open_in_terminal:
-            command = "gnome-terminal -- bash -c '"
-            if venv_path is not None:
-                command += f". {venv_path}/bin/activate && "
-            command += f"python3 {backend_path} --port={port}; exec $SHELL'"
-        else:
-            command = ""
-            if venv_path is not None:
-                command = f". {venv_path}/bin/activate && "
-            command += f"python3 {backend_path} --port={port}"
+        # Validates the paths (#56) and yields argv, not a shell string (#172).
+        command = build_backend_launch_command(backend_path, venv_path, port, open_in_terminal)
 
         log.info(f"Launching backend: {command}")
-        self.backend_process = subprocess.Popen(command, shell=True, start_new_session=True)
+        self.backend_process = subprocess.Popen(command, start_new_session=True)
         gl.plugin_manager.backend_processes.append(self.backend_process)
 
         self.wait_for_backend()
