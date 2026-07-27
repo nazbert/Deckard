@@ -366,6 +366,12 @@ def run_command(command):
 
     The command gets its own session, its stdio pointed at /dev/null and
     ~ as its cwd, so it outlives us cleanly.
+
+    Fire-and-forget: spawn failures are logged, never raised. The fork
+    wrapper this replaced ran the Popen in the child, so an OSError (no
+    /bin/sh, a HOME that no longer exists, fork refused under load) never
+    reached the caller -- and callers are plugin action callbacks that have
+    no way to handle one.
     """
     if command is None:
         return
@@ -373,9 +379,13 @@ def run_command(command):
     if is_flatpak():
         command = "flatpak-spawn --host " + command
 
-    process = subprocess.Popen(command, shell=True, start_new_session=True,
-                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL, cwd=os.path.expanduser("~"))
+    try:
+        process = subprocess.Popen(command, shell=True, start_new_session=True,
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, cwd=os.path.expanduser("~"))
+    except OSError as e:
+        log.error(f"Failed to run command {command!r}: {e}")
+        return
     # This used to be a multiprocessing.Process wrapping the Popen -- a fork
     # of the whole interpreter (GTK, plugins, deck threads and all) whose
     # only job was to orphan the grandchild so nobody had to reap it. The

@@ -18,7 +18,10 @@ The contract asserted here:
   (c) The direct child is reaped -- it must not linger as a zombie.
   (d) The call is non-blocking: a command that sleeps must not hold up the
       caller (the old wrapper's fork was async for the same reason).
-  (e) run_command(None) is still a silent no-op.
+  (e) run_command(None) is still a silent no-op, and a command that cannot
+      be spawned at all is logged, not raised: the fork wrapper ran the
+      Popen in the child, so an OSError never reached the caller, and the
+      callers are plugin action callbacks with nothing to do about one.
 """
 import multiprocessing
 import os
@@ -113,6 +116,23 @@ def main() -> None:
     # (e) -- None is a no-op, not a crash.
     run_command(None)
     print("PASS: run_command(None) is a silent no-op")
+
+    # (e cont.) -- an unspawnable command is logged, not raised. cwd is the
+    # only spawn input a caller can't see: point HOME at a directory that
+    # doesn't exist and the exec fails in the parent, where the old fork
+    # wrapper would have swallowed it in the child.
+    real_home = os.environ.get("HOME")
+    os.environ["HOME"] = os.path.join(gl.DATA_PATH, "home that is not there")
+    try:
+        run_command("true")
+    except OSError as e:
+        raise AssertionError(f"run_command must not raise on a failed spawn: {e!r}")
+    finally:
+        if real_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = real_home
+    print("PASS: an unspawnable command is logged, not raised")
 
     print("PASS: scenario_run_command_detach")
 
