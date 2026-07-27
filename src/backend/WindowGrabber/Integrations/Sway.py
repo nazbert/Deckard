@@ -40,11 +40,11 @@ class Sway(Integration):
     def __init__(self, window_grabber: "WindowGrabber"):
         super().__init__(window_grabber=window_grabber)
 
-        self.command_prefix = ""
+        self.command_prefix: list[str] = []
         if not gl.IS_MAC:
             portal = Xdp.Portal.new()
             if portal.running_under_flatpak():
-                self.command_prefix = "flatpak-spawn --host "
+                self.command_prefix = ["flatpak-spawn", "--host"]
 
         self.start_active_window_change_thread()
 
@@ -78,8 +78,7 @@ class Sway(Integration):
         windows = []
         try:
             # Run the swaymsg command and capture the output
-            command = "swaymsg -t get_tree"
-            output = subprocess.check_output(f"{self.command_prefix}{command}", shell=True, text=True, cwd="/").strip()
+            output = subprocess.check_output([*self.command_prefix, "swaymsg", "-t", "get_tree"], text=True, cwd="/").strip()
             # Parse the JSON output into a Python list
             clients = json.loads(output)
 
@@ -87,7 +86,9 @@ class Sway(Integration):
                 for workspace in output.get("nodes", []):
                     self._walk_tree(workspace, windows)
 
-        except subprocess.CalledProcessError as e:
+        except (subprocess.CalledProcessError, OSError) as e:
+            # OSError covers the binary being absent: with the argv list there
+            # is no shell to turn that into a 127 CalledProcessError.
             log.error(f"An error occurred while running swaymsg: {e}")
         except json.JSONDecodeError as e:
             log.error(f"Failed to parse JSON: {e}")
