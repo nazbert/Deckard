@@ -348,7 +348,8 @@ class ActionRowLabelToggle(Gtk.Button):
         for button in self.config_buttons:
             try:
                 button.disconnect_by_func(self.on_label_toggled)
-            except:
+            except TypeError:
+                # Already disconnected: disconnect_by_func raises TypeError.
                 pass
 
     def set_active(self, values: list[bool]) -> None:
@@ -537,7 +538,7 @@ class ActionRow(Adw.ActionRow):
     def set_image_toggled(self, value: bool):
         try:
             self.allow_image_toggle.disconnect_by_func(self.on_allow_image_toggled)
-        except:
+        except TypeError:
             pass
 
         self.allow_image_toggle.set_active(value)
@@ -547,7 +548,7 @@ class ActionRow(Adw.ActionRow):
     def set_background_toggled(self, value: bool):
         try:
             self.allow_background_toggle.disconnect_by_func(self.on_allow_background_toggled)
-        except:
+        except TypeError:
             pass
 
         self.allow_background_toggle.set_active(value)
@@ -557,7 +558,7 @@ class ActionRow(Adw.ActionRow):
     def set_label_toggled(self, value: bool):
         try:
             self.allow_label_toggle.disconnect_by_func(self.on_allow_label_toggled)
-        except:
+        except TypeError:
             pass
 
         self.allow_label_toggle.set_active(value)
