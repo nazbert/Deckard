@@ -30,7 +30,7 @@ class _BarePlugin(PluginBase):
     warm-up dispatch contract, not plugin construction (locales, asset
     manager)."""
 
-    def __init__(self):  # noqa: super-init-not-called
+    def __init__(self):  # deliberately does not call super().__init__()
         pass
 
 
