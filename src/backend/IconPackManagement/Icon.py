@@ -18,10 +18,10 @@ import os
 # Import typing
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    pass
+    from src.backend.IconPackManagement.IconPack import IconPack
 
 class Icon:
-    def __init__(self, icon_pack: "IconPackpath", path: str):
+    def __init__(self, icon_pack: "IconPack", path: str):
         self.icon_pack = icon_pack
         self.path = path
 

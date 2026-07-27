@@ -23,14 +23,12 @@ from src.backend.DeckManagement.HelperMethods import color_values_to_gdk, gdk_co
 from src.backend.SettingsManager import AppSettings
 from src.windows.Settings.PluginSettingsPage import PluginSettingsPage
 
-# Import globals first to get IS_MAC
+# Import globals
 import globals as gl
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw
-if not gl.IS_MAC:
-    pass
 
 import os
 
