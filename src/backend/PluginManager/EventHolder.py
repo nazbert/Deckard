@@ -22,6 +22,13 @@ class EventHolder:
         # dominant steady-state growth mechanism for event-using plugins
         # like AudioControl).
         self.observers = CallbackRegistry()
+        # This holder's own dispatch lane (issue #178). Observers of THIS
+        # event are serialized on one thread of their own, so an observer
+        # that blocks (the pulsectl-wedge precedent) stalls only this event
+        # source's queue -- every other holder keeps delivering. The lane is
+        # owned by the holder, so it dies with it and no registry keying is
+        # needed (two holders can legitimately share an event_id).
+        self._lane = event_dispatch.Lane(label=self.event_id)
 
     def add_listener(self, callback: callable):
         if not self.observers.add(callback):
@@ -48,4 +55,4 @@ class EventHolder:
         # argument (AudioControl's on_pulse_device_change reads it as
         # `args[0]` and the real pulsectl event as `args[1]`). Preserve that
         # contract here.
-        event_dispatch.dispatch(self.observers.snapshot(), (self.event_id, *args), kwargs, label=self.event_id)
+        self._lane.dispatch(self.observers.snapshot(), (self.event_id, *args), kwargs, label=self.event_id)

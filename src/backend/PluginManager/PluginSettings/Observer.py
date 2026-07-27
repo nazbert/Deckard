@@ -7,12 +7,17 @@ from src.backend.PluginManager import event_dispatch
 from src.Signals.weak_callbacks import CallbackRegistry
 
 class Observer:
-    def __init__(self):
+    def __init__(self, label: str | None = None):
         # CallbackRegistry (src/Signals/weak_callbacks.py, design doc bug
         # 3/27): bound-method observers are held weakly, so a subscriber
         # that never calls unsubscribe() on teardown doesn't keep this list
         # (and the objects it points at) growing forever.
         self.observers = CallbackRegistry()
+        # This notifier's own dispatch lane (issue #178): its subscribers are
+        # serialized on a thread of their own, so a blocking subscriber
+        # stalls only this asset stream, not plugin events app-wide. `label`
+        # is what the wedge watchdog names the lane by.
+        self._lane = event_dispatch.Lane(label=label)
 
     def subscribe(self, observer: callable):
         self.observers.add(observer)
@@ -31,4 +36,4 @@ class Observer:
         # in its own try/except. notify() returns before observers
         # necessarily run, same as it effectively already did for a caller
         # racing a *running* loop via the `ensure_future` branch above.
-        event_dispatch.dispatch(self.observers.snapshot(), args, kwargs)
+        self._lane.dispatch(self.observers.snapshot(), args, kwargs)

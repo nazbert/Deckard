@@ -208,8 +208,8 @@ class Lane:
             stuck_name = self.current["name"]
         if warn_backlog:
             log.error(
-                f"event dispatch backlog reached {backlog} queued batch(es) -- "
-                f"the lane is stalled"
+                f"event dispatch lane {self.name} backlog reached {backlog} "
+                f"queued batch(es) -- this lane is stalled"
                 + (f" inside observer {stuck_name}" if stuck_name else "")
             )
         try:
@@ -359,12 +359,15 @@ class Lane:
                 # observer's re-warn clock out.
                 return
             self.current["next_warn"] = stuck_for + _WEDGE_REWARN_S
-        where = f" in {label}" if label else ""
+        # The batch label is only worth printing when it says something the
+        # lane's own name does not (it is the same event id for an
+        # EventHolder's lane).
+        where = f" in {label}" if label and label != self.label else ""
         log.error(
-            f"event dispatch wedged for {stuck_for:.0f}s inside observer "
-            f"{name}{where} -- ALL plugin events app-wide are stalled "
-            f"behind it ({backlog} batch(es) queued); see #79 for the "
-            f"per-holder-lane refactor"
+            f"event dispatch lane {self.name} wedged for {stuck_for:.0f}s "
+            f"inside observer {name}{where} -- events on this lane are "
+            f"stalled behind it ({backlog} batch(es) queued); other lanes "
+            f"are unaffected"
         )
 
 
