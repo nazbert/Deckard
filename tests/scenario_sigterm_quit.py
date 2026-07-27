@@ -23,7 +23,14 @@ already covered by scenario_plugin_backend_teardown.py; the end-to-end
      would see "default handler" and install its own over GLib's sigaction,
      routing Ctrl+C to app.quit() and bypassing on_quit entirely.
   2. A real SIGTERM raised at ourselves reaches on_quit exactly once via the
-     GLib main loop (pre-fix this killed the interpreter -> non-zero exit).
+     GLib main loop (pre-fix this killed the interpreter -> non-zero exit),
+     and it is still armed for a *second* delivery. A unix-signal source
+     whose callback returns falsy is destroyed and takes GLib's sigaction
+     with it (SIG_DFL is restored), so routing the source straight at on_quit
+     -- which returns None the moment its re-entry latch trips -- would let a
+     repeated `kill -TERM` disarm the handler and hand the next one to the
+     default disposition, killing the app mid-teardown with the backends
+     still running. Hence App._on_unix_signal returning SOURCE_CONTINUE.
   3. Same for SIGHUP (terminal close, a common way the app dies).
   4. on_quit is idempotent: a second entry (Ctrl+C landing mid-teardown --
      Python signal handlers run between bytecodes on the main thread) is a
@@ -34,12 +41,22 @@ already covered by scenario_plugin_backend_teardown.py; the end-to-end
      aborted teardown *before* terminate_all_backends.
   6. force_quit terminates the backends before os._exit(1), so even a wedged
      teardown that the 6s watchdog cuts short doesn't orphan them.
+  7. unix_signal_add() degrades (returns False) instead of raising when the
+     install itself fails. It runs inside App.__init__, so an escaping
+     exception there costs the whole startup.
+  8. That degraded path -- GLib 2.80+ moved the Unix API into the separate
+     GLibUnix-2.0 namespace, and a runtime shipping neither spelling gets a
+     plain signal.signal handler -- still routes TERM/HUP to the teardown.
+     Forced explicitly, since this machine's GLib does have the source
+     (see the INFO lines the run prints).
 """
 import fixtures  # noqa: F401  (must be first: isolates the data dir)
 
 import contextlib
 import os
 import signal
+import sys
+import threading
 
 import globals as gl
 
@@ -81,8 +98,14 @@ def no_real_exit():
     Without this a check that accidentally ran a real teardown to completion
     would os._exit(0) and the scenario would report a false PASS."""
     saved = os._exit
+    main_thread = threading.main_thread()
 
     def _fake_exit(code):
+        if threading.current_thread() is not main_thread:
+            # fixtures' deadlock watchdog hard-exits from its own daemon
+            # thread. Raising there would only kill that thread and leave the
+            # hang it was meant to break in place, so let it through.
+            saved(code)
         raise _ForcedExit(code)
 
     os._exit = _fake_exit
@@ -104,6 +127,10 @@ class QuitRecorder:
     (action, param) from the Gio "quit" action -- which is why the real
     on_quit is declared as on_quit(self, *args)."""
 
+    # The real wrapper the TERM/HUP sources are registered against, under
+    # test unbound on this stub exactly like the other App methods here.
+    _on_unix_signal = App._on_unix_signal
+
     def __init__(self):
         self.calls = []
         self.loop = None
@@ -112,12 +139,10 @@ class QuitRecorder:
         self.calls.append(args)
         if self.loop is not None:
             self.loop.quit()
-        # Mirrors the real on_quit's return value: None. As a GLib source
-        # callback that means SOURCE_REMOVE -- moot in production (on_quit
-        # ends in os._exit and never returns). Here it means GLib drops the
-        # source and restores SIG_DFL for that signum once its last source
-        # goes, so each signal below is raised exactly once on purpose: a
-        # second one would kill this interpreter.
+        # Mirrors the real on_quit's return value: None -- SOURCE_REMOVE if it
+        # were the source callback itself, which is why it isn't:
+        # _on_unix_signal wraps it and returns SOURCE_CONTINUE so the source
+        # (and GLib's sigaction) survive the latch's early return.
         return None
 
 
@@ -135,6 +160,45 @@ def check_sigint_stays_a_python_handler() -> QuitRecorder:
     )
     print("  PASS: SIGINT still routed to on_quit via signal.signal")
     return recorder
+
+
+def report_signal_path(signum: int, name: str) -> None:
+    """Print which of the two mechanisms register_signal_handlers landed on.
+
+    GLib's sigaction is invisible to signal.getsignal() -- that is the very
+    reason SIGINT has to stay a Python-level handler (check 1) -- so a SIG_DFL
+    reading here means the GLib unix-signal source is what is armed. Anything
+    else means unix_signal_add() degraded to signal.signal on this runtime
+    (pre-2.80 GLib without the old spelling, or no GLibUnix typelib): the
+    checks below still hold, but they are covering the fallback rather than
+    the source. Informational, not an assertion -- degrading is a supported
+    outcome, silently mistaking one path for the other is not.
+    """
+    handler = signal.getsignal(signum)
+    if handler == signal.SIG_DFL:
+        print(f"  INFO: {name} armed via a GLib unix-signal source")
+    else:
+        print(f"  INFO: {name} DEGRADED to a Python-level handler ({handler!r}) "
+              f"-- the GLib unix-signal source path is NOT covered here")
+
+
+def check_unix_signal_callback_keeps_source_armed() -> None:
+    probe = QuitRecorder()
+    result = probe._on_unix_signal()
+
+    assert probe.calls == [()], (
+        f"the TERM/HUP source callback must invoke on_quit, got {probe.calls!r}"
+    )
+    assert result == GLib.SOURCE_CONTINUE, (
+        f"the TERM/HUP source callback must return SOURCE_CONTINUE, got "
+        f"{result!r}. A falsy return destroys the unix-signal source and GLib "
+        f"restores SIG_DFL with it, so once on_quit's re-entry latch has "
+        f"tripped (it then returns None) a repeated `kill -TERM` would disarm "
+        f"the handler and let the next signal kill the process outright, "
+        f"mid-teardown, with the plugin backends still running -- the exact "
+        f"orphan this issue fixes."
+    )
+    print("  PASS: the TERM/HUP source callback keeps its source armed")
 
 
 def check_signal_reaches_on_quit(recorder: QuitRecorder, signum: int, name: str) -> None:
@@ -168,7 +232,65 @@ def check_signal_reaches_on_quit(recorder: QuitRecorder, signum: int, name: str)
     assert len(fired) == 1, (
         f"{name} must invoke on_quit exactly once, got {len(fired)}: {fired!r}"
     )
-    print(f"  PASS: {name} dispatched to on_quit through the GLib main loop")
+    print(f"  PASS: {name} reached on_quit with the GLib main loop running")
+
+
+def check_unix_signal_add_degrades_instead_of_raising() -> None:
+    """A symbol that resolves but blows up on call must still degrade.
+
+    unix_signal_add() is called from App.__init__ via
+    register_signal_handlers, so anything it lets escape aborts startup
+    outright -- a much worse outcome than the Python-level handler it is
+    supposed to fall back to. Resolving GLib.unix_signal_add /
+    GLibUnix.signal_add is no guarantee the call works: a signum
+    g_unix_signal_add refuses, a GLib built without UNIX signal support, or
+    an argument mismatch between the two spellings all raise at call time.
+    """
+    import src.app as app_mod
+
+    class _BoomGLib:
+        @staticmethod
+        def unix_signal_add(*args):
+            raise TypeError("simulated marshalling mismatch")
+
+    saved_glib = app_mod.GLib
+    app_mod.GLib = _BoomGLib
+    try:
+        installed = app_mod.unix_signal_add(0, signal.SIGTERM, lambda *a: None)
+    finally:
+        app_mod.GLib = saved_glib
+
+    assert installed is False, (
+        f"unix_signal_add must report failure rather than raise when the "
+        f"install itself fails (got {installed!r}); an exception here "
+        f"propagates out of App.__init__ and the app never starts"
+    )
+    print("  PASS: a failing unix-signal install degrades instead of raising")
+
+
+def check_degraded_fallback_still_reaches_on_quit(recorder: QuitRecorder) -> None:
+    """The no-GLib-unix-signal-source path must still run the teardown.
+
+    Must run AFTER the GLib-source checks: signal.signal() overwrites GLib's
+    sigaction for these signums, so once this has run the source path is no
+    longer reachable in this process.
+    """
+    import src.app as app_mod
+
+    saved = app_mod.unix_signal_add
+    app_mod.unix_signal_add = lambda *args, **kwargs: False
+    try:
+        App.register_signal_handlers(recorder)
+    finally:
+        app_mod.unix_signal_add = saved
+
+    for signum, name in ((signal.SIGTERM, "SIGTERM"), (signal.SIGHUP, "SIGHUP")):
+        assert signal.getsignal(signum) == recorder._on_unix_signal, (
+            f"with no unix-signal source available, {name} must fall back to a "
+            f"Python-level handler running the same teardown, got "
+            f"{signal.getsignal(signum)!r}"
+        )
+        check_signal_reaches_on_quit(recorder, signum, f"{name} (degraded fallback)")
 
 
 def check_quit_is_idempotent() -> None:
@@ -279,13 +401,29 @@ def check_force_quit_terminates_backends() -> None:
 
 
 def main() -> None:
+    # Line-buffered: several checks below fail by *dying from the signal*
+    # (SIG_DFL restored), and run_all.py captures stdout through a pipe -- a
+    # block-buffered scenario would report "exit 143, no output".
+    sys.stdout.reconfigure(line_buffering=True)
     fixtures.start_watchdog(60, label="scenario_sigterm_quit")
     recorder = check_sigint_stays_a_python_handler()
-    check_signal_reaches_on_quit(recorder, signal.SIGTERM, "SIGTERM")
-    check_signal_reaches_on_quit(recorder, signal.SIGHUP, "SIGHUP")
+    report_signal_path(signal.SIGTERM, "SIGTERM")
+    report_signal_path(signal.SIGHUP, "SIGHUP")
+    check_unix_signal_callback_keeps_source_armed()
+    # Each signal is delivered twice on purpose. The second delivery proves
+    # end-to-end that the first dispatch left the source (and GLib's
+    # sigaction) in place: if it did not, SIG_DFL is back and this kill takes
+    # the interpreter down instead -- which run_all.py reports as a FAIL, so
+    # the check cannot silently pass.
+    for signum, name in ((signal.SIGTERM, "SIGTERM"), (signal.SIGHUP, "SIGHUP")):
+        check_signal_reaches_on_quit(recorder, signum, name)
+        check_signal_reaches_on_quit(recorder, signum, f"{name} (second delivery)")
     check_quit_is_idempotent()
     check_quit_tolerates_missing_main_win()
     check_force_quit_terminates_backends()
+    check_unix_signal_add_degrades_instead_of_raising()
+    # Last: it replaces GLib's sigaction for TERM/HUP with a Python handler.
+    check_degraded_fallback_still_reaches_on_quit(recorder)
     print("PASS: scenario_sigterm_quit")
 
 
