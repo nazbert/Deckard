@@ -61,7 +61,6 @@ psutil==7.0.0
 pulsectl==24.12.0
 py-gcode-metadata==0.2.0
 pycairo==1.27.0
-pyclip==0.7.0
 pycparser==2.22
 pydantic==2.12.3
 pydantic_core==2.41.4

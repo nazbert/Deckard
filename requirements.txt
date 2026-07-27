@@ -30,7 +30,6 @@ packaging==24.2           # version checks/migrators (Migrator.py, ActionHolder.
 pillow==11.1.0            # PIL, used throughout image handling
 psutil==7.0.0             # DeckController.py, MediaManager.py (memory/process telemetry)
 pulsectl==24.12.0         # ecosystem pin: AudioSwitcher, AudioControl and VolumeMixer plugins import pulsectl directly and ship no requirements.txt of their own
-pyclip==0.7.0             # src/windows/Permissions/FlatpakPermissionRequest.py
 python-wayland-extra==0.7.0  # src/backend/Wayland/Wayland.py
 pyusb==1.3.1              # main.py, DeckManager.py (usb.core/usb.util)
 rapidfuzz==3.14.3         # Store/AssetManager/ActionChooser/PageSelector search (7 call sites); version matches the wheel already vendored via Levenshtein

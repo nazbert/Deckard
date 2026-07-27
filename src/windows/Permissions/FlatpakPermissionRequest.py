@@ -13,14 +13,14 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 import os
-import pyclip
+from loguru import logger as log
 
 # Import gtk modules
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Pango, GdkPixbuf
+from gi.repository import Gtk, Adw, Gdk, Pango, GdkPixbuf
 
 # Import globals
 import globals as gl
@@ -112,10 +112,10 @@ class FlatpakPermissionRequestWindow(Gtk.ApplicationWindow):
 
     def on_copy(self, button):
         try:
-            pyclip.copy(self.command)
-        except:
+            Gdk.Display.get_default().get_clipboard().set(self.command)
+        except Exception as e:
             #TODO: Show toast
-            pass
+            log.warning(f"Could not copy the command to the clipboard: {e}")
 
     def on_mark_solved(self, button):
         self.destroy()
