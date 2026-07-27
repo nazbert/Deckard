@@ -284,7 +284,7 @@ def reset_all_decks():
                 # Reset deck
                 usb.util.dispose_resources(device)
                 device.reset()
-        except:
+        except (usb.core.USBError, NotImplementedError):
             log.error("Failed to reset deck, maybe it's already connected to another instance? Skipping...")
 
 # Every CLI-side D-Bus call carries this instead of the 25s bus default:
@@ -486,7 +486,9 @@ def handle_listing_commands():
                     try:
                         deck_type = getattr(device, 'deck_type', lambda: 'Unknown StreamDeck')()
                         print(f"  Product Name: {deck_type}")
-                    except:
+                    except Exception:
+                        # Genuinely unknowable: whatever the HID backend raises
+                        # for a device we may not have permission to talk to.
                         print("  Product Name: Unknown (permission issue)")
                     
                     # Try to open device to get detailed info
