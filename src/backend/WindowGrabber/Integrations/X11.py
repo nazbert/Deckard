@@ -134,7 +134,7 @@ class X11(Integration):
             stdout, stderr = root.communicate()
             window_ids = stdout.decode().strip().split("#")[1].strip().split(", ")
             return window_ids
-        except IndexError or subprocess.CalledProcessError as e:
+        except (IndexError, subprocess.CalledProcessError) as e:
             log.error(f"An error occurred while running xprop: {e}")
             return []
 

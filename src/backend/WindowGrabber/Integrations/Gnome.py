@@ -22,7 +22,7 @@ from loguru import logger as log
 # Import globals first to get IS_MAC
 import globals as gl
 
-from gi.repository import Gio
+from gi.repository import Gio, GLib
 
 # Import typing
 from typing import TYPE_CHECKING
@@ -89,7 +89,9 @@ class Gnome(Integration):
         
         try:
             answer = json.loads(self.call("GetAllWindows"))
-        except:
+        except (GLib.Error, json.JSONDecodeError):
+            # The extension can be gone (D-Bus error) or answer with something
+            # that isn't JSON.
             return []
         windows: list[Window] = []
         
@@ -105,7 +107,7 @@ class Gnome(Integration):
             return None
         try:
             answer = json.loads(self.call("GetFocusedWindow"))
-        except:
+        except (GLib.Error, json.JSONDecodeError):
             return None
         wm_class = answer.get("wm_class")
         title = answer.get("title")
