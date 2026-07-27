@@ -59,12 +59,22 @@ def get_session() -> requests.Session:
     response is handed back rather than raising, so every call site keeps the
     status handling (and, for the store, the stale-cache fallback) it had
     before it was routed through here.
+
+    `connect=0` switches OFF the connect-error half of the budget that
+    `total` would otherwise also cover. Retrying a *status* is the point of
+    this policy; retrying a failed CONNECT buys nothing (a black-holed or
+    down host stays that way for the seconds involved) and costs three times
+    the wall clock on every offline failure -- a 10s asset download becomes a
+    31s block, and HelperMethods.download_file is reached synchronously from
+    KeyGrid's GTK drop handler, i.e. on the main thread. Read-side errors
+    stay retryable: those really are transient.
     """
     global _session
     with _session_lock:
         if _session is None:
             retry = Retry(
                 total=2,
+                connect=0,
                 backoff_factor=0.5,
                 status_forcelist=(429, 502, 503),
                 allowed_methods=frozenset({"GET"}),
