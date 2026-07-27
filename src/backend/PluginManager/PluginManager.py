@@ -1,6 +1,7 @@
 import os
 import signal
 import importlib
+import shlex
 import sys
 from loguru import logger as log
 import threading
@@ -65,11 +66,17 @@ def build_backend_launch_command(backend_path: str, venv_path: str, port: int,
     venv. It used to be whatever `python3` PATH resolved to, which on a
     native install is the system python -- no rpyc there, so the backend
     died at import (in flatpak `python3` and sys.executable are the same
-    interpreter, so nothing changes).
+    interpreter, so nothing changes). Running {venv}/bin/python directly
+    rather than sourcing {venv}/bin/activate resolves imports identically
+    (plugin venvs come from venv.create() without system site packages, so
+    activation's `python3` was this same binary); what activation also did
+    and this does not is export VIRTUAL_ENV and prepend {venv}/bin to PATH,
+    which only a backend that shells out to its own venv's console scripts
+    would notice.
 
     Raises:
-        ValueError: if venv_path is given but missing, or backend_path is
-            None or missing.
+        ValueError: if venv_path is given but missing or has no usable
+            interpreter, or backend_path is None or missing.
     """
     if venv_path is not None:
         if not os.path.exists(venv_path):
@@ -82,6 +89,13 @@ def build_backend_launch_command(backend_path: str, venv_path: str, port: int,
 
     if venv_path is not None:
         interpreter = os.path.join(venv_path, "bin", "python")
+        # bin/python is a symlink to the interpreter the venv was built
+        # against; a python upgrade under a native install leaves it
+        # dangling (exists() follows the link, so this catches that too).
+        # Checked here so the caller gets the documented ValueError with a
+        # useful message instead of a bare FileNotFoundError out of Popen.
+        if not os.path.exists(interpreter):
+            raise ValueError(f"Venv has no usable interpreter: {interpreter}")
     else:
         interpreter = sys.executable
 
@@ -91,8 +105,17 @@ def build_backend_launch_command(backend_path: str, venv_path: str, port: int,
     # Debug affordance: run the backend in a terminal that stays open after
     # it exits (`exec $SHELL`) so its output survives a crash. The paths ride
     # in as bash positional parameters, so nothing in them is interpolated.
-    terminal = os.environ.get("DECKARD_TERMINAL", "gnome-terminal")
-    return [terminal, "--", "bash", "-c", '"$1" "$2" --port="$3"; exec $SHELL',
+    #
+    # DECKARD_TERMINAL is the whole terminal command PREFIX, not just the
+    # binary: there is no portable "run this command" flag. gnome-terminal
+    # and friends take `--`, konsole/alacritty/xterm/xfce4-terminal take
+    # `-e`, kitty takes the command as a bare positional. Splitting the env
+    # var means every one of those is expressible ("konsole -e",
+    # "alacritty -e", "kitty"); hardcoding `--` after it made the knob work
+    # for exactly one family and fail silently -- terminal prints its usage,
+    # exits, backend never registers -- for the rest.
+    terminal = shlex.split(os.environ.get("DECKARD_TERMINAL", "")) or ["gnome-terminal", "--"]
+    return [*terminal, "bash", "-c", '"$1" "$2" --port="$3"; exec $SHELL',
             "deckard-backend", interpreter, backend_path, str(port)]
 
 

@@ -18,9 +18,11 @@ Both classes now go through PluginManager.build_backend_launch_command:
   (a) Argv shape. Spaces and quotes survive as single argv items; a venv
       yields {venv}/bin/python and no venv yields sys.executable; the
       open_in_terminal debug form passes user paths as bash positional
-      parameters (nothing interpolated) and honors $DECKARD_TERMINAL.
+      parameters (nothing interpolated) and honors $DECKARD_TERMINAL as a
+      whole command prefix (terminals disagree about `--` vs `-e`).
   (b) The #56 ValueError contract, now shared -- PluginBase.launch_backend
-      validates too, which it never used to.
+      validates too, which it never used to -- extended to a venv whose
+      bin/python does not resolve.
   (c) End-to-end: a real stub backend under a directory whose name contains
       a space is launched by ActionCore.launch_backend and registers back
       over rpyc. Pre-fix this cannot work: the shell splits the path.
@@ -100,9 +102,21 @@ def _write_stub_backend() -> str:
     return path
 
 
+def _make_venv(name: str) -> str:
+    """A venv skeleton: the directory AND a bin/python that resolves. The
+    helper checks both -- a venv dir whose bin/python is a dangling symlink
+    (a python upgrade under a native install) must fail as a ValueError with
+    a message, not as a bare FileNotFoundError out of Popen."""
+    venv_path = os.path.join(gl.DATA_PATH, name)
+    os.makedirs(os.path.join(venv_path, "bin"), exist_ok=True)
+    interpreter = os.path.join(venv_path, "bin", "python")
+    if not os.path.exists(interpreter):
+        os.symlink(sys.executable, interpreter)
+    return venv_path
+
+
 def check_argv_shape(backend_path: str) -> None:
-    venv_path = os.path.join(gl.DATA_PATH, "venv with spaces")
-    os.makedirs(venv_path, exist_ok=True)
+    venv_path = _make_venv("venv with spaces")
 
     # No venv -> our own interpreter, not whatever PATH calls python3.
     command = build_backend_launch_command(backend_path, None, 4242)
@@ -138,12 +152,32 @@ def check_argv_shape(backend_path: str) -> None:
     )
     print("PASS: terminal form passes paths as bash positional parameters")
 
-    # ... and the emulator is configurable.
-    os.environ["DECKARD_TERMINAL"] = "kitty"
-    command = build_backend_launch_command(backend_path, None, 4242, open_in_terminal=True)
-    assert command[0] == "kitty", command
+    # ... and the emulator is configurable. DECKARD_TERMINAL is the whole
+    # command prefix, because terminals disagree about how you hand them a
+    # command: gnome-terminal wants `--`, konsole/alacritty/xterm want `-e`,
+    # kitty wants a bare positional. A hardcoded `--` after the binary would
+    # work for exactly one family and fail silently for the rest.
+    for spec, expected_prefix in (
+        ("kitty", ["kitty"]),
+        ("konsole -e", ["konsole", "-e"]),
+        ("alacritty -e", ["alacritty", "-e"]),
+        ("'my terminal' --", ["my terminal", "--"]),
+    ):
+        os.environ["DECKARD_TERMINAL"] = spec
+        command = build_backend_launch_command(backend_path, None, 4242, open_in_terminal=True)
+        assert command[:len(expected_prefix)] == expected_prefix, (spec, command)
+        assert command[len(expected_prefix)] == "bash", (spec, command)
+        assert command[-3:] == [sys.executable, backend_path, "4242"], (spec, command)
     os.environ.pop("DECKARD_TERMINAL", None)
-    print("PASS: DECKARD_TERMINAL selects the terminal emulator")
+    print("PASS: DECKARD_TERMINAL carries the terminal's own exec flag")
+
+    # An empty/blank setting must not strip the terminal off the argv (which
+    # would run bash headless and pass the whole thing to the wrong argv[0]).
+    os.environ["DECKARD_TERMINAL"] = "   "
+    command = build_backend_launch_command(backend_path, None, 4242, open_in_terminal=True)
+    assert command[:2] == ["gnome-terminal", "--"], command
+    os.environ.pop("DECKARD_TERMINAL", None)
+    print("PASS: a blank DECKARD_TERMINAL falls back to the default")
 
 
 def check_path_validation(backend_path: str) -> None:
@@ -168,7 +202,25 @@ def check_path_validation(backend_path: str) -> None:
     else:
         raise AssertionError("a missing venv_path did not raise")
 
-    print("PASS: ValueError for None/missing backend_path and missing venv_path")
+    # A venv dir that exists but whose bin/python doesn't resolve -- what a
+    # python upgrade leaves behind on a native install. Popen would raise
+    # FileNotFoundError from inside launch_backend; the contract says
+    # ValueError, and the message must name the interpreter.
+    broken_venv = os.path.join(gl.DATA_PATH, "broken venv")
+    os.makedirs(os.path.join(broken_venv, "bin"), exist_ok=True)
+    dangling = os.path.join(broken_venv, "bin", "python")
+    if not os.path.lexists(dangling):
+        os.symlink(os.path.join(gl.DATA_PATH, "gone", "python3.13"), dangling)
+    try:
+        build_backend_launch_command(backend_path, broken_venv, 4242)
+    except ValueError as e:
+        assert "interpreter" in str(e), f"unhelpful message for a broken venv: {e}"
+    except OSError as e:
+        raise AssertionError(f"a dangling venv interpreter escaped as OSError: {e}")
+    else:
+        raise AssertionError("a venv with no usable interpreter did not raise")
+
+    print("PASS: ValueError for None/missing backend_path, missing venv and dangling interpreter")
 
 
 def _make_action() -> ActionCore:
@@ -213,9 +265,12 @@ def check_end_to_end_spaced_path(backend_path: str) -> None:
         # so run_all.py would then block on the pipe until its timeout.
         process = action.backend_process
         action.on_disconnect(None)
-        assert fixtures.wait_until(lambda: process.poll() is not None, timeout=15.0), (
-            "the stub backend was never terminated"
-        )
+        # Guarded: if launch_backend itself raised, there is no process, and
+        # an AttributeError here would replace the real failure.
+        if process is not None:
+            assert fixtures.wait_until(lambda: process.poll() is not None, timeout=15.0), (
+                "the stub backend was never terminated"
+            )
 
 
 def check_wait_for_backend_event() -> None:
