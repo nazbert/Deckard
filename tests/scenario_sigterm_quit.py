@@ -327,7 +327,12 @@ def check_quit_tolerates_missing_main_win() -> None:
     def _trigger_signal(*args, **kwargs):
         raise _ReachedAppQuit()
 
-    stub = Obj(_quit_started=False)  # no main_win: quit before on_activate
+    # No main_win: quit before on_activate. The window teardown is a real
+    # method now (App._destroy_main_window, #193), so bind the real one to
+    # the stub rather than stubbing it out -- its missing-attribute branch is
+    # exactly what this check exercises.
+    stub = Obj(_quit_started=False)
+    stub._destroy_main_window = lambda: App._destroy_main_window(stub)
     saved_dbus = app_mod.stop_dbus_service
     saved_sm = getattr(gl, "signal_manager", None)
     app_mod.stop_dbus_service = Recorder()
