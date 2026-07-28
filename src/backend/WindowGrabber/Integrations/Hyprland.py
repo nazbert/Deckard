@@ -41,11 +41,11 @@ class Hyprland(Integration):
     def __init__(self, window_grabber: "WindowGrabber"):
         super().__init__(window_grabber=window_grabber)
 
-        self.command_prefix = ""
+        self.command_prefix: list[str] = []
         if not gl.IS_MAC:
             portal = Xdp.Portal.new()
             if portal.running_under_flatpak():
-                self.command_prefix = "flatpak-spawn --host "
+                self.command_prefix = ["flatpak-spawn", "--host"]
 
         self._socket_path = self._find_socket2_path()
         self.start_active_window_change_thread()
@@ -81,7 +81,7 @@ class Hyprland(Integration):
         windows: list[Window] = []
         try:
             # Run the hyprctl command and capture the output
-            output = subprocess.check_output(f"{self.command_prefix}hyprctl clients -j", shell=True, text=True, cwd="/").strip()
+            output = subprocess.check_output([*self.command_prefix, "hyprctl", "clients", "-j"], text=True, cwd="/").strip()
             # Parse the JSON output into a Python list
             clients = json.loads(output)
 
@@ -89,7 +89,9 @@ class Hyprland(Integration):
                 if "class" in client and "title" in client:
                     windows.append(Window(client["class"], client["title"]))
 
-        except subprocess.CalledProcessError as e:
+        except (subprocess.CalledProcessError, OSError) as e:
+            # OSError covers the binary being absent: with the argv list there
+            # is no shell to turn that into a 127 CalledProcessError.
             log.error(f"An error occurred while running hyprctl: {e}")
         except json.JSONDecodeError as e:
             log.error(f"Failed to parse JSON: {e}")
@@ -99,13 +101,15 @@ class Hyprland(Integration):
     def get_active_window(self) -> Window:
         try:
             # Run the hyprctl command and capture the output
-            output = subprocess.check_output(f"{self.command_prefix}hyprctl activewindow -j", shell=True, text=True, cwd="/").strip()
+            output = subprocess.check_output([*self.command_prefix, "hyprctl", "activewindow", "-j"], text=True, cwd="/").strip()
             # Parse the JSON output into a Python list
             client = json.loads(output)
 
             if "class" in client and "title" in client:
                 return Window(client["class"], client["title"])
-        except subprocess.CalledProcessError as e:
+        except (subprocess.CalledProcessError, OSError) as e:
+            # OSError covers the binary being absent: with the argv list there
+            # is no shell to turn that into a 127 CalledProcessError.
             log.error(f"An error occurred while running hyprctl: {e}")
         except json.JSONDecodeError as e:
             log.error(f"Failed to parse JSON: {e}")

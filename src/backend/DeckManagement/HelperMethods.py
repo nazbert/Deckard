@@ -16,19 +16,20 @@ from datetime import datetime
 from functools import lru_cache, wraps
 import hashlib
 from io import BytesIO
-import multiprocessing
 import os
 import subprocess
 import sys
 import math
 import json
 import re
+import threading
 from urllib.parse import urlparse
+from loguru import logger as log
 from PIL import Image
 
 import gi
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Pango
+from gi.repository import Gdk, Gio, GLib, Pango
 
 from src.backend.DeckManagement import font_resolver
 from src.backend.atomic_json import atomic_write_json
@@ -360,20 +361,58 @@ def sort_times(time_list):
 
 
 def run_command(command):
+    """Detach a shell command line and forget about it.
+
+    `command` is a COMMAND LINE, not an argv list: callers (including
+    plugins -- this is de-facto plugin API surface) rely on shell syntax
+    such as pipes, `&&` and variable expansion, and the flatpak prefix is
+    spliced in as a string. Do not "fix" this to shlex.split/argv; build
+    the argv yourself and call subprocess directly if you need that.
+
+    The command gets its own session, its stdio pointed at /dev/null and
+    ~ as its cwd, so it outlives us cleanly.
+
+    Fire-and-forget: spawn failures are logged, never raised. The fork
+    wrapper this replaced ran the Popen in the child, so an OSError (no
+    /bin/sh, a HOME that no longer exists, fork refused under load) never
+    reached the caller -- and callers are plugin action callbacks that have
+    no way to handle one.
+    """
     if command is None:
         return
 
     if is_flatpak():
         command = "flatpak-spawn --host " + command
 
-    p = multiprocessing.Process(target=subprocess.Popen, args=[command], kwargs={
-                                "shell": True, "start_new_session": True, "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "cwd": os.path.expanduser("~")})
-    p.start()
+    try:
+        process = subprocess.Popen(command, shell=True, start_new_session=True,
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, cwd=os.path.expanduser("~"))
+    except OSError as e:
+        log.error(f"Failed to run command {command!r}: {e}")
+        return
+    # This used to be a multiprocessing.Process wrapping the Popen -- a fork
+    # of the whole interpreter (GTK, plugins, deck threads and all) whose
+    # only job was to orphan the grandchild so nobody had to reap it. The
+    # direct child needs reaping instead, or it lingers as a zombie for the
+    # life of the app; one throwaway daemon thread per spawn does that.
+    threading.Thread(target=process.wait, name="run_command_reaper", daemon=True).start()
 
 def open_web(url):
+    """Open a URL in the user's default browser.
+
+    Uses Gio rather than shelling out to xdg-open: GLib routes the call
+    through the OpenURI portal when sandboxed, so this works in the flatpak
+    without `flatpak-spawn --host`, and a URL containing shell metacharacters
+    can no longer become a command.
+    """
     if not url.startswith("http"):
         url = f"https://{url}"
-    run_command(f"xdg-open {url}")
+    try:
+        Gio.AppInfo.launch_default_for_uri(url, None)
+    except GLib.Error as e:
+        # The shell path failed silently; Gio raises, so say so.
+        log.error(f"Failed to open URL {url}: {e}")
 
 def svg_string_to_pil(svg_string, width: int = 96, height: int = 96):
     """

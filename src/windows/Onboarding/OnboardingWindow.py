@@ -23,7 +23,7 @@ from loguru import logger as log
 
 from GtkHelper.GtkHelper import LoadingScreen, run_on_main
 from autostart import is_flatpak
-from src.backend.DeckManagement.HelperMethods import open_web, run_command
+from src.backend.DeckManagement.HelperMethods import open_web
 from src.windows.Onboarding.PluginRecommendations import PluginRecommendations
 
 gi.require_version("Gtk", "4.0")
@@ -416,16 +416,4 @@ class SupportAppOnboardingScreen(Gtk.Box):
         self.append(self.support_button)
 
     def on_support_button_clicked(self, button):
-        run_command("xdg-open https://ko-fi.com/core447")
-        # portal = Xdp.Portal.new()
-        # portal.open_uri(
-        #     parent=XdpGtk4.parent_new_gtk(gl.app.get_active_window()),
-        #     uri="https://ko-fi.com/core447",
-        #     flags=Xdp.OpenUriFlags.ASK,
-        #     cancellable=None,
-        #     callback=self.callback
-        # )
-
-    def callback(self, source, res):
-        print(source)
-        print(res)
+        open_web("https://ko-fi.com/core447")

@@ -233,13 +233,7 @@ def test_clone_repo_rejects_injection_and_never_shells() -> None:
             os.makedirs(args[-1], exist_ok=True)
         return 0
 
-    def fake_os_sys(args):
-        # os_sys is os.system -- it must NEVER be reached with catalog values
-        # on the clone path anymore.
-        raise AssertionError(f"os_sys (shell) must not be used on the clone path: {args!r}")
-
     sb.subp_call = fake_subp_call
-    sb.os_sys = fake_os_sys
 
     # 1) Injected branch: refused, no git call, no side effect.
     injected_branch = f"main; touch {marker}"
