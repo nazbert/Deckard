@@ -55,12 +55,51 @@ from src.api import start_dbus_service, stop_dbus_service
 # Import globals
 import globals as gl
 
+
+def unix_signal_add(priority, signum, callback) -> bool:
+    """Install a GLib main-loop source for `signum`; returns whether one was
+    installed.
+
+    GLib 2.80 moved the Unix-specific API out of the GLib-2.0 introspection
+    namespace into a separate GLibUnix-2.0 one, so exactly one of the two
+    spellings exists depending on the runtime's GLib -- GLib.unix_signal_add
+    on older distros, GLibUnix.signal_add on current ones (and in the
+    org.gnome.Platform//50 flatpak runtime). Try both rather than pinning
+    either. Returns False if neither is introspectable, leaving the caller to
+    decide how to degrade.
+    """
+    add = getattr(GLib, "unix_signal_add", None)
+    if add is None:
+        try:
+            gi.require_version("GLibUnix", "2.0")
+            from gi.repository import GLibUnix
+            add = GLibUnix.signal_add
+        except (ImportError, ValueError, AttributeError):
+            return False
+    try:
+        add(priority, signum, callback)
+    except Exception as e:
+        # Resolving the symbol is not the same as it working: a signum
+        # g_unix_signal_add refuses, a GLib built without UNIX signal support,
+        # or an argument-marshalling mismatch between the two spellings all
+        # raise here. Degrading is this helper's entire contract -- letting it
+        # escape would propagate out of App.__init__ and abort startup, which
+        # is a far worse outcome than a Python-level handler.
+        log.warning(f"Could not install a GLib unix-signal source for {signum}: {e}")
+        return False
+    return True
+
+
 class App(Adw.Application):
     def __init__(self, deck_manager, **kwargs):
         super().__init__(**kwargs)
         self.deck_manager = deck_manager
 
-        self.register_sigint_handler()
+        # Re-entry latch for on_quit (issue #169). Set before the handlers are
+        # registered below so the very first signal already sees it.
+        self._quit_started = False
+
+        self.register_signal_handlers()
 
         self.connect("activate", self.on_activate)
 
@@ -232,15 +271,52 @@ class App(Adw.Application):
         self.permissions.present()
 
     def on_quit(self, *args):
+        # Run at most once (issue #169). SIGINT is a Python-level handler, so
+        # it fires between bytecodes on the main thread: a Ctrl+C landing
+        # during a teardown already in flight would otherwise re-enter here
+        # and re-destroy the window, re-trigger AppQuit, re-run close_all()
+        # and arm a second force_quit watchdog. The interrupted outer frame
+        # resumes normally after this early return.
+        if self._quit_started:
+            return
+        self._quit_started = True
+
         log.info("Quitting...")
 
         # Stop DBus API service
         if not gl.IS_MAC:
             stop_dbus_service()
 
-        self.main_win.destroy()
+        # Guarded: a TERM arriving before on_activate built the window
+        # (autostart followed by an immediate logout, or a startup crash-loop
+        # kill) would raise AttributeError here and abort teardown *before*
+        # terminate_all_backends() below -- exactly the orphan this issue is
+        # about. Everything else on this path is created in main.py before
+        # App exists, or is internally guarded.
+        main_win = getattr(self, "main_win", None)
+        if main_win is not None:
+            try:
+                main_win.destroy()
+            except Exception as e:
+                # main_win is published by MainWindow.__init__'s first
+                # statement, before the build can still fail (see
+                # on_activate), so this can be a half-built window.
+                log.warning(f"Failed to destroy the main window during shutdown: {e}")
 
-        gl.signal_manager.trigger_signal(Signals.AppQuit)
+        # Guarded for the same reason as the window teardown above, and it
+        # matters more here: SignalManager.trigger_signal invokes AppQuit
+        # handlers synchronously and *unwrapped*, so one third-party plugin
+        # raising in its quit hook aborts on_quit right here -- before
+        # close_all() (a deck left open fails the next startup with
+        # TransportError(-1)), before terminate_all_backends() (the orphaned
+        # backends this issue is about) and before the force_quit watchdog
+        # below is even armed. With the _quit_started latch above, that abort
+        # is now permanent: every later quit route (tray, Gio "quit" action,
+        # Ctrl+C, TERM) takes the early return instead of retrying.
+        try:
+            gl.signal_manager.trigger_signal(Signals.AppQuit)
+        except Exception as e:
+            log.warning(f"An AppQuit handler failed during shutdown: {e}")
 
         gl.threads_running = False
 
@@ -322,10 +398,73 @@ class App(Adw.Application):
 
     def force_quit(self):
         log.info("Forcing quit...")
+        # Last chance to reap the plugin backends (issue #169): they are
+        # spawned with start_new_session=True, so once this os._exit lands
+        # nothing else kills them -- a wedged teardown that never reached
+        # on_quit's terminate_all_backends() would orphan them. Non-blocking
+        # (escalate=False is just a killpg per backend), safe from the timer
+        # wheel's dispatch thread, and idempotent against a concurrent
+        # on_quit (snapshot copy + ProcessLookupError swallowed).
+        try:
+            gl.plugin_manager.terminate_all_backends()
+        except Exception as e:
+            log.warning(f"Failed to terminate plugin backends during force quit: {e}")
         os._exit(1)
 
-    def register_sigint_handler(self):
+    def _on_unix_signal(self, *args):
+        """SIGTERM/SIGHUP entry point. Runs on_quit, then keeps the source.
+
+        Not just `on_quit` itself, because of the return value. A unix-signal
+        source whose callback returns falsy is destroyed, and GLib restores
+        SIG_DFL for that signum along with it (verified: the *next* TERM then
+        kills the process outright). on_quit normally never returns -- but its
+        _quit_started latch does, so once a teardown is in flight every
+        further TERM/HUP would fall through the latch, return None, disarm the
+        handler, and hand the next signal back to the default disposition,
+        killing the process mid-teardown with the backends still running --
+        precisely the failure issue #169 is about. SOURCE_CONTINUE keeps the
+        source armed for as long as the process lives.
+
+        Deliberately not reused for the Gio "quit" action or the
+        GLib.idle_add(on_quit) routes (mainWindow.on_close, the hamburger
+        menu): on an idle source a truthy return means "run me again", which
+        would spin the main loop. on_quit's plain None is right for those.
+
+        An exception from on_quit is *not* swallowed: it propagates, GLib
+        drops the source, and a follow-up TERM hard-kills. That escalation is
+        wanted -- a deterministically broken teardown must not leave the app
+        immune to TERM.
+        """
+        self.on_quit()
+        return GLib.SOURCE_CONTINUE
+
+    def register_signal_handlers(self):
+        # SIGINT stays a Python-level handler: PyGObject's wakeup-fd bridge
+        # makes it fire promptly under the GLib loop, and having a custom
+        # handler installed keeps Gio.Application.run's register_sigint_fallback
+        # inert -- that fallback checks signal.getsignal(SIGINT), cannot see a
+        # GLib unix-signal source, and would install its own handler routing
+        # Ctrl+C to app.quit(), bypassing on_quit's whole teardown.
         signal.signal(signal.SIGINT, self.on_quit)
+        # SIGTERM/SIGHUP (issue #169): GLib-native sources dispatched on the
+        # main loop, so a logout/systemd TERM runs the full teardown -- notably
+        # terminate_all_backends(), without which the backends (own session,
+        # so no killpg reaches them) are orphaned. Registered here rather than
+        # at loop start: GLib installs its sigaction immediately, so a signal
+        # arriving before the loop runs is held pending, not lost. Routed via
+        # _on_unix_signal rather than on_quit directly -- see its docstring
+        # for why the source's return value is not moot.
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            if unix_signal_add(GLib.PRIORITY_DEFAULT, signum, self._on_unix_signal):
+                continue
+            # No introspectable unix-signal source on this GLib. A Python-level
+            # handler still runs the full teardown (that is what matters here);
+            # it just fires between bytecodes instead of as a loop source.
+            log.warning(
+                f"No GLib unix-signal source available for {signum}; falling "
+                f"back to a Python-level handler"
+            )
+            signal.signal(signum, self._on_unix_signal)
 
     def add_signals(self):
         self.update_all_assets_action = Gio.SimpleAction.new("update-all-assets", None)
