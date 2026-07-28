@@ -15,7 +15,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 import gi
 from gi.repository import Gtk, Adw
 
-from fuzzywuzzy import fuzz
+from rapidfuzz import fuzz
 
 class StorePageSection(Gtk.Stack):
     def __init__(self, *args, **kwargs):
@@ -89,9 +89,14 @@ class StorePageSection(Gtk.Stack):
         author = item.author_label.get_text().lower()
         description = item.description_label.get_text().lower()
 
-        name_score = fuzz.ratio(search_string, name)
-        author_score = fuzz.ratio(search_string, author)
-        description_score = fuzz.ratio(search_string, description)
+        # Compare the *rounded* scores (#170): rapidfuzz returns a float where
+        # fuzzywuzzy returned int(round(...)), and a ratio of exactly 20 comes
+        # back as 19.999999999999996 -- one ULP below the threshold, which
+        # would silently drop cards that used to match (e.g. "p" vs
+        # "OS Plugin"). sort_func keeps the unrounded scores for finer ranking.
+        name_score = round(fuzz.ratio(search_string, name))
+        author_score = round(fuzz.ratio(search_string, author))
+        description_score = round(fuzz.ratio(search_string, description))
 
         MIN_FUZZY_SCORE = 20
 

@@ -24,9 +24,10 @@ if TYPE_CHECKING:
     from .AssetManager import AssetManager
 
 # Import python modules
+import math
+import cv2
 from PIL import Image
 from loguru import logger as log
-from videoprops import get_video_properties
 
 # Import own modules
 from GtkHelper.GtkHelper import AttributeRow, OriginalURL
@@ -139,13 +140,25 @@ class InfoPage(Gtk.Box):
         self.image_group.set_visible(False)
         self.video_group.set_visible(True)
 
-        # Update ui content -- guarded (#112): ffprobe raises (or returns a
-        # dict missing keys) for corrupt/unreadable videos.
+        # Update ui content -- guarded (#112): cv2 never raises for a
+        # corrupt/unreadable video, it just fails to open or reports zeroes, so
+        # the checks below raise on its behalf to reach the "unknown" fallback.
         try:
-            props = get_video_properties(path)
-            self.video_resolution_row.set_url(f"{props['width']}x{props['height']}")
-            self.aspect_ratio_row.set_url(f"{props['display_aspect_ratio']}")
-            self.video_framerate_row.set_url(f"{eval(props['avg_frame_rate']):.2f} fps")
+            vid = cv2.VideoCapture(path)
+            try:
+                if not vid.isOpened():
+                    raise ValueError("cv2.VideoCapture could not open file")
+                width = int(vid.get(cv2.CAP_PROP_FRAME_WIDTH))
+                height = int(vid.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                fps = vid.get(cv2.CAP_PROP_FPS)
+            finally:
+                vid.release()
+            if width <= 0 or height <= 0:
+                raise ValueError("cv2 reported zero dimensions")
+            gcd = math.gcd(width, height)
+            self.video_resolution_row.set_url(f"{width}x{height}")
+            self.aspect_ratio_row.set_url(f"{width//gcd}:{height//gcd}")
+            self.video_framerate_row.set_url(f"{fps:.2f} fps")
         except Exception as e:
             log.warning(f"Could not read video info for {path}: {e}")
             self.video_resolution_row.set_url("unknown")

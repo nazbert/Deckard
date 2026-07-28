@@ -26,7 +26,7 @@ from gi.repository import Gtk, Adw
 
 # Import Python modules
 from loguru import logger as log
-from fuzzywuzzy import fuzz, process
+from rapidfuzz import fuzz
 
 # Import own modules
 from src.backend.DeckManagement.HelperMethods import get_last_dir
@@ -228,10 +228,15 @@ class PluginGroup(BetterPreferencesGroup):
             # Show all
             return True
 
-        if expander.highest_fuzz_score >= MIN_ACTION_FUZZY_SCORE:
+        # Compare the *rounded* score (#170): rapidfuzz returns a float where
+        # fuzzywuzzy returned int(round(...)), and a ratio of exactly 20 comes
+        # back as 19.999999999999996 -- one ULP below the threshold. Rounding
+        # keeps those matches visible, as they were before the swap. Sorting
+        # still uses the unrounded scores, which rank strictly finer.
+        if round(expander.highest_fuzz_score) >= MIN_ACTION_FUZZY_SCORE:
             return True
-        
-        title_fuzzy = fuzz.ratio(search_string.lower(), expander.get_title().lower())
+
+        title_fuzzy = round(fuzz.ratio(search_string.lower(), expander.get_title().lower()))
         if title_fuzzy >= MIN_TITLE_FUZZY_SCORE:
             return True
         return False
@@ -295,7 +300,8 @@ class ActionChooserExpander(BetterExpander):
             # Show all
             return True
 
-        fuzz_score = fuzz.ratio(search_string.lower(), label.lower())
+        # Rounded for the same reason as PluginGroup.filter_func (#170).
+        fuzz_score = round(fuzz.ratio(search_string.lower(), label.lower()))
 
         MIN_FUZZY_SCORE = 20
         if fuzz_score >= MIN_FUZZY_SCORE:
