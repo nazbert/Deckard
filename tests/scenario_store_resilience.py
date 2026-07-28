@@ -187,8 +187,8 @@ def test_fetches_run_concurrently() -> None:
         time.sleep(0.2)
         return FakeResponse()
 
-    real_get = sb_module.requests.get
-    sb_module.requests.get = slow_get
+    real_get = sb_module.http_client.get
+    sb_module.http_client.get = slow_get
     try:
         sb = StoreBackend()
 
@@ -199,7 +199,7 @@ def test_fetches_run_concurrently() -> None:
             ))
             elapsed = time.monotonic() - start
     finally:
-        sb_module.requests.get = real_get
+        sb_module.http_client.get = real_get
 
     assert all(not isinstance(r, NoConnectionError) for r in results)
     # Liveness/non-serialization ceiling, deliberately generous: what this

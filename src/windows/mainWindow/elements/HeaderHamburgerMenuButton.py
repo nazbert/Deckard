@@ -13,13 +13,12 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import gtk modules
-import json
 import sys
 import threading
 import gi
 import webbrowser as web
 
-import urllib.request
+from src.backend import http_client
 from src.backend.DeckManagement.HelperMethods import open_web
 
 gi.require_version("Gtk", "4.0")
@@ -103,8 +102,14 @@ class HeaderHamburgerMenuButton(Gtk.MenuButton):
 
     def get_contributer_list(self):
         try:
-            contents = urllib.request.urlopen("https://api.github.com/repos/StreamController/StreamController/contributors", timeout=10).read().decode()
-            data = json.loads(contents)
+            # Shared session (#168): api.github.com rate-limits by IP, and the
+            # store hits the same endpoint -- going through http_client means
+            # this fetch retries a 429 and reuses a pooled connection like
+            # every other one. raise_for_status keeps urlopen's old semantics,
+            # where a non-2xx answer raised into the except below.
+            response = http_client.get("https://api.github.com/repos/StreamController/StreamController/contributors", timeout=10)
+            response.raise_for_status()
+            data = response.json()
 
             contributors = []
             for contributor in data:

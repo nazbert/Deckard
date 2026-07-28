@@ -23,9 +23,12 @@ funnels through. Its contract (transactional since gl#82):
      on this (B-06's pre-delete flow is gone; pinned in
      scenario_store_b06_pack_survival.py).
 
-The `requests.get` call is monkeypatched to serve bytes from a local file
-(or raise) -- no socket is ever opened. Extraction/cleanup run against the
-real shutil/zipfile machinery in the isolated temp DATA_PATH.
+The shared session's `http_client.get` is monkeypatched to serve bytes from
+an in-memory archive (or raise) -- no socket is ever opened. Extraction and
+cleanup run against the real shutil/zipfile machinery in the isolated temp
+DATA_PATH. Since gl#168 the archive itself is fetched by
+http_client.download_to_file, which is where contract 1 (no partial/zero-
+byte .zip survives a failed download) is now enforced.
 """
 import io
 import os
@@ -92,19 +95,20 @@ class _FakeResponse:
 
 
 def _install_fake_get(chunks, **kwargs):
-    """Point requests.get (as referenced inside StoreBackend) at an in-memory
-    response. Returns the previous callable so the caller can restore it."""
-    prev = store_mod.requests.get
+    """Point the shared session's get() (as reached from StoreBackend, and
+    from inside http_client.download_to_file) at an in-memory response.
+    Returns the previous callable so the caller can restore it."""
+    prev = store_mod.http_client.get
 
     def fake_get(url, stream=False, timeout=None):
         return _FakeResponse(chunks, **kwargs)
 
-    store_mod.requests.get = fake_get
+    store_mod.http_client.get = fake_get
     return prev
 
 
 def _restore_get(prev):
-    store_mod.requests.get = prev
+    store_mod.http_client.get = prev
 
 
 def _good_zip_bytes(top_folder="repo-abc", files=None) -> bytes:

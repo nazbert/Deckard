@@ -213,23 +213,28 @@ def download_file(url: str, path: str = "", file_name: str = None) -> str:
 
     Returns:
         path (str): The path of the downloaded file.
+
+    Raises:
+        requests.RequestException: on a network failure OR an HTTP error
+            status. Nothing is left on disk in either case.
     """
 
-    import requests
+    # Lazy import: this module is pulled in by nearly everything at startup,
+    # and http_client imports requests.
+    from src.backend import http_client
 
     if file_name is None:
         file_name = get_file_name_from_url(url)
 
     path = os.path.join(path, file_name)
 
-    if os.path.dirname(path) != "":
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-
-    with open(path, "wb") as f:
-        # timeout: never block indefinitely on a black-holed/hung connection
-        # (same anti-pattern the About-dialog fetch had -- a timeout-less
-        # network call that could hang the caller forever).
-        f.write(requests.get(url, timeout=10).content)
+    # Streamed through the shared session. timeout: never block indefinitely
+    # on a black-holed/hung connection (same anti-pattern the About-dialog
+    # fetch had -- a timeout-less network call that could hang the caller
+    # forever). An HTTP error status raises instead of writing the error page
+    # into the asset cache under the requested file name, where the
+    # extension-based is_image() check would happily accept it as an asset.
+    http_client.download_to_file(url, path, timeout=10)
 
     return path
 

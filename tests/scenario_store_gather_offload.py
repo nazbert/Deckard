@@ -56,8 +56,8 @@ def test_catalog_fanout_overlaps() -> None:
         time.sleep(0.3)
         return FakeResponse()
 
-    real_get = sb_module.requests.get
-    sb_module.requests.get = slow_get
+    real_get = sb_module.http_client.get
+    sb_module.http_client.get = slow_get
     try:
         sb = _make_backend()
         sb.get_stores = lambda: [("https://github.com/Example/Store", "main")]
@@ -73,7 +73,7 @@ def test_catalog_fanout_overlaps() -> None:
         results = sb.process_store_data("Plugins.json", prepare, None, str)
         elapsed = time.monotonic() - start
     finally:
-        sb_module.requests.get = real_get
+        sb_module.http_client.get = real_get
 
     assert results == ["abc123"] * 5, f"expected 5 resolved shas, got {results!r}"
     assert elapsed < 1.0, (
@@ -99,8 +99,8 @@ def test_lookup_respects_fetch_limiter() -> None:
             in_flight -= 1
         return FakeResponse()
 
-    real_get = sb_module.requests.get
-    sb_module.requests.get = tracking_get
+    real_get = sb_module.http_client.get
+    sb_module.http_client.get = tracking_get
     try:
         sb = _make_backend()
         sb._fetch_limiter = threading.Semaphore(2)
@@ -116,7 +116,7 @@ def test_lookup_respects_fetch_limiter() -> None:
         for t in threads:
             t.join()
     finally:
-        sb_module.requests.get = real_get
+        sb_module.http_client.get = real_get
 
     assert peak <= 2, (
         f"{peak} lookups ran concurrently inside a limiter of 2 -- "
@@ -132,8 +132,8 @@ def test_network_failure_returns_no_connection_error() -> None:
     def failing_get(url, timeout=30):
         raise requests.exceptions.ConnectionError("boom: no route to host")
 
-    real_get = sb_module.requests.get
-    sb_module.requests.get = failing_get
+    real_get = sb_module.http_client.get
+    sb_module.http_client.get = failing_get
     try:
         sb = _make_backend()
 
@@ -155,7 +155,7 @@ def test_network_failure_returns_no_connection_error() -> None:
             f"prepare_plugin must propagate the NoConnectionError, got {result!r}"
         )
     finally:
-        sb_module.requests.get = real_get
+        sb_module.http_client.get = real_get
 
 
 def test_download_repo_guards_unresolved_sha() -> None:
@@ -165,9 +165,9 @@ def test_download_repo_guards_unresolved_sha() -> None:
     def get_must_not_be_called(*args, **kwargs):
         raise AssertionError("no archive fetch may be attempted for an unresolved sha")
 
-    real_get = sb_module.requests.get
+    real_get = sb_module.http_client.get
     real_is_flatpak = sb_module.is_flatpak
-    sb_module.requests.get = get_must_not_be_called
+    sb_module.http_client.get = get_must_not_be_called
     sb_module.is_flatpak = lambda: True  # force the zip path (argv has --devel)
     try:
         sb = _make_backend()
@@ -188,7 +188,7 @@ def test_download_repo_guards_unresolved_sha() -> None:
             f"a branch with no commits must be a hard 404, got {result!r}"
         )
     finally:
-        sb_module.requests.get = real_get
+        sb_module.http_client.get = real_get
         sb_module.is_flatpak = real_is_flatpak
 
 
