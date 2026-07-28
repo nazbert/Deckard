@@ -293,15 +293,7 @@ class App(Adw.Application):
         # terminate_all_backends() below -- exactly the orphan this issue is
         # about. Everything else on this path is created in main.py before
         # App exists, or is internally guarded.
-        main_win = getattr(self, "main_win", None)
-        if main_win is not None:
-            try:
-                main_win.destroy()
-            except Exception as e:
-                # main_win is published by MainWindow.__init__'s first
-                # statement, before the build can still fail (see
-                # on_activate), so this can be a half-built window.
-                log.warning(f"Failed to destroy the main window during shutdown: {e}")
+        self._destroy_main_window()
 
         # Guarded for the same reason as the window teardown above, and it
         # matters more here: SignalManager.trigger_signal invokes AppQuit
@@ -395,6 +387,46 @@ class App(Adw.Application):
         # os._exit, not sys.exit: interpreter teardown aborts in libusb on the
         # hidapi read thread during exit.
         os._exit(0)
+
+    def _destroy_main_window(self) -> None:
+        """Tear down the main window, if there is one that can be torn down.
+
+        GTK 4.22 segfaults disposing a window that was never realized (issue
+        #193, reproduced down to a bare Gtk/Adw.ApplicationWindow: destroy(),
+        remove_window() and set_application(None) all abort on the unrealized
+        dispose path; only close() and leaving it alone are safe). In
+        background mode (-b -- the autostart path) on_activate builds
+        main_win but skips present(), so the window is never realized and
+        this statement killed the process mid-teardown, before
+        terminate_all_backends() below: every plugin backend was orphaned on
+        every quit, which is the symptom #169 set out to fix.
+
+        close() is not a substitute: MainWindow.on_close pops the
+        keep-running dialog when the setting is unset and otherwise
+        re-enters on_quit through GLib.idle_add.
+
+        Skipping is correct rather than merely safe -- an unrealized window
+        owns no surface to release, and the process os._exit()s a few lines
+        below regardless.
+        """
+        main_win = getattr(self, "main_win", None)
+        if main_win is None:
+            # A TERM arriving before on_activate built the window (autostart
+            # followed by an immediate logout, or a startup crash-loop kill).
+            return
+        if not main_win.get_realized():
+            log.debug("Main window was never realized (background mode); "
+                      "skipping destroy to avoid the GTK unrealized-dispose "
+                      "abort (#193)")
+            return
+        try:
+            main_win.destroy()
+        except Exception as e:
+            # main_win is published by MainWindow.__init__'s first statement,
+            # before the build can still fail (see on_activate), so this can
+            # be a half-built window. Note this cannot catch #193 itself --
+            # that is a native abort, not a Python exception.
+            log.warning(f"Failed to destroy the main window during shutdown: {e}")
 
     def force_quit(self):
         log.info("Forcing quit...")
