@@ -14,18 +14,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 # Import gtk modules
 import gi
 
-from src.backend.DeckManagement.HelperMethods import is_video
 from src.windows.Store.SDPlusBarWallpapers.SDPlusBarWallpaperPage import SDPlusBarWallpaperPage
 
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib, Gio, Gdk, GObject, GdkPixbuf
+from gi.repository import Gtk
 
 # Import Python modules
 import threading
-from loguru import logger as log
-import webbrowser as web
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.windows.mainWindow.mainWindow import MainWindow
@@ -34,7 +31,6 @@ if TYPE_CHECKING:
 import globals as gl
 
 # Import own modules
-from src.backend.DeckManagement.ImageHelpers import image2pixbuf
 from src.windows.Store.Plugins.PluginPage import PluginPage
 from src.windows.Store.Icons.IconPage import IconPage
 from src.windows.Store.StorePage import StorePage

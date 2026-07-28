@@ -13,10 +13,8 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import gtk modules
-import sys
 import threading
 import gi
-import webbrowser as web
 
 from src.backend import http_client
 from src.backend.DeckManagement.HelperMethods import open_web
@@ -31,10 +29,8 @@ import globals as gl
 
 # Import python modules
 import  os
-from loguru import logger as log
 
 # Import own modules
-from src.windows.Store.Store import Store
 from src.windows.Settings.Settings import Settings
 
 # Import typing
