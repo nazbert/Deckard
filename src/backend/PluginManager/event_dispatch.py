@@ -14,57 +14,78 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 ---
 
-Shared, single-threaded observer dispatcher for EventHolder and the
-AssetManager plugin-settings Observer (docs/memory-footprint-plan.md bug
-27): both used to build a brand new asyncio event loop (plus its lazily
-created default executor) on every single trigger -- churn that shows up
-directly in fd/thread telemetry during a PulseAudio event burst (AudioControl
-fires its PulseEvent holder tens of times/sec on volume changes).
+Observer dispatch for EventHolder and the AssetManager plugin-settings
+Observer, one lane per event source.
 
-One background daemon thread now owns one persistent event loop for the
-process's lifetime; every trigger_event()/notify() call hands its batch of
-observers to that thread instead of building its own loop. Dispatch within a
-batch is sequential (not fanned out across threads like the old
-`asyncio.to_thread` path) and every observer gets its own try/except -- each
-observer runs, and one failing observer never stops the rest (this is
-slightly *more* isolated than the pre-existing code, which only wrapped the
-non-coroutine branch in a try/except; every real observer in the plugin
-ecosystem today is an `async def`, so the old code would have let one
-raising observer blow up the whole batch via asyncio.gather).
+Both used to build a brand new asyncio event loop (plus its lazily created
+default executor) on every single trigger -- churn that shows up directly in
+fd/thread telemetry during a PulseAudio event burst, AudioControl firing its
+PulseEvent holder tens of times/sec on volume changes
+(docs/memory-footprint-plan.md bug 27). Instead, a trigger hands its batch of
+observers to a background thread that keeps one loop alive across events.
+
+That thread used to be ONE app-wide worker, which made a blocking observer
+everybody's problem: the pulsectl-wedge precedent parked the single worker
+and every plugin's events stalled behind it, unbounded (issue #5). Dispatch
+is now split into lanes (issue #178). Each EventHolder and each
+plugin-settings Observer owns one; a lane is serviced by at most one thread
+of its own, spawned lazily on its first event and reaped again after
+_IDLE_REAP_S of idleness (closing its loop, so an idle holder costs neither a
+thread nor an epoll fd). A wedged observer therefore parks exactly one daemon
+thread -- its own lane's -- and no other holder notices. There is no pool for
+the wedge to occupy, so there is also no worker-count cliff where the N-th
+simultaneous wedge quietly restores the app-wide stall.
+
+Residual coupling, by design: observers of the SAME holder share its lane, so
+one that blocks still delays that event source's other observers. Splitting a
+trigger's batch across lanes would fix that at the price of the
+registration-order FIFO plugins do rely on (pinned by
+tests/scenario_event_dispatch_contract.py) -- and consumers of one event
+source sharing its fate is the normal event-bus bargain. The watchdog below
+still names the individual observer, so the culprit stays identifiable.
+
+Ordering: batches run FIFO within a lane, and the observers of a batch run in
+registration order, sequentially (not fanned out across threads like the old
+`asyncio.to_thread` path), each in its own try/except -- one failing observer
+never stops the rest. Nothing is ordered ACROSS lanes; nothing usefully was,
+since dispatch is queue-and-return from arbitrary plugin threads and the
+submit order of two holders was always a race between their callers.
 
 trigger_event()/notify() return as soon as the batch is queued, before the
 observers necessarily run. This was already true in effect for the call site
 that matters: `PulseEvent.trigger_event()` is invoked synchronously from
 inside `pulse.event_listen()`'s own dispatch loop, and nothing reads a
-return value or depends on the observers finishing before the call returns
--- so queuing to the shared dispatcher preserves observable behavior while
-removing the per-call event-loop-plus-executor churn.
+return value or depends on the observers finishing before the call returns.
+
+Quit: lane runners are daemon threads, and their queues are abandoned rather
+than drained. shutdown() (from on_quit) stops accepting batches and wakes
+every runner; a runner checks the flag both when idle and before taking its
+next batch, so a lane holding a backlog when quit arrives stops there instead
+of running plugin observers on into teardown. Anything still queued dies with
+the process, as it already did when quit os._exit()'d the old executor's
+queue. Nothing is joined, so a wedged observer cannot delay quit. dispatch()
+after shutdown raises DispatchShutdown; the fire-and-forget entry points
+(EventHolder.trigger_event, PluginSettings Observer.notify) swallow it, since
+plugin event sources keep firing until os._exit and cannot act on it.
+
+Residual: a lane's loop identity changes across an idle reap, so an observer
+that captured its running loop for a later call_soon_threadsafe would be
+holding a closed one. No installed plugin does that (AudioControl, the only
+async-observer producer, does not).
 """
 import asyncio
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 from typing import Callable, Iterable
+from weakref import WeakSet
 
 from loguru import logger as log
 
-# A single persistent worker. max_workers=1 is deliberate: it guarantees
-# every batch lands on the *same* OS thread across the process's lifetime,
-# so that thread can keep one asyncio event loop alive indefinitely instead
-# of paying loop-creation cost per trigger. It also means observer batches
-# are dispatched one at a time -- fine, since nothing in the app today
-# relies on concurrent observer execution (see module docstring).
-#
-# The worker is non-daemon: CPython >= 3.9 removed daemon threads from
-# ThreadPoolExecutor (bpo-39812) with no restore knob (issue #56, accepted
-# residual). Exit is covered anyway -- quit ends in os._exit (src/app.py),
-# and a normal interpreter exit unblocks the idle worker via
-# concurrent.futures' atexit queue wake-up.
-_dispatch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="event_dispatch")
-
-# Keyed off the executor's single worker thread. A thread-local (rather than
-# a module global guarded by a lock) is sufficient precisely because
-# max_workers=1 above ensures only one thread ever touches it.
+# Thread-local, keyed off whichever lane runner is executing a batch. Each
+# runner keeps ONE asyncio loop alive for as long as it lives, instead of
+# paying loop-creation cost per trigger; the loop is closed again when the
+# runner exits (idle reap below) so an idle lane holds no epoll fd.
 _thread_state = threading.local()
 
 
@@ -82,23 +103,51 @@ def _get_loop() -> asyncio.AbstractEventLoop:
     return loop
 
 
+def _close_thread_loop() -> None:
+    """Closes the calling runner's loop, reclaiming its epoll fd. Called on
+    every runner exit path -- keeping the loop alive past its thread would
+    give back exactly the fd churn this module exists to remove."""
+    loop = getattr(_thread_state, "loop", None)
+    _thread_state.loop = None
+    if loop is None:
+        return
+    try:
+        asyncio.set_event_loop(None)
+        if not loop.is_closed():
+            loop.close()
+    except Exception:
+        log.opt(exception=True).warning("failed to close an event dispatch lane's loop")
+
+
 # --- wedge watchdog (issue #5) ----------------------------------------------
-# The single lane means one wedged observer (real precedent: a pulsectl call
-# blocking forever) stalls plugin-event delivery APP-WIDE while the queue
-# grows without bound -- and used to do so silently. The watchdog cannot
-# un-stall it (that is the per-holder-lanes refactor, issue #79); it makes
-# the incident loud and attributable: which observer, for how long, how much
-# queued behind it. Mirrors the tick loop's >10s stall warning.
+# A wedged observer (real precedent: a pulsectl call blocking forever) no
+# longer stalls the app -- its lane contains it -- but its own event source
+# is dead until it returns, and its queue grows without bound meanwhile. The
+# watchdog makes that loud and attributable: which lane, which observer, for
+# how long, how much queued behind it. Mirrors the tick loop's >10s stall
+# warning.
 _WEDGE_WARN_S = 10.0
 _WEDGE_REWARN_S = 30.0
 _MONITOR_INTERVAL_S = 5.0
 _BACKLOG_WARN_THRESHOLD = 100
 
+# A runner with nothing to do for this long exits (and closes its loop). The
+# next dispatch on that lane spawns a fresh one -- so an app with many idle
+# holders costs no threads, and the hot lane's runner never reaches the
+# timeout in the first place.
+_IDLE_REAP_S = 60.0
+
 _watch_lock = threading.Lock()
-_current = {"name": None, "label": None, "started": 0.0, "next_warn": 0.0}
+# Every live lane, weakly: a lane dies with the EventHolder/Observer that
+# owns it, and the monitor must not be what keeps either alive. Mutated and
+# snapshotted under _watch_lock -- WeakSet tolerates GC-driven removal during
+# iteration (_IterationGuard) but not a concurrent add.
+_lanes: "WeakSet[Lane]" = WeakSet()
+# App-wide queued-batch total across all lanes (per-lane counts live on the
+# lanes themselves). Diagnostics only; the dispatch decisions are per lane.
 _backlog = 0
-_backlog_warned = False
 _monitor_started = False
+_shutdown = False
 
 
 def _observer_name(observer) -> str:
@@ -122,115 +171,324 @@ def _ensure_monitor() -> None:
                      daemon=True).start()
 
 
+def _monitor_tick() -> None:
+    # A function of its own, not an inline block, so the snapshot's strong
+    # lane references die with this frame instead of staying bound in the
+    # monitor loop's locals across the next sleep -- a dead holder's lane
+    # (and everything its queue still pins) must not be held alive for an
+    # extra monitor interval.
+    with _watch_lock:
+        lanes = list(_lanes)
+    for lane in lanes:
+        lane._check_wedge()
+
+
 def _monitor_loop() -> None:
     while True:
         time.sleep(_MONITOR_INTERVAL_S)
+        if _shutdown:
+            return
+        try:
+            _monitor_tick()
+        except Exception:
+            # This thread is spawned exactly once and never respawned
+            # (_monitor_started stays True for the process's life), so an
+            # escaping exception used to end wedge reporting permanently and
+            # near-silently -- and the watchdog is the only thing that makes
+            # a wedge attributable at all (issue #5). One bad tick must cost
+            # one tick. Sources are real if rare: a lane whose _check_wedge
+            # raises takes down reporting for every OTHER lane too, and on
+            # Python < 3.14 WeakSet iteration can race a GC-driven removal
+            # (the _remove callback runs on whichever thread drops the last
+            # reference, outside _watch_lock).
+            log.opt(exception=True).error("event dispatch watchdog tick failed")
+
+
+class DispatchShutdown(RuntimeError):
+    """Raised by dispatch() once shutdown() has run.
+
+    A RuntimeError subclass, so direct callers (and the pinned contract in
+    tests/scenario_dispatch_watchdog.py check 5) that expect a RuntimeError
+    are unaffected -- but a distinct type, so the plugin-facing entry points
+    can swallow exactly this and nothing else. `RuntimeError: can't start new
+    thread` out of _spawn_locked must still reach the caller; "you dispatched
+    while the app was quitting" must not, because trigger_event()/notify()
+    are fire-and-forget by contract and there is nothing a caller could do
+    with it.
+    """
+
+
+class Lane:
+    """One serialized dispatch queue, serviced by at most one thread.
+
+    A lane is the unit of wedge isolation: its runner is the only thread that
+    ever executes its batches, so a blocking observer parks that one daemon
+    thread and nothing else -- there is no shared pool slot to occupy and no
+    exhaustion cliff, however many lanes wedge at once.
+
+    The runner is spawned lazily on the first dispatch and exits again after
+    _IDLE_REAP_S with an empty queue, so a lane that never fires costs
+    nothing and an idle one costs nothing for long.
+    """
+
+    def __init__(self, label: str | None = None):
+        self.label = label
+        self._cond = threading.Condition()
+        self._pending: deque = deque()
+        self._runner: threading.Thread | None = None
+        # Watchdog state, guarded by the module-wide _watch_lock (contention
+        # is trivial: a handful of lanes, one short critical section per
+        # observer).
+        self.current = {"name": None, "label": None, "started": 0.0, "next_warn": 0.0}
+        self.backlog = 0
+        self.backlog_warned = False
         with _watch_lock:
-            name = _current["name"]
-            label = _current["label"]
-            started = _current["started"]
-            next_warn = _current["next_warn"]
-            backlog = _backlog
-        if name is None:
-            continue
-        stuck_for = time.monotonic() - started
-        if stuck_for >= next_warn:
-            with _watch_lock:
-                _current["next_warn"] = stuck_for + _WEDGE_REWARN_S
-            where = f" in {label}" if label else ""
+            _lanes.add(self)
+
+    @property
+    def name(self) -> str:
+        return self.label or "default"
+
+    # --- producer side ------------------------------------------------
+
+    def dispatch(self, observers: Iterable[Callable], args: tuple, kwargs: dict,
+                 label: str | None = None) -> None:
+        """Queues `observers` onto this lane and returns immediately."""
+        global _backlog
+        observers = list(observers)
+        if not observers:
+            return
+        if _shutdown:
+            # Checked before the accounting below so a rejected batch cannot
+            # leak a backlog count.
+            raise DispatchShutdown("event dispatch is shut down")
+        _ensure_monitor()
+        with _watch_lock:
+            _backlog += 1
+            self.backlog += 1
+            backlog = self.backlog
+            if backlog >= _BACKLOG_WARN_THRESHOLD and not self.backlog_warned:
+                self.backlog_warned = True
+                warn_backlog = True
+            else:
+                if backlog < _BACKLOG_WARN_THRESHOLD // 2:
+                    self.backlog_warned = False
+                warn_backlog = False
+            stuck_name = self.current["name"]
+        if warn_backlog:
             log.error(
-                f"event dispatch wedged for {stuck_for:.0f}s inside observer "
-                f"{name}{where} -- ALL plugin events app-wide are stalled "
-                f"behind it ({backlog} batch(es) queued); see #79 for the "
-                f"per-holder-lane refactor"
+                f"event dispatch lane {self.name} backlog reached {backlog} "
+                f"queued batch(es) -- this lane is stalled"
+                + (f" inside observer {stuck_name}" if stuck_name else "")
             )
-
-
-def _dispatch_batch(observers: list[Callable], label: str | None, args: tuple, kwargs: dict) -> None:
-    global _backlog
-    try:
-        # _get_loop() (loop creation, or the lazy log_hooks import inside it)
-        # must be INSIDE this try: it can raise, and the finally below owns
-        # the backlog decrement for THIS batch -- a raise before the finally
-        # would leak the count permanently (issue #5 review round 1).
-        loop = _get_loop()
-        asyncio.set_event_loop(loop)
-        for observer in observers:
+        try:
+            self._enqueue((observers, label, args, kwargs))
+        except BaseException:
+            # The batch will never run, so the backlog count must not leak.
             with _watch_lock:
-                _current["name"] = _observer_name(observer)
-                _current["label"] = label
-                _current["started"] = time.monotonic()
-                _current["next_warn"] = _WEDGE_WARN_S
+                _backlog -= 1
+                self.backlog -= 1
+            raise
+
+    def _enqueue(self, batch: tuple) -> None:
+        with self._cond:
+            if _shutdown:
+                # Re-checked under the lock the runner exits on: shutdown()
+                # sets the flag before waking the lanes, so nothing can slip
+                # a fresh runner in behind it mid-teardown.
+                raise DispatchShutdown("event dispatch is shut down")
+            self._pending.append(batch)
+            if self._runner is not None:
+                self._cond.notify()
+                return
             try:
-                if asyncio.iscoroutinefunction(observer):
-                    loop.run_until_complete(observer(*args, **kwargs))
-                else:
-                    observer(*args, **kwargs)
-            except Exception:
-                name = getattr(observer, "__name__", repr(observer))
-                where = f" in {label}" if label else ""
-                # opt(exception=True) attaches sys.exc_info() so the observer's
-                # full traceback lands in the log -- a bare one-liner here made
-                # raising plugin callbacks invisible (issue #33).
-                log.opt(exception=True).error(f"Callback {name}{where} could not be called")
-    finally:
+                self._spawn_locked()
+            except BaseException:
+                self._pending.pop()
+                raise
+
+    def _spawn_locked(self) -> None:
+        """Starts this lane's runner. Caller holds self._cond."""
+        runner = threading.Thread(target=self._run, name=f"event_dispatch:{self.name}",
+                                  daemon=True)
+        self._runner = runner
+        try:
+            runner.start()
+        except BaseException:
+            # Leaving a never-started thread booked as the runner would kill
+            # the lane permanently (every later dispatch would notify a
+            # thread that does not exist).
+            self._runner = None
+            raise
+
+    # --- consumer side ------------------------------------------------
+
+    def _run(self) -> None:
+        try:
+            while True:
+                with self._cond:
+                    idle_deadline = time.monotonic() + _IDLE_REAP_S
+                    while not self._pending:
+                        remaining = idle_deadline - time.monotonic()
+                        if _shutdown or remaining <= 0:
+                            # Clearing _runner here -- under the same lock
+                            # that guards the emptiness check -- is what
+                            # makes the reap race-free: a dispatch() that
+                            # appends after this point sees no runner and
+                            # spawns one, and one that appended before it
+                            # leaves _pending non-empty so we do not exit.
+                            self._runner = None
+                            return
+                        self._cond.wait(remaining)
+                    if _shutdown:
+                        # Abandon what is queued rather than draining it --
+                        # the emptiness check above only covers an IDLE
+                        # runner, so without this a lane that was holding a
+                        # backlog when quit arrived kept running plugin
+                        # observers all the way to os._exit, against decks
+                        # that close_all() had already closed and log sinks
+                        # on_quit had already detached. Measured on this
+                        # branch before the fix: ~43k batches dispatched
+                        # after shutdown() returned. Same _runner discipline
+                        # as the reap path above.
+                        self._runner = None
+                        return
+                    batch = self._pending.popleft()
+                try:
+                    self._run_batch(*batch)
+                except Exception:
+                    # A batch-level failure (loop creation, not the
+                    # per-observer try/except below) used to vanish into the
+                    # pool's discarded Future; a hand-rolled runner logs it
+                    # here instead, and keeps servicing the lane (issue #80).
+                    log.opt(exception=True).error("event dispatch batch failed before observer dispatch")
+        finally:
+            self._retire()
+
+    def _retire(self) -> None:
+        # Runner-exit invariant: _runner is None whenever no thread is
+        # servicing this lane, on EVERY exit path -- otherwise the lane is
+        # dead forever. The identity guard matters on the reap path, which
+        # already cleared _runner: a fresh runner may have been spawned since
+        # and must not be un-booked here.
+        try:
+            with self._cond:
+                if self._runner is threading.current_thread():
+                    self._runner = None
+                    if self._pending and not _shutdown:
+                        # Only reachable when something escaped the loop
+                        # above (BaseException); hand the queued work to a
+                        # replacement rather than stranding it.
+                        self._spawn_locked()
+        except Exception:
+            log.opt(exception=True).error(
+                f"event dispatch lane {self.name} could not be retired cleanly")
+        _close_thread_loop()
+
+    def _run_batch(self, observers: list[Callable], label: str | None,
+                   args: tuple, kwargs: dict) -> None:
+        global _backlog
+        try:
+            # _get_loop() (loop creation, or the lazy log_hooks import inside
+            # it) must be INSIDE this try: it can raise, and the finally
+            # below owns the backlog decrement for THIS batch -- a raise
+            # before the finally would leak the count permanently (issue #5
+            # review round 1).
+            loop = _get_loop()
+            asyncio.set_event_loop(loop)
+            for observer in observers:
+                with _watch_lock:
+                    self.current["name"] = _observer_name(observer)
+                    self.current["label"] = label
+                    self.current["started"] = time.monotonic()
+                    self.current["next_warn"] = _WEDGE_WARN_S
+                try:
+                    if asyncio.iscoroutinefunction(observer):
+                        loop.run_until_complete(observer(*args, **kwargs))
+                    else:
+                        observer(*args, **kwargs)
+                except Exception:
+                    name = getattr(observer, "__name__", repr(observer))
+                    where = f" in {label}" if label else ""
+                    # opt(exception=True) attaches sys.exc_info() so the observer's
+                    # full traceback lands in the log -- a bare one-liner here made
+                    # raising plugin callbacks invisible (issue #33).
+                    log.opt(exception=True).error(f"Callback {name}{where} could not be called")
+        finally:
+            with _watch_lock:
+                self.current["name"] = None
+                self.backlog -= 1
+                _backlog -= 1
+
+    # --- watchdog -----------------------------------------------------
+
+    def _check_wedge(self) -> None:
         with _watch_lock:
-            _current["name"] = None
-            _backlog -= 1
+            name = self.current["name"]
+            label = self.current["label"]
+            started = self.current["started"]
+            next_warn = self.current["next_warn"]
+            backlog = self.backlog
+        if name is None:
+            return
+        stuck_for = time.monotonic() - started
+        if stuck_for < next_warn:
+            return
+        with _watch_lock:
+            if self.current["name"] is not name or self.current["started"] != started:
+                # The observer finished (or the next one started) while this
+                # warning was being assembled -- do not push the *new*
+                # observer's re-warn clock out.
+                return
+            self.current["next_warn"] = stuck_for + _WEDGE_REWARN_S
+        # The batch label is only worth printing when it says something the
+        # lane's own name does not (it is the same event id for an
+        # EventHolder's lane).
+        where = f" in {label}" if label and label != self.label else ""
+        log.error(
+            f"event dispatch lane {self.name} wedged for {stuck_for:.0f}s "
+            f"inside observer {name}{where} -- events on this lane are "
+            f"stalled behind it ({backlog} batch(es) queued); other lanes "
+            f"are unaffected"
+        )
 
 
-def _log_batch_failure(future) -> None:
-    # Pool-task exceptions live only on the Future -- they never reach
-    # threading.excepthook (issue #80). Without this callback an exception
-    # escaping _dispatch_batch itself (loop creation, not the per-observer
-    # try/except) would vanish into the discarded Future forever.
-    try:
-        exc = future.exception()
-    except Exception:
-        return
-    if exc is not None:
-        log.opt(exception=exc).error("event dispatch batch failed before observer dispatch")
+# The lane behind the module-level dispatch() below: everything that does not
+# own a lane of its own shares this one.
+_default_lane = Lane()
 
 
 def dispatch(observers: Iterable[Callable], args: tuple, kwargs: dict, label: str | None = None) -> None:
     """Queue `observers` for sequential, exception-isolated dispatch on the
-    shared background thread. Returns immediately; observers have not
-    necessarily run by the time this returns (see module docstring for why
+    shared default lane. Returns immediately; the observers have not
+    necessarily run by the time it does (see the module docstring for why
     that's safe here).
 
-    Cross-plugin coupling (issue #5): all plugins share this ONE dispatch
-    lane. A blocking observer delays every other plugin's events, not just
-    its own source's -- the watchdog above names the culprit after 10s and
-    warns when the backlog piles up. Plugins must not block in observers.
+    This is the lane for callers that do not own one. EventHolder and the
+    plugin-settings Observer each dispatch on a lane of their own (issue
+    #178), so a wedge there stays contained to that one event source;
+    everything queued here shares a lane and shares its fate. Plugins must
+    not block in observers either way -- the watchdog above names the culprit
+    after 10s and warns when the backlog piles up.
     """
-    global _backlog, _backlog_warned
-    observers = list(observers)
-    if not observers:
-        return
-    _ensure_monitor()
+    _default_lane.dispatch(observers, args, kwargs, label=label)
+
+
+def shutdown() -> None:
+    """Stops accepting new batches and wakes every lane runner so idle ones
+    exit promptly.
+
+    Queued batches are abandoned, not drained: a woken runner returns instead
+    of taking another batch. In-flight batches are neither interrupted nor
+    waited for -- runners are daemon threads and quit ends in os._exit
+    (src/app.py), so a wedged lane can never delay shutdown. Calls to
+    dispatch() after this raise DispatchShutdown rather than silently
+    dropping their batch.
+    """
+    global _shutdown
+    _shutdown = True
     with _watch_lock:
-        _backlog += 1
-        backlog = _backlog
-        if backlog >= _BACKLOG_WARN_THRESHOLD and not _backlog_warned:
-            _backlog_warned = True
-            warn_backlog = True
-        else:
-            if backlog < _BACKLOG_WARN_THRESHOLD // 2:
-                _backlog_warned = False
-            warn_backlog = False
-        stuck_name = _current["name"]
-    if warn_backlog:
-        log.error(
-            f"event dispatch backlog reached {backlog} queued batch(es) -- "
-            f"the lane is stalled"
-            + (f" inside observer {stuck_name}" if stuck_name else "")
-        )
-    try:
-        future = _dispatch_executor.submit(_dispatch_batch, observers, label, args, kwargs)
-    except RuntimeError:
-        # Executor already shut down: the batch will never run, so the
-        # backlog count must not leak.
-        with _watch_lock:
-            _backlog -= 1
-        raise
-    future.add_done_callback(_log_batch_failure)
+        lanes = list(_lanes)
+    for lane in lanes:
+        with lane._cond:
+            lane._cond.notify_all()

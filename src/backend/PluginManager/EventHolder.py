@@ -22,6 +22,13 @@ class EventHolder:
         # dominant steady-state growth mechanism for event-using plugins
         # like AudioControl).
         self.observers = CallbackRegistry()
+        # This holder's own dispatch lane (issue #178). Observers of THIS
+        # event are serialized on one thread of their own, so an observer
+        # that blocks (the pulsectl-wedge precedent) stalls only this event
+        # source's queue -- every other holder keeps delivering. The lane is
+        # owned by the holder, so it dies with it and no registry keying is
+        # needed (two holders can legitimately share an event_id).
+        self._lane = event_dispatch.Lane(label=self.event_id)
 
     def add_listener(self, callback: callable):
         if not self.observers.add(callback):
@@ -34,18 +41,30 @@ class EventHolder:
         self.observers.remove(callback)
 
     def trigger_event(self, *args, **kwargs):
-        # Dispatch on the shared background thread instead of spinning up a
-        # new asyncio event loop (+ default executor) on every call --
-        # this is the hottest callback path in the app (AudioControl's
-        # PulseEvent fires per PulseAudio event, bursts of tens/sec) and the
-        # old per-call loop churned an epoll fd every time (bug 27). See
-        # event_dispatch.py for why returning before observers finish is
-        # safe for this call site.
-        #
+        """Fire-and-forget: queues this holder's current observers onto its
+        dispatch lane and returns immediately.
+
+        Returning does NOT mean the observers have run -- do not read it as
+        "delivered". They run afterwards, sequentially and in registration
+        order, on this holder's own lane (per-lane FIFO), so an observer that
+        blocks stalls this event source only; no ordering is guaranteed
+        relative to other holders' events. See event_dispatch.py.
+        """
         # NOTE: the old implementation called
         # `self._run_event(self.event_id, *args, **kwargs)`, which silently
         # prepended `self.event_id` as the observers' first positional
         # argument (AudioControl's on_pulse_device_change reads it as
         # `args[0]` and the real pulsectl event as `args[1]`). Preserve that
         # contract here.
-        event_dispatch.dispatch(self.observers.snapshot(), (self.event_id, *args), kwargs, label=self.event_id)
+        try:
+            self._lane.dispatch(self.observers.snapshot(), (self.event_id, *args), kwargs, label=self.event_id)
+        except event_dispatch.DispatchShutdown:
+            # on_quit stopped the dispatcher, but plugin event sources keep
+            # running until os._exit -- AudioControl's pulse listener is a
+            # `while True: pulse.event_listen()` daemon thread whose callback
+            # calls this. Letting the shutdown error out of a documented
+            # fire-and-forget call would kill that thread with an uncaught
+            # RuntimeError (a CRITICAL traceback in logs.log) on every quit
+            # that races an event, for nothing a caller could act on. Any
+            # OTHER RuntimeError still propagates (see DispatchShutdown).
+            log.debug(f"Event {self.event_id} triggered after dispatch shutdown; dropped")

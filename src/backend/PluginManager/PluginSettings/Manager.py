@@ -16,7 +16,10 @@ class Manager:
         self._asset_type: type = asset_type
         self._assets: dict[str, asset_type] = {}
         self._asset_overrides: dict[str, asset_type] = {}
-        self._observer = Observer()
+        # The json_key ("colors"/"icons") is what names this manager's
+        # dispatch lane in a wedge warning -- an unlabeled lane would just
+        # read "default" there.
+        self._observer = Observer(label=f"plugin-settings:{json_key}")
         self._json_key = json_key
 
     # Assets
