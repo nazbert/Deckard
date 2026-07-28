@@ -167,7 +167,8 @@ class ColorRow(Adw.PreferencesRow):
     def disconnect_signals(self):
         try:
             self.button.button.disconnect_by_func(self.on_change_color)
-        except:
+        except TypeError:
+            # Already disconnected: disconnect_by_func raises TypeError.
             pass
 
     def set_color(self, color_values: list):
@@ -291,7 +292,7 @@ class VideoLoopRow(Adw.PreferencesRow):
     def disconnect_signals(self):
         try:
             self.switch.disconnect_by_func(self.on_toggle)
-        except:
+        except TypeError:
             pass
 
     def on_toggle(self, *args):
@@ -339,7 +340,7 @@ class VideoFpsRow(Adw.PreferencesRow):
     def disconnect_signals(self):
         try:
             self.spinner.disconnect_by_func(self.on_change)
-        except:
+        except TypeError:
             pass
 
     def _uses_media_fps(self) -> bool:

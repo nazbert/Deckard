@@ -713,7 +713,8 @@ class Page:
 
             try:
                 value = value.get(key, fallback)
-            except:
+            except AttributeError:
+                # A shorter path than `keys` bottomed out on a non-dict.
                 return
         return value
     

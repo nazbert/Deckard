@@ -60,7 +60,9 @@ class IpEntryRow(Adw.PreferencesRow):
                 ip_box.disconnect_by_func(self.ip_box_enter_pressed)
                 ip_box.disconnect_by_func(self.ip_text_changed)
                 controller.disconnect_by_func(self.ip_changed)
-        except:
+        except TypeError:
+            # disconnect_by_func raises TypeError ("nothing connected to ...")
+            # when the handler is already disconnected.
             pass
 
     def ip_box_enter_pressed(self, entry: Gtk.Entry):
@@ -169,7 +171,7 @@ class HostnameEntryRow(Adw.PreferencesRow):
         try:
             self.hostname_entry.disconnect_by_func(self.hostname_changed)
             self.focus_listener.disconnect_by_func(self.hostname_changed)
-        except:
+        except TypeError:
             pass
 
     def hostname_changed(self, *args):

@@ -487,7 +487,7 @@ class DeckManager:
                     # Reset deck
                     usb.util.dispose_resources(device)
                     device.reset()
-            except:
+            except (usb.core.USBError, NotImplementedError):
                 log.error("Failed to reset deck, maybe it's already connected to another instance? Skipping...")
 
     def get_connected_serials(self) -> list[str]:

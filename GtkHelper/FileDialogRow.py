@@ -4,7 +4,7 @@ from typing import Callable
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gio
+from gi.repository import Gtk, Adw, Gio, GLib
 
 @dataclass
 class FileDialogFilter:
@@ -90,7 +90,9 @@ class FileDialogRow(Adw.ActionRow):
 
             if self._callback:
                 self._callback(self.selected_file)
-        except:
+        except GLib.Error:
+            # Dismissing the dialog fails open_finish() -- not an error.
+            # Anything the callback raises is a real bug and now surfaces.
             pass
 
     def load_from_path(self, path: str):

@@ -169,7 +169,8 @@ class SizeRow(Adw.PreferencesRow):
     def disconnect_signals(self):
         try:
             self.size_spinner.button.disconnect_by_func(self.on_size_changed)
-        except:
+        except TypeError:
+            # Already disconnected: disconnect_by_func raises TypeError.
             pass
 
 

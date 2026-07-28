@@ -813,9 +813,8 @@ class StoreBackend:
         )
 
     def get_web_image(self, url: str, path: str, branch: str = "main") -> Image:
-        # `except Exception`, NOT bare `except:` -- the bare form would
-        # also swallow BaseExceptions (SystemExit, KeyboardInterrupt) out
-        # of a pool worker.
+        # `except Exception` so a pool worker still honours SystemExit and
+        # KeyboardInterrupt.
         try:
             result = self.get_remote_file(url, path, branch, data_type="content")
         except Exception as e:
