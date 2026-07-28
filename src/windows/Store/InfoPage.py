@@ -20,7 +20,6 @@ from gi.repository import Gtk, Adw, Pango
 
 # Import python modules
 from typing import TYPE_CHECKING
-import webbrowser as web
 
 # Import own modules
 if TYPE_CHECKING:
@@ -29,7 +28,6 @@ if TYPE_CHECKING:
 from GtkHelper.GtkHelper import AttributeRow, OriginalURL
 
 # Import globals
-import globals as gl
 
 class InfoPage(Gtk.Box):
     def __init__(self, store_page:"StorePage"):

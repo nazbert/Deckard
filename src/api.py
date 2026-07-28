@@ -27,7 +27,7 @@ from dasbus.server.interface import dbus_interface
 from dasbus.connection import SessionMessageBus
 from dasbus.typing import Str, List
 from dasbus.error import DBusError
-from gi.repository import GLib, Gio
+from gi.repository import GLib
 
 import appinfo
 import globals as gl

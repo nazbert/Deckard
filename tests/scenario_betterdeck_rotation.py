@@ -14,7 +14,6 @@ Scenario: BetterDeck rotation mapping and async callback setters
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
-import types
 
 from fixtures import FaultyFakeDeck, start_watchdog
 

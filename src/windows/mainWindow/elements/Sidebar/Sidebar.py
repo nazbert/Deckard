@@ -17,7 +17,6 @@ import os
 import gi
 
 from src.backend.DeckManagement.InputIdentifier import Input, InputIdentifier
-from src.backend.DeckManagement.DeckController import ControllerKey, DeckController
 from src.windows.mainWindow.elements.PageSelector import PageSelector
 from src.windows.mainWindow.elements.Sidebar.elements.StateSwitcher import StateSwitcher
 from src.windows.mainWindow.elements.Sidebar.elements.ScreenEditor import ScreenEditor
@@ -148,7 +147,7 @@ class Sidebar(Adw.NavigationPage):
         controller = visible_child.deck_controller
         if controller is None:
             return
-        if controller.active_page == None:
+        if controller.active_page is None:
             # self.error_page.set_error_text(gl.lm.get("right-area-no-page-selected-error"))
             # self.error_page.set_reload_args([None])
             #FIXME: User is unable to change or create pages when the error is shown

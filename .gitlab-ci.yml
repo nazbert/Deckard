@@ -60,6 +60,31 @@ test:compile:
   script:
     - python -m compileall -q *.py src GtkHelper tests
 
+# Lint gate. Rule selection lives in pyproject.toml and is an explicit
+# allowlist -- no rule is enabled until its population is clean, so this job
+# is green the day it lands. Tool versions come out of requirements-dev.txt so
+# the pin can't drift from the one developers install.
+lint:ruff:
+  stage: test
+  image: python:3.13-slim
+  interruptible: true
+  needs: []
+  script:
+    - pip install --quiet "$(grep -oE '^ruff==[0-9.]+' requirements-dev.txt)"
+    - ruff --version
+    - ruff check .
+
+lint:types:                # non-blocking type-check lane (#171 pt. 3)
+  stage: test
+  image: python:3.13-slim
+  interruptible: true
+  allow_failure: true      # advisory: visibility + ratchet, not a gate
+  needs: []
+  script:
+    # quoted: the ' #' inside the regex would otherwise start a YAML comment
+    - "pip install --quiet $(grep -oE '^(mypy|PyGObject-stubs|types-setuptools)==[^ #]+' requirements-dev.txt) typing_extensions"
+    - mypy
+
 # Advisory nudge: an MR should either add a bullet under ## [Unreleased] in
 # CHANGELOG.md or carry the no-changelog label. auto-release adds MR-title
 # fallback bullets for anything that slips through, so this never blocks.

@@ -45,18 +45,18 @@ def create_full_deck_sized_image(deck, image_filename = None, image = None):
         # Resize the image to suit the StreamDeck's full image size. We use the
         # helper function in Pillow's ImageOps module so that the image's aspect
         # ratio is preserved.
-        if image_filename != None:
+        if image_filename is not None:
             with Image.open(image_filename) as image:
                 image = image.copy().convert("RGBA")
-        elif image != None:
+        elif image is not None:
             image = image.convert("RGBA")
         image = ImageOps.fit(image, full_deck_image_size, Image.Resampling.LANCZOS)
         return image
 def create_wallpaper_image_array(deck, progress_dir = None, image = None):
         # Maybe use 2D array instead
-        if progress_dir != None:
+        if progress_dir is not None:
             image = create_full_deck_sized_image(deck, image_filename=progress_dir)
-        elif image != None:
+        elif image is not None:
             image = create_full_deck_sized_image(deck, image=image)
             
         key_images = []

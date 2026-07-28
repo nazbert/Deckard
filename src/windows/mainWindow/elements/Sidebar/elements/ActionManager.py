@@ -15,7 +15,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 # Import gtk modules
 import gi
 
-from src.backend.DeckManagement.InputIdentifier import Input, InputIdentifier
+from src.backend.DeckManagement.InputIdentifier import InputIdentifier
 from src.windows.Settings.PluginSettingsWindow.PluginSettingsWindow import PluginSettingsWindow
 
 gi.require_version("Gtk", "4.0")
@@ -25,8 +25,6 @@ from gi.repository import Gtk, Adw, Gdk, GLib, Pango
 # Import Python modules
 from loguru import logger as log
 from copy import copy
-import asyncio
-import threading
 
 # Import globals
 import globals as gl
@@ -172,7 +170,7 @@ class ActionExpanderRow(BetterExpander):
         #TODO: Fix this function, it does not work
         # return
         if hasattr(self, "preview"):
-            if self.preview != None:
+            if self.preview is not None:
                 # self.reorder_child_after(self.preview, self.get_rows()[index])
                 GLib.idle_add(self.reorder_child_after, self.preview, self.get_rows()[index])
                 return
@@ -597,7 +595,7 @@ class ActionRow(Adw.ActionRow):
         self.expander.update_indices()
 
     def init_dnd(self):
-        if self.index == None:
+        if self.index is None:
             return
         # DnD Source
         dnd_source = Gtk.DragSource()

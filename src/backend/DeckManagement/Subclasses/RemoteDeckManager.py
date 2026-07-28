@@ -1,6 +1,4 @@
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import json
-import time
+from http.server import HTTPServer
 import threading
 from datetime import datetime
 

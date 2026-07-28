@@ -1,10 +1,8 @@
-from dataclasses import dataclass
-from typing import Callable
 
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gdk, GLib, Gio
+from gi.repository import Gtk, Adw, Gdk
 
 class ColorButtonRow(Adw.ActionRow):
     """

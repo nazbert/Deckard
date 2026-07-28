@@ -17,20 +17,15 @@ import os
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib
+from gi.repository import Gtk, Adw
 
 # Import Python modules
-import cv2
-import threading
-from loguru import logger as log
-from math import floor
-from time import sleep
 
 # Import globals
 import globals as gl
 
 # Import own modules
-from src.backend.DeckManagement.ImageHelpers import image2pixbuf, is_transparent
+from src.backend.DeckManagement.ImageHelpers import image2pixbuf
 
 class BackgroundGroup(Adw.PreferencesGroup):
     def __init__(self, settings_page):
@@ -174,7 +169,7 @@ class BackgroundMediaRow(Adw.PreferencesRow):
         return
         if not hasattr(self.settings_page.deck_page.deck_controller, "active_page"):
             return
-        if self.settings_page.deck_page.deck_controller.active_page == None:
+        if self.settings_page.deck_page.deck_controller.active_page is None:
             return
         
         original_values = None

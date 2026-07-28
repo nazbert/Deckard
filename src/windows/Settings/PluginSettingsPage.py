@@ -12,7 +12,6 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
-import gi
 from gi.repository import Gtk, Adw, GLib
 
 from GtkHelper.ConfirmationDialog import ConfirmationDialog

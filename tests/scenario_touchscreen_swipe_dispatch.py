@@ -24,7 +24,6 @@ callbacks exactly like the library reader thread does):
   5. key events still map (Key.DOWN -> on_key_down) -- compat table intact.
 """
 import fixtures
-from loguru import logger as log
 
 from StreamDeck.Devices.StreamDeck import TouchscreenEventType
 

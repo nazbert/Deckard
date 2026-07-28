@@ -19,7 +19,6 @@ URLs, exercised WITHOUT network:
 import time
 
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
-import globals as gl
 
 from src.backend.Store.StoreBackend import StoreBackend, NoConnectionError
 

@@ -36,7 +36,6 @@ Covers:
       (design-doc bug 48's half: a Touchscreen marker must be consumable on
       map too, not just Key ones).
 """
-import time
 
 import fixtures
 from PIL import Image

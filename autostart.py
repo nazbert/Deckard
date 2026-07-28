@@ -143,7 +143,7 @@ def setup_autostart_flatpak(enable: bool = True, generation: int = None):
             None,  # user_data
         )
     except Exception:
-        log.error(f"request_background failed")
+        log.error("request_background failed")
         setup_autostart_desktop_entry(enable)
 
 def setup_autostart_desktop_entry(enable: bool = True, native: bool = False):

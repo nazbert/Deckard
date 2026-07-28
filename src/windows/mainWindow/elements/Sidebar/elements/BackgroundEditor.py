@@ -17,12 +17,12 @@ import gi
 
 from GtkHelper.GtkHelper import RevertButton
 from src.backend.DeckManagement.InputIdentifier import InputIdentifier, Input
-from src.backend.DeckManagement.HelperMethods import add_default_keys, is_video
+from src.backend.DeckManagement.HelperMethods import is_video
 from src.backend.DeckManagement.ImageHelpers import image2pixbuf
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gdk, Pango, GLib
+from gi.repository import Gtk, Adw, Gdk, GLib
 
 # Import Python modules
 from loguru import logger as log

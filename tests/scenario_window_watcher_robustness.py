@@ -23,7 +23,6 @@ poll and from the routing callback).
 """
 import fixtures  # noqa: F401  (must be imported first: isolates DATA_PATH)
 
-import threading
 import time
 
 import globals as gl

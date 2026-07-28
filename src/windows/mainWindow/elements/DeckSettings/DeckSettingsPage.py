@@ -15,13 +15,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 # Import gtk modules
 import gi
 
-from GtkHelper.GtkHelper import BackButton
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw
 
 # Import Python modules 
-from loguru import logger as log
 
 # Import own modules
 from src.windows.mainWindow.elements.DeckSettings.DeckGroup import DeckGroup
@@ -29,7 +27,6 @@ from src.windows.mainWindow.elements.DeckSettings.BackgroundGroup import Backgro
 from src.windows.mainWindow.elements.DeckSettings.FakeDeckGroup import FakeDeckGroup
 
 # Import globals
-import globals as gl
 
 class DeckSettingsPage(Gtk.Overlay):
     def __init__(self, deck_stack_child, deck_controller, **kwargs):
@@ -40,7 +37,7 @@ class DeckSettingsPage(Gtk.Overlay):
         self.deck_controller = deck_controller
         self.deck_serial_number = deck_controller.deck.get_serial_number()
         self.build()
-        if self.deck_controller.active_page == None:
+        if self.deck_controller.active_page is None:
             # TODO: Fix: Error not showing up
             self.show_no_page_error()
             return
@@ -97,7 +94,7 @@ class DeckSettingsPage(Gtk.Overlay):
         self.error_box.append(self.retry_button)
 
     def on_retry_button_click(self, button):
-        if self.deck_controller.active_page == None:
+        if self.deck_controller.active_page is None:
             return
         
         self.clear()

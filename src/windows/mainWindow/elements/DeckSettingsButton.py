@@ -4,7 +4,6 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk
 
 # Import globals
-import globals as gl
 
 # Import typing
 from typing import TYPE_CHECKING

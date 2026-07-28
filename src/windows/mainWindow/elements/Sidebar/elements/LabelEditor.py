@@ -21,7 +21,7 @@ from src.backend.DeckManagement.InputIdentifier import InputIdentifier
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gdk, Pango, GLib
+from gi.repository import Gtk, Adw
 
 # Import Python modules
 from loguru import logger as log
@@ -236,7 +236,7 @@ class LabelRow(Adw.PreferencesRow):
             return
         page = controller.active_page
 
-        if page == None:
+        if page is None:
             #TODO: Show error
             return
         

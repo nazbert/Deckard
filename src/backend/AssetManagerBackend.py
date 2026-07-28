@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk, Adw, GLib
+from gi.repository import Gtk, GLib
 
 # Import Python modules
 import json
@@ -24,7 +24,6 @@ import os
 import shutil
 import uuid
 from loguru import logger as log
-from PIL import Image
 
 # Import own modules
 from src.backend.DeckManagement.HelperMethods import is_video, is_image, sha256, file_in_dir, create_empty_json, download_file, is_svg
@@ -330,7 +329,7 @@ class AssetManagerBackend(list):
                 # media path.
                 return None
 
-        if path == None:
+        if path is None:
             return
         if not os.path.exists(path):
             return
@@ -343,7 +342,7 @@ class AssetManagerBackend(list):
             GLib.idle_add(dial.show)
             return
         asset_id = gl.asset_manager_backend.add(asset_path=path)
-        if asset_id == None:
+        if asset_id is None:
             return
         
         asset = self.get_by_id(asset_id)

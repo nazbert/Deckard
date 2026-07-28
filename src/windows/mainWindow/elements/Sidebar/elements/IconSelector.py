@@ -15,14 +15,12 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 # Import gtk modules
 import gi
 
-from PIL import Image
 
 from src.backend.DeckManagement.InputIdentifier import Input, InputIdentifier
-from src.backend.DeckManagement.HelperMethods import add_default_keys
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib
+from gi.repository import Gtk, GLib
 
 # Import Python modules
 from loguru import logger as log

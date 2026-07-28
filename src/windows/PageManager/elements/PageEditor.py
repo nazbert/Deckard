@@ -12,18 +12,16 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
-import gc
 
 # Import gi
 import gi
 
 from GtkHelper.ScaleRow import ScaleRow
-from GtkHelper.ToggleRow import ToggleRow
 from src.backend.DeckManagement.ImageHelpers import image2pixbuf
 from src.windows.MultiDeckSelector.MultiDeckSelectorRow import MultiDeckSelectorRow
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gio, GLib
+from gi.repository import Gtk, Adw, GLib
 
 # Import typing
 from typing import TYPE_CHECKING
@@ -40,7 +38,6 @@ import os
 from GtkHelper.GtkHelper import BetterExpander, better_disconnect
 from src.backend.WindowGrabber.Window import Window
 from src.windows.PageManager.elements.MenuButton import MenuButton
-from src.backend.PageManagement.Page import Page
 
 class PageEditor(Adw.NavigationPage):
     def __init__(self, page_manager: "PageManager"):

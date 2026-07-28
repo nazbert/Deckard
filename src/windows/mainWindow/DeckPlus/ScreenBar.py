@@ -13,7 +13,6 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import gtk modules
-import threading
 import time
 import gi
 from loguru import logger as log
@@ -27,14 +26,14 @@ from src.backend.DeckManagement.InputIdentifier import Input, InputIdentifier
 from src.backend.DeckManagement.ImageHelpers import image2pixbuf
 from src.backend.DeckManagement.HelperMethods import recursive_hasattr
 
-from StreamDeck.Devices.StreamDeck import DialEventType, TouchscreenEventType
+from StreamDeck.Devices.StreamDeck import TouchscreenEventType
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
 import globals as gl
 
-from gi.repository import Gtk, Adw, Gdk, GLib, Gio
+from gi.repository import Gtk, GLib, Gio
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:

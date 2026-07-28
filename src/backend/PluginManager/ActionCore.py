@@ -15,7 +15,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 import threading
 from loguru import logger as log
-from copy import copy
 import subprocess
 import os
 from PIL import Image
@@ -25,7 +24,7 @@ from src.backend.PluginManager.EventManager import EventManager
 from src.backend.PluginManager.EventAssigner import EventAssigner
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk, GLib
+from gi.repository import GLib
 
 import rpyc
 from rpyc.utils.server import ThreadedServer
@@ -39,7 +38,6 @@ from src.backend.DeckManagement.Subclasses.KeyImage import InputImage
 from src.backend.DeckManagement.Subclasses.KeyVideo import InputVideo
 from src.backend.DeckManagement.Subclasses.KeyLabel import KeyLabel
 from src.backend.DeckManagement.Subclasses.KeyLayout import ImageLayout
-from src.backend.DeckManagement.Media.Media import Media
 from src.backend.DeckManagement.InputIdentifier import Input, InputEvent, InputIdentifier
 from src.Signals.Signals import Signal
 
@@ -53,7 +51,7 @@ from src.backend.PluginManager.PluginSettings.Asset import Color,Icon
 
 if TYPE_CHECKING:
     from src.backend.PluginManager.PluginBase import PluginBase
-    from src.backend.DeckManagement.DeckController import DeckController, ControllerKey, ControllerKeyState
+    from src.backend.DeckManagement.DeckController import DeckController, ControllerKey
     from src.backend.PageManagement.Page import Page
     from src.backend.DeckManagement.DeckController import ControllerInput, ControllerInputState
 

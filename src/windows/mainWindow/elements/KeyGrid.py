@@ -23,7 +23,7 @@ from src.backend.DeckManagement.InputIdentifier import Input
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gdk, GLib, Gio
+from gi.repository import Gtk, Gdk, GLib, Gio
 
 # Import Python modules 
 from loguru import logger as log

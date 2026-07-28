@@ -25,7 +25,7 @@ import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
 import threading
 
-from fixtures import make_headless_controller, seed_page, start_watchdog, wait_until
+from fixtures import make_headless_controller, seed_page, start_watchdog
 
 import globals as gl
 from src.backend.DeckManagement.InputIdentifier import Input

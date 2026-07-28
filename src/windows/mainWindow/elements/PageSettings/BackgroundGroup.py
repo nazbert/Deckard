@@ -17,21 +17,16 @@ import os
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib
+from gi.repository import Gtk, Adw
 
 # Import Python modules
-import cv2
-import threading
 from loguru import logger as log
-from math import floor
-from time import sleep
-from copy import copy
 
 # Import globals
 import globals as gl
 
 # Import own modules
-from src.backend.DeckManagement.ImageHelpers import image2pixbuf, is_transparent
+from src.backend.DeckManagement.ImageHelpers import image2pixbuf
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -212,7 +207,7 @@ class BackgroundMediaRow(Adw.PreferencesRow):
         gl.app.let_user_select_asset(default_path=media_path, callback_func=self.set_deck_background)
 
     def set_thumbnail(self, file_path):
-        if file_path == None:
+        if file_path is None:
             self.media_selector_image.clear()
             return
         if file_path is None:

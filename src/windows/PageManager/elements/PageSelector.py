@@ -17,7 +17,7 @@ from functools import lru_cache
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gio, Pango, GLib
+from gi.repository import Gtk, Adw, Pango, GLib
 
 # Import typing
 from typing import TYPE_CHECKING
@@ -31,7 +31,6 @@ from src.backend.DeckManagement.HelperMethods import natural_keys
 # Import python modules
 import os
 from rapidfuzz import fuzz
-import re
 
 # Import globals
 import globals as gl

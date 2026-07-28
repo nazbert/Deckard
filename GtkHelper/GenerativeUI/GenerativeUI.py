@@ -3,14 +3,12 @@ import threading
 from abc import ABC, abstractmethod
 from typing import TypeVar, Callable
 
-import gi
 from gi.repository import Gtk
 
 from typing import TYPE_CHECKING
 
 from loguru import logger as log
 
-from globals import signal_manager
 
 if TYPE_CHECKING:
     from src.backend.PluginManager.ActionCore import ActionCore

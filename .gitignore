@@ -143,6 +143,9 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
+# ruff
+.ruff_cache/
+
 # Pyre type checker
 .pyre/
 
@@ -208,7 +211,6 @@ localdev/
 ## UV
 .python-version
 uv.lock
-pyproject.toml
 
 
 .DS_Store

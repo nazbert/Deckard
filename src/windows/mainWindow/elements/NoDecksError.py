@@ -18,13 +18,12 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw
+from gi.repository import Gtk
 
 # Import own modules
 from src.windows.Settings.Settings import Settings
 
 # Import Python modules
-from loguru import logger as log
 
 # Import globals
 import globals as gl

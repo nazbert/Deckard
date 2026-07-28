@@ -20,7 +20,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gdk, Pango, GdkPixbuf
+from gi.repository import Gtk, Adw, Gdk, Pango
 
 # Import globals
 import globals as gl

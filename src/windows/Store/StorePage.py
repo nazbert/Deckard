@@ -26,7 +26,6 @@ from loguru import logger as log
 
 # Import own modules
 from src.windows.Store.InfoPage import InfoPage
-from GtkHelper.GtkHelper import ErrorPage
 from src.windows.Store.NoConnectionError import NoConnectionError
 
 # Typing

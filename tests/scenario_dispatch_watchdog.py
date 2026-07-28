@@ -25,7 +25,6 @@ Checks (real dispatcher, thresholds patched down):
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
 import threading
-import time
 
 from loguru import logger as log
 

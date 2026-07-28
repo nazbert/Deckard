@@ -1,12 +1,10 @@
-from dataclasses import dataclass
 
 from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
 from GtkHelper.FileDialogRow import FileDialogRow as FileDialog, FileDialogFilter
 
-import gi
-from gi.repository import Gtk, Adw, Gio, Gdk
+from gi.repository import Gio
 
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.backend.PluginManager.ActionCore import ActionCore

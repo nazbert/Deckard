@@ -39,7 +39,6 @@ Two independent things are checked:
      the transition doesn't corrupt or starve unrelated switches, only
      serializes on the (brief) locked section.
 """
-import os
 import threading
 import time
 

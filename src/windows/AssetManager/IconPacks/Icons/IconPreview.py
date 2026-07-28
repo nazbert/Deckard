@@ -17,7 +17,6 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw
 
 # Import own modules
 from src.windows.AssetManager.Preview import Preview
@@ -31,7 +30,6 @@ import globals as gl
 # Import typing
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from src.windows.AssetManager.IconPacks.PackChooser import IconPackChooser
     from src.backend.IconPackManagement.Icon import Icon
 
 class IconPreview(Preview):

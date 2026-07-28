@@ -27,7 +27,6 @@ import fixtures  # must be first: isolates DATA_PATH before any src import
 import gc
 import io
 import os
-import signal
 import subprocess
 import sys
 import threading

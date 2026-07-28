@@ -13,10 +13,9 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import gtk modules
-from re import I
 import gi
 
-from src.backend.DeckManagement.InputIdentifier import Input, InputIdentifier
+from src.backend.DeckManagement.InputIdentifier import InputIdentifier
 from src.backend.PluginManager.ActionHolderGroup import ActionHolderGroup
 from src.backend.PluginManager.ActionInputSupport import ActionInputSupport
 
@@ -29,13 +28,11 @@ from loguru import logger as log
 from rapidfuzz import fuzz
 
 # Import own modules
-from src.backend.DeckManagement.HelperMethods import get_last_dir
-from GtkHelper.GtkHelper import BackButton, BetterExpander, BetterPreferencesGroup, better_disconnect
-from src.windows.Store.Store import Store
+from GtkHelper.GtkHelper import BackButton, BetterExpander, BetterPreferencesGroup
 from src.backend.PluginManager.ActionHolder import ActionHolder
 
 # Import typing
-from typing import TYPE_CHECKING, Type
+from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.windows.mainWindow.elements.Sidebar import Sidebar
 
@@ -517,7 +514,7 @@ class PluginActionRow(Adw.ActionRow):
         self.main_box.append(self.warning_icon)
 
     def on_click(self, button):
-        if self.action_holder.action_core == None:
+        if self.action_holder.action_core is None:
             return
         
         # Go back to old page

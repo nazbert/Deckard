@@ -14,9 +14,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
 # Import Python modules
-import json
 import os
-import shutil
 from loguru import logger as log
 
 # Import globals

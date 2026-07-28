@@ -25,13 +25,11 @@ from loguru import logger as log
 import subprocess
 import time
 import os
-import uuid
 import shutil
 from packaging import version
 import threading
 
 # Import GLib
-import gi
 from gi.repository import GLib
 
 # Import own modules
@@ -39,7 +37,6 @@ from autostart import is_flatpak
 from src.backend.Store.StoreCache import StoreCache
 from src.backend.PluginManager.PluginBase import PluginBase
 from src.backend.DeckManagement.HelperMethods import recursive_hasattr
-from src.backend.atomic_json import atomic_write_json
 from src.backend import http_client
 
 # Import signals

@@ -15,7 +15,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 from io import BytesIO
 import uuid
-from StreamDeck.Devices import StreamDeck
 from PIL import Image
 
 import globals as gl

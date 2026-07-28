@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from threading import Thread, Timer
 
 import psutil
-from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageSequence
+from PIL import Image, ImageDraw, ImageEnhance, ImageSequence
 from StreamDeck.Devices import StreamDeck
 from StreamDeck.Devices.StreamDeck import DialEventType, TouchscreenEventType
 from StreamDeck.Devices.StreamDeckPlus import StreamDeckPlus
@@ -2178,7 +2178,7 @@ class DeckController:
             return self.own_key_grid
         
         deck_stack_child = self.get_own_deck_stack_child()
-        if deck_stack_child == None:
+        if deck_stack_child is None:
             return
         
         self.own_key_grid = deck_stack_child.page_settings.deck_config.grid

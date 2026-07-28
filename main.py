@@ -487,7 +487,7 @@ def handle_listing_commands():
                         deck_type = getattr(device, 'deck_type', lambda: 'Unknown StreamDeck')()
                         print(f"  Product Name: {deck_type}")
                     except:
-                        print(f"  Product Name: Unknown (permission issue)")
+                        print("  Product Name: Unknown (permission issue)")
                     
                     # Try to open device to get detailed info
                     device_opened = False
@@ -503,23 +503,23 @@ def handle_listing_commands():
                         if hasattr(device, 'dial_count') and device.dial_count() > 0:
                             print(f"  Dials: {device.dial_count()}")
                         if hasattr(device, 'is_touch') and device.is_touch():
-                            print(f"  Touchscreen: Yes")
+                            print("  Touchscreen: Yes")
                         print(f"  Connected: {'Yes' if device.connected() else 'No'}")
                         
                         if device_opened:
                             device.close()
                             
                     except PermissionError:
-                        print(f"  Status: Permission denied")
-                        print(f"  Note: Run 'sudo python main.py --list-devices' or install udev rules")
+                        print("  Status: Permission denied")
+                        print("  Note: Run 'sudo python main.py --list-devices' or install udev rules")
                     except Exception as open_error:
                         print(f"  Status: Could not access device ({open_error})")
-                        print(f"  Note: This may be a permission issue or device is in use")
+                        print("  Note: This may be a permission issue or device is in use")
                         
                 except Exception as e:
                     print(f"  Error: {e}")
                     if "permission" in str(e).lower() or "access" in str(e).lower():
-                        print(f"  Note: Try running with sudo or install proper udev rules")
+                        print("  Note: Try running with sudo or install proper udev rules")
                 
                 print()
         except ImportError:
@@ -585,7 +585,7 @@ def handle_listing_commands():
                                         print(f"    - {input_type[:-1]} {item_id}: {states_count} states")
                     
                     if items_with_states == 0:
-                        print(f"    - No configured items")
+                        print("    - No configured items")
                     
                 except Exception as e:
                     print(f"    - Error reading page: {e}")

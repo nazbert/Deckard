@@ -18,7 +18,6 @@ widgets need a display; the control flow and the GLib marshalling are real):
    on the progress bar of a window that closes moments later. Now failures
    aggregate into an error toast on the surviving main window.
 """
-import threading
 import types
 
 import fixtures  # noqa: F401  (isolates DATA_PATH before src imports)

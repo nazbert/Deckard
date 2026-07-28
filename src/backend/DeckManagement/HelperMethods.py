@@ -13,14 +13,13 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 from datetime import datetime
-from functools import lru_cache, wraps
+from functools import wraps
 import hashlib
 from io import BytesIO
 import os
 import subprocess
 import sys
 import math
-import json
 import re
 import threading
 from urllib.parse import urlparse
@@ -115,7 +114,7 @@ def has_dict_recursive(dictionary: dict, *args):
     working_dict = dictionary
     for arg in args:
         working_dict = working_dict.get(arg)
-        if working_dict == None:
+        if working_dict is None:
             return False
     return True
 

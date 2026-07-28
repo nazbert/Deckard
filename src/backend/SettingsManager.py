@@ -434,7 +434,7 @@ class SettingsManager:
     def get_app_settings(self) -> dict:
         path = os.path.join(gl.DATA_PATH, "settings", "settings.json")
         settings =  self.load_settings_from_file(path)
-        if settings == None:
+        if settings is None:
             settings = {}
             self.save_settings_to_file(path, settings)
         return settings

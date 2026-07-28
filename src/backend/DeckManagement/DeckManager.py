@@ -17,22 +17,18 @@ import threading
 import time
 from StreamDeck.DeviceManager import DeviceManager
 from StreamDeck.Devices import StreamDeck
-from StreamDeck.ImageHelpers import PILHelper
 from loguru import logger as log
 from usbmonitor import USBMonitor
 import usb.core
 import usb.util
 import os
-import types
 
 
 # Import own modules
 from src.backend.DeckManagement.Subclasses.RemoteDeckManager import RemoteDeckManager
-from src.backend.DeckManagement.Subclasses.RemoteDeck import RemoteDeck
 from src.backend.DeckManagement.DeckController import DeckController, ClearAndCloseMsg
-from src.backend.PageManagement.PageManagerBackend import PageManagerBackend
 from src.backend.SettingsManager import SettingsManager
-from src.backend.DeckManagement.HelperMethods import get_sys_param_value, recursive_hasattr
+from src.backend.DeckManagement.HelperMethods import recursive_hasattr
 from src.backend.DeckManagement.Subclasses.FakeDeck import FakeDeck
 
 # Import globals first to get IS_MAC

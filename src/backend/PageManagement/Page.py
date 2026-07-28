@@ -12,8 +12,6 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
-from argparse import Action
-import gc
 import os
 import json
 import sys
@@ -32,7 +30,6 @@ import shutil
 
 # Import globals
 from src.backend.PluginManager.EventAssigner import EventAssigner
-from src.backend.DeckManagement.ImageHelpers import crop_key_image_from_deck_sized_image
 from src.backend.atomic_json import atomic_write_json
 import globals as gl
 
@@ -43,7 +40,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.backend.DeckManagement.DeckController import LabelManager
     from src.backend.PluginManager.ActionHolder import ActionHolder
-    from src.backend.DeckManagement.DeckController import ControllerKeyState, ControllerKey
+    from src.backend.DeckManagement.DeckController import ControllerKeyState
 
 
 # One save lock per page json path, shared across every Page object for that

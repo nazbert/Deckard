@@ -13,7 +13,7 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
-from PIL import Image, ImageOps, ImageDraw, ImageFont
+from PIL import Image
 import os
 
 import globals as gl

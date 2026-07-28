@@ -12,9 +12,8 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
-from src.backend.DeckManagement.Subclasses.SingleKeyAsset import SingleKeyAsset
 from src.backend.DeckManagement import font_resolver
-from PIL import Image, ImageFont
+from PIL import ImageFont
 from dataclasses import dataclass
 from functools import lru_cache
 from fontTools.ttLib import TTFont

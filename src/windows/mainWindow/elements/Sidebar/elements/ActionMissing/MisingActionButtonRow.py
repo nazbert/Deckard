@@ -20,9 +20,7 @@ from src.windows.mainWindow.elements.Sidebar.elements.ActionMissing.MissingRow i
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gdk, GLib, Pango
 
-import globals as gl
 
 class MissingActionButtonRow(MissingRow):
     def __init__(self, action_id:str, identifier: InputIdentifier, state:int, index: int):
