@@ -313,19 +313,33 @@ class KeyButton(Gtk.Frame):
         
 
     def set_image(self, image):
-        self.pixbuf = image2pixbuf(image.convert("RGBA"), force_transparency=True)
+        # Callable from any thread: image2pixbuf is pure PIL + GdkPixbuf (no
+        # GTK), so the conversion runs on the caller -- the media thread for
+        # live frames -- and only the widget mutation is handed to the loop.
+        pixbuf = image2pixbuf(image.convert("RGBA"), force_transparency=True)
         # Default idle priority: high-priority pixbuf updates every frame can
         # starve the main loop's layout/draw.
-        GLib.idle_add(self.show_pixbuf, self.pixbuf)
+        GLib.idle_add(self._apply_pixbuf, pixbuf)
         # image.close()
         # image = None
         # del image
 
-        # update righthand side key preview if possible
-        if recursive_hasattr(gl, "app.main_win.sidebar"):
-            self.set_icon_selector_previews(self.pixbuf)
+    def _apply_pixbuf(self, pixbuf):
+        self.pixbuf = pixbuf
+        # update righthand side key preview if possible - before the paint
+        # below, which bails out when this button is unmapped
+        self.set_icon_selector_previews(pixbuf)
+        # Skip if the button was unmapped between queuing and running this
+        # callback: painting a disposed widget crashes GTK.
+        try:
+            if not self.get_mapped():
+                return
+            self.image.set_from_pixbuf(self.pixbuf)
+        except Exception as e:
+            log.debug(f"Key mirror paint skipped: {e}")
 
     def set_icon_selector_previews(self, pixbuf):
+        # Main loop only: the gating below reads widget state.
         if not recursive_hasattr(gl, "app.main_win.sidebar"):
             return
         sidebar = gl.app.main_win.sidebar
@@ -339,20 +353,9 @@ class KeyButton(Gtk.Frame):
         if child.deck_controller != self.key_grid.deck_controller:
             return
         # Update icon selector on the top of the right are
-        GLib.idle_add(sidebar.key_editor.icon_selector.set_pixbuf_and_del, pixbuf)
+        sidebar.key_editor.icon_selector.set_pixbuf_and_del(pixbuf)
         # Update icon selector in margin editor
-        # GLib.idle_add(sidebar.key_editor.image_editor.image_group.expander.margin_row.icon_selector.image.set_from_pixbuf, pixbuf)
-
-    def show_pixbuf(self, pixbuf):
-        self.pixbuf = pixbuf
-        # Skip if the button was unmapped between queuing and running this
-        # callback: painting a disposed widget crashes GTK.
-        try:
-            if not self.get_mapped():
-                return
-            self.image.set_from_pixbuf(self.pixbuf)
-        except Exception as e:
-            log.debug(f"Key mirror paint skipped: {e}")
+        # sidebar.key_editor.image_editor.image_group.expander.margin_row.icon_selector.image.set_from_pixbuf(pixbuf)
 
     def on_click(self, gesture, n_press, x, y):
         if gesture.get_current_button() == 1 and n_press == 1:

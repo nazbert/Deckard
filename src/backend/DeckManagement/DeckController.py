@@ -4860,7 +4860,8 @@ class ControllerKey(ControllerInput):
             try:
                 # Racing the check above: the grid can go away, and the button
                 # grid can be smaller than this key's coords mid-rebuild.
-                GLib.idle_add(self.deck_controller.get_own_key_grid().buttons[x][y].set_image, image)
+                # set_image converts on this thread and idles only the paint.
+                self.deck_controller.get_own_key_grid().buttons[x][y].set_image(image)
             except (AttributeError, IndexError):
                 log.opt(exception=True).warning(f"Failed to set ui key image for {self.identifier}")
         
