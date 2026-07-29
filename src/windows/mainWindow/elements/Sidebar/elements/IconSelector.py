@@ -13,6 +13,7 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import gtk modules
+import itertools
 import gi
 
 
@@ -38,6 +39,10 @@ class IconSelector(Gtk.Box):
         self.active_identifier: InputIdentifier = None
         self.active_state: int = None
 
+        # next() on a count is atomic; a read-modify-write on latest_task_id
+        # would hand two frames the same id now that producers are threads,
+        # letting a stale one pass the check in set_pixbuf_and_del.
+        self.task_ids = itertools.count()
         self.latest_task_id: int = None
         self.build()
 
@@ -82,10 +87,7 @@ class IconSelector(Gtk.Box):
 
 
     def get_new_task_id(self):
-        if self.latest_task_id is None:
-            return 0
-
-        return self.latest_task_id + 1
+        return next(self.task_ids)
 
     def set_image(self, image):
         pixbuf = image2pixbuf(image.convert("RGBA"), force_transparency=True)

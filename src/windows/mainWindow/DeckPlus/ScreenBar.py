@@ -13,6 +13,7 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import gtk modules
+import itertools
 import time
 import gi
 from loguru import logger as log
@@ -241,6 +242,10 @@ class ScreenBarImage(Gtk.Picture):
         self.on_map_tasks: list[callable] = []
         self.connect("map", self.on_map)
 
+        # next() on a count is atomic; a read-modify-write on latest_task_id
+        # would hand two frames the same id now that producers are threads,
+        # letting a stale one pass the check in set_pixbuf_and_del.
+        self.task_ids = itertools.count()
         self.latest_task_id: int = None
 
 
@@ -261,11 +266,8 @@ class ScreenBarImage(Gtk.Picture):
         return controller.get_input(identifier)
     
     def get_new_task_id(self):
-        if self.latest_task_id is None:
-            return 0
+        return next(self.task_ids)
 
-        return self.latest_task_id + 1
-        
     def set_image(self, image: Image.Image):
         # Callable from any thread: the thumbnail and both conversions are
         # pure PIL + GdkPixbuf, so they run on the caller (the media thread
