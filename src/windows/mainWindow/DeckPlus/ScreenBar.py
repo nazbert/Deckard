@@ -20,10 +20,7 @@ from loguru import logger as log
 
 from PIL import Image
 
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from src.backend.DeckManagement.DeckController import ControllerDial, ControllerTouchScreen
-from src.backend.DeckManagement.InputIdentifier import Input, InputIdentifier
+from src.backend.DeckManagement.InputIdentifier import Input
 from src.backend.DeckManagement.ImageHelpers import image2pixbuf
 from src.backend.DeckManagement.HelperMethods import recursive_hasattr
 
@@ -248,23 +245,11 @@ class ScreenBarImage(Gtk.Picture):
         self.task_ids = itertools.count()
         self.latest_task_id: int = None
 
-
-        # screen_image = self.get_controller_touch_screen().get_current_image()
-        # self.set_image(screen_image)
-
     def on_map(self, *args):
         for task in self.on_map_tasks:
             task()
         self.on_map_tasks.clear()
-        
-    def get_controller_touch_screen(self) -> "ControllerTouchScreen":
-        controller = gl.app.main_win.get_active_controller()
-        return controller.get_input(Input.Touchscreen("sd-plus"))
-    
-    def get_controller_dial(self, identifier: InputIdentifier) -> "ControllerDial":
-        controller = gl.app.main_win.get_active_controller()
-        return controller.get_input(identifier)
-    
+
     def get_new_task_id(self):
         return next(self.task_ids)
 
