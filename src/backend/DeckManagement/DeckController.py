@@ -4990,7 +4990,8 @@ class ControllerTouchScreen(ControllerInput):
             self._last_ui_image_time = now
             self._pending_ui_image = None
             screenbar = self.deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar
-            GLib.idle_add(screenbar.image.set_image, image)
+            # set_image converts on this thread and idles only the paint.
+            screenbar.image.set_image(image)
         else:
             # Mark dirty only (P5.4) -- ScreenBar.load_from_changes
             # recomposites a fresh image on map instead of replaying `image`.

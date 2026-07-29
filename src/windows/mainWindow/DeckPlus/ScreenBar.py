@@ -267,10 +267,10 @@ class ScreenBarImage(Gtk.Picture):
         return self.latest_task_id + 1
         
     def set_image(self, image: Image.Image):
-        if not self.get_mapped():
-            self.on_map_tasks = [lambda: self.set_image(image)]
-            return
-
+        # Callable from any thread: the thumbnail and both conversions are
+        # pure PIL + GdkPixbuf, so they run on the caller (the media thread
+        # for live frames) and only the paint is idled. The mapped check moved
+        # to set_pixbuf_and_del - widget state can't be read from off-main.
         width = 385 #TODO: Find a better way to do this
         thumbnail = image.copy()
         thumbnail.thumbnail((width, width/8))
@@ -283,18 +283,25 @@ class ScreenBarImage(Gtk.Picture):
 
         thumbnail.close()
         del thumbnail
-        
+
         if not recursive_hasattr(gl, "app.main_win.sidebar"):
             return
 
-        
+
         identifier = gl.app.main_win.sidebar.active_identifier
         if isinstance(identifier, Input.Dial):
-            dial_image_area = self.get_controller_touch_screen().get_dial_image_area(identifier)
+            # Own controller, not whichever deck happens to be visible: this
+            # widget belongs to one deck, and resolving via the deck stack
+            # would be a GTK read on the producer thread.
+            touch_screen = self.screenbar.deck_controller.get_input(Input.Touchscreen("sd-plus"))
+            if touch_screen is None:
+                return
+            dial_image_area = touch_screen.get_dial_image_area(identifier)
 
             dial_image = image.crop(dial_image_area)
 
-            GLib.idle_add(gl.app.main_win.sidebar.key_editor.icon_selector.set_image, dial_image)
+            # Converts on this thread as well and idles only its own paint.
+            gl.app.main_win.sidebar.key_editor.icon_selector.set_image(dial_image)
 
     def set_pixbuf_and_del(self, pixbuf, task_id: int = None):
         if task_id is not None:
@@ -305,6 +312,10 @@ class ScreenBarImage(Gtk.Picture):
         # callback: painting a disposed widget crashes GTK.
         try:
             if not self.get_mapped():
+                # Replay this pixbuf on map. Secondary net only: the P5.4
+                # dirty-mark path recomposites a fresh frame when the window
+                # comes back, which is what normally repaints the preview.
+                self.on_map_tasks = [lambda: self.set_pixbuf_and_del(pixbuf)]
                 return
             self.set_pixbuf(pixbuf)
         except Exception as e:
