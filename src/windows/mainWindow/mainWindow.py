@@ -225,29 +225,33 @@ class MainWindow(Adw.ApplicationWindow):
             no-pages: Shows the no pages available error
             None: Goes back to normal mode
         """
+        # Safe to call from any thread. One idle for the whole transition, so
+        # the window can't be observed halfway between the two modes.
+        GLib.idle_add(self._apply_main_error, error)
+
+    def _apply_main_error(self, error: str=None) -> None:
         if error is None:
-            GLib.idle_add(self.main_stack.set_visible_child, self.toast_overlay)
-            GLib.idle_add(self.deck_switcher.set_show_switcher, True)
-            GLib.idle_add(self.split_view.set_collapsed, False)
-            GLib.idle_add(self.sidebar_toggle_button.set_visible, True)
-            GLib.idle_add(self.menu_button.set_optional_actions_state, True)
-            GLib.idle_add(self.split_view.set_collapsed, False)
-            GLib.idle_add(self.deck_settings_button.set_visible, True)
+            self.main_stack.set_visible_child(self.toast_overlay)
+            self.deck_switcher.set_show_switcher(True)
+            self.split_view.set_collapsed(False)
+            self.sidebar_toggle_button.set_visible(True)
+            self.menu_button.set_optional_actions_state(True)
+            self.deck_settings_button.set_visible(True)
             return
-        
+
         elif error == "no-decks":
-            GLib.idle_add(self.main_stack.set_visible_child, self.no_decks_error)
-            GLib.idle_add(self.deck_switcher.set_label_text, gl.lm.get("deck-switcher-no-decks"))
+            self.main_stack.set_visible_child(self.no_decks_error)
+            self.deck_switcher.set_label_text(gl.lm.get("deck-switcher-no-decks"))
 
         elif error == "no-pages":
-            GLib.idle_add(self.main_stack.set_visible_child, self.no_pages_error)
-            GLib.idle_add(self.deck_switcher.set_label_text, gl.lm.get("errors.no-page.header"))
+            self.main_stack.set_visible_child(self.no_pages_error)
+            self.deck_switcher.set_label_text(gl.lm.get("errors.no-page.header"))
 
-        GLib.idle_add(self.deck_switcher.set_show_switcher, False)
-        GLib.idle_add(self.sidebar_toggle_button.set_visible, False)
-        GLib.idle_add(self.menu_button.set_optional_actions_state, False)
-        GLib.idle_add(self.split_view.set_collapsed, True)
-        GLib.idle_add(self.deck_settings_button.set_visible, False)
+        self.deck_switcher.set_show_switcher(False)
+        self.sidebar_toggle_button.set_visible(False)
+        self.menu_button.set_optional_actions_state(False)
+        self.split_view.set_collapsed(True)
+        self.deck_settings_button.set_visible(False)
 
     def check_for_errors(self):
         if len(gl.deck_manager.deck_controller) == 0:

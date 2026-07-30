@@ -13,16 +13,14 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import gtk modules
+import itertools
 import time
 import gi
 from loguru import logger as log
 
 from PIL import Image
 
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from src.backend.DeckManagement.DeckController import ControllerDial, ControllerTouchScreen
-from src.backend.DeckManagement.InputIdentifier import Input, InputIdentifier
+from src.backend.DeckManagement.InputIdentifier import Input
 from src.backend.DeckManagement.ImageHelpers import image2pixbuf
 from src.backend.DeckManagement.HelperMethods import recursive_hasattr
 
@@ -241,36 +239,25 @@ class ScreenBarImage(Gtk.Picture):
         self.on_map_tasks: list[callable] = []
         self.connect("map", self.on_map)
 
+        # next() on a count is atomic; a read-modify-write on latest_task_id
+        # would hand two frames the same id now that producers are threads,
+        # letting a stale one pass the check in set_pixbuf_and_del.
+        self.task_ids = itertools.count()
         self.latest_task_id: int = None
-
-
-        # screen_image = self.get_controller_touch_screen().get_current_image()
-        # self.set_image(screen_image)
 
     def on_map(self, *args):
         for task in self.on_map_tasks:
             task()
         self.on_map_tasks.clear()
-        
-    def get_controller_touch_screen(self) -> "ControllerTouchScreen":
-        controller = gl.app.main_win.get_active_controller()
-        return controller.get_input(Input.Touchscreen("sd-plus"))
-    
-    def get_controller_dial(self, identifier: InputIdentifier) -> "ControllerDial":
-        controller = gl.app.main_win.get_active_controller()
-        return controller.get_input(identifier)
-    
+
     def get_new_task_id(self):
-        if self.latest_task_id is None:
-            return 0
+        return next(self.task_ids)
 
-        return self.latest_task_id + 1
-        
     def set_image(self, image: Image.Image):
-        if not self.get_mapped():
-            self.on_map_tasks = [lambda: self.set_image(image)]
-            return
-
+        # Callable from any thread: the thumbnail and both conversions are
+        # pure PIL + GdkPixbuf, so they run on the caller (the media thread
+        # for live frames) and only the paint is idled. The mapped check moved
+        # to set_pixbuf_and_del - widget state can't be read from off-main.
         width = 385 #TODO: Find a better way to do this
         thumbnail = image.copy()
         thumbnail.thumbnail((width, width/8))
@@ -283,18 +270,25 @@ class ScreenBarImage(Gtk.Picture):
 
         thumbnail.close()
         del thumbnail
-        
+
         if not recursive_hasattr(gl, "app.main_win.sidebar"):
             return
 
-        
+
         identifier = gl.app.main_win.sidebar.active_identifier
         if isinstance(identifier, Input.Dial):
-            dial_image_area = self.get_controller_touch_screen().get_dial_image_area(identifier)
+            # Own controller, not whichever deck happens to be visible: this
+            # widget belongs to one deck, and resolving via the deck stack
+            # would be a GTK read on the producer thread.
+            touch_screen = self.screenbar.deck_controller.get_input(Input.Touchscreen("sd-plus"))
+            if touch_screen is None:
+                return
+            dial_image_area = touch_screen.get_dial_image_area(identifier)
 
             dial_image = image.crop(dial_image_area)
 
-            GLib.idle_add(gl.app.main_win.sidebar.key_editor.icon_selector.set_image, dial_image)
+            # Converts on this thread as well and idles only its own paint.
+            gl.app.main_win.sidebar.key_editor.icon_selector.set_image(dial_image)
 
     def set_pixbuf_and_del(self, pixbuf, task_id: int = None):
         if task_id is not None:
@@ -305,6 +299,10 @@ class ScreenBarImage(Gtk.Picture):
         # callback: painting a disposed widget crashes GTK.
         try:
             if not self.get_mapped():
+                # Replay this pixbuf on map. Secondary net only: the P5.4
+                # dirty-mark path recomposites a fresh frame when the window
+                # comes back, which is what normally repaints the preview.
+                self.on_map_tasks = [lambda: self.set_pixbuf_and_del(pixbuf)]
                 return
             self.set_pixbuf(pixbuf)
         except Exception as e:

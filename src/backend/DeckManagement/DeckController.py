@@ -4860,8 +4860,15 @@ class ControllerKey(ControllerInput):
             try:
                 # Racing the check above: the grid can go away, and the button
                 # grid can be smaller than this key's coords mid-rebuild.
-                GLib.idle_add(self.deck_controller.get_own_key_grid().buttons[x][y].set_image, image)
-            except (AttributeError, IndexError):
+                # set_image converts on this thread and idles only the paint.
+                self.deck_controller.get_own_key_grid().buttons[x][y].set_image(image)
+            except Exception:
+                # Open failure set since the conversion moved here: the lookup
+                # races above, plus PIL convert/tobytes and
+                # GdkPixbuf.new_from_bytes. Contain all of it -- the mirror is
+                # best-effort, and we run under the media tick, whose catch-all
+                # backs off 0.25s per exception. A failing preview must never
+                # throttle the deck writer loop.
                 log.opt(exception=True).warning(f"Failed to set ui key image for {self.identifier}")
         
     def get_own_ui_key(self) -> KeyButton:
@@ -4989,7 +4996,17 @@ class ControllerTouchScreen(ControllerInput):
             self._last_ui_image_time = now
             self._pending_ui_image = None
             screenbar = self.deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar
-            GLib.idle_add(screenbar.image.set_image, image)
+            try:
+                # set_image converts on this thread and idles only the paint.
+                # Contain everything it can raise (PIL thumbnail/crop, pixbuf
+                # build, and the dial branch's sidebar.key_editor.icon_selector
+                # chain -- only checked down to `sidebar` there): the mirror is
+                # best-effort, and we run under the media tick, whose catch-all
+                # backs off 0.25s per exception. A failing preview must never
+                # throttle the deck writer loop.
+                screenbar.image.set_image(image)
+            except Exception:
+                log.opt(exception=True).warning("Touchscreen mirror update failed")
         else:
             # Mark dirty only (P5.4) -- ScreenBar.load_from_changes
             # recomposites a fresh image on map instead of replaying `image`.
