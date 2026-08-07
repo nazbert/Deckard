@@ -24,6 +24,7 @@ import os
 import shutil
 import uuid
 from loguru import logger as log
+from PIL import Image
 
 # Import own modules
 from src.backend.DeckManagement.HelperMethods import is_video, is_image, sha256, file_in_dir, create_empty_json, download_file, is_svg
@@ -80,8 +81,11 @@ class AssetManagerBackend(list):
         # the user is right there to see the dialog and retry. This gate is
         # import-only: assets already in the library are never auto-deleted
         # for failing to decode (transient-failure policy, see
-        # remove_invalid_data / fill_missing_thumbnails).
-        if not self._is_decodable(asset_path):
+        # remove_invalid_data / fill_missing_thumbnails). The decoded image
+        # is kept and fed to save_thumbnail below so the gate stays a
+        # ONE-time decode per add, not a second full decode for videos/svgs.
+        decoded = self._decode_for_import(asset_path)
+        if decoded is None:
             log.warning(f"Refusing to import undecodable asset {asset_path}")
             return None
 
@@ -102,13 +106,13 @@ class AssetManagerBackend(list):
             return None
 
         thumbnail_path = internal_path
-        
+
         if is_video(asset_path):
-            thumbnail_path = self.save_thumbnail(asset_path, hash)
+            thumbnail_path = self.save_thumbnail(asset_path, hash, image=decoded)
 
         if is_svg(asset_path):
-            thumbnail_path = self.save_thumbnail(asset_path, hash)
-            
+            thumbnail_path = self.save_thumbnail(asset_path, hash, image=decoded)
+
 
         asset = {
             "name": os.path.splitext(os.path.basename(asset_path))[0],
@@ -131,15 +135,18 @@ class AssetManagerBackend(list):
         # Return id of added asset
         return asset["id"]
 
-    def _is_decodable(self, path: str) -> bool:
-        # Keyed off the sc_broken marker, not try/except: our
-        # generate_thumbnail never raises (#112) -- it returns the tagged
-        # placeholder on any decode failure, so an exception-based check
-        # would be a silent always-True.
+    def _decode_for_import(self, path: str) -> Image.Image | None:
+        # Decodability gate for add() (#197): the decoded image on success,
+        # None if the file cannot be decoded. Keyed off the sc_broken marker,
+        # not try/except: our generate_thumbnail never raises (#112) -- it
+        # returns the tagged placeholder on any decode failure, so an
+        # exception-based check would be a silent always-True.
         thumbnail = gl.media_manager.generate_thumbnail(path)
-        return not thumbnail.info.get("sc_broken")
+        if thumbnail.info.get("sc_broken"):
+            return None
+        return thumbnail
 
-    def save_thumbnail(self, asset_path, asset_hash):
+    def save_thumbnail(self, asset_path, asset_hash, image: Image.Image = None):
         thumbnail_path = os.path.join(gl.DATA_PATH, "Assets", "AssetManager", "thumbnails", f"{asset_hash}.png")
 
         if os.path.exists(thumbnail_path):
@@ -157,8 +164,10 @@ class AssetManagerBackend(list):
         # and fill_missing_thumbnails retries None entries on every boot, so
         # a TRANSIENT failure (file mid-download, network mount hiccup) heals
         # itself instead of wedging the asset until delete+re-import.
+        # `image`: add() passes its gate decode through so an import decodes
+        # the file once, not twice (#197).
         try:
-            thumbnail = gl.media_manager.generate_thumbnail(asset_path)
+            thumbnail = image if image is not None else gl.media_manager.generate_thumbnail(asset_path)
             if thumbnail.info.get("sc_broken"):
                 # generate_thumbnail already logged the decode failure; don't
                 # persist the placeholder (keeps the file retryable).

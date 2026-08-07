@@ -4,9 +4,9 @@ Corrupt files are refused at asset import time (gl#197).
 Upstream gates add() on an exception-based is_decodable; our
 generate_thumbnail never raises (#112 -- it returns a placeholder tagged
 `sc_broken` on any decode failure), so a straight port would be a silent
-always-True. The adapted gate (_is_decodable) must key off the sc_broken
-marker, run BEFORE the copy (no partial import), and surface as the same
-None sentinel the existing add() failure paths use so
+always-True. The adapted gate (_decode_for_import) must key off the
+sc_broken marker, run BEFORE the copy (no partial import), and surface as
+the same None sentinel the existing add() failure paths use so
 add_custom_media_set_by_ui can raise its AlertDialog.
 
 Contract under test:
@@ -14,10 +14,12 @@ Contract under test:
       a garbage-bytes .mp4 are refused: add() returns None, nothing is
       appended, no file lands in the internal Assets dir, Assets.json is
       unchanged;
-  (b) a valid PNG still adds (gate must not break the happy path);
-  (c) _is_decodable is keyed off the sc_broken marker directly -- a tagged
-      placeholder means False, an untagged image True, regardless of
-      exceptions;
+  (b) a valid PNG still adds (gate must not break the happy path), and a
+      valid video decodes exactly ONCE per add (the gate's decode is reused
+      for the thumbnail, not repeated);
+  (c) _decode_for_import is keyed off the sc_broken marker directly -- a
+      tagged placeholder means None, an untagged image is returned,
+      regardless of exceptions;
   (d) add_custom_media_set_by_ui shows an AlertDialog on the refusal (the
       drop must not silently do nothing), with the corrupt case covered in
       the dialog text.
@@ -31,6 +33,9 @@ import fixtures  # noqa: F401  (must be first -- see fixtures.py docstring)
 import json
 import os
 import types
+
+import cv2
+import numpy as np
 
 import globals as gl
 from PIL import Image
@@ -101,7 +106,7 @@ def check_valid_still_adds(backend: AssetManagerBackend) -> None:
     print("ok: a valid PNG still adds through the gate")
 
 
-def check_is_decodable_keys_off_sc_broken(backend: AssetManagerBackend) -> None:
+def check_decode_for_import_keys_off_sc_broken(backend: AssetManagerBackend) -> None:
     """The required adaptation (#112): the gate must read the sc_broken
     marker, not rely on exceptions -- generate_thumbnail never raises."""
     real_generate = gl.media_manager.generate_thumbnail
@@ -109,18 +114,60 @@ def check_is_decodable_keys_off_sc_broken(backend: AssetManagerBackend) -> None:
         broken = Image.new("RGB", (8, 8))
         broken.info["sc_broken"] = True
         gl.media_manager.generate_thumbnail = lambda path: broken
-        assert backend._is_decodable("whatever.png") is False, (
+        assert backend._decode_for_import("whatever.png") is None, (
             "a tagged placeholder must read as not decodable"
         )
 
         ok = Image.new("RGB", (8, 8))
         gl.media_manager.generate_thumbnail = lambda path: ok
-        assert backend._is_decodable("whatever.png") is True, (
-            "an untagged thumbnail must read as decodable"
+        assert backend._decode_for_import("whatever.png") is ok, (
+            "an untagged image must read as decodable and be RETURNED, so "
+            "add() can reuse it instead of decoding a second time"
         )
     finally:
         gl.media_manager.generate_thumbnail = real_generate
-    print("ok: _is_decodable keys off the sc_broken marker directly")
+    print("ok: _decode_for_import keys off the sc_broken marker directly")
+
+
+def make_test_video(path: str, n_frames: int = 8, size=(48, 32), fps: int = 10) -> None:
+    writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), fps, size)
+    assert writer.isOpened(), f"could not open test video writer for {path}"
+    frame = np.zeros((size[1], size[0], 3), dtype=np.uint8)
+    for i in range(n_frames):
+        frame[:, :] = (i % 255, 60, 120)
+        writer.write(frame)
+    writer.release()
+
+
+def check_video_add_decodes_once(backend: AssetManagerBackend) -> None:
+    """#197 cost contract: the gate's decode IS the thumbnail decode -- a
+    video add must run generate_thumbnail exactly once, not once for the
+    gate and again inside save_thumbnail."""
+    video = os.path.join(WORK_DIR, "decode_once.mp4")
+    make_test_video(video)
+
+    real_generate = gl.media_manager.generate_thumbnail
+    calls: list[str] = []
+
+    def counting_generate(path):
+        calls.append(path)
+        return real_generate(path)
+
+    gl.media_manager.generate_thumbnail = counting_generate
+    try:
+        asset_id = backend.add(video)
+    finally:
+        gl.media_manager.generate_thumbnail = real_generate
+
+    assert asset_id is not None, "a valid video must add through the gate"
+    assert len(calls) == 1, (
+        f"a video add must decode the file exactly once, got {len(calls)}: {calls}"
+    )
+    asset = backend.get_by_id(asset_id)
+    assert asset["thumbnail"] is not None and os.path.isfile(asset["thumbnail"]), (
+        "the reused gate decode must still produce a real thumbnail file"
+    )
+    print("ok: a valid video add decodes the file exactly once")
 
 
 def check_ui_add_shows_alert_dialog(backend: AssetManagerBackend, files: dict) -> None:
@@ -177,7 +224,8 @@ def main() -> None:
 
     check_corrupt_refused_no_partial_copy(backend, files)
     check_valid_still_adds(backend)
-    check_is_decodable_keys_off_sc_broken(backend)
+    check_decode_for_import_keys_off_sc_broken(backend)
+    check_video_add_decodes_once(backend)
     check_ui_add_shows_alert_dialog(backend, files)
 
 
