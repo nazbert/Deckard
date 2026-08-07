@@ -28,7 +28,7 @@ class LockScreenDetector:
         self.lock_screen_manager: "LockScreenManager" = lock_screen_manager
         self.bus = None
 
-    def subscribe_to_screen_saver(self, bus_name: str, object_path: str, interface: str, callback) -> None:
+    def subscribe_to_screen_saver(self, bus_name: str | None, object_path: str, interface: str, callback) -> None:
         """Listen for the ScreenSaver ActiveChanged signal on the session bus.
 
         bus_name is the sender to match; the DE detectors pass None (any
