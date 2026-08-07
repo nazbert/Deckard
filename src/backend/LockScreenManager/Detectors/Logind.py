@@ -31,8 +31,10 @@ class LogindLockScreenDetector(LockScreenDetector):
             # logind lives on the System Bus, unlike the session-bus DE
             # detectors. Kept referenced: the subscription below lives
             # exactly as long as the connection does. `bus` is a test seam;
-            # production passes None.
-            self.bus = bus or Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+            # production passes None. Compared against None, not truthiness,
+            # so a falsy-but-valid double cannot silently pull in the real
+            # system bus.
+            self.bus = bus if bus is not None else Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
 
             session_path = self.resolve_session_path()
 
