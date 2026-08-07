@@ -223,12 +223,30 @@ class ActionCore(rpyc.Service):
                 self._stamp_media_owner(input_state)
 
             elif is_video(media_path):
-                input_state.set_video(InputVideo(
-                    controller_input=controller_input,
-                    video_path=media_path,
-                    fps=fps,
-                    loop=loop
-                ))
+                # Local import: DeckController imports ActionCore at module
+                # level, so a top-level import here would be circular (same
+                # pattern as ScreenSaver.py's ReleaseStashedInputsMsg import).
+                from src.backend.DeckManagement.DeckController import ControllerKey, KeyGIF
+                if os.path.splitext(media_path)[1].lower() == ".gif" and isinstance(controller_input, ControllerKey):
+                    # GIFs on KEYS route to KeyGIF -- parity with the
+                    # page-media loader (ControllerKey.load_from_input_dict):
+                    # RGBA alpha survives (cv2's GIF demuxer drops it) and
+                    # per-frame delays are honored. Keys only: KeyGIF is a
+                    # SingleKeyAsset; dials/touchscreens keep the InputVideo
+                    # path below unchanged.
+                    input_state.set_video(KeyGIF(
+                        controller_key=controller_input,
+                        gif_path=media_path,
+                        fps=fps,
+                        loop=loop
+                    ))
+                else:
+                    input_state.set_video(InputVideo(
+                        controller_input=controller_input,
+                        video_path=media_path,
+                        fps=fps,
+                        loop=loop
+                    ))
                 self._stamp_media_owner(input_state)
 
             else:
