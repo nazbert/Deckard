@@ -3185,8 +3185,18 @@ class GifBackground:
         delay timeline plus the away-gap clamp -- KeyGIF.get_next_frame's
         arithmetic kept in lockstep (see that method's comments for the
         rationale on each branch)."""
+        # Snapshot the timeline once: close() swaps frames/_cum_delays/
+        # _total_delay from another thread mid-call (deck route: GTK/
+        # screensaver swap racing the media tick). Locals keep the guard and
+        # the arithmetic looking at the SAME generation -- a racer can't
+        # land a zero modulo or an emptied-list index between them. (The
+        # caller indexes its own frames snapshot; every index returned here
+        # comes from either the shared full timeline or the 0 fallback, so
+        # it stays in range for that snapshot too.)
+        cum = self._cum_delays
+        total = self._total_delay
         n = len(self.frames)
-        if n <= 1 or self._total_delay <= 0:
+        if n <= 1 or total <= 0 or not cum:
             self.active_frame = 0
             return 0
 
@@ -3196,14 +3206,13 @@ class GifBackground:
         if self._play_start is None:
             self._play_start = now
         elif self._last_frame_tick is not None and now - self._last_frame_tick > 1.0:
-            frame_period = self._cum_delays[0] if self._cum_delays else self._total_delay / n
-            self._play_start += (now - self._last_frame_tick) - frame_period
+            self._play_start += (now - self._last_frame_tick) - cum[0]
         self._last_frame_tick = now
 
         elapsed = now - self._play_start
-        t = elapsed % self._total_delay if self.loop else min(elapsed, self._total_delay)
+        t = elapsed % total if self.loop else min(elapsed, total)
 
-        frame = bisect.bisect_right(self._cum_delays, t)
+        frame = bisect.bisect_right(cum, t)
         if frame >= n:
             frame = n - 1  # float-edge / non-loop clamp landing on t == total
         self.active_frame = frame
