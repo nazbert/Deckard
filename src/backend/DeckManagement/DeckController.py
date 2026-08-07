@@ -3008,12 +3008,15 @@ class KeyGIF(SingleKeyAsset):
                 if abs(saturation - 1.0) > 0.001:
                     fitted = ImageEnhance.Color(fitted).enhance(saturation)
                 self.frames.append(fitted)
-                # Get frame delay from GIF metadata (in milliseconds)
-                # Default to 100ms (10fps) if no delay specified
-                delay = gif.info.get('duration', 100)
-                # Some GIFs use delay in centiseconds, convert to milliseconds
-                if delay < 50:
-                    delay *= 10
+                # Per-frame delay from GIF metadata (ms), normalized the
+                # browser way (Firefox/Chrome): missing or < 20ms -> 100ms,
+                # anything else trusted as-is. The old "< 50 -> x10
+                # centiseconds" heuristic played legitimate fast GIFs (40ms
+                # == 25fps) 10x too slow, and an all-zero-duration GIF made
+                # _total_delay == 0 and froze on frame 0.
+                delay = gif.info.get('duration')
+                if delay is None or delay < 20:
+                    delay = 100
                 self.frame_delays.append(delay)
         finally:
             gif.close()
