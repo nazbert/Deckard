@@ -18,6 +18,7 @@ from src.backend.LockScreenManager.Detectors.Gnome import GnomeLockScreenDetecto
 from src.backend.LockScreenManager.Detectors.Cinnamon import CinnamonLockScreenDetector
 from src.backend.LockScreenManager.Detectors.KDE import KDELockScreenDetector
 from src.backend.LockScreenManager.Detectors.Hyprland import HyprlandLockScreenDetector
+from src.backend.LockScreenManager.Detectors.Logind import LogindLockScreenDetector
 from loguru import logger as log
 
 import globals as gl
@@ -25,6 +26,7 @@ import globals as gl
 class LockScreenManager:
     def __init__(self):
         self.locked = False
+        self.detector = None
 
         threading.Thread(target=self.setup, daemon=True).start() # Run in separate thread incase something gets stuck
 
@@ -42,6 +44,8 @@ class LockScreenManager:
             self.detector = KDELockScreenDetector(self)
         elif "hyprland" in env_components:
             self.detector = HyprlandLockScreenDetector(self)
+        else:
+            self.detector = LogindLockScreenDetector(self)
 
     @log.catch
     def get_active_environment(self) -> str:
