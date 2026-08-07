@@ -144,7 +144,7 @@ class DynamicFlowBox(Gtk.Box):
                 try:
                     self.factory_func(preview, page_items[i])
                 except Exception as e:
-                    log.error(f"Asset factory failed for item {i}: {e}")
+                    log.opt(exception=True).error(f"Asset factory failed for item {i}: {e}")
                     preview.set_visible(False)
                     continue
                 preview.set_visible(True)
