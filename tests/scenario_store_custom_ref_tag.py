@@ -127,6 +127,28 @@ def test_branch_ref_still_installs_branch_tip(sb: StoreBackend) -> None:
     print("PASS: a custom plugin pinned to a branch still installs the branch tip")
 
 
+def test_nonexistent_ref_fails_install(sb: StoreBackend) -> None:
+    # A typo'd pinned ref must FAIL the install: with the rc of the
+    # checkout ignored, the clone silently stayed on the default tip and
+    # the wrong tree was installed, stamped with the typo'd ref.
+    dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_TypoPlugin")
+
+    result = sb.clone_repo(repo_url=FIXTURE_REPO, local_path=dest,
+                           branch_name="v1-typo")
+
+    assert result != 200, (
+        "a nonexistent pinned ref must fail the install, not silently ship "
+        "the default-branch tip"
+    )
+    assert not os.path.exists(dest), (
+        "a failed install must not create the destination dir"
+    )
+    assert _staging_leftovers() == [], (
+        f"staging litter left in cache: {_staging_leftovers()}"
+    )
+    print("PASS: a nonexistent pinned ref fails the install cleanly")
+
+
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_store_custom_ref_tag")
     _isolate_git_config()
@@ -136,6 +158,7 @@ def main() -> None:
 
     test_tag_ref_installs_tagged_tree(sb)
     test_branch_ref_still_installs_branch_tip(sb)
+    test_nonexistent_ref_fails_install(sb)
     print("PASS: scenario_store_custom_ref_tag")
 
 

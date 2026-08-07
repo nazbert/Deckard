@@ -1124,8 +1124,13 @@ class StoreBackend:
             elif branch_name is not None:
                 # checkout, not switch: custom plugins may pin a TAG (or any
                 # detachable ref), which `git switch` refuses without
-                # --detach (#197).
-                self.subp_call(["git", "-C", staging, "checkout", branch_name])
+                # --detach (#197). The rc must be checked -- ignoring it
+                # shipped the default-branch tip stamped as the ref whenever
+                # the (user-typed) ref didn't exist.
+                rc = self.subp_call(["git", "-C", staging, "checkout", branch_name])
+                if rc != 0:
+                    log.error(f"git checkout {branch_name!r} failed with exit code {rc} for {repo_url}")
+                    return 404
 
             # Same order as download_repo: validate the staged tree first,
             # then stamp VERSION, then swap.
