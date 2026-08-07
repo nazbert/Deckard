@@ -295,6 +295,24 @@ def check_broken_thumbnail_retry(backend: AssetManagerBackend) -> None:
         "an undecodable LIBRARY entry must never be dropped (transient-failure policy)"
     )
 
+    # THE data-loss pin, while the entry is still corrupt-but-present: the
+    # FULL startup chain (load_json -> fill_missing_data ->
+    # remove_invalid_data, what main.py runs) must keep both the entry and
+    # the FILE. Upstream's version of the #197 gate os.remove()d
+    # undecodable files right here -- the exact policy violation this
+    # scenario exists to catch. (fill_missing_data alone has no removal
+    # path, so only the full chain makes this assertion meaningful.)
+    reborn = AssetManagerBackend()
+    assert reborn.get_by_id(asset["id"]) is not None, (
+        "startup re-init must never drop an undecodable-but-present "
+        "library entry (transient-failure policy)"
+    )
+    assert os.path.exists(internal), (
+        "startup re-init must never DELETE an undecodable library file -- "
+        "a transient failure (unmounted dir, mid-download) would cost the "
+        "user their asset"
+    )
+
     # The source becomes valid (download finished / mount back).
     make_test_video(internal)
 
