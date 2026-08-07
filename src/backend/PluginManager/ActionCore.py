@@ -227,6 +227,7 @@ class ActionCore(rpyc.Service):
                 # level, so a top-level import here would be circular (same
                 # pattern as ScreenSaver.py's ReleaseStashedInputsMsg import).
                 from src.backend.DeckManagement.DeckController import ControllerKey, KeyGIF
+                key_gif = None
                 if os.path.splitext(media_path)[1].lower() == ".gif" and isinstance(controller_input, ControllerKey):
                     # GIFs on KEYS route to KeyGIF -- parity with the
                     # page-media loader (ControllerKey.load_from_input_dict):
@@ -234,12 +235,24 @@ class ActionCore(rpyc.Service):
                     # per-frame delays are honored. Keys only: KeyGIF is a
                     # SingleKeyAsset; dials/touchscreens keep the InputVideo
                     # path below unchanged.
-                    input_state.set_video(KeyGIF(
-                        controller_key=controller_input,
-                        gif_path=media_path,
-                        fps=fps,
-                        loop=loop
-                    ))
+                    # KeyGIF decodes eagerly and RAISES on a corrupt/
+                    # truncated GIF, where InputVideo's detached cv2 builder
+                    # fails soft -- set_media never raised into plugin code
+                    # for bad media before, so keep that contract and fall
+                    # back to the cv2 path (same policy as the GifBackground
+                    # routes in DeckController).
+                    try:
+                        key_gif = KeyGIF(
+                            controller_key=controller_input,
+                            gif_path=media_path,
+                            fps=fps,
+                            loop=loop
+                        )
+                    except Exception:
+                        log.opt(exception=True).warning(
+                            f"GIF decode failed in set_media, falling back to the opaque cv2 path: {media_path}")
+                if key_gif is not None:
+                    input_state.set_video(key_gif)
                 else:
                     input_state.set_video(InputVideo(
                         controller_input=controller_input,

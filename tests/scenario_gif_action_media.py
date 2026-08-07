@@ -14,7 +14,12 @@ scenario pins the set_media parity fix:
       == background color, opaque-region pixel == the GIF's own content);
   (b) the same call on a DIAL action still takes the non-KeyGIF path
       (KeyGIF is a SingleKeyAsset -- the isinstance(ControllerKey) guard is
-      load-bearing) and does not raise.
+      load-bearing) and does not raise;
+  (c) a CORRUPT .gif through set_media falls back to the InputVideo path
+      without raising -- KeyGIF decodes eagerly (PIL raises on bad media)
+      where InputVideo's detached cv2 builder fails soft, and set_media
+      never raised into plugin code for bad media before the KeyGIF route
+      existed.
 
 Drives the REAL DeckController/Page/ActionCore machinery with a LatchAction
 injected via the stub plugin_manager (fixtures helpers), against a GIF
@@ -157,6 +162,20 @@ def main() -> None:
         assert center[:3] != tuple(BG_COLOR[:3]), (
             "the GIF's opaque disc must cover the key center, got background "
             "color instead -- no GIF content composited"
+        )
+
+        # (c) corrupt GIF: set_media must not raise into the (plugin) caller
+        # -- it falls back to the InputVideo path, whose detached cv2
+        # builder fails soft downstream (pre-KeyGIF-route behavior).
+        corrupt_path = os.path.join(gl.DATA_PATH, "media", "corrupt.gif")
+        with open(corrupt_path, "wb") as f:
+            f.write(b"not a gif at all, just bytes with the extension")
+        action = key.get_active_state().get_own_actions()[0]
+        action.set_media(media_path=corrupt_path)  # must not raise
+        fallback_video = key.get_active_state().key_video
+        assert type(fallback_video).__name__ == "InputVideo", (
+            f"a corrupt plugin-set GIF must fall back to InputVideo "
+            f"(fail-soft), got {type(fallback_video).__name__}"
         )
 
         print("PASS: scenario_gif_action_media")
