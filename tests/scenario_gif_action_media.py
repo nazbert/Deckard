@@ -155,8 +155,8 @@ def main() -> None:
         )
         center = composed.getpixel((composed.width // 2, composed.height // 2))
         assert center[:3] != tuple(BG_COLOR[:3]), (
-            f"the GIF's opaque disc must cover the key center, got background "
-            f"color instead -- no GIF content composited"
+            "the GIF's opaque disc must cover the key center, got background "
+            "color instead -- no GIF content composited"
         )
 
         print("PASS: scenario_gif_action_media")
