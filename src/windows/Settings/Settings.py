@@ -13,12 +13,13 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import gtk modules
-import subprocess
 import threading
 import gi
 
+from loguru import logger as log
+
 from GtkHelper.GtkHelper import BetterPreferencesGroup
-from autostart import is_flatpak, setup_autostart
+from autostart import setup_autostart
 from src.backend.DeckManagement.HelperMethods import color_values_to_gdk, gdk_color_to_values, get_pango_font_description, get_values_from_pango_font_description
 from src.backend.SettingsManager import AppSettings
 from src.windows.Settings.PluginSettingsPage import PluginSettingsPage
@@ -28,7 +29,7 @@ import globals as gl
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw
+from gi.repository import Gtk, Adw, Gio, GLib
 
 import os
 
@@ -332,18 +333,16 @@ class DataPathGroup(Adw.PreferencesGroup):
             return False
 
     def on_open_data_path_button_clicked(self, *args):
-        command = []
-        if is_flatpak():
-            command += ["flatpak-spawn", "--host"]
-
-        # No shell=True: the entry text must never be interpolated into a
-        # shell command line.
-        command += ["xdg-open", self.data_path.get_text()]
-
+        # Gio instead of shelling out to xdg-open (same rationale as
+        # HelperMethods.open_web): non-blocking on the GTK main loop, routed
+        # through the OpenURI portal when sandboxed (no flatpak-spawn
+        # --host), and the entry text can never become a command.
+        path = os.path.expanduser(self.data_path.get_text())
+        uri = Gio.File.new_for_path(path).get_uri()
         try:
-            subprocess.check_output(command)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            pass
+            Gio.AppInfo.launch_default_for_uri(uri, None)
+        except GLib.Error as e:
+            log.error(f"Failed to open data path {path}: {e}")
 
 
 class GeneralPage(Adw.PreferencesPage):
