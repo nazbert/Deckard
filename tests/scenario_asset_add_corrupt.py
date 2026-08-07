@@ -128,18 +128,28 @@ def check_ui_add_shows_alert_dialog(backend: AssetManagerBackend, files: dict) -
     do nothing. Gtk/GLib are stubbed at the module level -- the harness is
     headless and only the dialog CONSTRUCTION is under test."""
     dialogs: list[dict] = []
+    shown: list[tuple] = []
+    built_before_idle: list[int] = []
 
     class FakeAlertDialog:
         def __init__(self, **kwargs):
             dialogs.append(kwargs)
 
         def show(self, *a, **k):
-            pass
+            shown.append(a)
+
+    def fake_idle_add(fn, *a):
+        # Record how many dialogs exist when the callback is SCHEDULED: the
+        # calling (worker) thread must not have built any GTK object --
+        # construction belongs inside the main-thread callback (this path
+        # runs on the Chooser's bare import thread, see Chooser.add_files).
+        built_before_idle.append(len(dialogs))
+        return fn(*a)
 
     real_gtk, real_glib = amb_mod.Gtk, amb_mod.GLib
     real_app = gl.app
     amb_mod.Gtk = types.SimpleNamespace(AlertDialog=FakeAlertDialog)
-    amb_mod.GLib = types.SimpleNamespace(idle_add=lambda fn, *a: fn(*a))
+    amb_mod.GLib = types.SimpleNamespace(idle_add=fake_idle_add)
     gl.app = types.SimpleNamespace(main_win=None)
     gl.asset_manager_backend = backend
     try:
@@ -150,6 +160,11 @@ def check_ui_add_shows_alert_dialog(backend: AssetManagerBackend, files: dict) -
 
     assert result is None, f"a refused add must yield no media path, got {result!r}"
     assert dialogs, "the refusal must surface an AlertDialog, not silently do nothing"
+    assert built_before_idle and built_before_idle[-1] == len(dialogs) - 1, (
+        "the AlertDialog must be constructed INSIDE the idle callback (this "
+        "path runs on the Chooser's worker thread), not on the calling thread"
+    )
+    assert shown, "the dialog must be shown, not just constructed"
     text = " ".join(str(v) for v in dialogs[-1].values()).lower()
     assert "corrupt" in text, f"the dialog text must cover the corrupt case: {dialogs[-1]}"
     print("ok: a refused UI add raises an AlertDialog covering corrupt files")

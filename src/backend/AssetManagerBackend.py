@@ -305,23 +305,33 @@ class AssetManagerBackend(list):
                 self.remove(asset)
         self.save_json()
 
+    def _alert_on_main(self, window, message: str, detail: str) -> None:
+        # Construct the dialog INSIDE the idle callback (house pattern): this
+        # path runs on the Chooser's import worker thread (add_files spawns a
+        # bare Thread per drop), and GTK objects must only be built on the
+        # main thread. show(window) rather than show(): without a parent,
+        # modal=True binds to nothing.
+        def show():
+            dial = Gtk.AlertDialog(message=message, detail=detail, modal=True)
+            dial.show(window)
+        GLib.idle_add(show)
+
     def add_custom_media_set_by_ui(self, url: str, path: str):
         window = gl.app.main_win
         if gl.store is not None:
             window = gl.store
-            
+
         if path is None and url is not None:
             # Lower domain and remove point
             extension = os.path.splitext(url)[1].lower().replace(".", "")
             if extension not in (set(gl.video_extensions) | set(gl.image_extensions) | set(gl.svg_extensions)):
 
                 # Not a valid url
-                dial = Gtk.AlertDialog(
+                self._alert_on_main(
+                    window,
                     message="The image is invalid.",
                     detail="You can only use urls directly pointing to images (not directly from Google).",
-                    modal=True
                 )
-                GLib.idle_add(dial.show)
                 return -1
 
             os.makedirs(os.path.join(gl.DATA_PATH, "cache", "downloads"), exist_ok=True)
@@ -335,12 +345,11 @@ class AssetManagerBackend(list):
                 path = download_file(url=url, path=os.path.join(gl.DATA_PATH, "cache", "downloads"))
             except Exception as e:
                 log.opt(exception=True).error(f"Could not download asset from {url}: {e}")
-                dial = Gtk.AlertDialog(
+                self._alert_on_main(
+                    window,
                     message="The download failed.",
                     detail="The image or video could not be downloaded. Check the url and your connection.",
-                    modal=True
                 )
-                GLib.idle_add(dial.show)
                 # None, not -1: KeyGrid.handle_file_drop only bails on None
                 # and would otherwise write the sentinel into the key's
                 # media path.
@@ -351,24 +360,22 @@ class AssetManagerBackend(list):
         if not os.path.exists(path):
             return
         if not is_video(path) and not is_image(path) and not is_svg(path):
-            dial = Gtk.AlertDialog(
-                    message="No valid image or video.",
-                    detail="Only images and videos are supported.",
-                    modal=True
-                )
-            GLib.idle_add(dial.show)
+            self._alert_on_main(
+                window,
+                message="No valid image or video.",
+                detail="Only images and videos are supported.",
+            )
             return
         asset_id = gl.asset_manager_backend.add(asset_path=path)
         if asset_id is None:
             # add() refuses undecodable files (#197) and fails soft on
             # unreadable/uncopyable ones (#112) -- without a dialog the
             # drop/import silently does nothing.
-            dial = Gtk.AlertDialog(
+            self._alert_on_main(
+                window,
                 message="No valid image or video.",
                 detail="Only images and videos are supported. The file may also be corrupt or unreadable.",
-                modal=True
             )
-            GLib.idle_add(dial.show)
             return
 
         asset = self.get_by_id(asset_id)
