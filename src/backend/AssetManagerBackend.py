@@ -75,7 +75,16 @@ class AssetManagerBackend(list):
             id = self.get_by_sha256(hash)["id"]
             asset = self.get_by_id(id)
             return id
-        
+
+        # Refuse undecodable files at import time (#197), BEFORE the copy --
+        # the user is right there to see the dialog and retry. This gate is
+        # import-only: assets already in the library are never auto-deleted
+        # for failing to decode (transient-failure policy, see
+        # remove_invalid_data / fill_missing_thumbnails).
+        if not self._is_decodable(asset_path):
+            log.warning(f"Refusing to import undecodable asset {asset_path}")
+            return None
+
         # Copy the asset into the internal folder -- ALWAYS (#112 rev1). The
         # old `if not file_in_dir(basename, DATA_PATH/cache)` skip was a
         # non-recursive top-level name match that nothing legitimately hits
@@ -121,7 +130,15 @@ class AssetManagerBackend(list):
 
         # Return id of added asset
         return asset["id"]
-    
+
+    def _is_decodable(self, path: str) -> bool:
+        # Keyed off the sc_broken marker, not try/except: our
+        # generate_thumbnail never raises (#112) -- it returns the tagged
+        # placeholder on any decode failure, so an exception-based check
+        # would be a silent always-True.
+        thumbnail = gl.media_manager.generate_thumbnail(path)
+        return not thumbnail.info.get("sc_broken")
+
     def save_thumbnail(self, asset_path, asset_hash):
         thumbnail_path = os.path.join(gl.DATA_PATH, "Assets", "AssetManager", "thumbnails", f"{asset_hash}.png")
 
@@ -343,8 +360,17 @@ class AssetManagerBackend(list):
             return
         asset_id = gl.asset_manager_backend.add(asset_path=path)
         if asset_id is None:
+            # add() refuses undecodable files (#197) and fails soft on
+            # unreadable/uncopyable ones (#112) -- without a dialog the
+            # drop/import silently does nothing.
+            dial = Gtk.AlertDialog(
+                message="No valid image or video.",
+                detail="Only images and videos are supported. The file may also be corrupt or unreadable.",
+                modal=True
+            )
+            GLib.idle_add(dial.show)
             return
-        
+
         asset = self.get_by_id(asset_id)
         # Add to asset chooser ui if opened
         if gl.asset_manager is not None:

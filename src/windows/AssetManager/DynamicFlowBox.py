@@ -21,6 +21,8 @@ from gi.repository import Gtk, GLib
 # Import python modules
 import functools
 
+from loguru import logger as log
+
 class DynamicFlowBox(Gtk.Box):
     def __init__(self, base_class: type, *args, **kwargs):
         """
@@ -135,8 +137,16 @@ class DynamicFlowBox(Gtk.Box):
                 break
             if i < len(page_items):
                 # Bind BEFORE showing: the child only ever becomes
-                # clickable already carrying its new asset.
-                self.factory_func(preview, page_items[i])
+                # clickable already carrying its new asset. Guarded (#197):
+                # one poison item must not abort the rest of the rebind --
+                # and a child whose bind failed must stay hidden, or it
+                # would be clickable with the PREVIOUS page's asset.
+                try:
+                    self.factory_func(preview, page_items[i])
+                except Exception as e:
+                    log.error(f"Asset factory failed for item {i}: {e}")
+                    preview.set_visible(False)
+                    continue
                 preview.set_visible(True)
             else:
                 # Hide left over placeholders

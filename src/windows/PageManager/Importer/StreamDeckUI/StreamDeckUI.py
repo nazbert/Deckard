@@ -161,7 +161,13 @@ class StreamDeckUIImporter:
                             if os.path.exists(export_icon):
                                 asset_id = gl.asset_manager_backend.add(asset_path=export_icon)
                                 asset = gl.asset_manager_backend.get_by_id(asset_id)
-                                page["keys"][coords]["states"][page_state]["media"]["path"] = asset["internal-path"]
+                                if asset is not None:
+                                    page["keys"][coords]["states"][page_state]["media"]["path"] = asset["internal-path"]
+                                else:
+                                    # add() refuses corrupt/unreadable icons
+                                    # (#197/#112) -- skip the icon, keep the
+                                    # rest of the import.
+                                    log.warning(f"Could not import icon {export_icon}, skipping")
                             else:
                                 log.warning(f"Icon {export_icon} not found, skipping")
 
