@@ -71,6 +71,27 @@ tests/soak/mem_census.py <pid> --max-rss-mb 800 --max-swap-mb 200   # fail on br
 grep -v '^#' logs/mem_telemetry.csv     # the sampled rows, markers stripped
 ```
 
+### Image-cache columns
+
+The last five CSV columns come from the image-cache budget (#142) and are
+what make its ceiling tunable against a real soak rather than a guess:
+
+| column | meaning |
+|---|---|
+| `img_cache_kb` | Σ of the **evictable** native-image caches (every deck's `encode_memo` + `native_tile_cache`). This is the quantity `DECKARD_IMAGE_CACHE_MB` governs, so **no row may ever exceed the ceiling** by more than one wake's worth of paints -- that is the soak's mechanical gate. |
+| `img_cache_evictions` / `img_cache_evicted_kb` | cumulative (monotonic) entries and kB the global ceiling has shed. Flat at 0 for a whole soak = the ceiling never bound, i.e. it is not the thing limiting RSS. A steep, continuous slope on an otherwise steady `img_cache_kb` = **thrashing**: the ceiling is fighting a live working set and every eviction is buying a re-encode. `logs.log` carries a matching `cache-budget: ... re-admitted N key(s)` warning when that happens. |
+| `video_readers_kb` | census only, never evicted: the one-frame payloads held by background/key video readers. Grows with the number of video assets on screen, not with time -- a slope here is an instance leak, not a cache growing. |
+| `gif_frames_kb` | census only, never evicted: whole decoded GIF frame lists. **The largest un-capped image holder** -- a 32-key page of 200-frame GIFs is ~0.9 GiB, roughly 10x the entire budget the ceiling governs. This column exists to size that follow-up against real pages. |
+
+The default ceiling (`MemTotal/64`, clamped to 64-256 MiB) is deliberately
+non-binding on a typical single-deck rig, so expect `img_cache_evictions` to
+stay at 0 unless you tune `DECKARD_IMAGE_CACHE_MB` down or attach several
+decks. Set it low on purpose for one soak leg to exercise the eviction path.
+
+A run whose header does not match the current schema is rotated to
+`mem_telemetry.csv.old` on the next start and a fresh file begun -- so a CSV
+from before this change is preserved, not silently widened.
+
 `mem_census.py` buckets anonymous mappings (heap, arenas, anonymous mmaps
 -- not file-backed .so's or cache mp4s) by size class, reporting **both Rss
 and Swap** per bucket plus the process-wide VmRSS/VmSwap from

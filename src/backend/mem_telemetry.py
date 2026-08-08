@@ -23,6 +23,7 @@ import time
 from loguru import logger as log
 
 import globals as gl
+from src.backend.DeckManagement.Subclasses import cache_budget
 
 # Never sample faster than this: /proc/self/smaps_rollup measured 6.4ms
 # median / 20ms max on the live 6.1GB-VmData process, and the walk holds
@@ -39,7 +40,9 @@ MIN_TRIM_INTERVAL = 600.0
 
 CSV_HEADER = (
     "timestamp,vmrss_kb,vmswap_kb,private_dirty_kb,threads,fds,gc0,gc1,gc2,"
-    "page_switches,trim_ms,trim_rss_before_kb,trim_rss_after_kb\n"
+    "page_switches,trim_ms,trim_rss_before_kb,trim_rss_after_kb,"
+    "img_cache_kb,img_cache_evictions,img_cache_evicted_kb,"
+    "video_readers_kb,gif_frames_kb\n"
 )
 
 
@@ -105,6 +108,31 @@ def _fd_count() -> int:
         return -1
 
 
+def _image_cache_fields() -> tuple[int, int, int, int, int]:
+    """(evictable image-cache kB, cumulative evictions, cumulative evicted kB,
+    video-reader kB, GIF-frame kB) from the image-cache budget (#142).
+
+    This is the attribution half of that work and the reason it is default-on:
+    the ceiling can only be tuned against the field once the CSV says how much
+    image RAM is actually held, how hard the ceiling is biting, and how much of
+    the rest sits in holders the ceiling does NOT govern (video readers and
+    especially GIF frame lists, which have no byte cap at all). Every value is
+    a cheap sum of per-cache counters -- no cache is walked."""
+    try:
+        totals = cache_budget.totals()
+        evictions, evicted_bytes = cache_budget.eviction_stats()
+        return (
+            cache_budget.evictable_bytes() // 1024,
+            evictions,
+            evicted_bytes // 1024,
+            totals.get("video_readers", 0) // 1024,
+            totals.get("gif_frames", 0) // 1024,
+        )
+    except Exception as e:
+        log.debug(f"mem_telemetry: image-cache fields unavailable: {e}")
+        return 0, 0, 0, 0, 0
+
+
 _libc = None
 
 
@@ -143,9 +171,28 @@ class MemTelemetrySampler(threading.Thread):
             self._ensure_header()
 
     def _ensure_header(self) -> None:
-        if not os.path.exists(self.csv_path) or os.path.getsize(self.csv_path) == 0:
+        """Writes the header into a new or empty CSV.
+
+        An existing file whose header predates a schema change is rotated to
+        `<path>.old` once and a fresh file started: appending wider rows
+        under a narrower header would silently misalign every column for
+        every reader of the file (tests/soak/mem_census.py, hw_verify.py
+        soak, and anyone's spreadsheet)."""
+        try:
+            if os.path.exists(self.csv_path) and os.path.getsize(self.csv_path) > 0:
+                with open(self.csv_path) as f:
+                    existing = f.readline()
+                if existing == CSV_HEADER:
+                    return
+                os.replace(self.csv_path, self.csv_path + ".old")
+                log.info(
+                    f"mem_telemetry: column schema changed; rotated the old CSV to "
+                    f"{self.csv_path}.old"
+                )
             with open(self.csv_path, "a") as f:
                 f.write(CSV_HEADER)
+        except OSError as e:
+            log.warning(f"mem_telemetry: could not prepare {self.csv_path}: {e}")
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -188,9 +235,11 @@ class MemTelemetrySampler(threading.Thread):
         fds = _fd_count()
         gc0, gc1, gc2 = gc.get_count()
         trim_ms, trim_before, trim_after = trim_result
+        img_kb, evictions, evicted_kb, video_kb, gif_kb = _image_cache_fields()
         row = (
             f"{time.time():.0f},{vmrss},{vmswap},{private_dirty},{threads},{fds},"
-            f"{gc0},{gc1},{gc2},{page_switches.value},{trim_ms},{trim_before},{trim_after}\n"
+            f"{gc0},{gc1},{gc2},{page_switches.value},{trim_ms},{trim_before},{trim_after},"
+            f"{img_kb},{evictions},{evicted_kb},{video_kb},{gif_kb}\n"
         )
         with open(self.csv_path, "a") as f:
             f.write(row)
