@@ -99,6 +99,11 @@ class App(Adw.Application):
         # registered below so the very first signal already sees it.
         self._quit_started = False
 
+        # The live engine->UI adapter, so on_quit can detach it (#141). None
+        # until on_activate builds the window -- a TERM before that must not
+        # raise here.
+        self._ui_adapter = None
+
         self.register_signal_handlers()
 
         self.connect("activate", self.on_activate)
@@ -153,11 +158,13 @@ class App(Adw.Application):
         # the map/unmap handlers, and re-scans the stack so any child added
         # during construction is bound regardless.
         adapter = GtkUIAdapter()
+        self._ui_adapter = adapter
         ui_port.install(adapter)
         try:
             self.main_win = MainWindow(application=app, deck_manager=self.deck_manager)
         except Exception:
             ui_port.install(None)
+            self._ui_adapter = None
             raise
         adapter.attach_window(self.main_win)
         if not gl.argparser.parse_args().b:
@@ -301,6 +308,17 @@ class App(Adw.Application):
         # while yet, and a push into a window that is being destroyed is a
         # crash shape. The null port makes them dirty-mark instead (#141).
         ui_port.install(None)
+        # Drop the adapter's own references too (bound DeckStackChildren, the
+        # window, per-controller throttle/coalescer state): uninstalling only
+        # stops new calls, it does not release the widget graph the adapter
+        # still points at while the tick threads wind down.
+        # getattr, not self._ui_adapter: guarded for the same reason as the
+        # window teardown below -- a quit landing before __init__ finished
+        # must still reach terminate_all_backends() (issue #169).
+        adapter = getattr(self, "_ui_adapter", None)
+        if adapter is not None:
+            adapter.detach_window()
+            self._ui_adapter = None
 
         # Stop DBus API service
         if not gl.IS_MAC:
