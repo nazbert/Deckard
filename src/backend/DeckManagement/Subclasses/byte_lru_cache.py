@@ -16,6 +16,8 @@ import threading
 import time
 from collections import OrderedDict
 
+from src.backend.DeckManagement.Subclasses import cache_budget
+
 # How long an evicted key stays in the thrash tripwire ring, and how many
 # keys the ring holds. Both are bookkeeping-only (a key + a float each): the
 # ring exists so a re-admission shortly after a GLOBAL eviction is countable,
@@ -74,6 +76,12 @@ class ByteLRUCache:
         self._recent_evicted: "OrderedDict[object, float]" = OrderedDict()
         self._thrash_hits = 0
 
+        # Bytes admitted since the last budget notification (wake damping,
+        # plan-142 §3.2). Hysteresis bounds eviction churn, not WAKE churn:
+        # without a watermark, warm-up would wake the budget daemon at paint
+        # rate and every wake would sum every registrant.
+        self._bytes_since_notify = 0
+
     # --- public API (byte-identical across both subclasses) ---------------
 
     @property
@@ -102,6 +110,7 @@ class ByteLRUCache:
     def put(self, key, data: bytes) -> None:
         if self._max_bytes <= 0:
             return
+        notify = False
         with self._lock:
             if key not in self._entries and not self._admit(key):
                 return
@@ -113,8 +122,16 @@ class ByteLRUCache:
             self._entries[key] = data
             self._stamps[key] = time.monotonic()
             self._total_bytes += len(data)
+            self._bytes_since_notify += len(data)
             while self._total_bytes > self._max_bytes and self._entries:
                 self._pop_oldest_locked()
+            if self._bytes_since_notify >= cache_budget.NOTIFY_WATERMARK_BYTES:
+                self._bytes_since_notify = 0
+                notify = True
+        # Outside the lock, and only past the watermark: the entire cost of
+        # the global ceiling to a painter thread is this Event.set().
+        if notify:
+            cache_budget.notify_grew()
 
     def clear(self) -> None:
         """Drops every cached entry. Called wherever the content the entries

@@ -50,6 +50,7 @@ from src.backend.DeckManagement.Subclasses.KeyLayout import ImageLayout
 from src.backend.DeckManagement.Subclasses.KeyVideo import InputVideo
 from src.backend.DeckManagement.Subclasses.ScreenSaver import ScreenSaver
 from src.backend.DeckManagement.Subclasses.SingleKeyAsset import SingleKeyAsset
+from src.backend.DeckManagement.Subclasses import cache_budget
 from src.backend.DeckManagement.Subclasses.background_video_cache import BackgroundVideoCache
 from src.backend.DeckManagement.Subclasses.encoded_image_cache import EncodedImageCache
 from src.backend.DeckManagement.Subclasses.native_tile_cache import NativeTileCache, native_tile_cache_max_bytes
@@ -1096,6 +1097,18 @@ class DeckController:
         # passthrough path (#163) -- a bare key over a video background skips
         # the tobytes+hash too, so a warmed loop costs a dict lookup per key.
         self.native_tile_cache = NativeTileCache(max_bytes=native_tile_cache_max_bytes())
+        # Enrol both in the process-wide image-cache budget (#142): their own
+        # caps bound each cache, the budget bounds the SUM across decks --
+        # without it, total image-cache RAM scales with deck count and a cold
+        # deck's full memo never yields a byte to a hot one. The registry is
+        # weak, so close() needs no matching unregister. Wrapped here as well
+        # as inside register(): DeckManager swallows anything raised out of
+        # __init__ as "Failed to initialize deck" and silently skips the whole
+        # device, which no telemetry/housekeeping feature may ever cost a user.
+        try:
+            self._register_image_caches()
+        except Exception as e:
+            log.warning(f"Could not register the image caches with the budget: {e}")
 
         self.inputs = {}
         for i in Input.All:
@@ -1430,6 +1443,40 @@ class DeckController:
             cache = getattr(self, cache_name, None)
             if cache is not None:
                 cache.clear()
+
+    def _register_image_caches(self) -> None:
+        """Enrols this deck's two native-image caches with the process-wide
+        budget (#142). Labels carry the serial so a multi-deck rig's
+        eviction/thrash logs are attributable; `totals()` sums per group, so
+        the telemetry columns stay deck-agnostic."""
+        serial = self.serial_number()
+        cache_budget.register(self.encode_memo, label=f"encode_memo:{serial}")
+        cache_budget.register(self.native_tile_cache, label=f"native_tiles:{serial}")
+
+    def refresh_tile_cache_min_age(self, video: "BackgroundVideo" = None) -> None:
+        """Retunes how long the native tile cache's entries are shielded from
+        GLOBAL eviction, to the duration of the background video now playing
+        (clamped to 2-30 s); back to the 2 s default when there is no video.
+
+        Native tile entries are keyed per FRAME, so an entry is re-touched
+        once per loop of the content, not once per media tick. Under a
+        binding ceiling a flat 2 s min-age would therefore make a playing
+        video's whole frame set eligible for eviction exactly one loop before
+        it is needed again -- silently reinstating the per-frame encode this
+        cache exists to remove. A closed video's frames become immediately
+        eligible again, which is what we want: they are stale."""
+        min_age = cache_budget.DEFAULT_MIN_AGE_S
+        if video is not None:
+            try:
+                fps = float(video.get_source_fps() or getattr(video, "fps", 0) or 0)
+                frames = int(getattr(video, "n_frames", 0) or 0)
+                if fps > 0 and frames > 0:
+                    min_age = max(2.0, min(30.0, frames / fps))
+            except Exception:
+                min_age = cache_budget.DEFAULT_MIN_AGE_S
+        cache = getattr(self, "native_tile_cache", None)
+        if cache is not None:
+            cache_budget.set_min_age(cache, min_age)
 
     def get_touchscreen_image_size(self) -> tuple[int]:
         if self._touchscreen_image_size is not None:
@@ -2488,6 +2535,7 @@ class Background:
         # eviction happened to churn through it.
         self._identified_tiles = None
         self.deck_controller.clear_encoded_key_caches()
+        self.deck_controller.refresh_tile_cache_min_age(None)
         gc.collect()
 
         self.update_tiles()
@@ -2507,6 +2555,9 @@ class Background:
         # clear is what stops the old video's frames lingering.
         self._identified_tiles = None
         self.deck_controller.clear_encoded_key_caches()
+        # The new video's loop duration is what its frame entries must be
+        # shielded for; see refresh_tile_cache_min_age.
+        self.deck_controller.refresh_tile_cache_min_age(video)
         gc.collect()
 
         self.update_tiles()
