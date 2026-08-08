@@ -11,9 +11,11 @@ wall-clock frame-picking arithmetic in isolation).
 Covers:
   (a) a GIF much larger than the tile size ends up with every retained
       frame at or below 2x the tile size in both dimensions.
-  (b) alpha survives the decode+fit round trip (the reason this stays a PIL
-      frame list instead of routing through Mp4FrameCache -- cv2's GIF
-      demuxer drops alpha; see the design doc's alpha-probe note).
+  (b) alpha survives the decode+fit round trip (the reason an ALPHA GIF
+      stays a PIL frame list instead of routing through Mp4FrameCache like
+      an opaque one does since #201 -- cv2's GIF demuxer drops alpha; see
+      the design doc's alpha-probe note). Every fixture here declares
+      transparency, so they all take the frame-list route.
   (c) a GIF already smaller than the 2x budget keeps its source dimensions
       (shrink-only, same policy as P2.4's static images: upscaling a small
       GIF to the budget would multiply its retained memory -- 40px -> 144px
