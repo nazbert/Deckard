@@ -137,8 +137,11 @@ class DeckManager:
                 continue
 
             self.deck_controller.append(controller)
-            for remote_controller in self.remote_deck_manager.deck_controllers:
-                ui_port.get().on_deck_added(remote_controller)
+            # Announce ONCE per newly registered controller. The announce
+            # used to sit inside this loop and walk every remote controller
+            # again on each iteration -- N announcements for deck N, i.e. N
+            # duplicate add_page calls for the first deck of N.
+            ui_port.get().on_deck_added(controller)
 
         ui_port.get().on_page_list_changed()
         ui_port.get().refresh_deck_availability()
