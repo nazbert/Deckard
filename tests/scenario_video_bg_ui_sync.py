@@ -10,7 +10,8 @@ the video loop ALSO skips -- were never repainted in the app. The in-app grid
 then diverged from the deck: a mix of stale and black key previews on
 video-background pages, while the device itself was correct.
 
-Headless tier: gl.app is never set, so set_ui_key_image stores a dirty MARKER in
+Headless tier: no UI is attached, so the null UIPort refuses the push and
+set_ui_key_image stores a dirty MARKER in
 ui_image_changes_while_hidden per key -- observable proof the UI push happened
 (the real GTK-side replay needs a live widget tree the harness never builds; see
 scenario_hidden_window_markers).

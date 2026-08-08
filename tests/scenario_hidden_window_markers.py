@@ -4,14 +4,15 @@ ui_image_changes_while_hidden stores dirty MARKERS while the main window is
 hidden, not a full composited PIL image per input rewritten ~20-30x/s
 against a video background.
 
-fixtures.make_headless_controller's integration tier never sets gl.app (see
-fixtures.py's own module docstring), so every real DeckController built
-through it is permanently in the "window hidden/unmapped" state as far as
+fixtures.make_headless_controller's integration tier attaches no UI, so
+src.backend.ui_port serves the NULL port and push_input_image returns False
+(issue #141) -- every real DeckController built through it is permanently in
+the "nothing is showing this" state as far as
 ControllerKey.set_ui_key_image/ControllerTouchScreen.set_ui_image are
-concerned -- get_own_key_grid()/the screenbar recursive_hasattr guard both
-fail closed. That makes the backend half of P5.4 directly exercisable here,
+concerned. That makes the backend half of P5.4 directly exercisable here,
 driving the REAL DeckController/ControllerKey/ControllerTouchScreen code
-(not a reimplementation of it).
+(not a reimplementation of it). The inverse -- an ACCEPTING port suppressing
+these markers entirely -- is pinned by scenario_ui_port_events.py.
 
 The GTK-side replay (KeyGrid.load_from_changes / ScreenBar.load_from_changes
 actually recompositing and pushing pixels into live widgets on map) is NOT
