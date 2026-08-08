@@ -64,15 +64,12 @@ from src.backend import ui_port
 
 process = psutil.Process()
 
-from gi.repository import GLib
-
 # Import signals
 from src.Signals import Signals
 
 # Import typing
 from typing import TYPE_CHECKING, cast
 
-from src.windows.mainWindow.elements.KeyGrid import KeyButton, KeyGrid
 from src.backend.PluginManager.ActionCore import ActionCore
 if TYPE_CHECKING:
     from src.windows.mainWindow.elements.DeckStackChild import DeckStackChild
@@ -962,12 +959,7 @@ class MediaPlayerThread(threading.Thread):
             self.set_banner_revealed(False)
 
     def set_banner_revealed(self, state: bool) -> None:
-        deck_stack_child: "DeckStackChild" = self.deck_controller.get_own_deck_stack_child()
-        if deck_stack_child is None:
-            return
-        
-        # deck_stack_child.low_fps_banner.set_revealed(show_warning)
-        GLib.idle_add(deck_stack_child.low_fps_banner.set_revealed, state)
+        ui_port.get().set_low_fps_warning(self.deck_controller, state)
 
 
     def wake(self) -> None:
@@ -1186,9 +1178,6 @@ class DeckController:
         
         self.hold_time: float = gl.settings_manager.app().hold_time
         
-        self.own_deck_stack_child: "DeckStackChild" = None
-        self.own_key_grid: "KeyGridChild" = None
-
         self.screen_saver = ScreenSaver(deck_controller=self)
         self.allow_interaction = True
         self.has_animated_keys = False
@@ -2166,20 +2155,11 @@ class DeckController:
         # old rotation is dead the moment it changes.
         self.clear_encoded_key_caches()
 
-        self.own_key_grid = None
-
-
-        if recursive_hasattr(gl, "app.main_win"):
-            # self.get_own_key_grid().regenerate_buttons()
-
-            # Re-generate key grid
-            deck_stack_child = self.get_own_deck_stack_child()
-            deck_config = deck_stack_child.page_settings.deck_config
-            key_grid = deck_config.grid
-            deck_config.remove(key_grid)
-
-            deck_config.grid = KeyGrid(self, key_grid.page_settings_page)
-            deck_config.prepend(deck_config.grid)
+        # The UI rebuilds its key grid for the new geometry. Synchronous when
+        # we are already on the main loop (our only caller is), so the
+        # load_page below repaints into the NEW grid rather than the
+        # transposed old one.
+        ui_port.get().on_deck_layout_changed(self)
 
         if not self.get_alive(): return
         self.load_page(self.active_page)
@@ -2310,36 +2290,15 @@ class DeckController:
             self.load_page(self.active_page, allow_reload=True)
     
     def get_own_deck_stack_child(self) -> "DeckStackChild":
-        # Why not just lru_cache this? Because this would also cache the None that gets returned while the ui is still loading
-        if self.own_deck_stack_child is not None:
-            return self.own_deck_stack_child
-        
-        if not recursive_hasattr(gl, "app.main_win.leftArea.deck_stack"): return
-        deck_stack = gl.app.main_win.leftArea.deck_stack
-        # Identity scan instead of get_child_by_name(get_serial_number()):
-        # the name is a device-read string frozen at add_page time, and
-        # matching it against a fresh device read misses forever -- silently,
-        # previews then only dirty-mark -- if either read was wrong (issue
-        # #156). remove_page already matches children by controller identity;
-        # this is the same contract. Normally add_page pre-binds the ref and
-        # this scan never runs; it covers children created before this
-        # controller learned about them.
-        for page in deck_stack.get_pages():
-            if page is None:
-                # Racing a main-thread stack mutation: ListModel iteration
-                # snapshots len once, so removed trailing indices yield
-                # None. Only trailing entries can be None -- stop.
-                break
-            deck_stack_child = page.get_child()
-            if getattr(deck_stack_child, "deck_controller", None) is self:
-                # Publish only if still unbound: a stale scan (e.g. over a
-                # replaced window's stack) must not clobber add_page's
-                # fresh bind for the new widget tree.
-                if self.own_deck_stack_child is None:
-                    self.own_deck_stack_child = deck_stack_child
-                return self.own_deck_stack_child
-        return
-    
+        """Deprecated in-process shim (#141): kept for out-of-tree plugins.
+
+        The engine no longer caches or resolves widgets -- the attached UI
+        owns the controller->child binding (by object identity at add_page
+        time, issue #156, never by matching a re-read serial against a stack
+        child's name). Returns None when no UI is attached.
+        """
+        return ui_port.get().query_deck_widget(self, "deck_stack_child")
+
     def _write_blank_frames(self) -> None:
         """Writes blank key images (+ touchscreen) directly to the device.
         Shared body for _clear_direct() and the media thread's Clear/
@@ -2379,17 +2338,9 @@ class DeckController:
         seq = self.media_player.next_submit_seq()
         self.media_player.submit_control(ClearMsg(seq=seq))
 
-    def get_own_key_grid(self) -> KeyGrid:
-        # Why not just lru_cache this? Because this would also cache the None that gets returned while the ui is still loading
-        if self.own_key_grid is not None:
-            return self.own_key_grid
-        
-        deck_stack_child = self.get_own_deck_stack_child()
-        if deck_stack_child is None:
-            return
-        
-        self.own_key_grid = deck_stack_child.page_settings.deck_config.grid
-        return deck_stack_child.page_settings.deck_config.grid
+    def get_own_key_grid(self):
+        """Deprecated in-process shim (#141) -- see get_own_deck_stack_child."""
+        return ui_port.get().query_deck_widget(self, "key_grid")
     
     def clear_media_player_tasks(self, gen=None):
         # Skip the clear when a newer page load has superseded this one, so a late
@@ -5360,10 +5311,10 @@ class ControllerKey(ControllerInput):
             self.deck_controller.ui_image_changes_while_hidden[self.identifier] = True
 
 
-    def get_own_ui_key(self) -> KeyButton:
-        x, y = ControllerKey.Index_To_Coords(self.deck_controller.deck, self.index)
-        buttons = self.deck_controller.get_own_key_grid().buttons # The ui key coords are in reverse order
-        return buttons[x][y]
+    def get_own_ui_key(self):
+        """Deprecated in-process shim (#141): the attached UI resolves its own
+        widget for this input. None when headless."""
+        return ui_port.get().query_input_widget(self.deck_controller, self.identifier)
     
     def get_image_size(self) -> tuple[int, int]:
         return self.deck_controller.get_key_image_size()

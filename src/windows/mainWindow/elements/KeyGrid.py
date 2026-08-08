@@ -109,13 +109,30 @@ class KeyGrid(Gtk.Grid):
                 # tasks.pop() is try/except-guarded exactly like the Key
                 # case above, so whichever widget gets there first wins and
                 # the other is a no-op.
-                if recursive_hasattr(self, "deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar.image"):
-                    screenbar = self.deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar
+                screenbar = self._find_screenbar()
+                if screenbar is not None:
                     self._push_current_image(identifier, screenbar.image)
                     try:
                         tasks.pop(identifier)
                     except KeyError:
                         pass
+
+    def _find_screenbar(self):
+        """Our sibling screenbar, found by walking up the widget tree.
+
+        Duck-typed on purpose: importing DeckStackChild/DeckConfig here would
+        be a cycle, and since #141 the engine no longer caches the child for
+        us to borrow. Allowed to fail: during __init__ this grid is not in the
+        widget tree yet (DeckConfig.build appends the grid before the
+        screenbar exists), so the touchscreen replay defers to ScreenBar's own
+        load_from_changes -- which is the existing, deliberate behavior.
+        """
+        widget = self.get_parent()
+        while widget is not None:
+            if recursive_hasattr(widget, "screenbar.image"):
+                return widget.screenbar
+            widget = widget.get_parent()
+        return None
 
     def _push_current_image(self, identifier, widget) -> None:
         controller_input = self.deck_controller.get_input(identifier)
