@@ -39,6 +39,8 @@ import os
 
 # Import own modules
 from src.backend import timer_wheel
+from src.backend import ui_port
+from src.windows.ui_adapter import GtkUIAdapter
 from src.windows.mainWindow.mainWindow import MainWindow
 from src.windows.AssetManager.AssetManager import AssetManager
 from src.windows.Store.Store import Store
@@ -143,7 +145,21 @@ class App(Adw.Application):
             # stays False and the next activation retries the full build.
             self.on_reopen()
             return
-        self.main_win = MainWindow(application=app, deck_manager=self.deck_manager)
+        # Install the engine->UI adapter BEFORE constructing the window
+        # (#141): every boot-time add_page runs INSIDE MainWindow's
+        # constructor (build() -> leftArea -> deck_stack.add_pages()), so an
+        # adapter installed afterwards would miss every bind and leave all
+        # previews permanently dirty-marked. attach_window() runs after, for
+        # the map/unmap handlers, and re-scans the stack so any child added
+        # during construction is bound regardless.
+        adapter = GtkUIAdapter()
+        ui_port.install(adapter)
+        try:
+            self.main_win = MainWindow(application=app, deck_manager=self.deck_manager)
+        except Exception:
+            ui_port.install(None)
+            raise
+        adapter.attach_window(self.main_win)
         if not gl.argparser.parse_args().b:
             self.main_win.present()
 
@@ -280,6 +296,11 @@ class App(Adw.Application):
         self._quit_started = True
 
         log.info("Quitting...")
+
+        # Detach the UI first: the media/tick threads keep running for a
+        # while yet, and a push into a window that is being destroyed is a
+        # crash shape. The null port makes them dirty-mark instead (#141).
+        ui_port.install(None)
 
         # Stop DBus API service
         if not gl.IS_MAC:

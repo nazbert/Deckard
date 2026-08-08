@@ -26,7 +26,9 @@ from loguru import logger as log
 # Import globals
 
 # Import own modules
+from src.backend import ui_port
 from src.windows.mainWindow.elements.DeckStackChild import DeckStackChild
+from src.windows.ui_adapter import GtkUIAdapter
 
 # Import typing
 from typing import TYPE_CHECKING
@@ -80,6 +82,9 @@ class DeckStack(Gtk.Stack):
         # consume the markers into dead widgets and leave the new screenbar
         # with nothing to replay on map. Unbound, that replay defers and
         # the markers survive for the new widgets.
+        adapter = ui_port.get()
+        if isinstance(adapter, GtkUIAdapter):
+            adapter.unbind(deck_controller)
         deck_controller.own_deck_stack_child = None
         deck_controller.own_key_grid = None
         page = DeckStackChild(self, deck_controller)
@@ -91,6 +96,8 @@ class DeckStack(Gtk.Stack):
         # add_titled also means an exception mid-construction can never
         # leave the controller bound to a child that is not in the stack.
         deck_controller.own_deck_stack_child = page
+        if isinstance(adapter, GtkUIAdapter):
+            adapter.bind(deck_controller, page)
 
         page.page_settings.deck_config.grid.select_key(0, 0)
 
@@ -135,6 +142,10 @@ class DeckStack(Gtk.Stack):
         return deck_number, deck_type
 
     def remove_page(self, deck_controller) -> str:
+        adapter = ui_port.get()
+        if isinstance(adapter, GtkUIAdapter):
+            adapter.unbind(deck_controller)
+
         was_visible: bool = False
         for i, page in enumerate(self.get_pages()):
             if page.get_child().deck_controller == deck_controller:
