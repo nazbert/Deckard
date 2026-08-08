@@ -21,6 +21,7 @@ from loguru import logger as log
 from GtkHelper.GtkHelper import BetterPreferencesGroup
 from autostart import setup_autostart
 from src.backend.DeckManagement.HelperMethods import color_values_to_gdk, gdk_color_to_values, get_pango_font_description, get_values_from_pango_font_description
+from src.backend.PresenceMonitor.PresenceMonitor import MODE_SCREENSAVER, MODE_SYSTEM_IDLE
 from src.backend.SettingsManager import AppSettings
 from src.windows.Settings.PluginSettingsPage import PluginSettingsPage
 
@@ -688,6 +689,9 @@ class PerformancePage(Adw.PreferencesPage):
         self.add(PerformancePageGroup(settings=settings))
 
 class PerformancePageGroup(Adw.PreferencesGroup):
+    # Row order == stored value; the ComboRow only knows indices.
+    PAUSE_MODES = (MODE_SCREENSAVER, MODE_SYSTEM_IDLE)
+
     def __init__(self, settings: Settings):
         self.settings = settings
         super().__init__(title=gl.lm.get("settings.performance.header"))
@@ -703,16 +707,55 @@ class PerformancePageGroup(Adw.PreferencesGroup):
                                           tooltip_text=gl.lm.get("settings.performance.cache-videos.tooltip"))
         self.add(self.cache_videos)
 
+        # Quiescence gating (issue #144). The default -- pause only while the
+        # deck screensaver is up -- is what the app has always done, so
+        # leaving these alone changes nothing.
+        self.animation_pause_mode = Adw.ComboRow(
+            title=gl.lm.get("settings.performance.animation-pause.title"),
+            subtitle=gl.lm.get("settings.performance.animation-pause.subtitle"),
+        )
+        self.animation_pause_mode.set_model(Gtk.StringList.new([
+            gl.lm.get("settings.performance.animation-pause.screensaver"),
+            gl.lm.get("settings.performance.animation-pause.system-idle"),
+        ]))
+        self.add(self.animation_pause_mode)
+
+        self.animation_idle_minutes = Adw.SpinRow.new_with_range(min=1, max=120, step=1)
+        self.animation_idle_minutes.set_title(gl.lm.get("settings.performance.animation-idle-minutes.title"))
+        self.animation_idle_minutes.set_subtitle(gl.lm.get("settings.performance.animation-idle-minutes.subtitle"))
+        self.add(self.animation_idle_minutes)
+
         self.load_defaults()
 
         # Connect signals
         self.n_cached_pages.connect("changed", self.on_n_cached_pages_changed)
         self.cache_videos.connect("notify::active", self.on_cache_videos_toggled)
+        self.animation_pause_mode.connect("notify::selected", self.on_animation_pause_mode_changed)
+        self.animation_idle_minutes.connect("changed", self.on_animation_idle_minutes_changed)
+
+    def get_selected_pause_mode(self) -> str:
+        index = self.animation_pause_mode.get_selected()
+        if index >= len(self.PAUSE_MODES):
+            # Gtk.INVALID_LIST_POSITION, i.e. nothing selected.
+            return self.PAUSE_MODES[0]
+        return self.PAUSE_MODES[index]
 
     def load_defaults(self):
         app = self.settings.app
         self.n_cached_pages.set_value(app.n_cached_pages)
         self.cache_videos.set_active(app.cache_videos)
+        mode = app.animation_pause_mode
+        self.animation_pause_mode.set_selected(
+            self.PAUSE_MODES.index(mode) if mode in self.PAUSE_MODES else 0
+        )
+        self.animation_idle_minutes.set_value(app.animation_idle_minutes)
+        self.sync_idle_row_sensitivity()
+
+    def sync_idle_row_sensitivity(self):
+        # The delay only means anything in the mode that watches system idle.
+        self.animation_idle_minutes.set_sensitive(
+            self.get_selected_pause_mode() == MODE_SYSTEM_IDLE
+        )
 
     def on_n_cached_pages_changed(self, *args):
         self.settings.app.n_cached_pages = int(self.n_cached_pages.get_value())
@@ -728,6 +771,33 @@ class PerformancePageGroup(Adw.PreferencesGroup):
 
         # Save
         self.settings.save_json()
+
+    def on_animation_pause_mode_changed(self, *args):
+        self.settings.app.animation_pause_mode = self.get_selected_pause_mode()
+
+        # Save
+        self.settings.save_json()
+
+        self.sync_idle_row_sensitivity()
+        self.push_to_presence_monitor()
+
+    def on_animation_idle_minutes_changed(self, *args):
+        self.settings.app.animation_idle_minutes = int(self.animation_idle_minutes.get_value())
+
+        # Save
+        self.settings.save_json()
+
+        self.push_to_presence_monitor()
+
+    def push_to_presence_monitor(self):
+        # Runtime push, same pattern as the FPS-warning row's fan-out to the
+        # media players: the monitor re-evaluates immediately instead of
+        # waiting for the next lock/idle event.
+        if gl.presence_monitor is not None:
+            gl.presence_monitor.set_mode(
+                self.settings.app.animation_pause_mode,
+                self.settings.app.animation_idle_minutes,
+            )
 
 
 class SystemPage(Adw.PreferencesPage):
