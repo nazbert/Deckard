@@ -3170,6 +3170,12 @@ GIF_BG_BUDGET_MB = 128
 # a pathological page cannot outweigh the whole #142 budget by itself.
 GIF_KEY_BUDGET_MB = 32
 
+# Raw DECKARD_GIF_KEY_BUDGET_MB values already warned about, so a bad (or
+# pathologically small) setting costs ONE log line per distinct value for the
+# life of the process instead of one per GIF key per page load. Same
+# once-per-distinct-value discipline as cache_budget._warned_ceiling_values.
+_warned_gif_budget_values: "set[str]" = set()
+
 
 def gif_key_budget_bytes() -> int:
     """Byte ceiling for one key GIF's retained frame list, from
@@ -3183,7 +3189,12 @@ def gif_key_budget_bytes() -> int:
     silently lost its media -- a tuning knob typo must never cost content.
     "Malformed" includes the values float() ACCEPTS but int() cannot take
     ("nan", "inf", "1e400"): they parse, survive the sign test (every nan
-    comparison is False), then raise from int()."""
+    comparison is False), then raise from int().
+
+    A sub-1-MiB budget also warns: it is smaller than a SINGLE fitted frame
+    at any tile size, so every alpha GIF in the app silently loses its
+    transparency to the bounded route. That is a legitimate setting (the
+    knob is "bound this hard"), but it is never what a typo'd "0.5" meant."""
     raw = os.environ.get("DECKARD_GIF_KEY_BUDGET_MB")
     if raw is None:
         return GIF_KEY_BUDGET_MB * 1024 * 1024
@@ -3193,21 +3204,38 @@ def gif_key_budget_bytes() -> int:
     except ValueError:
         usable = False
     if not usable:
-        log.warning(
-            f"Ignoring malformed DECKARD_GIF_KEY_BUDGET_MB={raw!r}; "
-            f"using the default {GIF_KEY_BUDGET_MB}"
-        )
+        if raw not in _warned_gif_budget_values:
+            _warned_gif_budget_values.add(raw)
+            log.warning(
+                f"Ignoring malformed DECKARD_GIF_KEY_BUDGET_MB={raw!r}; "
+                f"using the default {GIF_KEY_BUDGET_MB}"
+            )
         return GIF_KEY_BUDGET_MB * 1024 * 1024
     if mb < 0:
         return 0
+    if 0 < mb < 1 and raw not in _warned_gif_budget_values:
+        _warned_gif_budget_values.add(raw)
+        log.warning(
+            f"DECKARD_GIF_KEY_BUDGET_MB={raw!r} is under 1 MiB -- smaller than one "
+            f"fitted GIF frame, so EVERY alpha-carrying GIF key will drop its "
+            f"transparency for the bounded mp4 route"
+        )
     return int(mb * 1024 * 1024)
 
 
 def contained_size(source_size: "tuple[int, int]", max_size: "tuple[int, int]") -> "tuple[int, int]":
-    """The dimensions ImageOps.contain would land on: aspect-preserving,
+    """The dimensions ImageOps.contain lands on: aspect-preserving,
     SHRINK-ONLY (a source already inside max_size keeps its own size --
     upscaling would multiply retained memory for zero display benefit,
     mem-plan P2.3).
+
+    "Lands on" to within a pixel, not bit-for-bit: ImageOps.contain rounds
+    each axis independently (round(w * scale) with its own recomputed
+    scale), so the two disagree by 1 px on one axis for a small minority of
+    extreme aspect ratios (94 of 1.1M source/target pairs surveyed). The
+    routes below share THIS function, so they cannot drift from each other;
+    the residual is a 1-px difference from what a raw ImageOps.contain call
+    elsewhere would produce.
 
     Shared by the frame-list decode (its pre-decode budget estimate) and the
     video route (the tile size it asks the mp4 registry to build), so a GIF's
@@ -3784,10 +3812,20 @@ class KeyGIF(SingleKeyAsset):
         return len(self._cum_delays) if self.video_cache is not None else 0
 
     def get_next_frame(self, now: float = None) -> Image.Image:
+        # ONE snapshot of the timeline for the whole tick. close() rebinds
+        # these to fresh empty containers from the teardown thread, so
+        # re-reading them mid-arithmetic could divide by a _total_delay that
+        # was non-zero at the guard and zero at the modulo (reproduced:
+        # ~2e-5 per close at the default switch interval -- bounded by the
+        # media tick's own guard, but it costs a dropped tick and a 250ms
+        # backoff exactly at page teardown), or index a timeline emptied
+        # after its length was read.
+        cum_delays = self._cum_delays
+        total_delay = self._total_delay
         n = self._frame_count()
         if n == 0:
             return None
-        if n == 1 or self._total_delay <= 0:
+        if n == 1 or total_delay <= 0:
             # Single-frame GIF, or no usable timing info: nothing to pick.
             self.active_frame = 0
             return self._frame_at(0)
@@ -3802,14 +3840,14 @@ class KeyGIF(SingleKeyAsset):
             # switch, suspend): shift the timebase across the gap so playback
             # resumes near where it left off instead of fast-forwarding
             # through the whole gap (mirrors BackgroundVideo's gap clamp).
-            frame_period = self._cum_delays[0] if self._cum_delays else self._total_delay / n
+            frame_period = cum_delays[0] if cum_delays else total_delay / n
             self._play_start += (now - self._last_frame_tick) - frame_period
         self._last_frame_tick = now
 
         elapsed = now - self._play_start
-        t = elapsed % self._total_delay if self.loop else min(elapsed, self._total_delay)
+        t = elapsed % total_delay if self.loop else min(elapsed, total_delay)
 
-        frame = bisect.bisect_right(self._cum_delays, t)
+        frame = bisect.bisect_right(cum_delays, t)
         if frame >= n:
             frame = n - 1  # guard the end: float-edge / non-loop clamp landing on t == total
         self.active_frame = frame
@@ -5552,13 +5590,23 @@ class ControllerKey(ControllerInput):
                     elif is_video(path):
                         key_gif = None
                         if os.path.splitext(path)[1].lower() == ".gif":
-                            # KeyGIF decodes eagerly and RAISES on a corrupt or
+                            # KeyGIF parses eagerly and RAISES on a corrupt or
                             # truncated GIF, where InputVideo's detached cv2
                             # builder fails soft. Unguarded, one bad asset in a
                             # page's config took the whole page load down with
                             # it (issue #199) -- the set_media route got this
                             # try/except in !93, this one did not. Same policy,
                             # same fallback: the opaque cv2 path.
+                            #
+                            # Scope, stated honestly: this contains the
+                            # GIF-SPECIFIC parse/decode failures. It does not
+                            # make page load total -- InputVideo's own
+                            # constructor stats and hashes the file, so the
+                            # EACCES/EIO/ENOENT class still escapes from the
+                            # fallback itself, exactly as it does for every
+                            # non-GIF video on this route (pre-existing; the
+                            # whole media block would need the guard to close
+                            # that, which is not this issue's scope).
                             try:
                                 key_gif = KeyGIF(
                                     controller_key=self,
