@@ -3667,11 +3667,20 @@ class LabelManager:
 
         self._scroll_widths_cache = None
         self._has_visible_labels_cache = None
+        self.update_label_editor()
+        if update:
+            self.update_label(position)
+
+    def update_label_editor(self):
+        """Kept as the caller-facing name; the widget work is the adapter's.
+
+        Page.set_label_* calls this on every label styling change (8 sites in
+        PageManagement/Page.py) and the trailing update_input repaint runs
+        after it -- so this must stay a plain forwarder that never raises.
+        """
         ui_port.get().on_input_visuals_changed(
             self.controller_input.deck_controller, self.controller_input.identifier,
             self.controller_input.state, "labels")
-        if update:
-            self.update_label(position)
 
     def get_use_page_label_properties(self, position: str) -> dict:
         if self.page_labels.get(position) is None:
