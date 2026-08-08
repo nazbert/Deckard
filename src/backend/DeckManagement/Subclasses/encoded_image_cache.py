@@ -12,13 +12,17 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
-import threading
-from collections import OrderedDict, deque
+from collections import deque
+
+from src.backend.DeckManagement.Subclasses.byte_lru_cache import ByteLRUCache
 
 
-class EncodedImageCache:
+class EncodedImageCache(ByteLRUCache):
     """LRU of encoded (device-native) key images, capped by total byte size.
     Thread-safe; values must be immutable bytes.
+
+    The LRU/byte-accounting core lives in `ByteLRUCache`; this class is that
+    core plus a doorkeeper.
 
     Admission into the real cache is gated by a small doorkeeper ring
     (mem-plan P2.5): a key only earns a cache slot on its SECOND sighting.
@@ -42,43 +46,19 @@ class EncodedImageCache:
     DOORKEEPER_SIZE = 512
 
     def __init__(self, max_bytes: int):
-        self._max_bytes = max_bytes
-        self._lock = threading.Lock()
-        self._entries: "OrderedDict[object, bytes]" = OrderedDict()
-        self._total_bytes = 0
+        super().__init__(max_bytes)
         # Doorkeeper bookkeeping: a bounded FIFO of recently-seen keys (set
         # for O(1) membership, deque to know which to evict from the set
         # once the ring is full).
         self._doorkeeper_seen: set = set()
         self._doorkeeper_order: "deque" = deque()
 
-    def get(self, key) -> bytes | None:
-        with self._lock:
-            data = self._entries.get(key)
-            if data is not None:
-                self._entries.move_to_end(key)
-            return data
-
-    def put(self, key, data: bytes) -> None:
-        with self._lock:
-            if key not in self._entries and not self._admit(key):
-                # First sighting of a key that isn't already cached: record
-                # it in the doorkeeper only, don't spend a real cache slot.
-                return
-            old = self._entries.pop(key, None)
-            if old is not None:
-                self._total_bytes -= len(old)
-            self._entries[key] = data
-            self._total_bytes += len(data)
-            while self._total_bytes > self._max_bytes and self._entries:
-                _, evicted = self._entries.popitem(last=False)
-                self._total_bytes -= len(evicted)
-
     def _admit(self, key) -> bool:
         """Doorkeeper check-and-record, called with `_lock` already held.
         Returns True once `key` has been seen before (this sighting is its
         second or later -- let it into the real cache); records a first
-        sighting and returns False otherwise."""
+        sighting and returns False otherwise. A False return means put()
+        spends a bookkeeping slot instead of a real cache slot."""
         if key in self._doorkeeper_seen:
             return True
         self._doorkeeper_seen.add(key)
@@ -88,18 +68,10 @@ class EncodedImageCache:
             self._doorkeeper_seen.discard(oldest)
         return False
 
-    def clear(self) -> None:
-        """Drops every cached entry (plan P1.3 close() step 7 / P2.5): a
-        torn-down deck's encode memo must not keep referencing composited
-        frames from a dead controller until LRU eviction eventually gets
-        around to it -- and a background content change (P2.5) orphans
-        every entry the exact same way, since they're all keyed against the
-        OLD background's composited pixels/hashes. Also resets the
+    def _on_clear_locked(self) -> None:
+        """clear() (plan P1.3 close() step 7 / P2.5) also resets the
         doorkeeper: stale "seen" bookkeeping from the old content must not
         let one of its keys skip straight past admission if it ever
         coincidentally recurred under the new content."""
-        with self._lock:
-            self._entries.clear()
-            self._total_bytes = 0
-            self._doorkeeper_seen.clear()
-            self._doorkeeper_order.clear()
+        self._doorkeeper_seen.clear()
+        self._doorkeeper_order.clear()
