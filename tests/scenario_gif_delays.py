@@ -142,11 +142,48 @@ def check_mixed_durations_normalized() -> None:
         gif.close()
 
 
+def check_close_leaves_late_ticks_harmless() -> None:
+    """(d, issue #199) close() must leave the object tickable. Teardown races
+    the media loop, so a tick can land after close(); the old close() set
+    frames/frame_delays to None and then `del`eted them, so the very next
+    get_next_frame() raised (TypeError on len(None), AttributeError once the
+    attributes were gone) instead of quietly returning nothing. Empty
+    containers make the late tick, get_frame_delay(), get_raw_image() and a
+    double close() all no-ops by construction."""
+    path = _make_gif(os.path.join(gl.DATA_PATH, "media", "close_noop.gif"),
+                     [100, 100, 100])
+    gif = _decode(path)
+    T0 = 1_000_000.0
+    gif.get_next_frame(now=T0)
+
+    gif.close()
+
+    assert gif.frames == [] and gif.frame_delays == [] and gif._cum_delays == [], (
+        f"close() must swap in fresh EMPTY containers, got "
+        f"{gif.frames!r} / {gif.frame_delays!r} / {gif._cum_delays!r}"
+    )
+    assert gif.get_next_frame(now=T0 + 0.25) is None, (
+        "a media tick after close() must return None, not a frame"
+    )
+    assert gif.get_raw_image() is None, "get_raw_image() after close() must be None"
+    # Falls back to the fps-based delay rather than indexing an empty list.
+    assert gif.get_frame_delay() == 1.0 / gif.fps, (
+        f"get_frame_delay() after close() must fall back to 1/fps, got {gif.get_frame_delay()}"
+    )
+    assert gif.budget_bytes() == 0, (
+        f"a closed GIF holds no frames -- its census share must be 0, got {gif.budget_bytes()}"
+    )
+    gif.close()  # idempotent
+    assert gif.get_next_frame(now=T0 + 0.5) is None
+    print("PASS: close() empties the frame list; late ticks and double close are no-ops")
+
+
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_gif_delays")
     check_all_zero_durations_animate()
     check_40ms_frames_kept()
     check_mixed_durations_normalized()
+    check_close_leaves_late_ticks_harmless()
     print("PASS: scenario_gif_delays")
 
 

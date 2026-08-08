@@ -3557,10 +3557,27 @@ class KeyGIF(SingleKeyAsset):
         return self.get_next_frame()
     
     def close(self) -> None:
-        self.frames = None
-        self.frame_delays = None
-        del self.frames
-        del self.frame_delays
+        """Drops the retained frame list (the whole footprint) and leaves the
+        object safely tickable.
+
+        Swaps in fresh EMPTY containers instead of None/del (issue #199): a
+        media tick can land after close() -- teardown races the media loop --
+        and get_next_frame()/get_frame_delay() read len(self.frames) /
+        len(self.frame_delays) on every tick, where `None` raised TypeError
+        and the deleted attribute raised AttributeError. With empty lists the
+        n == 0 arm already returns None, so a late tick and a double close are
+        both no-ops by construction (GifBackground.close()'s pattern -- the
+        two providers stay in lockstep).
+
+        Also leaves the #142 census immediately: the frames are gone, so the
+        registered byte count must stop being reported rather than linger
+        until GC drops the weak registration."""
+        self.frames = []
+        self.frame_delays = []
+        self._cum_delays = []
+        self._total_delay = 0.0
+        self._frames_bytes = 0
+        cache_budget.unregister(self)
 
 # Shared, context-independent text measurement for label layout / scroll
 # detection: textbbox only computes layout (it never touches the pixels), and
@@ -5253,13 +5270,28 @@ class ControllerKey(ControllerInput):
                         ), update=False)
 
                     elif is_video(path):
+                        key_gif = None
                         if os.path.splitext(path)[1].lower() == ".gif":
-                            state.set_video(KeyGIF(
-                                controller_key=self,
-                                gif_path=path,
-                                loop=media.loop,
-                                fps=media.fps
-                            )) # GIFs always update
+                            # KeyGIF decodes eagerly and RAISES on a corrupt or
+                            # truncated GIF, where InputVideo's detached cv2
+                            # builder fails soft. Unguarded, one bad asset in a
+                            # page's config took the whole page load down with
+                            # it (issue #199) -- the set_media route got this
+                            # try/except in !93, this one did not. Same policy,
+                            # same fallback: the opaque cv2 path.
+                            try:
+                                key_gif = KeyGIF(
+                                    controller_key=self,
+                                    gif_path=path,
+                                    loop=media.loop,
+                                    fps=media.fps
+                                )
+                            except Exception:
+                                log.opt(exception=True).warning(
+                                    f"GIF decode failed during page load, falling "
+                                    f"back to the opaque cv2 path: {path}")
+                        if key_gif is not None:
+                            state.set_video(key_gif) # GIFs always update
                         else:
                             state.set_video(InputVideo(
                                 controller_input=self,
