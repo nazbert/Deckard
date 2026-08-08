@@ -29,9 +29,10 @@ true, so everything the media loop's gate depends on is pinned here:
   8. the detector is built lazily -- the default pause mode must not open a
      system-bus connection at all -- and exactly once across mode toggles,
   9. the logind idle detector over a FAKE system bus: the session resolver's
-     GetSession/GetSessionByPID order, the PropertiesChanged subscription and
-     its interface filter, the initial-state read (a session already idle at
-     startup must gate without waiting for a signal that may never come), and
+     GetSession/GetSessionByPID(caller) order, the PropertiesChanged
+     subscription and its interface filter, the initial-state read (a session
+     already idle at startup must gate without waiting for a signal that may
+     never come), and
      the inert-on-GLib.Error posture that keeps lock gating alive when logind
      is unreachable.
 
@@ -477,7 +478,11 @@ def check_detector_resolves_by_session_id() -> None:
     print("PASS: detector resolves via GetSession and seeds the initial idle state")
 
 
-def check_detector_falls_back_to_pid() -> None:
+def check_detector_falls_back_to_caller_pid() -> None:
+    """Without XDG_SESSION_ID the resolver asks logind to resolve the CALLER
+    (pid 0, from bus credentials) rather than passing os.getpid() -- which
+    under flatpak is a sandbox-namespace number the host logind would read as
+    a host PID."""
     bus = FakeSystemBus(idle_hint=False)
     previous = with_session_id(None)
     try:
@@ -490,10 +495,12 @@ def check_detector_falls_back_to_pid() -> None:
         f"without XDG_SESSION_ID the resolver must fall back to GetSessionByPID, "
         f"got {method}"
     )
-    assert args == (os.getpid(),), f"GetSessionByPID called with {args}"
+    assert args == (0,), (
+        f"GetSessionByPID must ask for the caller (0), not a namespaced pid: {args}"
+    )
     assert monitor.is_quiescent() is False
     monitor.stop()
-    print("PASS: detector falls back to GetSessionByPID")
+    print("PASS: detector falls back to GetSessionByPID(0) -- the caller, not our pid")
 
 
 def check_detector_dispatches_property_changes() -> None:
@@ -571,7 +578,7 @@ def main() -> None:
     check_fan_out_is_snapshot_and_contained()
     check_detector_is_built_lazily()
     check_detector_resolves_by_session_id()
-    check_detector_falls_back_to_pid()
+    check_detector_falls_back_to_caller_pid()
     check_detector_dispatches_property_changes()
     check_detector_is_inert_on_dbus_failure()
 

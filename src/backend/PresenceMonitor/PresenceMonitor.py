@@ -416,8 +416,18 @@ class LogindIdleDetector:
             method = "GetSession"
             args = GLib.Variant("(s)", (session_id,))
         else:
+            # PID 0 means "resolve the CALLER, from its bus credentials".
+            # os.getpid() would be a sandbox-namespace number under flatpak,
+            # which the host's logind reads as a host PID -- either unknown or,
+            # worse, some unrelated process's session. Verified against a live
+            # logind (systemd 261): pid 0 takes the caller-credentials branch,
+            # answering "Caller does not belong to any known session" where a
+            # numeric pid answers "PID <n> does not belong to any known
+            # session"; it is not rejected as an invalid argument. Same shape
+            # the #195 logind lock detector wants, for the shared resolver the
+            # two are meant to be deduplicated onto.
             method = "GetSessionByPID"
-            args = GLib.Variant("(u)", (os.getpid(),))
+            args = GLib.Variant("(u)", (0,))
 
         reply = self.bus.call_sync(
             LOGIND_BUS_NAME,
