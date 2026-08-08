@@ -24,9 +24,12 @@ Covers:
       before the window existed.
 """
 import os
+from types import SimpleNamespace
 
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 import globals as gl
+
+from loguru import logger as log
 
 from src.backend import ui_port
 from src.backend.DeckManagement.InputIdentifier import Input
@@ -165,12 +168,39 @@ def check_page_change_follows_action_init() -> None:
         fixtures.teardown(controller)
 
 
+class _RaisingButton:
+    """A widget whose set_image blows up the way a torn-down/rebuilt one does
+    (image2pixbuf on a freed surface, a disposed GtkPicture, ...)."""
+
+    def set_image(self, image):
+        raise RuntimeError("widget tree is being torn down")
+
+
+def _fake_key_child(button):
+    return SimpleNamespace(
+        page_settings=SimpleNamespace(
+            deck_config=SimpleNamespace(grid=SimpleNamespace(buttons=[[button]]))
+        )
+    )
+
+
 def check_every_port_method_is_headless_safe() -> None:
     """No window, no gl.app: every method must be a quiet no-op."""
     from src.windows.ui_adapter import GtkUIAdapter
 
     identifier = Input.Key("0x0")
     controller = object()
+
+    # Anything the adapter logs at WARNING+ is a failure for the quiet-no-op
+    # half below: push_input_image's broad except REPORTS through the log, so
+    # without this sink a guard that silently degraded into the except path
+    # would look identical to a guard that worked.
+    warnings: list = []
+    sink_id = log.add(
+        lambda msg: warnings.append(msg.record["message"]),
+        level="WARNING",
+        filter=lambda record: record["name"] == "src.windows.ui_adapter",
+    )
 
     def exercise(port, label: str) -> None:
         try:
@@ -198,7 +228,67 @@ def check_every_port_method_is_headless_safe() -> None:
             raise AssertionError(f"{label}: port method raised headless: {e!r}")
 
     exercise(ui_port.UIPort(), "null port")
-    exercise(GtkUIAdapter(), "unattached GtkUIAdapter")
+    adapter = GtkUIAdapter()
+    exercise(adapter, "unattached GtkUIAdapter")
+
+    assert not warnings, (
+        "the unattached adapter logged warnings while being exercised -- a "
+        f"guard degraded into push_input_image's containment path: {warnings}"
+    )
+
+    # The adapter's public sync methods are thin GLib.idle_add wrappers, and
+    # pygobject SWALLOWS exceptions raised inside idle callbacks -- so the
+    # exercise() pass above proves almost nothing about them: with no main
+    # loop the _run_* bodies (which hold every real guard) never execute at
+    # all. Call those bodies directly.
+    #
+    # Each must also return False: a GLib idle/timeout callback that returns
+    # anything truthy re-arms itself forever.
+    run_bodies = [
+        ("_run_page_changed", (controller,)),
+        ("_run_input_visuals_changed", (controller, identifier, 0, "labels")),
+        ("_run_input_visuals_changed", (controller, identifier, 0, "layout")),
+        ("_run_input_visuals_changed", (controller, identifier, 0, "background")),
+        ("_run_input_states_changed", (controller, identifier, 3)),
+        ("_run_input_state_selected", (controller, identifier, 1)),
+        ("_run_set_low_fps_warning", (controller, True)),
+        ("_run_deck_layout_changed", (controller,)),
+        ("_flush_touchscreen", (controller, Input.Touchscreen("sd-plus"))),
+    ]
+    for name, args in run_bodies:
+        try:
+            result = getattr(adapter, name)(*args)
+        except Exception as e:
+            raise AssertionError(
+                f"GtkUIAdapter.{name} raised with no window attached: {e!r} -- "
+                "headless this is invisible (pygobject swallows idle-callback "
+                "exceptions), in the app it is a silently dead UI update"
+            )
+        assert result is False, (
+            f"GtkUIAdapter.{name} returned {result!r}, expected False -- a "
+            "GLib idle/timeout callback that returns truthy re-arms forever"
+        )
+
+    # An unknown aspect is a programming error, not a crash: it logs and
+    # returns, so it is checked separately from the no-warning assertion.
+    assert adapter._run_input_visuals_changed(controller, identifier, 0, "bogus") is False
+
+    # push_input_image's except path (the containment that keeps a failing
+    # preview from throttling the media writer). Exercised with a widget that
+    # raises, since every OTHER refusal returns False through a guard and
+    # never reaches the except at all.
+    adapter.bind(controller, _fake_key_child(_RaisingButton()))
+    adapter._window_mapped = True
+    warnings.clear()
+    assert adapter.push_input_image(controller, identifier, object()) is False, (
+        "a raising widget must come back as False so the engine dirty-marks; "
+        "anything else silently loses the frame"
+    )
+    assert warnings, (
+        "the containment path swallowed a widget failure without logging"
+    )
+    adapter.unbind(controller)
+    log.remove(sink_id)
 
     # on_deck_layout_changed ran inline on the main thread, which is the path
     # that imports KeyGrid lazily -- proving the ui_adapter <-> KeyGrid import
