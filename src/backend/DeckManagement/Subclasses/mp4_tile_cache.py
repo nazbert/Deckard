@@ -34,6 +34,7 @@ from PIL import Image, ImageEnhance, ImageOps
 from loguru import logger as log
 
 import globals as gl
+from src.backend.DeckManagement.Subclasses import cache_budget
 
 VID_CACHE = os.path.join(gl.DATA_PATH, "cache", "videos")
 os.makedirs(VID_CACHE, exist_ok=True)
@@ -185,6 +186,49 @@ class Mp4FrameCache:
 
         if not self._open_existing_cache():
             self._open_source()
+
+        # #142 census, accounting-only: these hold real image RAM but are
+        # never evictable -- dropping the one-frame memo would force a
+        # re-decode every media tick, and the decoder buffers are not ours
+        # to free. Registered last so budget_bytes() can never see a
+        # half-constructed instance.
+        cache_budget.register(
+            self,
+            label=f"video_readers:{self.video_md5[:8]}@{self.out_size[0]}x{self.out_size[1]}",
+            evictable=False,
+        )
+
+    # Flat allowance per open cv2.VideoCapture. FFmpeg's decoder internals
+    # (packet buffers, reference frames, swscale contexts) are opaque to
+    # Python, so this is an honest constant rather than a measurement -- the
+    # census's job is to show that video readers hold SOMETHING and how their
+    # count moves, not to price libavcodec.
+    CAPTURE_OVERHEAD_BYTES = 2 * 1024 * 1024
+
+    def budget_bytes(self) -> int:
+        """Estimated image RAM held by this reader (#142 census).
+
+        LOCK-FREE ON PURPOSE. `self.lock` is held across whole decode, seek
+        and build-frame operations, so taking it here would let one slow
+        source stall the budget daemon (and, through it, every deck's
+        eviction). Every read below is a single attribute load -- atomic
+        under the GIL -- snapshotted into a local so a concurrent close()
+        can null the original without this raising. A torn read costs one
+        diagnostic sample a stale number, which is the correct trade for a
+        census."""
+        payload = self.last_payload
+        total = 0
+        if payload is not None:
+            frames = payload if isinstance(payload, (list, tuple)) else (payload,)
+            for frame in frames:
+                try:
+                    total += frame.width * frame.height * len(frame.getbands())
+                except Exception:
+                    continue
+        for cap in (self.cap, self._cache_cap):
+            if cap is not None:
+                total += self.CAPTURE_OVERHEAD_BYTES
+        return total
 
     def get_source_fps(self) -> float:
         """Native fps of the source video; None if unknown. The cache mp4 is
@@ -511,6 +555,11 @@ class Mp4FrameCache:
             pass
 
     def close(self) -> None:
+        # Out of the census the moment it is closed, rather than whenever GC
+        # gets to the weak registry. A closed reader would report only its
+        # (now released) captures anyway; this just keeps the reader COUNT
+        # honest between teardown and collection.
+        cache_budget.unregister(self)
         with self.lock:
             if self.cap is not None:
                 self.cap.release()

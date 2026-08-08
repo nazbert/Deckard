@@ -3078,6 +3078,26 @@ class KeyGIF(SingleKeyAsset):
         )
         self._total_delay: float = self._cum_delays[-1] if self._cum_delays else 0.0
 
+        # #142 census, accounting-only. The frame list is the largest image
+        # holder in the app with NO byte cap at all: P2.3 caps each frame at
+        # 2x tile, but nothing caps the frame count or the number of GIFs, so
+        # a 32-key page of 200-frame GIFs is ~0.9 GiB -- roughly 10x the
+        # entire evictable budget the ceiling governs. Capping it means
+        # re-architecting decode (opaque GIFs through Mp4FrameCache, the
+        # deferred follow-up noted above); this makes it VISIBLE first, so
+        # that work can be sized against real pages instead of arithmetic.
+        # Never evictable: these frames ARE the asset's per-frame memo.
+        self._frames_bytes = sum(
+            frame.width * frame.height * len(frame.getbands()) for frame in self.frames
+        )
+        cache_budget.register(
+            self, label=f"gif_frames:{os.path.basename(self.gif_path)}", evictable=False)
+
+    def budget_bytes(self) -> int:
+        """Pixel bytes of the retained frame list (#142 census). Computed
+        once at decode time: the list is immutable for this object's life."""
+        return self._frames_bytes
+
     def get_next_frame(self, now: float = None) -> Image.Image:
         n = len(self.frames)
         if n == 0:

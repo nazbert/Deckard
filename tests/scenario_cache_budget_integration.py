@@ -21,7 +21,9 @@ Covers:
       evicted around it.
   (d) the native tile cache's min-age tracks the background video's loop
       duration, and reverts when the video goes away.
-  (e) closing a deck zeroes its share of the budget.
+  (e) the accounting-only census registrants (video readers, GIF frame
+      lists) are visible in totals() and never counted against the ceiling.
+  (f) closing a deck zeroes its share of the budget.
 """
 import fixtures  # noqa: F401  (isolated data dir + sys.path, house convention)
 
@@ -196,6 +198,22 @@ def check_tile_cache_min_age_tracks_the_video(controller) -> None:
         f"{controller.native_tile_cache.budget_min_age_s}"
     )
 
+    # The reader's census entry: accounting-only, so it is visible in
+    # totals() but must never be counted against the ceiling.
+    controller.background.update_tiles()
+    assert not video.budget_evictable, "video readers are census-only, never evictable"
+    # Read the governed sum FIRST: the census is a superset, so this
+    # comparison can only be made safer by anything that lands in between.
+    evictable = cache_budget.evictable_bytes()
+    census = cache_budget.totals()
+    assert census.get("video_readers", 0) > 0, (
+        f"an open video reader must show up in the census: {census!r}"
+    )
+    assert evictable <= census.get("encode_memo", 0) + census.get("native_tiles", 0), (
+        f"census-only registrants must not leak into the quantity the ceiling "
+        f"governs: {evictable} vs {census!r}"
+    )
+
     still = BackgroundImage(controller, Image.new("RGB", (16, 16), (10, 20, 30)))
     controller.background.set_image(still, update=False)
     assert controller.native_tile_cache.budget_min_age_s == cache_budget.DEFAULT_MIN_AGE_S, (
@@ -204,6 +222,36 @@ def check_tile_cache_min_age_tracks_the_video(controller) -> None:
     )
 
     print("PASS: the native tile cache's min-age tracks the background video's loop duration")
+
+
+def check_gif_frames_census(controller) -> None:
+    """The GIF frame list is the largest image holder with no byte cap at
+    all. It is deliberately NOT evictable (the list IS the asset's per-frame
+    memo); this census column is what will let the capping follow-up be
+    sized against real pages rather than arithmetic."""
+    from src.backend.DeckManagement.DeckController import KeyGIF
+
+    path = os.path.join(gl.DATA_PATH, "media", "budget_census.gif")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    frames = [Image.new("RGBA", (240, 240), (i * 20 % 256, 30, 30, 255)) for i in range(8)]
+    frames[0].save(path, format="GIF", save_all=True, append_images=frames[1:],
+                   duration=80, loop=0, disposal=2)
+
+    key = sorted(controller.inputs[Input.Key], key=lambda k: k.index)[0]
+    gif = KeyGIF(controller_key=key, gif_path=path, fps=30, loop=True)
+    try:
+        expected = sum(f.width * f.height * len(f.getbands()) for f in gif.frames)
+        assert expected > 0, "fixture sanity: the GIF decoded to nothing"
+        assert not gif.budget_evictable, "GIF frames are census-only, never evictable"
+        assert cache_budget.totals().get("gif_frames", 0) >= expected, (
+            f"the decoded frame list must be visible in the census: "
+            f"{cache_budget.totals()!r} (expected >= {expected})"
+        )
+        assert gif.budget_bytes() == expected
+    finally:
+        del gif
+
+    print("PASS: decoded GIF frame lists are visible in the census")
 
 
 def check_close_zeroes_the_share(controller) -> None:
@@ -243,6 +291,7 @@ def main() -> None:
     try:
         check_registration_and_cross_deck_eviction(busy, idle)
         check_tile_cache_min_age_tracks_the_video(busy)
+        check_gif_frames_census(busy)
         check_close_zeroes_the_share(idle)
     finally:
         _set_ceiling(None)
