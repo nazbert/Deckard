@@ -472,7 +472,7 @@ class FlatpakDeckDisconnectThread(threading.Thread):
             for controller in list(self.deck_manager.deck_controller):
                 if not controller.deck.connected():
                     self.deck_manager.remove_controller(controller)
-                    # Was an UNGUARDED, off-main gl.app.main_win call: it
+                    # Was an UNGUARDED, off-main reach into the window: it
                     # crashed this poll thread outright before the window
                     # existed.
                     ui_port.get().refresh_deck_availability()

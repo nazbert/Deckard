@@ -72,7 +72,6 @@ from typing import TYPE_CHECKING, cast
 
 from src.backend.PluginManager.ActionCore import ActionCore
 if TYPE_CHECKING:
-    from src.windows.mainWindow.elements.DeckStackChild import DeckStackChild
     from src.backend.DeckManagement.DeckManager import DeckManager
 
 # Import globals
@@ -2289,7 +2288,7 @@ class DeckController:
         if self.active_page is not None:
             self.load_page(self.active_page, allow_reload=True)
     
-    def get_own_deck_stack_child(self) -> "DeckStackChild":
+    def get_own_deck_stack_child(self):
         """Deprecated in-process shim (#141): kept for out-of-tree plugins.
 
         The engine no longer caches or resolves widgets -- the attached UI
@@ -4348,12 +4347,12 @@ class ControllerInputState:
             if isinstance(action, ActionOutdated):
                 if show_notifications:
                     plugin_id = gl.plugin_manager.get_plugin_id_from_action_id(action.id)
-                    gl.app.send_outdated_plugin_notification(plugin_id)
+                    ui_port.get().notify_plugin_problem(plugin_id, "outdated")
                 continue
             if isinstance(action, NoActionHolderFound):
                 if show_notifications:
                     plugin_id = gl.plugin_manager.get_plugin_id_from_action_id(action.id)
-                    gl.app.send_missing_plugin_notification(plugin_id)
+                    ui_port.get().notify_plugin_problem(plugin_id, "missing")
                 continue
 
             # parsed_event = event
@@ -4598,9 +4597,9 @@ class ControllerInput:
     def update_state_switcher(self):
         """Kept as the plugin-facing name; the widget work is the adapter's.
 
-        Was an UNGUARDED, un-idled `gl.app.main_win.sidebar...` call reachable
-        from plugin/action threads -- an AttributeError crash before the
-        window existed, and an off-main widget mutation after it.
+        Was an UNGUARDED, un-idled reach into the window's sidebar from
+        plugin/action threads -- an AttributeError crash before the window
+        existed, and an off-main widget mutation after it.
         """
         ui_port.get().on_input_states_changed(
             self.deck_controller, self.identifier, len(self.states))
