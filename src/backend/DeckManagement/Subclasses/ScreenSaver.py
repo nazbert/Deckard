@@ -135,6 +135,18 @@ class ScreenSaver:
         kind, payload = self.deck_controller.background.prebuild_from_path(
             self.media_path, fps=self.fps, loop=self.loop
         )
+        if kind == "noop":
+            # A configured screensaver media file that no longer exists
+            # (deleted/moved, or a config carried to another machine)
+            # prebuilds as "noop" -- and apply_prebuilt() early-returns on
+            # "noop" WITHOUT touching the background (issue #144 §1.2). The
+            # underlying page's video capture would then stay open behind
+            # the showing screensaver and keep decoding/compositing at full
+            # rate for the screensaver's entire duration, which is exactly
+            # what showing it is supposed to stop. Nothing renderable
+            # exists in that case, so blank is both what the user sees and
+            # what releases the old page's media.
+            kind = "blank"
 
         with self.deck_controller._load_page_lock:
             # Coalesce: a concurrent second show() (e.g. a manual show()
