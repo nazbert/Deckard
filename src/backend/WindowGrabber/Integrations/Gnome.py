@@ -53,7 +53,10 @@ class Gnome(Integration):
         try:
             self.proxy = Gio.DBusProxy.new_for_bus_sync(
                 Gio.BusType.SESSION,
-                Gio.DBusProxyFlags.NONE,
+                # The extension exports no properties worth caching, and
+                # auto-start would try to D-Bus-activate org.gnome.Shell
+                # itself when the extension is absent.
+                Gio.DBusProxyFlags.DO_NOT_LOAD_PROPERTIES | Gio.DBusProxyFlags.DO_NOT_AUTO_START,
                 None,
                 "org.gnome.Shell",
                 "/org/gnome/Shell/Extensions/StreamController",
@@ -122,4 +125,7 @@ class Gnome(Integration):
         return self.proxy.call_sync(method_name, None, Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
 
     def get_is_connected(self) -> bool:
-        return self.proxy is not None
+        # Live owner check, not just "a proxy was built once": GDBusProxy
+        # tracks the name owner, so this goes False if the Shell (or the
+        # extension's exporter) drops off the bus after connect time.
+        return self.proxy is not None and self.proxy.get_name_owner() is not None
