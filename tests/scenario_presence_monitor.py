@@ -26,7 +26,9 @@ true, so everything the media loop's gate depends on is pinned here:
   7. the constructor seeds mode/minutes from AppSettings AND evaluates against
      the current gl.screen_locked -- without that seed the setting is silently
      off after every restart,
-  8. the logind idle detector over a FAKE system bus: the session resolver's
+  8. the detector is built lazily -- the default pause mode must not open a
+     system-bus connection at all -- and exactly once across mode toggles,
+  9. the logind idle detector over a FAKE system bus: the session resolver's
      GetSession/GetSessionByPID order, the PropertiesChanged subscription and
      its interface filter, the initial-state read (a session already idle at
      startup must gate without waiting for a signal that may never come), and
@@ -407,6 +409,45 @@ def with_session_id(value):
     return previous
 
 
+def check_detector_is_built_lazily() -> None:
+    """The default pause mode reads nothing from logind, so it must not touch
+    the system bus at all -- no connection, no session resolve, no
+    subscription. The detector is built on the opt-in instead, and exactly
+    once however often the mode is toggled."""
+    bus = FakeSystemBus(idle_hint=False)
+    previous = with_session_id("31")
+    try:
+        monitor = PresenceMonitor(mode=MODE_SCREENSAVER, minutes=1, bus=bus)
+        assert monitor.idle_detector is None, (
+            "the default pause mode built a logind detector"
+        )
+        assert bus.calls == [] and bus.subscriptions == [], (
+            f"the default pause mode reached for the bus anyway: {bus.calls}"
+        )
+
+        monitor.set_mode(MODE_SYSTEM_IDLE, 1)
+        detector = monitor.idle_detector
+        assert detector is not None, "opting in did not build the detector"
+        assert len(bus.subscriptions) == 1, (
+            f"the opted-in detector did not subscribe: {bus.subscriptions}"
+        )
+        calls = len(bus.calls)
+
+        # Toggling back keeps it (inert in that mode, and a teardown/rebuild
+        # per toggle would churn the bus); opting in again reuses it.
+        monitor.set_mode(MODE_SCREENSAVER)
+        monitor.set_mode(MODE_SYSTEM_IDLE, 1)
+        assert monitor.idle_detector is detector, "the detector was rebuilt"
+        assert len(bus.subscriptions) == 1 and len(bus.calls) == calls, (
+            f"a mode toggle churned the logind subscription: "
+            f"{len(bus.subscriptions)} subs, {len(bus.calls)} calls"
+        )
+    finally:
+        with_session_id(previous)
+    monitor.stop()
+    print("PASS: the detector is built on the opt-in, once, never by default")
+
+
 def check_detector_resolves_by_session_id() -> None:
     """An already-idle session must gate at construction: the detector reads
     IdleHint/IdleSinceHint up front rather than waiting for a
@@ -528,6 +569,7 @@ def main() -> None:
     check_set_mode_reevaluates()
     check_constructor_seeds_from_settings()
     check_fan_out_is_snapshot_and_contained()
+    check_detector_is_built_lazily()
     check_detector_resolves_by_session_id()
     check_detector_falls_back_to_pid()
     check_detector_dispatches_property_changes()

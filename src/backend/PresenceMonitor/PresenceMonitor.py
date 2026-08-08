@@ -129,12 +129,25 @@ class PresenceMonitor:
         self._last_deck_activity: float = 0.0
         self._deadline: "timer_wheel.TimerHandle" = None
 
-        # Built before the seeding evaluation below so an already-idle
-        # session is reflected in the very first verdict. `idle_detector` is
-        # the harness's opt-out; `bus` is the detector's test seam.
+        # The logind detector is built ON DEMAND, only for the mode that
+        # reads it: in the default pause mode it would open a system-bus
+        # connection (on a startup thread), resolve the session and hold a
+        # PropertiesChanged subscription for every user who never opted in --
+        # surface and cost for a signal nothing consumes. Deferring is
+        # lossless because the detector seeds the monitor from the session's
+        # CURRENT IdleHint whenever it is built (setup_dbus ->
+        # read_initial_state), not only at process start.
+        #
+        # `idle_detector` is the harness's opt-out and `bus` the detector's
+        # test seam; both are captured here for the deferred build. Built
+        # before the seeding evaluation below so an already-idle session is
+        # reflected in the very first verdict.
         self.idle_detector: "LogindIdleDetector" = None
-        if idle_detector:
-            self.idle_detector = LogindIdleDetector(self, bus=bus)
+        self._idle_detector_enabled: bool = bool(idle_detector)
+        self._idle_detector_bus = bus
+        self._detector_lock = threading.Lock()
+        if self._mode == MODE_SYSTEM_IDLE:
+            self._ensure_idle_detector()
 
         # Evaluate once at construction: without this, `system-idle` mode
         # would be silently off after every restart until the first lock or
@@ -205,7 +218,28 @@ class PresenceMonitor:
             self._mode = mode if mode in (MODE_SCREENSAVER, MODE_SYSTEM_IDLE) else MODE_SCREENSAVER
             if minutes is not None:
                 self._minutes = max(1, int(minutes))
+            mode_now = self._mode
+        if mode_now == MODE_SYSTEM_IDLE:
+            # The opt-in is where the detector gets built (see __init__).
+            # Outside the lock: with an injected bus the build wires up inline
+            # and calls straight back into _evaluate(). Switching BACK to the
+            # default mode deliberately keeps the detector -- the rule already
+            # ignores it there, and tearing it down and up again on every
+            # toggle would churn the bus for nothing.
+            self._ensure_idle_detector()
         self._evaluate()
+
+    def _ensure_idle_detector(self) -> None:
+        """Builds the logind idle detector once, if it is wanted at all.
+        Idempotent and safe from any thread. Never call it holding
+        `self._lock` -- an injected bus makes the build call back into
+        `_evaluate()`, which takes it."""
+        if not self._idle_detector_enabled:
+            return
+        with self._detector_lock:
+            if self.idle_detector is not None:
+                return
+            self.idle_detector = LogindIdleDetector(self, bus=self._idle_detector_bus)
 
     def stop(self) -> None:
         """Releases the idle deadline and the D-Bus subscription. Nothing in
