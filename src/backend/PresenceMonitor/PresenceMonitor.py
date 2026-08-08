@@ -149,6 +149,15 @@ class PresenceMonitor:
         object and the rest of the app can never disagree about lock state
         (the constructor's seeding evaluation has no argument to read)."""
         log.debug(f"PresenceMonitor: screen lock -> {active}")
+        if not active:
+            # An unlock is a person at the machine, and it is the only signal
+            # that says so on a session whose idle agent sets `IdleHint` but
+            # never clears it (no resume command configured -- swayidle's
+            # `idlehint` without a matching `resume`). Without this the idle
+            # term would still be measuring from a STALE IdleSinceHint minutes
+            # in the past, so the deck would stay frozen straight through the
+            # unlock, and stay frozen until the next deck press.
+            self._last_deck_activity = time.time()
         self._evaluate()
 
     def on_idle_hint_changed(self, idle_hint: bool, idle_since: float = None) -> None:

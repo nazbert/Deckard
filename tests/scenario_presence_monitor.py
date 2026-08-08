@@ -7,7 +7,10 @@ true, so everything the media loop's gate depends on is pinned here:
   1. mode "screensaver" (the DEFAULT) never reports quiescent, whatever the
      inputs do -- this is what makes the feature opt-in and today's behavior
      bit-for-bit unchanged for everyone who doesn't opt in,
-  2. mode "system-idle": screen lock gates instantly and unlock clears,
+  2. mode "system-idle": screen lock gates instantly and unlock clears --
+     including when a STALE IdleHint outlives the unlock (an idle agent with
+     no resume command), which would otherwise leave the deck frozen for the
+     user who just came back,
   3. idle arithmetic: an IdleHint whose IdleSinceHint is already past the
      residual deadline gates immediately; one that isn't arms a deadline and
      gates when it elapses,
@@ -124,6 +127,32 @@ def check_lock_gates_and_unlock_clears() -> None:
     )
     monitor.stop()
     print("PASS: lock gates, unlock clears, both directions wake every deck")
+
+
+def check_unlock_counts_as_activity() -> None:
+    """`IdleHint` is a hint the desktop maintains, and plenty of setups only
+    ever SET it: `swayidle ... idlehint 300` with no matching `resume`
+    command leaves it true across the unlock. The unlock itself has to count
+    as presence, or the user comes back to a frozen deck and nothing but a
+    deck press will thaw it."""
+    monitor = make_monitor(minutes=1)
+    monitor.on_idle_hint_changed(True, idle_since=time.time() - 600)
+    set_locked(monitor, True)
+    assert monitor.is_quiescent() is True
+
+    set_locked(monitor, False)
+    assert monitor.is_quiescent() is False, (
+        "a stale IdleHint kept the deck gated straight through the unlock"
+    )
+    assert monitor._deadline is not None, (
+        "the residual idle deadline was not re-armed -- the unlock cleared the "
+        "gate but nothing would re-engage it"
+    )
+    # Re-armed from the UNLOCK, not from the (ten-minute-old) IdleSinceHint.
+    time.sleep(0.3)
+    assert monitor.is_quiescent() is False
+    monitor.stop()
+    print("PASS: an unlock counts as activity and outlives a stale IdleHint")
 
 
 def check_idle_arithmetic() -> None:
@@ -450,6 +479,7 @@ def main() -> None:
 
     check_default_mode_never_gates()
     check_lock_gates_and_unlock_clears()
+    check_unlock_counts_as_activity()
     check_idle_arithmetic()
     check_deck_activity_clears_and_rearms()
     check_set_mode_reevaluates()
