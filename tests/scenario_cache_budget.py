@@ -141,27 +141,45 @@ def check_cross_cache_lru_order() -> None:
 def check_min_age_and_floor() -> None:
     """(c) The two things that make a binding ceiling safe: a hot working
     set is protected by age, and no cache is ever emptied out from under
-    playback."""
+    playback.
+
+    Sized so the FLOOR is what ends the shed rather than the drain target:
+    the only cache old enough to shed cannot reach the target by itself, so
+    the pass runs it down to exactly its floor and stops there with the sum
+    still over the ceiling. Sized the other way -- target above floor -- the
+    drain stops on the target and the floor is never consulted at all, which
+    is a check that passes with the floor stop-condition deleted."""
     clock = _FakeClock()
     byte_lru_cache.time = clock
-    _set_ceiling(0.5)  # 512 KiB, far below what gets put in
+    # 256 KiB ceiling -> a 249 KiB target, and floor_cap = ceiling //
+    # (2 * 2 registrants) = 64 KiB, so a 64 KiB floor survives the clamp
+    # intact and sits far ABOVE the target's reach for one cache.
+    _set_ceiling(0.25)
     cache = ByteLRUCache(max_bytes=4 * MIB)
     other = ByteLRUCache(max_bytes=4 * MIB)
     try:
-        # floor_cap = ceiling // (2 * registrants) = 512K // 4 = 128 KiB, so
-        # a 96 KiB floor survives the clamp intact.
-        floor = 96 * 1024
+        floor = 64 * 1024
         cache_budget.register(cache, label="floored:test", floor_bytes=floor)
         cache_budget.register(other, label="other:test", floor_bytes=0)
 
-        _fill(cache, "f", 64, 16 * 1024)   # 1 MiB
-        clock.advance(100.0)              # everything is now past min-age
+        _fill(cache, "f", 64, 16 * 1024)     # 1 MiB, aged past min-age below
+        clock.advance(100.0)
+        _fill(other, "y", 32, 16 * 1024)     # 512 KiB, inside min-age all pass
         cache_budget._drain_once()
 
-        assert cache.total_bytes >= floor, (
-            f"global eviction dug below the floor: {cache.total_bytes} < {floor}"
+        assert cache.total_bytes == floor, (
+            f"the drain must come to rest exactly ON the floor: {cache.total_bytes} "
+            f"!= {floor} (0 means the floor stop-condition never fired)"
         )
-        assert cache.total_bytes < MIB, "fixture sanity: the pass should have evicted something"
+        assert other.total_bytes == 512 * 1024, (
+            "entries younger than min_age_s must survive even a pass that cannot "
+            "reach its target without them"
+        )
+        assert cache_budget.evictable_bytes() > cache_budget.ceiling_bytes(), (
+            f"fixture sanity: the floor -- not the target -- has to be what ended "
+            f"this shed, or nothing ever consults the floor: "
+            f"{cache_budget.evictable_bytes()} <= {cache_budget.ceiling_bytes()}"
+        )
 
         # Degenerate case: refill both caches with entries that are all
         # YOUNGER than min_age_s. Nothing is evictable; the pass must warn

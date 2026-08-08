@@ -147,10 +147,16 @@ def check_registration_and_cross_deck_eviction(busy, idle) -> None:
         f"{cache_budget.evictable_bytes()} > {CEILING_BYTES}"
     )
     # Σ(default floors) is 4 MiB x 4 registrants -- 64x this ceiling. Only the
-    # ceiling // (2 x registrants) clamp makes ANY of this evictable, so an
-    # idle deck below its nominal floor at all is the clamp working.
-    assert _deck_bytes(idle) < cache_budget.DEFAULT_FLOOR_BYTES, (
-        "the floor clamp must keep a small ceiling from rendering the manager inert"
+    # ceiling // (2 x registrants) clamp makes ANY of this evictable, and the
+    # clamped floor is then what the idle deck's memo comes to rest on: it is
+    # the oldest cache in the process, so the drain runs it down until the
+    # floor stops it and takes the rest from the next-oldest. Comparing
+    # against the NOMINAL 4 MiB floor instead would be vacuous -- this whole
+    # fixture is a quarter of a MiB.
+    floor_clamp = CEILING_BYTES // (2 * 4)   # 32 KiB, 4 evictable registrants
+    assert idle.encode_memo.total_bytes >= floor_clamp, (
+        f"global eviction dug the idle deck's memo below its clamped floor: "
+        f"{idle.encode_memo.total_bytes} < {floor_clamp}"
     )
 
     # (c) eviction happened around a live paint path, not through it: the
