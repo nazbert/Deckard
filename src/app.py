@@ -362,7 +362,7 @@ class App(Adw.Application):
 
         gl.plugin_manager.loop_daemon = False
 
-        from GtkHelper.GtkHelper import shutdown_background_pool
+        from src.backend.main_loop import shutdown_background_pool
         shutdown_background_pool()
 
         # Stop accepting plugin-event batches, so a late trigger_event()

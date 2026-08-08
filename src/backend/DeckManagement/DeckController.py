@@ -2128,7 +2128,7 @@ class DeckController:
             if load_background:
                 # Decode the background off the media thread so it overlaps input
                 # loading; the update task below awaits it before keys composite.
-                from GtkHelper.GtkHelper import run_in_background
+                from src.backend.main_loop import run_in_background
                 if self._bg_future is not None:
                     self._bg_future.cancel()
                 bg_future = run_in_background(self.load_background, page, update=False, gen=gen)

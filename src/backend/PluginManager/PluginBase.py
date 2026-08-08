@@ -674,7 +674,7 @@ class PluginBase(rpyc.Service):
                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
             )
 
-        from GtkHelper.GtkHelper import run_on_main
+        from src.backend.main_loop import run_on_main
         run_on_main(_add)
 
     def register_page(self, path: str) -> None:
@@ -704,7 +704,7 @@ class PluginBase(rpyc.Service):
         Returns:
             Gtk.Widget: A Gtk.Image widget.
         """
-        from GtkHelper.GtkHelper import run_on_main
+        from src.backend.main_loop import run_on_main
         return run_on_main(lambda: Gtk.Image(icon_name="view-paged"))
     
     def on_uninstall(self) -> None:
