@@ -189,19 +189,42 @@ def check_min_age_and_floor() -> None:
         other.clear()
         _fill(cache, "young", 64, 16 * 1024)
         _fill(other, "young", 64, 16 * 1024)
-        cache_budget._last_degenerate_warn_ts = 0.0
         evictions_before = cache_budget.eviction_stats()[0]
-        with _WarningSink() as sink:
-            degenerate = cache_budget._drain_once()
+        degenerate_before = cache_budget.degenerate_pass_count()
+        degenerate = cache_budget._drain_once()
         assert degenerate, "a pass with nothing evictable must report itself as degenerate"
         assert cache_budget.eviction_stats()[0] == evictions_before, (
             "nothing may be evicted when every entry is younger than min_age_s"
         )
-        assert sink.matching("nothing is evictable"), (
-            f"the degenerate case must warn loudly; got {sink.messages!r}"
+        # Counted, not sniffed out of the log: the degenerate warning is
+        # rate-limited to one per WAKE_INTERVAL_S and that limiter is shared
+        # with the live daemon, which is free to burn it between any two
+        # statements here.
+        assert cache_budget.degenerate_pass_count() > degenerate_before, (
+            "the degenerate case must be counted (and, rate limiter permitting, "
+            "warn loudly) rather than pass silently"
         )
         assert cache.total_bytes == MIB and other.total_bytes == MIB, (
             "a degenerate pass must leave every cache untouched"
+        )
+
+        # The line itself, pinned separately from the pass. Asked for
+        # repeatedly rather than once: the limiter is shared, so the daemon
+        # can take the grant this scenario just armed -- but not twenty
+        # times running.
+        emitted: list = []
+        with _WarningSink() as sink:
+            for _ in range(20):
+                cache_budget._last_degenerate_warn_ts = 0.0
+                cache_budget._warn_degenerate(2 * MIB, MIB)
+                emitted = sink.matching("nothing is evictable")
+                if emitted:
+                    break
+        assert emitted, (
+            f"degenerate pressure must be loud; got {sink.messages!r}"
+        )
+        assert cache_budget.ENV_CEILING in emitted[0], (
+            f"the warning has to name the knob that fixes it: {emitted[0]!r}"
         )
     finally:
         cache_budget.unregister(cache)

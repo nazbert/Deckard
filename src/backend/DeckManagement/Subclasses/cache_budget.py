@@ -134,6 +134,7 @@ _thread_started = False
 
 _evictions = 0
 _evicted_bytes = 0
+_degenerate_passes = 0
 
 _default_ceiling_cache: int = None
 _warned_ceiling_values: set = set()
@@ -328,6 +329,16 @@ def eviction_stats() -> tuple[int, int]:
         return _evictions, _evicted_bytes
 
 
+def degenerate_pass_count() -> int:
+    """Passes that found real pressure but nothing to evict -- INCLUDING the
+    ones whose warning the log rate-limiter swallowed (one line per
+    WAKE_INTERVAL_S, shared by every caller of _drain_once()). Monotonic for
+    the life of the process; the scenarios assert on it rather than on the
+    log, which cannot distinguish "not degenerate" from "throttled"."""
+    with _lock:
+        return _degenerate_passes
+
+
 # --------------------------------------------------------------------- #
 # The budget thread
 # --------------------------------------------------------------------- #
@@ -480,7 +491,16 @@ def _warn_degenerate(total: int, ceiling: int) -> None:
     set physically larger than the ceiling protects, so evicting anyway
     would just re-encode the frames being painted this instant. Stop, and
     be loud about it -- the local caps still bound the sum at Σ(local caps),
-    and the operator needs to raise the ceiling."""
+    and the operator needs to raise the ceiling.
+
+    The COUNT is kept unconditionally, before the log rate-limiter: the
+    limiter exists so a daemon backing off every 5 s doesn't repeat itself
+    12x a minute, which also means "was this pass degenerate" is not
+    answerable from the log."""
+    global _degenerate_passes
+    with _lock:
+        _degenerate_passes += 1
+
     global _last_degenerate_warn_ts
     now = time.monotonic()
     if now - _last_degenerate_warn_ts < WAKE_INTERVAL_S:
