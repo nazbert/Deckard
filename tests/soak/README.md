@@ -59,21 +59,31 @@ each:
   1) -- Phase 0's read here is a baseline, not a pass/fail gate.
 - **Image-cache ceiling leg (#142)**, 2 h minimum, on a page with a looping
   background video and `soak_driver.py --cycles 200` cycling pages
-  underneath it. Run it with the ceiling deliberately tuned *below* the
-  per-deck local caps so the eviction path is actually exercised:
+  underneath it. The leg has TWO valid regimes, chosen by where the ceiling
+  sits relative to the deck's *active working set* -- measured at **~72 MB**
+  on the reference rig (real pages + noise video; read it off `img_cache_kb`
+  at the default ceiling before choosing):
 
   ```sh
+  # churn-stress regime: ceiling BELOW the working set -- eviction runs
+  # continuously; EXPECT lockstep `img_cache_evictions` and the re-admitted
+  # tripwire in logs.log. Gates: bound never exceeded, fps unaffected.
   SC_MEM_TELEMETRY=1 DECKARD_IMAGE_CACHE_MB=48 .venv/bin/python main.py
+
+  # no-thrash regime: ceiling AT/ABOVE the working set (e.g. 96) -- only
+  # cold entries age out. Gates: evictions rising but NOT in lockstep with
+  # the sample count.
+  SC_MEM_TELEMETRY=1 DECKARD_IMAGE_CACHE_MB=96 .venv/bin/python main.py
   ```
 
-  Gates: every CSV row's `img_cache_kb` at or under the ceiling (one wake's
-  worth of paints of slack, no more); `img_cache_evictions` rising but not
-  in lockstep with the sample count (that would be thrashing -- cross-check
-  `logs.log` for `cache-budget: ... re-admitted`); media-loop fps
+  Shared gates for both regimes: every CSV row's `img_cache_kb` at or under
+  the ceiling (one wake's worth of paints of slack, no more); media-loop fps
   (`DECKARD_MEDIA_PROFILE=1`) within noise of the same run on `main`, since
   the whole design premise is that the writer never stalls for the budget.
   Then repeat once at the default ceiling to confirm it does not bind on a
-  normal rig (`img_cache_evictions` stays 0).
+  normal rig (`img_cache_evictions` stays 0). Field reference (2026-08-08
+  overnight, MR !94): 381 k evictions/2 h at ~53/s in the churn regime with
+  the bound never exceeded and fps 32.3->32.2.
 - **2+ hour idle** with the deck showing a page with looping bg video: this
   is the number that matters for Phase 0 -- with `MALLOC_ARENA_MAX=2` and
   the thread caps in place, does `VmSwap` still grow, or was it mostly
