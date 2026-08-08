@@ -143,17 +143,17 @@ def check_mixed_durations_normalized() -> None:
 
 
 def check_probe_matches_the_full_decode() -> None:
-    """(e, issue #201) The header-only probe and the full decode must agree
-    on the timeline to the last float -- the routing decision picks which of
-    the two builds it, so any drift would change playback depending on
-    whether a GIF happened to route to RAM or to the mp4 tile cache. Also
-    pins the frame count and the O(1)-RAM contract (the probe retains no
-    frames)."""
-    from src.backend.DeckManagement.DeckController import probe_gif_header
+    """(e, issue #201) The pixel-free timeline probe and the full decode
+    must agree to the last float -- a warm KeyGIF (its pixels already in the
+    tile cache) builds its timeline from the probe while a cold one builds
+    it from the decode walk, so any drift would change playback depending on
+    whether the GIF had been seen before. Also pins the frame count and the
+    O(1)-RAM contract (the probe retains no frames)."""
+    from src.backend.DeckManagement.DeckController import probe_gif_timeline
 
     path = _make_gif(os.path.join(gl.DATA_PATH, "media", "probe_parity.gif"),
                      [0, 40, 10, 200, 100])
-    probe = probe_gif_header(path)
+    probe = probe_gif_timeline(path)
     gif = _decode(path)
     try:
         assert probe.n_frames == len(gif.frames) == 5, (
@@ -166,14 +166,9 @@ def check_probe_matches_the_full_decode() -> None:
             f"probe timeline {probe.cum_delays} != decoded timeline {gif._cum_delays}"
         )
         assert probe.size == (64, 64), f"probe must report the source size, got {probe.size}"
-        # This fixture paints a disc on a fully transparent canvas, so frame 0
-        # declares a transparent index.
-        assert probe.has_transparency, (
-            "a GIF whose first frame declares transparency must probe as alpha-carrying"
-        )
     finally:
         gif.close()
-    print("PASS: the header probe reproduces the decoded timeline exactly")
+    print("PASS: the timeline probe reproduces the decoded timeline exactly")
 
 
 def check_close_leaves_late_ticks_harmless() -> None:
@@ -213,6 +208,11 @@ def check_close_leaves_late_ticks_harmless() -> None:
 
 
 def main() -> None:
+    # KeyGIF reads performance.cache-videos at construction (issue #201): a
+    # GIF only has somewhere to route to when the disk cache is on. Every
+    # fixture here carries alpha, so they all stay on the frame list either
+    # way -- the stub tier just has to exist for the setting to be readable.
+    fixtures.install_stub_globals({"performance": {"cache-videos": True}})
     fixtures.start_watchdog(60, label="scenario_gif_delays")
     check_all_zero_durations_animate()
     check_40ms_frames_kept()

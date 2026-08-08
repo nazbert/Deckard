@@ -51,11 +51,17 @@ def _clamp_saturation(raw) -> float:
     return min(MAX_DISPLAY_SATURATION, max(MIN_DISPLAY_SATURATION, value))
 
 
-# Current cache-file naming: "<md5>.mp4" (default saturation) or
-# "<md5>.satNNN.mp4" (a baked-in saturation variant, see
-# mp4_tile_cache.sat_suffix). Anything else in a layout dir is legacy or a
-# writer temp file and is handled by the other sweep branches.
-_MP4_NAME_RE = re.compile(r"^(?P<hash>[0-9a-f]+)(?P<sat>\.sat\d+)?\.mp4$")
+# Current cache-file naming: "<md5>.mp4" (default saturation), optionally a
+# ".satNNN" baked-in saturation variant (mp4_tile_cache.sat_suffix) and
+# optionally a rendering variant (".bounded" -- KeyGIF's alpha-dropped
+# over-budget artifact, mp4_tile_cache.acquire_from_frames). The saturation
+# group is what the sweep matches on; the rendering variant is accepted so a
+# ".satNNN.bounded.mp4" is swept with the factor it belongs to instead of
+# falling through as an unrecognized name and being protected forever.
+# Anything else in a layout dir is legacy or a writer temp file and is
+# handled by the other sweep branches.
+_MP4_NAME_RE = re.compile(
+    r"^(?P<hash>[0-9a-f]+)(?P<sat>\.sat\d+)?(?P<variant>\.[a-z]+)?\.mp4$")
 
 # Top-level directory names the deleted key_video_cache.py's JPEG-per-frame
 # format wrote into: VID_CACHE/single_key/<stem>/<size>/<frame>.jpg and

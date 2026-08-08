@@ -295,6 +295,10 @@ def check_small_gif_keeps_source_size() -> None:
 
 
 def main() -> None:
+    # KeyGIF reads performance.cache-videos at construction (issue #201).
+    # Every fixture here renders alpha, so they all keep the frame list this
+    # scenario is about -- the stub tier just has to exist to be read.
+    fixtures.install_stub_globals({"performance": {"cache-videos": True}})
     fixtures.start_watchdog(60, label="scenario_gif_fit")
     check_large_gif_is_fit()
     check_small_gif_keeps_source_size()

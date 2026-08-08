@@ -618,10 +618,21 @@ _registry_lock = threading.Lock()
 _registry: dict[tuple[str, tuple[int, int], float], _TileCacheEntry] = {}
 
 
-def _registry_key(source_path: str, out_size: tuple[int, int], saturation: float) -> tuple:
+def _registry_key(source_path: str, out_size: tuple[int, int], saturation: float,
+                  variant: str = "") -> tuple:
     # canonical_saturation is the same rounding sat_suffix() uses, so a key
-    # and the file path derived from it can never disagree.
-    return (get_video_md5(source_path), tuple(out_size), canonical_saturation(saturation))
+    # and the file path derived from it can never disagree. `variant` names a
+    # second, DIFFERENT rendering of the same source at the same size (see
+    # acquire_from_frames): it must be part of the key, or the two would
+    # share a file and each would serve the other's pixels.
+    return (get_video_md5(source_path), tuple(out_size), canonical_saturation(saturation), variant)
+
+
+def _cache_file_path(md5: str, out_size: tuple[int, int], saturation: float,
+                     variant: str = "") -> str:
+    size_str = f"{out_size[0]}x{out_size[1]}"
+    return os.path.join(VID_CACHE, f"keys_{size_str}",
+                        f"{md5}{sat_suffix(saturation)}{variant}.mp4")
 
 
 def acquire(source_path: str, out_size: tuple[int, int], saturation: float = 1.0) -> KeyVideoCache:
@@ -630,10 +641,13 @@ def acquire(source_path: str, out_size: tuple[int, int], saturation: float = 1.0
     thread the first time a given key has no promoted cache on disk yet
     (and only while `performance.cache-videos` is enabled). Returns a fresh
     `KeyVideoCache` reader that owns its own `cv2.VideoCapture` and decode
-    state -- release it with `release()` (InputVideo.close() does this)."""
+    state -- release it with `release()` (InputVideo.close() does this).
+
+    The builder DEMUXES the source with FFmpeg, so this entry point is for
+    real video only: see `acquire_from_frames` for sources (GIFs) whose
+    frames must come from a different compositor."""
     key = _registry_key(source_path, out_size, saturation)
-    size_str = f"{out_size[0]}x{out_size[1]}"
-    path = os.path.join(VID_CACHE, f"keys_{size_str}", f"{key[0]}{sat_suffix(saturation)}.mp4")
+    path = _cache_file_path(key[0], out_size, saturation)
 
     start_builder = False
     with _registry_lock:
@@ -673,7 +687,13 @@ def release(reader: KeyVideoCache) -> None:
     entry = getattr(reader, "_registry_entry", None)
     if key is None or entry is None:
         return
+    _detach_entry(key, entry)
 
+
+def _detach_entry(key: tuple, entry: "_TileCacheEntry") -> None:
+    """Drop one reference to `entry`. Shared by release() and by the
+    build-from-frames path's failure exit, so a consumer that never got a
+    usable reader still balances its refcount."""
     with _registry_lock:
         # Identity comparison: a late release must not evict a newer entry
         # for the same key (e.g. this entry was already dropped and
@@ -684,6 +704,162 @@ def release(reader: KeyVideoCache) -> None:
         if entry.refcount <= 0:
             entry.stop_event.set()
             del _registry[key]
+
+
+# --------------------------------------------------------------------- #
+# Externally composited sources (GIF keys)
+# --------------------------------------------------------------------- #
+#
+# A GIF's pixels may NEVER come from FFmpeg. FFmpeg and PIL disagree about
+# GIF disposal and partial-extent frames -- measured on a stock 15-frame
+# file, 7 frames differed structurally (~48% of pixels off by >32/255,
+# disposed regions black on one side and olive on the other) -- so demuxing
+# a GIF here would silently change what a key looks like. The two entry
+# points below let a caller that HAS composited the frames itself (PIL, the
+# same compositor the retained frame list uses) put them into the shared
+# tile-cache file and read them back, without this module ever opening the
+# GIF as video.
+
+# Container timestamps only. Every consumer of these caches picks frames by
+# INDEX off its own timeline (KeyGIF's per-frame delay walk), so the encoded
+# frame rate is never played back at; it exists because mp4 needs one.
+EXTERNAL_TILE_FPS = 15.0
+
+
+def attach_promoted(source_path: str, out_size: tuple[int, int],
+                    saturation: float = 1.0, variant: str = "") -> KeyVideoCache:
+    """Attach a reader to an ALREADY-BUILT tile cache for this key, or
+    return None when there is nothing built to attach to.
+
+    Never starts a builder, and never hands back a reader that fell through
+    to decoding the source -- the two things acquire() does that an
+    externally-composited source must not get. A returned reader is always
+    `is_cache_complete()`, i.e. serving the promoted mp4.
+
+    Callers use this as the WARM path: the artifact's existence is itself
+    the proof that the source was classified as buildable, so nothing has to
+    be re-derived from pixels to route (issue #201). That inference is only
+    sound per `variant` -- see acquire_from_frames."""
+    key = _registry_key(source_path, out_size, saturation, variant)
+    path = _cache_file_path(key[0], out_size, saturation, variant)
+    with _registry_lock:
+        entry = _registry.get(key)
+        if entry is None:
+            if not os.path.isfile(path):
+                return None
+            entry = _TileCacheEntry(path)
+            _registry[key] = entry
+        elif not entry.ready:
+            # A build is in flight (or was abandoned): the caller does its
+            # own cold pass rather than waiting on someone else's.
+            return None
+        entry.refcount += 1
+    return _attach_promoted_reader(source_path, out_size, saturation, key, entry, path)
+
+
+def acquire_from_frames(source_path: str, out_size: tuple[int, int], saturation: float,
+                        frames, fps: float = EXTERNAL_TILE_FPS,
+                        variant: str = "") -> KeyVideoCache:
+    """Write the shared tile cache for this key from CALLER-SUPPLIED frames,
+    then attach a reader to it. Returns None if the cache could not be
+    written or read back (the caller keeps whatever it already has -- it
+    never gets a reader that would decode the source instead).
+
+    `frames` is any iterable of PIL images, consumed lazily and exactly
+    once: a caller holding the whole animation passes its list, one that
+    cannot afford to passes a generator and stays O(1). Images are resized
+    to `out_size` only if they are not already there (the even-dimension
+    clamp mp4v needs can leave a fitted frame a pixel off).
+
+    Refcounting, sharing and release() are exactly acquire()'s: two keys
+    showing the same GIF share one file and one entry, and the write is
+    skipped entirely if the artifact already exists.
+
+    `variant` separates renderings that are NOT interchangeable even though
+    they come from the same source at the same size -- KeyGIF uses it to
+    keep its alpha-dropping over-budget artifact away from the lossless one,
+    so a later load cannot mistake the degraded file for proof that the GIF
+    was opaque all along."""
+    key = _registry_key(source_path, out_size, saturation, variant)
+    path = _cache_file_path(key[0], out_size, saturation, variant)
+
+    with _registry_lock:
+        entry = _registry.get(key)
+        if entry is None:
+            entry = _TileCacheEntry(path)
+            _registry[key] = entry
+        entry.refcount += 1
+        needs_build = not entry.ready
+
+    if needs_build:
+        if _write_tile_mp4(path, out_size, frames, fps) <= 0:
+            _detach_entry(key, entry)
+            return None
+        with _registry_lock:
+            if _registry.get(key) is entry:
+                entry.ready = True
+
+    reader = _attach_promoted_reader(source_path, out_size, saturation, key, entry, path)
+    if reader is None:
+        log.warning(f"Tile cache written for {source_path} but not readable back")
+    return reader
+
+
+def _attach_promoted_reader(source_path: str, out_size: tuple[int, int], saturation: float,
+                            key: tuple, entry: "_TileCacheEntry", path: str) -> KeyVideoCache:
+    """A reader on this entry, or None -- the caller's refcount is dropped
+    on the None path. Rejects a reader that did not open the promoted cache:
+    `Mp4FrameCache.__init__` falls back to opening the SOURCE when the cache
+    file is missing or unreadable, which is exactly the FFmpeg-demuxes-the-
+    GIF outcome these entry points exist to make impossible."""
+    reader = KeyVideoCache(source_path, out_size, saturation, cache_path=path, is_builder=False)
+    reader._registry_key = key
+    reader._registry_entry = entry
+    if not reader.is_cache_complete():
+        release(reader)
+        return None
+    return reader
+
+
+def _write_tile_mp4(path: str, out_size: tuple[int, int], frames, fps: float) -> int:
+    """Encode `frames` into the tile cache at `path`, atomically (write to a
+    per-writer temp file, `os.replace` on success -- the same promote
+    discipline `_end_of_source` uses). Returns the number of frames written,
+    0 on any failure. Never raises: a failed cache write must cost playback
+    quality, never the key."""
+    written = 0
+    tmp_path = f"{path}.{os.getpid()}-{threading.get_ident():x}.tmp.mp4"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        writer = cv2.VideoWriter(tmp_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, out_size)
+        if not writer.isOpened():
+            log.warning(f"Could not open tile cache writer for {path}; playing uncached")
+            return 0
+        try:
+            for frame in frames:
+                if frame.size != out_size:
+                    frame = frame.resize(out_size, Image.Resampling.LANCZOS)
+                if frame.mode != "RGB":
+                    frame = frame.convert("RGB")
+                writer.write(cv2.cvtColor(np.asarray(frame), cv2.COLOR_RGB2BGR))
+                written += 1
+        finally:
+            writer.release()
+        if written == 0:
+            return 0
+        os.replace(tmp_path, path)
+        log.info(f"Cached tile video ({written} frames, "
+                 f"{os.path.getsize(path) / 1e6:.1f} MB): {path}")
+        return written
+    except Exception:
+        log.opt(exception=True).warning(f"Failed to write tile video cache {path}")
+        return 0
+    finally:
+        try:
+            if os.path.isfile(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
 
 
 def registry_cache_paths() -> set[str]:
