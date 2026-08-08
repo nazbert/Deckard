@@ -67,7 +67,7 @@ def test_remove_controller_frees_everything() -> None:
     assert controller in gl.page_manager.pages, "fixture sanity: controller should have a cached page before teardown"
 
     # Mirrors DeckManager.remove_controller (minus the UI-stack removal,
-    # which is recursive_hasattr-guarded out anyway -- see fixtures.py).
+    # which the null UIPort no-ops away here -- see fixtures.py).
     fixtures.teardown(controller)
 
     assert controller not in gl.page_manager.pages, "close() must discard the controller's cached pages (step 8)"
