@@ -30,7 +30,7 @@ import fixtures  # noqa: F401  (isolated data dir + sys.path, house convention)
 import os
 import time
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 import globals as gl
 from src.backend.DeckManagement.DeckController import BackgroundImage, BackgroundVideo
@@ -252,15 +252,25 @@ def check_tile_cache_min_age_tracks_the_video(controller) -> None:
 
 
 def check_gif_frames_census(controller) -> None:
-    """The GIF frame list is the largest image holder with no byte cap at
-    all. It is deliberately NOT evictable (the list IS the asset's per-frame
-    memo); this census column is what will let the capping follow-up be
-    sized against real pages rather than arithmetic."""
+    """A retained GIF frame list is the largest image holder in the app with
+    no byte cap at all. It is deliberately NOT evictable (the list IS the
+    asset's per-frame memo); this census column is what sizes whether an
+    aggregate cap across GIF keys is ever warranted.
+
+    The fixture carries ALPHA on purpose: since #201 only an alpha-carrying
+    GIF keeps a frame list at all -- an opaque one plays off the shared mp4
+    tile cache and shows up under video_readers instead (that route's census
+    contract is pinned by scenario_gif_opaque_route)."""
     from src.backend.DeckManagement.DeckController import KeyGIF
 
     path = os.path.join(gl.DATA_PATH, "media", "budget_census.gif")
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    frames = [Image.new("RGBA", (240, 240), (i * 20 % 256, 30, 30, 255)) for i in range(8)]
+    frames = []
+    for i in range(8):
+        frame = Image.new("RGBA", (240, 240), (0, 0, 0, 0))  # transparent -> frame list
+        ImageDraw.Draw(frame).ellipse([20 + i, 20, 220 + i, 220],
+                                      fill=(i * 20 % 256, 30, 30, 255))
+        frames.append(frame)
     frames[0].save(path, format="GIF", save_all=True, append_images=frames[1:],
                    duration=80, loop=0, disposal=2)
 
