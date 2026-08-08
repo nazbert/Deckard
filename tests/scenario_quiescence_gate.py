@@ -172,6 +172,29 @@ def main() -> None:
         assert media_player.gated_ticks > gated_before, "still gated after those"
         print("PASS: brightness + interactive paints still land while gated")
 
+        # (c2) a full repaint armed while gated -- suspend/resume, or the 2s
+        # retry after write failures -- bumps no generation but goes through
+        # the same update_all_inputs(), so it has the same transparent-key
+        # blind spot and must open the render window too.
+        deck.clear_journal()
+        controller._schedule_full_repaint()
+        assert fixtures.wait_until(
+            lambda: all(deck.last_op_for(f"key:{k}") is not None for k in range(key_count)),
+            timeout=8,
+        ), (
+            "a full repaint fired while gated never reached the transparent keys "
+            "-- a machine waking from suspend while the user is away would leave "
+            "them showing whatever survived the suspend"
+        )
+        assert wait_until_quiet(deck), "the repaint never settled"
+        settled = len(deck.journal())
+        gated_before = media_player.gated_ticks
+        time.sleep(OBSERVE_S)
+        assert len(deck.journal()) == settled and media_player.gated_ticks > gated_before, (
+            "the loop never re-gated after the full repaint"
+        )
+        print("PASS: a full repaint while gated paints once, then re-gates")
+
         # (d) a page change while gated must paint the NEW page once --
         # transparent keys included -- and then go quiet again.
         deck.clear_journal()

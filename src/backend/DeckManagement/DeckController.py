@@ -534,7 +534,7 @@ class MediaPlayerThread(threading.Thread):
             return False
 
         self.check_resume_gap(start)
-        self.deck_controller._run_pending_repaint()
+        repaint_fired = self.deck_controller._run_pending_repaint()
 
         # Quiescence gate (issue #144). STRICTLY after the control-queue
         # drain and the _stop check above: quit/clear/brightness must never
@@ -574,6 +574,15 @@ class MediaPlayerThread(threading.Thread):
                 current_gen = self.deck_controller._page_load_generation
             if current_gen != self._gated_generation:
                 self._gated_generation = current_gen
+                self._gate_render_ticks = self.GATE_SETTLE_TICKS
+            if repaint_fired:
+                # A full repaint that just fired (suspend/resume, or the 2s
+                # retry after write failures) bumps no generation but runs
+                # through the SAME update_all_inputs() -- so it has the same
+                # transparent-key blind spot on a video-bg page. Open the
+                # window for it too, or a machine that wakes from sleep while
+                # the user is still away leaves those keys showing whatever
+                # survived the suspend.
                 self._gate_render_ticks = self.GATE_SETTLE_TICKS
             if self._gate_render_ticks > 0:
                 gated = False
