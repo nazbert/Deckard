@@ -51,6 +51,7 @@ from src.backend.DeckManagement.Subclasses.KeyVideo import InputVideo
 from src.backend.DeckManagement.Subclasses.ScreenSaver import ScreenSaver
 from src.backend.DeckManagement.Subclasses.SingleKeyAsset import SingleKeyAsset
 from src.backend.DeckManagement.Subclasses.background_video_cache import BackgroundVideoCache
+from src.backend.DeckManagement.Subclasses.mp4_tile_cache import get_video_md5
 from src.backend.DeckManagement.Subclasses.encoded_image_cache import EncodedImageCache
 from src.backend.DeckManagement.Subclasses.native_tile_cache import NativeTileCache, native_tile_cache_max_bytes
 from src.backend.DeckManagement.Subclasses.media_pipeline_profiler import media_prof
@@ -2581,7 +2582,25 @@ class Background:
                     # Carry the path so apply_prebuilt can re-verify: this
                     # verdict is made lock-free, and a racing load_background
                     # may swap self.video before phase 2 applies it.
+                    # (Holds for GifBackground too -- it carries the same
+                    # three attributes; and for a GIF that fell back to the
+                    # cv2 path below, keeping the fallback avoids re-paying
+                    # the failed PIL decode attempt on every transition.)
                     return ("keep", path)
+            if os.path.splitext(path)[1].lower() == ".gif":
+                # .gif diverts to the PIL provider so alpha and the
+                # per-frame delay timeline survive (cv2's demuxer drops
+                # both). Over budget, or undecodable by PIL: fall back to
+                # the EXISTING cv2 path below -- opaque, source-fps,
+                # today's behavior -- rather than risk an OOM. One warning
+                # per construction; the keep-check above stops it repeating
+                # while the fallback stays loaded.
+                try:
+                    return ("video", GifBackground(self.deck_controller, path, loop=loop, fps=fps, extend_touchscreen=extend))
+                except GifBudgetExceeded as e:
+                    log.warning(f"GIF background over budget, falling back to the opaque cv2 path: {e}")
+                except Exception:
+                    log.opt(exception=True).warning(f"GIF background decode failed, falling back to the opaque cv2 path: {path}")
             return ("video", BackgroundVideo(self.deck_controller, path, loop=loop, fps=fps, extend_touchscreen=extend))
         if not os.path.isfile(path):
             return ("noop", None)
@@ -2953,6 +2972,310 @@ class BackgroundVideo(BackgroundVideoCache):
         identity = None if frame_index is None else (self.video_md5, frame_index)
         return copied_tiles, identity
 
+
+class GifBudgetExceeded(Exception):
+    """Raised by decode_gif_frames when the estimated decoded footprint
+    exceeds the caller's budget, BEFORE any frame is decoded -- callers fall
+    back to a bounded path (GifBackground -> the existing cv2/mp4 pipeline)
+    instead of risking an OOM on a pathological many-frame GIF."""
+
+
+# RAM ceiling for a fully-decoded GIF background (issue #196). One constant,
+# no new cache layer: GifBackground estimates n_frames x W x H x 4 against it
+# at open and falls back to the opaque cv2 path when over. 128MB covers
+# ~200 canvas frames on an SD+ (~600KB each) / ~90 on an XL (~1.4MB each) --
+# generous for the looping decorations this feature targets, small next to
+# what the old unbounded cv2 canvas pool used to swallow (mem-plan §3).
+GIF_BG_BUDGET_MB = 128
+
+
+def decode_gif_frames(path: str, max_size: "tuple[int, int]" = None,
+                      fit_size: "tuple[int, int]" = None,
+                      saturation: float = 1.0,
+                      budget_bytes: int = None) -> "tuple[list[Image.Image], list[int], list[float]]":
+    """Decodes every frame of the GIF at `path` to RGBA and builds the delay
+    timeline -- the one shared implementation behind KeyGIF (keys) and
+    GifBackground (deck/strip backgrounds), so the two can never drift
+    (#188-style duplicate avoided). Playback (gap clamp, bisect picking)
+    stays with the callers; this owns decode + delays only.
+
+    Sizing -- exactly one of the two, or neither:
+      * max_size: shrink-only ImageOps.contain. A frame larger than this is
+        contained (aspect preserved); a smaller one keeps its own size --
+        upscaling a small GIF would multiply retained memory for zero
+        display benefit (KeyGIF's 2x-tile policy, mem-plan P2.3).
+      * fit_size: every frame is ImageOps.fit to EXACTLY this size.
+        Backgrounds must fill the canvas so per-key crop coordinates hold --
+        the same fill contract as the cv2 background cache's re-encode.
+
+    Saturation is baked into the retained frames once, here, at decode time
+    (the frame list IS the caller's per-frame memo; a saturation change
+    reloads the page, which rebuilds the caller under the new factor).
+
+    budget_bytes: pre-decode gate -- the retained footprint is estimated
+    from the header (n_frames x out_w x out_h x 4) and GifBudgetExceeded is
+    raised before decoding when it would exceed the budget.
+
+    Returns (frames_rgba, frame_delays_ms, cum_delays) where cum_delays[i]
+    is the wall-clock second at which frame i's display window ENDS (the
+    callers' bisect timelines index it directly).
+    """
+    frames: "list[Image.Image]" = []
+    delays_ms: "list[int]" = []
+
+    # The source file is only needed for the duration of the decode loop --
+    # close it immediately after so the app doesn't hold a dangling fd +
+    # full-res frame cache alive underneath the fitted copies we keep.
+    gif = Image.open(path)
+    try:
+        if budget_bytes is not None:
+            n_frames = getattr(gif, "n_frames", 1)
+            out_w, out_h = gif.size
+            if fit_size is not None:
+                out_w, out_h = fit_size
+            elif max_size is not None and (out_w > max_size[0] or out_h > max_size[1]):
+                # The dims ImageOps.contain would land on: aspect-preserving
+                # shrink into max_size.
+                scale = min(max_size[0] / out_w, max_size[1] / out_h)
+                out_w, out_h = max(1, round(out_w * scale)), max(1, round(out_h * scale))
+            estimate = n_frames * out_w * out_h * 4
+            if estimate > budget_bytes:
+                raise GifBudgetExceeded(
+                    f"{path}: ~{estimate / (1024 * 1024):.0f}MB decoded "
+                    f"({n_frames} frames at {out_w}x{out_h} RGBA) exceeds the "
+                    f"{budget_bytes / (1024 * 1024):.0f}MB budget"
+                )
+
+        for frame in ImageSequence.Iterator(gif):
+            decoded = frame.convert("RGBA")
+            if fit_size is not None:
+                if decoded.size != fit_size:
+                    decoded = ImageOps.fit(decoded, fit_size, Image.Resampling.LANCZOS)
+            elif max_size is not None and (decoded.width > max_size[0] or decoded.height > max_size[1]):
+                decoded = ImageOps.contain(decoded, max_size)
+            if abs(saturation - 1.0) > 0.001:
+                decoded = ImageEnhance.Color(decoded).enhance(saturation)
+            frames.append(decoded)
+            # Per-frame delay from GIF metadata (ms), normalized the
+            # browser way (Firefox/Chrome): missing or < 20ms -> 100ms,
+            # anything else trusted as-is. The old "< 50 -> x10
+            # centiseconds" heuristic played legitimate fast GIFs (40ms
+            # == 25fps) 10x too slow, and an all-zero-duration GIF made
+            # the cumulative timeline degenerate and froze on frame 0.
+            delay = gif.info.get('duration')
+            if delay is None or delay < 20:
+                delay = 100
+            delays_ms.append(delay)
+    finally:
+        gif.close()
+
+    # Cumulative timeline in seconds: cum_delays[i] is the wall-clock time
+    # at which frame i's display window ENDS. Picking a frame for elapsed
+    # time t is then a single bisect instead of a per-tick
+    # increment-and-compare loop.
+    cum_delays = list(itertools.accumulate(d / 1000.0 for d in delays_ms))
+    return frames, delays_ms, cum_delays
+
+
+class GifBackground:
+    """RGBA GIF provider for deck/strip backgrounds (issue #196).
+
+    Satisfies the contract BackgroundVideo (the cv2/mp4 canvas cache)
+    exposes to the compositor -- get_next_tiles() -> (entries, identity)
+    with the strip slice as one extra entry when extended, plus the
+    video_path/extend_touchscreen/saturation/page/fps/loop attributes the
+    prebuild keep-check, the media tick, and the screensaver setters read --
+    but decodes through PIL so alpha and the per-frame delay timeline
+    survive (cv2's GIF demuxer drops both).
+
+    Frames are decoded once at construction, fitted to exactly the deck
+    canvas (per-key crop coordinates must hold), and owned by this object:
+    same lifetime as BackgroundVideo, freed with the background swap
+    (Background.set_image/set_video close the old provider). No global
+    cache, no registry -- two decks showing the same GIF decode it twice
+    (accepted v1 trade-off; the mp4 tile cache's refcounted registry stays
+    the only one). Construction raises GifBudgetExceeded before decoding
+    when the estimated footprint exceeds GIF_BG_BUDGET_MB; callers fall
+    back to the existing opaque cv2 path.
+
+    canvas_size overrides the deck-canvas geometry for the strip-background
+    route (ControllerTouchScreenState._get_background_video_frame): frames
+    are fitted to the strip and served whole via get_next_frame() -- the
+    per-touchscreen composite alpha_composites the frame, so the exact-size
+    RGBA decode is load-bearing there.
+    """
+
+    def __init__(self, deck_controller: "DeckController", gif_path: str, loop: bool = True,
+                 fps: int = 30, extend_touchscreen: bool = False,
+                 canvas_size: "tuple[int, int]" = None) -> None:
+        self.deck_controller = deck_controller
+        self.video_path = gif_path
+        self.loop = loop
+        self.fps = fps
+
+        self.page: Page = deck_controller.active_page
+        self.saturation = deck_controller.get_display_saturation()
+
+        deck = deck_controller.deck
+        self.extend_touchscreen = extend_touchscreen and deck.is_touch()
+
+        self.strip_size: "tuple[int, int]" = None
+        self._strip_box: "tuple[int, int, int, int]" = None
+        if canvas_size is None:
+            # Same canvas/crop geometry as BackgroundVideoCache -- computed
+            # once into plain boxes here since the frame list is fixed after
+            # decode (no per-call geometry methods needed).
+            key_rows, key_cols = deck.key_layout()
+            self.key_count = deck.key_count()
+            key_w, key_h = deck.key_image_format()['size']
+            spacing_x, spacing_y = deck_controller.key_spacing
+
+            canvas_w = key_w * key_cols + spacing_x * (key_cols - 1)
+            canvas_h = key_h * key_rows + spacing_y * (key_rows - 1)
+
+            self._key_regions: "list[tuple[int, int, int, int]]" = []
+            for key in range(self.key_count):
+                row, col = divmod(key, key_cols)
+                x = col * (key_w + spacing_x)
+                y = row * (key_h + spacing_y)
+                self._key_regions.append((x, y, x + key_w, y + key_h))
+
+            if self.extend_touchscreen:
+                # Extend the canvas below the key grid so the frame
+                # continues onto the touchscreen strip: one bezel gap plus
+                # the strip mapped into canvas coordinates (same geometry as
+                # BackgroundImage/BackgroundVideoCache).
+                self.strip_size = deck_controller.get_touchscreen_image_size()
+                strip_canvas_h = round(self.strip_size[1] * canvas_w / self.strip_size[0])
+                canvas_h += spacing_y + strip_canvas_h
+                self._strip_box = (0, canvas_h - strip_canvas_h, canvas_w, canvas_h)
+            canvas_size = (canvas_w, canvas_h)
+        else:
+            # Strip-background mode: whole-frame service only.
+            self.key_count = 0
+            self._key_regions = []
+            self.extend_touchscreen = False
+
+        self.canvas_size = canvas_size
+
+        self.frames, self.frame_delays, self._cum_delays = decode_gif_frames(
+            gif_path, fit_size=canvas_size, saturation=self.saturation,
+            budget_bytes=GIF_BG_BUDGET_MB * 1024 * 1024,
+        )
+        self._total_delay: float = self._cum_delays[-1] if self._cum_delays else 0.0
+
+        # Frame identity for the passthrough-key native-encode memo
+        # (Background.get_identified_tile consumers): (md5, frame index),
+        # the exact BackgroundVideo contract, so steady-state loop playback
+        # is a dict lookup + USB write per key (#163).
+        self.video_md5 = get_video_md5(gif_path)
+
+        self.active_frame: int = -1
+        # Wall-clock timeline state -- KeyGIF.get_next_frame's arithmetic
+        # (see _pick_frame).
+        self._play_start: float = None
+        self._last_frame_tick: float = None
+        # (frame index, entries) of the last cropped frame: at loop FPS most
+        # ticks land on the frame already cut (a 10fps GIF under a 30Hz tick
+        # re-uses each crop set ~3x). Handed out as copies either way.
+        self._tiles_memo: tuple = (None, None)
+
+    def _pick_frame(self, now: float = None) -> int:
+        """Wall-clock frame index for `now`: bisect over the cumulative
+        delay timeline plus the away-gap clamp -- KeyGIF.get_next_frame's
+        arithmetic kept in lockstep (see that method's comments for the
+        rationale on each branch)."""
+        # Snapshot the timeline once: close() swaps frames/_cum_delays/
+        # _total_delay from another thread mid-call (deck route: GTK/
+        # screensaver swap racing the media tick). Locals keep the guard and
+        # the arithmetic looking at the SAME generation -- a racer can't
+        # land a zero modulo or an emptied-list index between them. (The
+        # caller indexes its own frames snapshot; every index returned here
+        # comes from either the shared full timeline or the 0 fallback, so
+        # it stays in range for that snapshot too.)
+        cum = self._cum_delays
+        total = self._total_delay
+        n = len(self.frames)
+        if n <= 1 or total <= 0 or not cum:
+            self.active_frame = 0
+            return 0
+
+        if now is None:
+            now = time.time()
+
+        if self._play_start is None:
+            self._play_start = now
+        elif self._last_frame_tick is not None and now - self._last_frame_tick > 1.0:
+            self._play_start += (now - self._last_frame_tick) - cum[0]
+        self._last_frame_tick = now
+
+        elapsed = now - self._play_start
+        t = elapsed % total if self.loop else min(elapsed, total)
+
+        frame = bisect.bisect_right(cum, t)
+        if frame >= n:
+            frame = n - 1  # float-edge / non-loop clamp landing on t == total
+        self.active_frame = frame
+        return frame
+
+    def get_next_tiles(self) -> "tuple[list[Image.Image], tuple]":
+        """(entries, identity) for the frame this tick lands on --
+        BackgroundVideo.get_next_tiles's contract: key tiles, plus the strip
+        slice as one extra entry when extended; identity is (md5, frame
+        index). Crops are cut straight from the retained RGBA canvas frame
+        (no paste onto an opaque intermediate, so alpha reaches the
+        compositor) and handed out as copies: consumers paste onto the
+        tiles/strip slice in place."""
+        frames = self.frames  # snapshot: close() empties this from other threads
+        if not frames:
+            entries = [self.deck_controller.generate_alpha_key() for _ in range(self.key_count)]
+            if self.extend_touchscreen:
+                entries.append(Image.new("RGBA", self.strip_size, (0, 0, 0, 0)))
+            return entries, None
+
+        index = self._pick_frame()
+        memo_index, memo_entries = self._tiles_memo
+        if memo_index != index or memo_entries is None:
+            frame = frames[index]
+            memo_entries = [frame.crop(box) for box in self._key_regions]
+            if self.extend_touchscreen:
+                # Bottom slice of the extended canvas at strip resolution
+                # (same crop+HAMMING resize as BackgroundVideoCache.
+                # crop_strip_from_deck_sized_image).
+                memo_entries.append(
+                    frame.crop(self._strip_box).resize(self.strip_size, Image.Resampling.HAMMING)
+                )
+            self._tiles_memo = (index, memo_entries)
+        return [entry.copy() for entry in memo_entries], (self.video_md5, index)
+
+    def get_next_frame(self, now: float = None) -> Image.Image:
+        """The whole canvas-size RGBA frame for now (strip-background
+        route). Returns the retained frame itself -- the caller's
+        convert("RGBA") copies before anything pastes onto it."""
+        frames = self.frames
+        if not frames:
+            return None
+        return frames[self._pick_frame(now)]
+
+    def set_playback(self, fps: int, loop: bool) -> None:
+        """fps is only the owner's render cap here (playback position is
+        wall-clock over the GIF's own delay timeline, mirroring InputVideo's
+        natural_speed arm) -- no timebase rebase needed."""
+        self.fps = fps
+        self.loop = loop
+
+    def close(self) -> None:
+        """Drops the retained frame list (the whole footprint). Safe against
+        an in-flight tick: get_next_tiles/get_next_frame snapshot
+        self.frames, so a racer finishes on its own reference and the list
+        is reclaimed right after."""
+        self.frames = []
+        self.frame_delays = []
+        self._cum_delays = []
+        self._total_delay = 0.0
+        self._tiles_memo = (None, None)
+
+
 class KeyGIF(SingleKeyAsset):
     def __init__(self, controller_key: "ControllerKey", gif_path: str, fps: int = 30, loop: bool = True):
         super().__init__(controller_key)
@@ -2968,9 +3291,6 @@ class KeyGIF(SingleKeyAsset):
         self._play_start: float = None
         self._last_frame_tick: float = None
 
-        self.frames = []
-        self.frame_delays = []
-
         # mem-plan P2.3: cap retained frame size at 2x the key tile instead of
         # keeping every frame at source resolution -- a 500px/200-frame GIF is
         # ~200MB at source res vs ~46MB fitted. Composited size is decided per
@@ -2983,8 +3303,8 @@ class KeyGIF(SingleKeyAsset):
         tile_w, tile_h = self.deck_controller.get_key_image_size()
         fit_size = (max(1, tile_w * 2), max(1, tile_h * 2))
 
-        # Saturation is baked into the retained frames once, here, at decode
-        # time -- the frame list IS this asset's per-frame memo (get_next_frame
+        # Saturation is baked into the retained frames once, at decode time
+        # -- the frame list IS this asset's per-frame memo (get_next_frame
         # only indexes it), so enhancing there instead would re-pay
         # ImageEnhance on every media tick. A saturation change reloads the
         # page, which rebuilds this object under the new factor (see
@@ -2992,38 +3312,12 @@ class KeyGIF(SingleKeyAsset):
         # BackgroundImage. Skipped entirely at the default factor.
         saturation = self.deck_controller.get_display_saturation()
 
-        # Extract frames and their delays. The source file is only needed for
-        # the duration of this loop -- close it immediately after so the app
-        # doesn't hold a dangling fd + full-res frame cache alive underneath
-        # the fitted copies we keep.
-        gif = Image.open(self.gif_path)
-        try:
-            for frame in ImageSequence.Iterator(gif):
-                fitted = frame.convert("RGBA")
-                # Shrink-only: contain() would also UPSCALE a small GIF to the
-                # 2x budget (a 50px/200-frame GIF would go ~2MB -> ~46MB); a
-                # source already within budget composites fine as-is.
-                if fitted.width > fit_size[0] or fitted.height > fit_size[1]:
-                    fitted = ImageOps.contain(fitted, fit_size)
-                if abs(saturation - 1.0) > 0.001:
-                    fitted = ImageEnhance.Color(fitted).enhance(saturation)
-                self.frames.append(fitted)
-                # Get frame delay from GIF metadata (in milliseconds)
-                # Default to 100ms (10fps) if no delay specified
-                delay = gif.info.get('duration', 100)
-                # Some GIFs use delay in centiseconds, convert to milliseconds
-                if delay < 50:
-                    delay *= 10
-                self.frame_delays.append(delay)
-        finally:
-            gif.close()
-
-        # Cumulative delay timeline in seconds: _cum_delays[i] is the
-        # wall-clock time at which frame i's display window ENDS. Picking a
-        # frame for elapsed time t is then a single bisect (see
-        # get_next_frame) instead of a per-tick increment-and-compare loop.
-        self._cum_delays: list[float] = list(
-            itertools.accumulate(d / 1000.0 for d in self.frame_delays)
+        # Decode + delay timeline via the shared helper (issue #196; also
+        # serves GifBackground). max_size keeps the shrink-only 2x-tile
+        # policy (mem-plan P2.3); the wall-clock picking over _cum_delays
+        # stays here (get_next_frame: away-gap clamp + bisect).
+        self.frames, self.frame_delays, self._cum_delays = decode_gif_frames(
+            self.gif_path, max_size=fit_size, saturation=saturation,
         )
         self._total_delay: float = self._cum_delays[-1] if self._cum_delays else 0.0
 
@@ -5452,13 +5746,33 @@ class ControllerTouchScreenState(ControllerInputState):
                     or abs(self._background_video_saturation - saturation) > 0.001):
                 if video is not None:
                     video.close()
-                video = InputVideo(
-                    controller_input=self.controller_touch,
-                    video_path=path,
-                    fps=fps,
-                    loop=loop,
-                    natural_speed=True,
-                )
+                video = None
+                if os.path.splitext(path)[1].lower() == ".gif":
+                    # .gif diverts to the PIL provider (issue #196): frames
+                    # are fitted to EXACTLY the strip size -- the
+                    # alpha_composite in get_current_image needs same-size
+                    # RGBA -- and alpha + per-frame delays survive. Budget/
+                    # decode failure falls back to the InputVideo path below
+                    # (opaque, source-fps -- today's behavior), parity with
+                    # the deck-background route in prebuild_from_path.
+                    try:
+                        video = GifBackground(
+                            self.controller_touch.deck_controller, path,
+                            loop=loop, fps=fps,
+                            canvas_size=self.controller_touch.get_screen_dimensions(),
+                        )
+                    except GifBudgetExceeded as e:
+                        log.warning(f"GIF strip background over budget, falling back to the opaque cv2 path: {e}")
+                    except Exception:
+                        log.opt(exception=True).warning(f"GIF strip background decode failed, falling back to the opaque cv2 path: {path}")
+                if video is None:
+                    video = InputVideo(
+                        controller_input=self.controller_touch,
+                        video_path=path,
+                        fps=fps,
+                        loop=loop,
+                        natural_speed=True,
+                    )
                 self.background_video = video
                 self._background_video_saturation = saturation
             else:
@@ -5470,7 +5784,10 @@ class ControllerTouchScreenState(ControllerInputState):
                 # source eagerly), so <=0 is a deterministically bad file:
                 # fail it once instead of retrying (and logging) per frame.
                 # A transient miss on a healthy file just retries next tick.
-                if video.video_cache is None or video.video_cache.n_frames <= 0:
+                # InputVideo only: GifBackground has no video_cache (a bad
+                # GIF already fell back at construction; post-close None is
+                # transient and self-heals on the rebuild above).
+                if hasattr(video, "video_cache") and (video.video_cache is None or video.video_cache.n_frames <= 0):
                     log.error(f"Could not decode touchscreen background video {path}")
                     video.close()
                     self.background_video = None
