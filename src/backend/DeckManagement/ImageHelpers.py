@@ -20,7 +20,10 @@ Shoutout to Dean Camera alias abcminiuser for his amazing work!
 from PIL import Image, ImageOps
 from StreamDeck.ImageHelpers import PILHelper
 
-from gi.repository import GLib, GdkPixbuf
+# GLib/GdkPixbuf are imported lazily inside image2pixbuf (#141): it is their
+# only consumer and every one of its callers lives under src/windows/, so a
+# module-level import would drag the widget stack into the engine's import
+# closure (ImageHelpers is core to the render path).
 
 def create_full_deck_sized_image(deck, image_filename = None, image = None):
         key_rows, key_cols = deck.key_layout()
@@ -133,6 +136,8 @@ def image2pixbuf(img, force_transparency=False):
     Returns:
         GdkPixbuf.Pixbuf: The converted GdkPixbuf.Pixbuf object.
     """
+    from gi.repository import GLib, GdkPixbuf
+
     img = img.convert("RGBA")
     force_transparency = True
 

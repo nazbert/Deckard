@@ -417,7 +417,7 @@ class DeckManager:
         # The teardown sweep runs plugin hooks (step 6) and can block on a
         # wedged callback; it must never run on the USB monitor thread
         # (would stall future connect/disconnect events) or the shared
-        # GtkHelper background pool (quit's shutdown_background_pool() would
+        # main_loop background pool (quit's shutdown_background_pool() would
         # cancel it mid-close) -- see DeckController.close()'s docstring.
         threading.Thread(
             target=deck_controller.close,

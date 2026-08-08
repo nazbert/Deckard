@@ -1,8 +1,6 @@
 # Inspired by code of deltragon/SafeEyes repo.
 # Link: https://github.com/deltragon/SafeEyes/blob/f25f554585c79a11621e3a505cc6ce5af08a3d58/safeeyes/plugins/trayicon/plugin.py
 
-import gi
-gi.require_version("Gtk","4.0")
 from gi.repository import Gio, GLib
 
 from loguru import logger as log

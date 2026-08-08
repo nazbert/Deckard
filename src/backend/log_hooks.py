@@ -37,7 +37,7 @@ hooks resolve the logger's sinks at call time.
 
 Note the pool blind spot: exceptions inside ThreadPoolExecutor tasks are
 stored on their Future and NEVER reach threading.excepthook -- submit sites
-must attach a done-callback (the GtkHelper.run_in_background /
+must attach a done-callback (the main_loop.run_in_background /
 DeckController._log_callback_exception convention).
 
 Import discipline: this module must stay importable before `globals` (the

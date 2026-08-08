@@ -22,13 +22,20 @@ import sys
 import math
 import re
 import threading
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 from loguru import logger as log
 from PIL import Image
 
 import gi
-gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Gio, GLib, Pango
+from gi.repository import Gio, GLib
+
+# Gdk and Pango are imported lazily inside the four colour/font helpers below
+# (#141): they are the only consumers, their only callers live under
+# src/windows/, and a module-level import would drag the widget stack into
+# every engine import closure that touches HelperMethods.
+if TYPE_CHECKING:
+    from gi.repository import Gdk, Pango
 
 from src.backend.DeckManagement import font_resolver
 from src.backend.atomic_json import atomic_write_json
@@ -285,7 +292,21 @@ def instance_cache(func):
     return wrapper
 
 
-def color_values_to_gdk(color_values: tuple[int, int, int] | tuple[int, int, int, int]) -> Gdk.RGBA:
+def _load_gdk():
+    """Import Gdk on demand -- see the TYPE_CHECKING note at the top (#141)."""
+    gi.require_version("Gdk", "4.0")
+    from gi.repository import Gdk
+    return Gdk
+
+
+def _load_pango():
+    """Import Pango on demand -- see the TYPE_CHECKING note at the top (#141)."""
+    from gi.repository import Pango
+    return Pango
+
+
+def color_values_to_gdk(color_values: tuple[int, int, int] | tuple[int, int, int, int]) -> "Gdk.RGBA":
+    Gdk = _load_gdk()
     # Copy before normalizing: callers pass tuples (which .append would
     # crash on) and reuse the sequence they passed in afterwards.
     values = list(color_values)
@@ -297,7 +318,7 @@ def color_values_to_gdk(color_values: tuple[int, int, int] | tuple[int, int, int
     return color
 
 
-def gdk_color_to_values(color: Gdk.RGBA) -> tuple[int, int, int, int]:
+def gdk_color_to_values(color: "Gdk.RGBA") -> tuple[int, int, int, int]:
     green = round(color.green * 255)
     blue = round(color.blue * 255)
     red = round(color.red * 255)
@@ -306,7 +327,8 @@ def gdk_color_to_values(color: Gdk.RGBA) -> tuple[int, int, int, int]:
     return red, green, blue, alpha
 
 
-def get_pango_font_description(font_family: str, font_size: int, font_weight: int, font_style: str) -> Pango.FontDescription:
+def get_pango_font_description(font_family: str, font_size: int, font_weight: int, font_style: str) -> "Pango.FontDescription":
+    Pango = _load_pango()
     if font_style == "italic":
         font_style = Pango.Style.ITALIC
     elif font_style == "oblique":
@@ -323,7 +345,8 @@ def get_pango_font_description(font_family: str, font_size: int, font_weight: in
     return desc
 
 
-def get_values_from_pango_font_description(desc: Pango.FontDescription) -> tuple[str, int, int, str]:
+def get_values_from_pango_font_description(desc: "Pango.FontDescription") -> tuple[str, int, int, str]:
+    Pango = _load_pango()
     font_family = desc.get_family()
     font_size = desc.get_size() / Pango.SCALE
     font_weight = desc.get_weight()

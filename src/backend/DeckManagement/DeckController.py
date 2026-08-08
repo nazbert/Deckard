@@ -2128,7 +2128,7 @@ class DeckController:
             if load_background:
                 # Decode the background off the media thread so it overlaps input
                 # loading; the update task below awaits it before keys composite.
-                from GtkHelper.GtkHelper import run_in_background
+                from src.backend.main_loop import run_in_background
                 if self._bg_future is not None:
                     self._bg_future.cancel()
                 bg_future = run_in_background(self.load_background, page, update=False, gen=gen)
@@ -2466,7 +2466,7 @@ class DeckController:
         Threading contract: when `app_quit` is False this is expected to run
         off the main thread -- a wedged plugin teardown hook (step 6) must
         not freeze the UI. DeckManager.remove_controller dispatches it on a
-        dedicated daemon thread (not the shared GtkHelper pool, which quit's
+        dedicated daemon thread (not the shared main_loop pool, which quit's
         shutdown_background_pool() would cancel mid-close). `app_quit=True`
         is the one case that's expected to run synchronously on main: it
         skips step 6 entirely (no plugin hooks to block on), and on_quit's

@@ -36,12 +36,13 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import GLib
 
-import GtkHelper.GtkHelper as gtk_helper
-from GtkHelper.GtkHelper import run_on_main
+import src.backend.main_loop as main_loop
+from src.backend.main_loop import run_on_main
 
 # Shrink the marshalling bound so provoking a timeout is fast. Read at call
-# time by run_on_main.
-gtk_helper.RUN_ON_MAIN_TIMEOUT_S = 0.4
+# time by run_on_main. The knob's home is main_loop (#141): GtkHelper only
+# re-exports the functions, so patching a copy there would be a dead write.
+main_loop.RUN_ON_MAIN_TIMEOUT_S = 0.4
 
 
 def _pump(duration: float = 0.2) -> None:

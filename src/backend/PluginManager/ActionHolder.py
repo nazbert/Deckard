@@ -75,7 +75,7 @@ class ActionHolder:
             # segfault/abort class -- so the default icon is marshalled onto
             # the main loop. Inline (zero-cost) on the normal startup path,
             # which already runs on main.
-            from GtkHelper.GtkHelper import run_on_main
+            from src.backend.main_loop import run_on_main
             icon = run_on_main(lambda: Gtk.Image(icon_name="insert-image-symbolic"))
 
         self.plugin_base = plugin_base
