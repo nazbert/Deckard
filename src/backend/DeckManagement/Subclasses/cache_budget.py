@@ -113,6 +113,16 @@ DEGENERATE_BACKOFF_S = 5.0
 # A put must grow its own cache by this much before it is worth a wake.
 NOTIFY_WATERMARK_BYTES = 1024 * 1024
 
+# Entries one pass will shed before yielding. Each pick is a head scan over
+# every registrant plus a per-cache lock, so an unbounded pass against a
+# large deficit -- a ceiling lowered under a warm multi-deck rig is tens of
+# thousands of native key JPEGs -- is one long uninterruptible burst
+# contending with every painter's put. Capped, the same work happens in
+# MIN_WAKE_INTERVAL_S-spaced slices: the pass re-arms the wake before it
+# returns, so the next one continues from where this one stopped. Sized so
+# the common case (a page change, a few hundred entries) is never split.
+MAX_PICKS_PER_PASS = 2000
+
 LOG_INTERVAL_S = 5.0
 
 # --------------------------------------------------------------------- #
@@ -430,7 +440,17 @@ def _drain_once() -> bool:
     skip: set = set()
     freed = 0
     evicted = 0
+    picks = 0
     while total > target:
+        if picks >= MAX_PICKS_PER_PASS:
+            # Slice the burst (see MAX_PICKS_PER_PASS) and re-arm the wake so
+            # the next pass -- one damping interval away, not one 60 s
+            # periodic away -- picks up where this one stopped. The pass
+            # still reports itself as making progress, so the caller uses the
+            # short interval and not the degenerate backoff.
+            _wake.set()
+            break
+        picks += 1
         pick = None
         pick_ts = None
         for cache in caches:
