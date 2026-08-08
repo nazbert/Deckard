@@ -25,9 +25,13 @@ Inputs, all event-driven (no polling anywhere):
 The rule (evaluated on every input change):
 
     quiescent := mode == "system-idle" and (
-        screen_locked
+        (screen_locked and now - last_deck_activity >= DECK_ACTIVITY_GRACE_S)
         or (idle_hint and now - max(idle_since, last_deck_activity) >= minutes*60)
     )
+
+Deck activity outranks the lock for a short grace on purpose: with
+`lock-on-lock-screen` off the deck stays live and usable while the screen is
+locked, and a user drumming on it is present at it whatever the monitor says.
 
 Mode `"screensaver"` -- the default -- makes this object report `False`
 forever, which is bit-for-bit today's behavior: the deck screensaver's own
@@ -87,6 +91,18 @@ def _settings_seed() -> tuple[str, int]:
 
 class PresenceMonitor:
     """The quiescence signal. See the module docstring for the rule."""
+
+    # How long a deck press keeps this deck live even while the screen is
+    # locked. The lock is the strongest away signal there is -- but it is a
+    # signal about the MONITOR, and `lock-on-lock-screen` off means the deck
+    # deliberately stays live and usable while the screen is locked. Without
+    # this grace such a user drums on a working deck whose animations are
+    # frozen and nothing they do un-freezes them, because the lock term
+    # short-circuits before any activity is considered. Long enough that
+    # ordinary use never trips the gate, short enough that walking away from a
+    # locked screen still saves the CPU within the minute. Class-level so the
+    # harness can tighten it.
+    DECK_ACTIVITY_GRACE_S = 30.0
 
     def __init__(self, mode: str = None, minutes: int = None,
                  idle_detector: bool = True, bus=None):
@@ -172,8 +188,9 @@ class PresenceMonitor:
 
     def notify_activity(self) -> None:
         """A deck input happened. Deck presses are invisible to the
-        compositor, so this is the only thing that can clear an idle hint
-        for a user who is present *at the deck*."""
+        compositor AND to the lock state, so this is the only thing that can
+        speak for a user who is present *at the deck*: it clears an idle hint,
+        and it outranks a locked screen for DECK_ACTIVITY_GRACE_S."""
         self._last_deck_activity = time.time()
         # Fast path for the default mode: nothing can be gated, so an input
         # never needs to touch the lock or the timer wheel. `_mode` is
@@ -212,8 +229,9 @@ class PresenceMonitor:
 
     def _evaluate(self) -> None:
         """Recomputes `quiescent` from the current inputs, (re-)arming the
-        residual idle deadline as needed. Safe to call from any thread and
-        as often as inputs arrive."""
+        deadline that will make the verdict change on its own -- the residual
+        idle delay, or the deck-activity grace under a locked screen. Safe to
+        call from any thread and as often as inputs arrive."""
         with self._lock:
             was = self.quiescent
             now = time.time()
@@ -221,13 +239,30 @@ class PresenceMonitor:
             rearm_in = None
 
             if self._mode == MODE_SYSTEM_IDLE:
+                since_activity = now - self._last_deck_activity
                 if bool(getattr(gl, "screen_locked", False)):
                     # The strongest away signal there is, and the one that
                     # works without any idle agent. Deliberately independent
                     # of `lock-on-lock-screen`: that setting decides whether
                     # the deck shows its screensaver on lock, not whether the
                     # user is at the machine.
-                    quiescent = True
+                    #
+                    # It still yields to a RECENT deck press for
+                    # DECK_ACTIVITY_GRACE_S: a locked screen over a live deck
+                    # (lock-on-lock-screen off) is a supported configuration,
+                    # and the person pressing its keys is at it. The seed
+                    # `_last_deck_activity = 0.0` means "no press observed",
+                    # which lands here as an elapsed grace -- so a process
+                    # that starts into an already-locked session still gates
+                    # immediately.
+                    if since_activity >= self.DECK_ACTIVITY_GRACE_S:
+                        quiescent = True
+                    else:
+                        # Nothing else will call back: the lock state is not
+                        # changing and logind never sees deck presses. Arm the
+                        # grace's own expiry or the gate would stay off until
+                        # the next unrelated input.
+                        rearm_in = self.DECK_ACTIVITY_GRACE_S - since_activity
                 elif self._idle_hint:
                     since = self._idle_since if self._idle_since is not None else now
                     remaining = (max(since, self._last_deck_activity)

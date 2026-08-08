@@ -15,7 +15,10 @@ true, so everything the media loop's gate depends on is pinned here:
      residual deadline gates immediately; one that isn't arms a deadline and
      gates when it elapses,
   4. deck activity (the input funnel the compositor cannot see) clears a
-     pending idle and re-arms the deadline from the press,
+     pending idle and re-arms the deadline from the press -- and outranks
+     even the lock term for DECK_ACTIVITY_GRACE_S, since a deck left live on
+     lock (`lock-on-lock-screen` off) is a supported setup and the person
+     pressing its keys is at it,
   5. every transition -- both directions -- wakes every deck's media thread,
      over a SNAPSHOT of the controller list (unplug/close mutate it) and
      without letting one controller's failure strand the others,
@@ -200,6 +203,45 @@ def check_deck_activity_clears_and_rearms() -> None:
     assert monitor.is_quiescent() is False, "the deadline must re-arm from the press"
     monitor.stop()
     print("PASS: deck activity clears the gate and re-arms the deadline")
+
+
+def check_deck_activity_outranks_the_lock() -> None:
+    """With `lock-on-lock-screen` off the deck stays live and usable while
+    the screen is locked. If the lock term short-circuited, that user would
+    drum on a working deck whose animations stay frozen and nothing they did
+    would thaw them -- so a recent press outranks the lock, and the gate
+    re-engages on its own once the grace expires."""
+    (a,) = install_controllers(StubController())
+    monitor = make_monitor()
+    monitor.DECK_ACTIVITY_GRACE_S = 0.4  # the shipped 30s, tightened
+
+    # No press ever observed (_last_deck_activity == 0.0): a lock gates at
+    # once. This is the startup case -- process start is not deck activity.
+    set_locked(monitor, True)
+    assert monitor.is_quiescent() is True, (
+        "a lock with no deck activity behind it must still gate immediately"
+    )
+    assert a.media_player.wakes == 1
+
+    monitor.notify_activity()
+    assert monitor.is_quiescent() is False, (
+        "a deck press must un-gate even while the screen is locked -- the deck "
+        "is live on lock whenever lock-on-lock-screen is off"
+    )
+    assert a.media_player.wakes == 2, "un-gating must wake the deck"
+
+    # ... and re-gates on the grace's own deadline, with no further input:
+    # nothing else would ever call back (the lock is not changing and logind
+    # cannot see deck presses).
+    assert fixtures.wait_until(monitor.is_quiescent, timeout=3.0), (
+        "the grace expired but the gate never re-engaged -- its deadline was "
+        "not armed"
+    )
+    assert a.media_player.wakes == 3
+
+    set_locked(monitor, False)
+    monitor.stop()
+    print("PASS: a deck press outranks the lock for the grace, then re-gates")
 
 
 def check_set_mode_reevaluates() -> None:
@@ -482,6 +524,7 @@ def main() -> None:
     check_unlock_counts_as_activity()
     check_idle_arithmetic()
     check_deck_activity_clears_and_rearms()
+    check_deck_activity_outranks_the_lock()
     check_set_mode_reevaluates()
     check_constructor_seeds_from_settings()
     check_fan_out_is_snapshot_and_contained()
