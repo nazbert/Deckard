@@ -32,7 +32,6 @@ from rpyc.core.protocol import Connection
 from rpyc.core import netref
 
 # Import own modules
-from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
 from src.backend.DeckManagement.HelperMethods import is_image, is_svg, is_video
 from src.backend.DeckManagement.Subclasses.KeyImage import InputImage
 from src.backend.DeckManagement.Subclasses.KeyVideo import InputVideo
@@ -50,6 +49,10 @@ from typing import TYPE_CHECKING
 from src.backend.PluginManager.PluginSettings.Asset import Color,Icon
 
 if TYPE_CHECKING:
+    # GenerativeUI imports Gtk at module scope; ActionCore is in the engine's
+    # import closure (DeckController, Page), so it stays a type-only name here
+    # and is imported lazily for the one runtime isinstance below (#141).
+    from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
     from src.backend.PluginManager.PluginBase import PluginBase
     from src.backend.DeckManagement.DeckController import DeckController, ControllerKey
     from src.backend.PageManagement.Page import Page
@@ -84,7 +87,7 @@ class ActionCore(rpyc.Service):
         self.action_id = action_id
         self.action_name = action_name
         self.plugin_base = plugin_base
-        self.generative_ui_objects: list[GenerativeUI] = []
+        self.generative_ui_objects: list["GenerativeUI"] = []
 
         self.on_ready_called = False
         # Set only after on_ready() has returned (or raised). Ticks and
@@ -585,7 +588,9 @@ class ActionCore(rpyc.Service):
             return
         raise Warning("Seems like you're calling this method before the action is ready")
     
-    def get_generative_ui_objects(self) -> list[GenerativeUI]:
+    def get_generative_ui_objects(self) -> list["GenerativeUI"]:
+        from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
+
         objects = []
         for attr in dir(self):
             if isinstance(getattr(self, attr), GenerativeUI):
@@ -593,10 +598,10 @@ class ActionCore(rpyc.Service):
 
         return objects
 
-    def add_generative_ui_object(self, generative_ui_object: GenerativeUI):
+    def add_generative_ui_object(self, generative_ui_object: "GenerativeUI"):
         self.generative_ui_objects.append(generative_ui_object)
 
-    def remove_generative_ui_object(self, generative_ui_object: GenerativeUI):
+    def remove_generative_ui_object(self, generative_ui_object: "GenerativeUI"):
         """Unregister a GenerativeUI element (e.g. a dynamically-rebuilt config
         row) so it stops being retained for the action's lifetime."""
         try:
@@ -784,11 +789,11 @@ class ActionCore(rpyc.Service):
         self._release_backend_resources()
 
     @staticmethod
-    def _destroy_gen_ui_batch(snapshot: list[GenerativeUI]) -> None:
+    def _destroy_gen_ui_batch(snapshot: list["GenerativeUI"]) -> None:
         """GLib.idle_add callback queued from clean_up(): destroys each
         GenerativeUI object snapshotted at teardown time. Runs on the GTK
         main loop, where GenerativeUI.destroy()'s internal run_on_main()
-        executes inline (GtkHelper.py) -- no re-queueing, no deadlock risk."""
+        executes inline (main_loop.py) -- no re-queueing, no deadlock risk."""
         for obj in snapshot:
             try:
                 owner = obj.action_core
