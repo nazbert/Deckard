@@ -39,6 +39,8 @@ import os
 
 # Import own modules
 from src.backend import timer_wheel
+from src.backend import ui_port
+from src.windows.ui_adapter import GtkUIAdapter
 from src.windows.mainWindow.mainWindow import MainWindow
 from src.windows.AssetManager.AssetManager import AssetManager
 from src.windows.Store.Store import Store
@@ -97,6 +99,11 @@ class App(Adw.Application):
         # registered below so the very first signal already sees it.
         self._quit_started = False
 
+        # The live engine->UI adapter, so on_quit can detach it (#141). None
+        # until on_activate builds the window -- a TERM before that must not
+        # raise here.
+        self._ui_adapter = None
+
         self.register_signal_handlers()
 
         self.connect("activate", self.on_activate)
@@ -143,7 +150,23 @@ class App(Adw.Application):
             # stays False and the next activation retries the full build.
             self.on_reopen()
             return
-        self.main_win = MainWindow(application=app, deck_manager=self.deck_manager)
+        # Install the engine->UI adapter BEFORE constructing the window
+        # (#141): every boot-time add_page runs INSIDE MainWindow's
+        # constructor (build() -> leftArea -> deck_stack.add_pages()), so an
+        # adapter installed afterwards would miss every bind and leave all
+        # previews permanently dirty-marked. attach_window() runs after, for
+        # the map/unmap handlers, and re-scans the stack so any child added
+        # during construction is bound regardless.
+        adapter = GtkUIAdapter()
+        self._ui_adapter = adapter
+        ui_port.install(adapter)
+        try:
+            self.main_win = MainWindow(application=app, deck_manager=self.deck_manager)
+        except Exception:
+            ui_port.install(None)
+            self._ui_adapter = None
+            raise
+        adapter.attach_window(self.main_win)
         if not gl.argparser.parse_args().b:
             self.main_win.present()
 
@@ -280,6 +303,22 @@ class App(Adw.Application):
         self._quit_started = True
 
         log.info("Quitting...")
+
+        # Detach the UI first: the media/tick threads keep running for a
+        # while yet, and a push into a window that is being destroyed is a
+        # crash shape. The null port makes them dirty-mark instead (#141).
+        ui_port.install(None)
+        # Drop the adapter's own references too (bound DeckStackChildren, the
+        # window, per-controller throttle/coalescer state): uninstalling only
+        # stops new calls, it does not release the widget graph the adapter
+        # still points at while the tick threads wind down.
+        # getattr, not self._ui_adapter: guarded for the same reason as the
+        # window teardown below -- a quit landing before __init__ finished
+        # must still reach terminate_all_backends() (issue #169).
+        adapter = getattr(self, "_ui_adapter", None)
+        if adapter is not None:
+            adapter.detach_window()
+            self._ui_adapter = None
 
         # Stop DBus API service
         if not gl.IS_MAC:

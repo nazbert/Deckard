@@ -35,6 +35,7 @@ import globals as gl
 # Import own modules
 from src.backend.DeckManagement.ImageHelpers import image2pixbuf
 from src.backend.DeckManagement.HelperMethods import recursive_hasattr
+from src.windows.ui_adapter import mark_dirty
 
 class KeyGrid(Gtk.Grid):
     """
@@ -108,13 +109,30 @@ class KeyGrid(Gtk.Grid):
                 # tasks.pop() is try/except-guarded exactly like the Key
                 # case above, so whichever widget gets there first wins and
                 # the other is a no-op.
-                if recursive_hasattr(self, "deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar.image"):
-                    screenbar = self.deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar
+                screenbar = self._find_screenbar()
+                if screenbar is not None:
                     self._push_current_image(identifier, screenbar.image)
                     try:
                         tasks.pop(identifier)
                     except KeyError:
                         pass
+
+    def _find_screenbar(self):
+        """Our sibling screenbar, found by walking up the widget tree.
+
+        Duck-typed on purpose: importing DeckStackChild/DeckConfig here would
+        be a cycle, and since #141 the engine no longer caches the child for
+        us to borrow. Allowed to fail: during __init__ this grid is not in the
+        widget tree yet (DeckConfig.build appends the grid before the
+        screenbar exists), so the touchscreen replay defers to ScreenBar's own
+        load_from_changes -- which is the existing, deliberate behavior.
+        """
+        widget = self.get_parent()
+        while widget is not None:
+            if recursive_hasattr(widget, "screenbar.image"):
+                return widget.screenbar
+            widget = widget.get_parent()
+        return None
 
     def _push_current_image(self, identifier, widget) -> None:
         controller_input = self.deck_controller.get_input(identifier)
@@ -333,10 +351,21 @@ class KeyButton(Gtk.Frame):
         # callback: painting a disposed widget crashes GTK.
         try:
             if not self.get_mapped():
+                # Late failure (#141): push_input_image already answered True
+                # for this frame, so the engine did NOT dirty-mark it. Record
+                # the drop here or load_from_changes has nothing to replay on
+                # remap and the preview goes stale.
+                self._mark_dropped()
                 return
             self.image.set_from_pixbuf(self.pixbuf)
         except Exception as e:
             log.debug(f"Key mirror paint skipped: {e}")
+            self._mark_dropped()
+
+    def _mark_dropped(self) -> None:
+        controller = getattr(self.key_grid, "deck_controller", None)
+        if controller is not None:
+            mark_dirty(controller, self.identifier)
 
     def set_icon_selector_previews(self, pixbuf):
         # Main loop only: the gating below reads widget state.

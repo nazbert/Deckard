@@ -26,6 +26,7 @@ from loguru import logger as log
 # Import globals
 
 # Import own modules
+from src.backend import ui_port
 from src.windows.mainWindow.elements.DeckStackChild import DeckStackChild
 
 # Import typing
@@ -74,14 +75,19 @@ class DeckStack(Gtk.Stack):
 
         # Clear any previous binding BEFORE constructing the new child
         # (issue #156): KeyGrid.__init__ runs load_from_changes() during
-        # construction, and its touchscreen branch replays dirty markers
-        # against deck_controller.own_deck_stack_child -- on a window
-        # rebuild that still points at the ORPHANED old child, which would
-        # consume the markers into dead widgets and leave the new screenbar
-        # with nothing to replay on map. Unbound, that replay defers and
-        # the markers survive for the new widgets.
-        deck_controller.own_deck_stack_child = None
-        deck_controller.own_key_grid = None
+        # construction, and its touchscreen branch replays dirty markers into
+        # whatever screenbar it can resolve -- on a window rebuild a stale
+        # binding would consume the markers into dead widgets and leave the
+        # new screenbar with nothing to replay on map. Unbound, that replay
+        # defers and the markers survive for the new widgets.
+        # Duck-typed, not isinstance(GtkUIAdapter): a wrapper/proxy port
+        # (a recording port in tests, an IPC forwarder later) implements the
+        # same bind/unbind pair without inheriting, and an isinstance gate
+        # would silently drop every binding for it.
+        adapter = ui_port.get()
+        unbind = getattr(adapter, "unbind", None)
+        if callable(unbind):
+            unbind(deck_controller)
         page = DeckStackChild(self, deck_controller)
         self.add_titled(page, deck_number, deck_type)
         # Bind by reference only once the child is actually in the stack:
@@ -90,7 +96,9 @@ class DeckStack(Gtk.Stack):
         # contention at boot) or the window was rebuilt. Binding after
         # add_titled also means an exception mid-construction can never
         # leave the controller bound to a child that is not in the stack.
-        deck_controller.own_deck_stack_child = page
+        bind = getattr(adapter, "bind", None)
+        if callable(bind):
+            bind(deck_controller, page)
 
         page.page_settings.deck_config.grid.select_key(0, 0)
 
@@ -135,6 +143,11 @@ class DeckStack(Gtk.Stack):
         return deck_number, deck_type
 
     def remove_page(self, deck_controller) -> str:
+        adapter = ui_port.get()
+        unbind = getattr(adapter, "unbind", None)
+        if callable(unbind):
+            unbind(deck_controller)
+
         was_visible: bool = False
         for i, page in enumerate(self.get_pages()):
             if page.get_child().deck_controller == deck_controller:

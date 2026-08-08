@@ -60,10 +60,9 @@ from src.backend.mem_telemetry import page_switches
 from src.backend import timer_wheel
 from src.backend.PageManagement.Page import ActionOutdated, Page, NoActionHolderFound
 from src.api import notify_active_page_changed
+from src.backend import ui_port
 
 process = psutil.Process()
-
-from gi.repository import GLib
 
 # Import signals
 from src.Signals import Signals
@@ -71,10 +70,8 @@ from src.Signals import Signals
 # Import typing
 from typing import TYPE_CHECKING, cast
 
-from src.windows.mainWindow.elements.KeyGrid import KeyButton, KeyGrid
 from src.backend.PluginManager.ActionCore import ActionCore
 if TYPE_CHECKING:
-    from src.windows.mainWindow.elements.DeckStackChild import DeckStackChild
     from src.backend.DeckManagement.DeckManager import DeckManager
 
 # Import globals
@@ -961,12 +958,7 @@ class MediaPlayerThread(threading.Thread):
             self.set_banner_revealed(False)
 
     def set_banner_revealed(self, state: bool) -> None:
-        deck_stack_child: "DeckStackChild" = self.deck_controller.get_own_deck_stack_child()
-        if deck_stack_child is None:
-            return
-        
-        # deck_stack_child.low_fps_banner.set_revealed(show_warning)
-        GLib.idle_add(deck_stack_child.low_fps_banner.set_revealed, state)
+        ui_port.get().set_low_fps_warning(self.deck_controller, state)
 
 
     def wake(self) -> None:
@@ -1185,12 +1177,6 @@ class DeckController:
         
         self.hold_time: float = gl.settings_manager.app().hold_time
         
-        self.own_deck_stack_child: "DeckStackChild" = None
-        self.own_key_grid: "KeyGridChild" = None
-        # Coalescing flag for _queue_ui_page_sync (issue #157): rapid page
-        # changes must not queue one full sidebar rebuild each.
-        self._ui_page_sync_queued: bool = False
-
         self.screen_saver = ScreenSaver(deck_controller=self)
         self.allow_interaction = True
         self.has_animated_keys = False
@@ -1488,7 +1474,7 @@ class DeckController:
         # load_all_inputs has completed by the time this task runs) --
         # the sidebar can now render the NEW page's state objects.
         if self._page_is_current(gen):
-            self._queue_ui_page_sync()
+            ui_port.get().on_page_changed(self)
 
     def animations_gated(self) -> bool:
         """Whether this deck's media loop should skip its animation section
@@ -1944,52 +1930,6 @@ class DeckController:
         input_dict = controller_input.identifier.get_config(page)
         controller_input.load_from_input_dict(input_dict, update)
 
-    def _queue_ui_page_sync(self):
-        # Coalesce page-load completion signals into one pending idle
-        # callback: N rapid page changes (unlock bursts, ChangePage chains)
-        # must not queue N full sidebar rebuilds. Each callback renders the
-        # LIVE state, so whichever completion lands last wins. The
-        # check-then-set race between the two trigger threads is benign --
-        # worst case two idles, both rendering the same current state.
-        if self._ui_page_sync_queued:
-            return
-        self._ui_page_sync_queued = True
-        GLib.idle_add(self._run_ui_page_sync)
-
-    def _run_ui_page_sync(self):
-        self._ui_page_sync_queued = False
-        self.update_ui_on_page_change()
-        return False
-
-    def update_ui_on_page_change(self):
-        # Refresh the sidebar so the selected input's editor shows the NEW
-        # page's action configuration. This is all that is left of the
-        # original sync: the settings/background groups it also poked predate
-        # the settings restructure -- the page-scoped group variants are
-        # unreferenced, the deck-scoped rows reload on map, and
-        # BackgroundMediaRow.load_defaults_from_page is a deliberate dead
-        # early-return. The old accessor chain (...page_settings.
-        # settings_page) died on AttributeError on EVERY call -- swallowed by
-        # a blanket except as first-deck noise -- so none of it, the sidebar
-        # update included, ever ran (issue #157). No except wrapper anymore:
-        # this runs on the GLib main loop, where a real failure reaches the
-        # central hooks (#80) instead of being mislabeled.
-        if not recursive_hasattr(gl, "app.main_win.sidebar"):
-            return
-        # The sidebar mirrors the VISIBLE deck's selected input; a page
-        # change on a background deck must not reload it.
-        if gl.app.main_win.leftArea.deck_stack.get_visible_child() is not self.get_own_deck_stack_child():
-            return
-        sidebar = gl.app.main_win.sidebar
-        # Never yank the user out of a sub-view: Sidebar.load_for_* forces
-        # main_stack back to the input editor, so refreshing while the
-        # ActionChooser/ActionConfigurator (or the error page, whose
-        # deferred on_map task handles its own reload) is up would snap a
-        # mid-edit user away on every automatic page change.
-        if sidebar.main_stack.get_visible_child() is not sidebar.configurator_stack:
-            return
-        sidebar.update()
-
     def close_image_ressources(self):
         """Releases every input's media (key/dial images+videos) plus the
         background image/video. Called from close() step 7 (plan P1.3).
@@ -2157,9 +2097,9 @@ class DeckController:
 
         # Second completion signal: action_objects now exist, so the
         # sidebar's ActionManager can render the new page's actions. The
-        # queue coalesces this with the media-thread trigger above; each
+        # port coalesces this with the media-thread trigger above; each
         # callback renders the live state, so the later completion wins.
-        self._queue_ui_page_sync()
+        ui_port.get().on_page_changed(self)
 
         # Notify plugin actions. `page.json_path`, not active_page (same
         # rationale as initialize_actions above): a racing switch or close()
@@ -2214,20 +2154,11 @@ class DeckController:
         # old rotation is dead the moment it changes.
         self.clear_encoded_key_caches()
 
-        self.own_key_grid = None
-
-
-        if recursive_hasattr(gl, "app.main_win"):
-            # self.get_own_key_grid().regenerate_buttons()
-
-            # Re-generate key grid
-            deck_stack_child = self.get_own_deck_stack_child()
-            deck_config = deck_stack_child.page_settings.deck_config
-            key_grid = deck_config.grid
-            deck_config.remove(key_grid)
-
-            deck_config.grid = KeyGrid(self, key_grid.page_settings_page)
-            deck_config.prepend(deck_config.grid)
+        # The UI rebuilds its key grid for the new geometry. Synchronous when
+        # we are already on the main loop (our only caller is), so the
+        # load_page below repaints into the NEW grid rather than the
+        # transposed old one.
+        ui_port.get().on_deck_layout_changed(self)
 
         if not self.get_alive(): return
         self.load_page(self.active_page)
@@ -2357,37 +2288,16 @@ class DeckController:
         if self.active_page is not None:
             self.load_page(self.active_page, allow_reload=True)
     
-    def get_own_deck_stack_child(self) -> "DeckStackChild":
-        # Why not just lru_cache this? Because this would also cache the None that gets returned while the ui is still loading
-        if self.own_deck_stack_child is not None:
-            return self.own_deck_stack_child
-        
-        if not recursive_hasattr(gl, "app.main_win.leftArea.deck_stack"): return
-        deck_stack = gl.app.main_win.leftArea.deck_stack
-        # Identity scan instead of get_child_by_name(get_serial_number()):
-        # the name is a device-read string frozen at add_page time, and
-        # matching it against a fresh device read misses forever -- silently,
-        # previews then only dirty-mark -- if either read was wrong (issue
-        # #156). remove_page already matches children by controller identity;
-        # this is the same contract. Normally add_page pre-binds the ref and
-        # this scan never runs; it covers children created before this
-        # controller learned about them.
-        for page in deck_stack.get_pages():
-            if page is None:
-                # Racing a main-thread stack mutation: ListModel iteration
-                # snapshots len once, so removed trailing indices yield
-                # None. Only trailing entries can be None -- stop.
-                break
-            deck_stack_child = page.get_child()
-            if getattr(deck_stack_child, "deck_controller", None) is self:
-                # Publish only if still unbound: a stale scan (e.g. over a
-                # replaced window's stack) must not clobber add_page's
-                # fresh bind for the new widget tree.
-                if self.own_deck_stack_child is None:
-                    self.own_deck_stack_child = deck_stack_child
-                return self.own_deck_stack_child
-        return
-    
+    def get_own_deck_stack_child(self):
+        """Deprecated in-process shim (#141): kept for out-of-tree plugins.
+
+        The engine no longer caches or resolves widgets -- the attached UI
+        owns the controller->child binding (by object identity at add_page
+        time, issue #156, never by matching a re-read serial against a stack
+        child's name). Returns None when no UI is attached.
+        """
+        return ui_port.get().query_deck_widget(self, "deck_stack_child")
+
     def _write_blank_frames(self) -> None:
         """Writes blank key images (+ touchscreen) directly to the device.
         Shared body for _clear_direct() and the media thread's Clear/
@@ -2427,17 +2337,9 @@ class DeckController:
         seq = self.media_player.next_submit_seq()
         self.media_player.submit_control(ClearMsg(seq=seq))
 
-    def get_own_key_grid(self) -> KeyGrid:
-        # Why not just lru_cache this? Because this would also cache the None that gets returned while the ui is still loading
-        if self.own_key_grid is not None:
-            return self.own_key_grid
-        
-        deck_stack_child = self.get_own_deck_stack_child()
-        if deck_stack_child is None:
-            return
-        
-        self.own_key_grid = deck_stack_child.page_settings.deck_config.grid
-        return deck_stack_child.page_settings.deck_config.grid
+    def get_own_key_grid(self):
+        """Deprecated in-process shim (#141) -- see get_own_deck_stack_child."""
+        return ui_port.get().query_deck_widget(self, "key_grid")
     
     def clear_media_player_tasks(self, gen=None):
         # Skip the clear when a newer page load has superseded this one, so a late
@@ -3765,23 +3667,20 @@ class LabelManager:
 
         self._scroll_widths_cache = None
         self._has_visible_labels_cache = None
-        GLib.idle_add(self.update_label_editor)
+        self.update_label_editor()
         if update:
             self.update_label(position)
 
     def update_label_editor(self):
-        if not recursive_hasattr(gl, "app.main_win.sidebar.active_identifier"):
-            return
-        
-        if gl.app.main_win.sidebar.active_identifier != self.controller_input.identifier:
-            return
-        
-        controller = gl.app.main_win.get_active_controller()
-        if controller is not self.controller_input.deck_controller:
-            return
+        """Kept as the caller-facing name; the widget work is the adapter's.
 
-        gl.app.main_win.sidebar.key_editor.label_editor.load_for_identifier(self.controller_input.identifier, self.controller_input.state)
-        
+        Page.set_label_* calls this on every label styling change (8 sites in
+        PageManagement/Page.py) and the trailing update_input repaint runs
+        after it -- so this must stay a plain forwarder that never raises.
+        """
+        ui_port.get().on_input_visuals_changed(
+            self.controller_input.deck_controller, self.controller_input.identifier,
+            self.controller_input.state, "labels")
 
     def get_use_page_label_properties(self, position: str) -> dict:
         if self.page_labels.get(position) is None:
@@ -4216,20 +4115,9 @@ class LayoutManager:
 
     def update(self):
         self.controller_input.update()
-        GLib.idle_add(self.update_layout_editor)
-
-    def update_layout_editor(self):
-        if not recursive_hasattr(gl, "app.main_win.leftArea.deck_stack"):
-            return
-        
-        if gl.app.main_win.sidebar.active_identifier != self.controller_input.identifier:
-            return
-
-        controller = gl.app.main_win.get_active_controller()
-        if controller is not self.controller_input.deck_controller:
-            return
-
-        gl.app.main_win.sidebar.key_editor.image_editor.load_for_identifier(self.controller_input.identifier, self.controller_input.state)
+        ui_port.get().on_input_visuals_changed(
+            self.controller_input.deck_controller, self.controller_input.identifier,
+            self.controller_input.state, "layout")
 
     def add_image_to_background(self, image: Image.Image, background: Image.Image, cache_token=None) -> Image.Image:
         if image is None:
@@ -4326,20 +4214,9 @@ class BackgroundManager:
     def update(self, ui: bool = True):
         self.controller_input.update()
         if ui:
-            GLib.idle_add(self.update_background_editor)
-
-    def update_background_editor(self):
-        if not recursive_hasattr(gl, "app.main_win.leftArea.deck_stack"):
-            return
-        
-        if gl.app.main_win.sidebar.active_identifier != self.controller_input.identifier:
-            return
-
-        controller = gl.app.main_win.get_active_controller()
-        if controller is not self.controller_input.deck_controller:
-            return
-
-        gl.app.main_win.sidebar.key_editor.background_editor.load_for_identifier(self.controller_input.identifier, self.controller_input.state)
+            ui_port.get().on_input_visuals_changed(
+                self.controller_input.deck_controller, self.controller_input.identifier,
+                self.controller_input.state, "background")
 
     def get_color_is_set(self, color: list[int]) -> bool:
         return color not in [None, [None]*3, [None]*4]
@@ -4479,12 +4356,12 @@ class ControllerInputState:
             if isinstance(action, ActionOutdated):
                 if show_notifications:
                     plugin_id = gl.plugin_manager.get_plugin_id_from_action_id(action.id)
-                    gl.app.send_outdated_plugin_notification(plugin_id)
+                    ui_port.get().notify_plugin_problem(plugin_id, "outdated")
                 continue
             if isinstance(action, NoActionHolderFound):
                 if show_notifications:
                     plugin_id = gl.plugin_manager.get_plugin_id_from_action_id(action.id)
-                    gl.app.send_missing_plugin_notification(plugin_id)
+                    ui_port.get().notify_plugin_problem(plugin_id, "missing")
                 continue
 
             # parsed_event = event
@@ -4727,10 +4604,14 @@ class ControllerInput:
         gl.signal_manager.trigger_signal(Signals.RemoveState, state, state_map)
 
     def update_state_switcher(self):
-        if gl.app.main_win.sidebar.active_identifier != self.identifier:
-            return
+        """Kept as the plugin-facing name; the widget work is the adapter's.
 
-        gl.app.main_win.sidebar.key_editor.state_switcher.set_n_states(len(self.states))
+        Was an UNGUARDED, un-idled reach into the window's sidebar from
+        plugin/action threads -- an AttributeError crash before the window
+        existed, and an off-main widget mutation after it.
+        """
+        ui_port.get().on_input_states_changed(
+            self.deck_controller, self.identifier, len(self.states))
 
     def get_active_state(self) -> "ControllerInputState":
         state = self.states.get(self.state)
@@ -4751,20 +4632,14 @@ class ControllerInput:
             self.reload_sidebar()
 
     def reload_sidebar(self) -> None:
-        visible_child = gl.app.main_win.leftArea.deck_stack.get_visible_child()
-        if visible_child is None:
-            return
-        controller = visible_child.deck_controller
-        if controller is None:
-            return
-        
-        if controller is not self.deck_controller:
-            return
-        if self.identifier != gl.app.main_win.sidebar.active_identifier:
-            return
-        
-        gl.app.main_win.sidebar.active_state = self.state
-        GLib.idle_add(gl.app.main_win.sidebar.update)
+        """Kept as the plugin-facing name; the widget work is the adapter's.
+
+        The visible-child read used to happen on the CALLING thread (an
+        off-main GTK read); it now runs inside the adapter's idle together
+        with the refresh.
+        """
+        ui_port.get().on_input_state_selected(
+            self.deck_controller, self.identifier, self.state)
 
     def load_from_config(self, config, update: bool = True):
         n_states = len(config.get("states", {}))
@@ -5434,32 +5309,20 @@ class ControllerKey(ControllerInput):
     def set_ui_key_image(self, image: Image.Image) -> None:
         if image is None:
             return
-        
-        x, y = ControllerKey.Index_To_Coords(self.deck_controller.deck, self.index)
 
-        if self.deck_controller.get_own_key_grid() is None or not gl.app.main_win.get_mapped():
-            # Mark dirty only (P5.4) -- KeyGrid.load_from_changes
+        if not ui_port.get().push_input_image(self.deck_controller, self.identifier, image):
+            # Refused (no UI, window unmapped, grid mid-rebuild) or the push
+            # raised: mark dirty only (P5.4) -- KeyGrid.load_from_changes
             # recomposites a fresh image on map instead of replaying `image`.
+            # A frame the port ACCEPTS but later drops marks itself; see
+            # ui_adapter.mark_dirty.
             self.deck_controller.ui_image_changes_while_hidden[self.identifier] = True
-        else:
-            try:
-                # Racing the check above: the grid can go away, and the button
-                # grid can be smaller than this key's coords mid-rebuild.
-                # set_image converts on this thread and idles only the paint.
-                self.deck_controller.get_own_key_grid().buttons[x][y].set_image(image)
-            except Exception:
-                # Open failure set since the conversion moved here: the lookup
-                # races above, plus PIL convert/tobytes and
-                # GdkPixbuf.new_from_bytes. Contain all of it -- the mirror is
-                # best-effort, and we run under the media tick, whose catch-all
-                # backs off 0.25s per exception. A failing preview must never
-                # throttle the deck writer loop.
-                log.opt(exception=True).warning(f"Failed to set ui key image for {self.identifier}")
-        
-    def get_own_ui_key(self) -> KeyButton:
-        x, y = ControllerKey.Index_To_Coords(self.deck_controller.deck, self.index)
-        buttons = self.deck_controller.get_own_key_grid().buttons # The ui key coords are in reverse order
-        return buttons[x][y]
+
+
+    def get_own_ui_key(self):
+        """Deprecated in-process shim (#141): the attached UI resolves its own
+        widget for this input. None when headless."""
+        return ui_port.get().query_input_widget(self.deck_controller, self.identifier)
     
     def get_image_size(self) -> tuple[int, int]:
         return self.deck_controller.get_key_image_size()
@@ -5566,54 +5429,12 @@ class ControllerTouchScreen(ControllerInput):
         return Image.new("RGBA", (screen_width // n_dials, screen_height), (0, 0, 0, 0))
 
     def set_ui_image(self, image: Image.Image) -> None:
-        if recursive_hasattr(self, "deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar.image") and gl.app.main_win.get_mapped():
-            # Throttle the on-screen preview to a few FPS; the physical
-            # touchscreen still gets every frame.
-            now = time.time()
-            if now - getattr(self, "_last_ui_image_time", 0) < 0.1:
-                # Within the throttle window: keep the latest frame and flush it
-                # after the window, so the final frame (when a scroll stops) isn't lost.
-                self._pending_ui_image = image
-                if not getattr(self, "_ui_flush_scheduled", False):
-                    self._ui_flush_scheduled = True
-                    GLib.timeout_add(100, self._flush_pending_ui_image)
-                return
-            self._last_ui_image_time = now
-            self._pending_ui_image = None
-            screenbar = self.deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar
-            try:
-                # set_image converts on this thread and idles only the paint.
-                # Contain everything it can raise (PIL thumbnail/crop, pixbuf
-                # build, and the dial branch's sidebar.key_editor.icon_selector
-                # chain -- only checked down to `sidebar` there): the mirror is
-                # best-effort, and we run under the media tick, whose catch-all
-                # backs off 0.25s per exception. A failing preview must never
-                # throttle the deck writer loop.
-                screenbar.image.set_image(image)
-            except Exception:
-                log.opt(exception=True).warning("Touchscreen mirror update failed")
-        else:
+        if not ui_port.get().push_input_image(self.deck_controller, self.identifier, image):
             # Mark dirty only (P5.4) -- ScreenBar.load_from_changes
             # recomposites a fresh image on map instead of replaying `image`.
+            # The preview throttle (and its tail flush, which re-marks a frame
+            # the window unmapped out from under) lives in the adapter now.
             self.deck_controller.ui_image_changes_while_hidden[self.identifier] = True
-
-    def _flush_pending_ui_image(self) -> bool:
-        # Runs on the GTK main loop; pushes the last throttled frame so the preview
-        # doesn't freeze mid-scroll. Skipped if a fresh frame already superseded it.
-        self._ui_flush_scheduled = False
-        image = getattr(self, "_pending_ui_image", None)
-        self._pending_ui_image = None
-        if image is None:
-            return False
-        if recursive_hasattr(self, "deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar.image") and gl.app.main_win.get_mapped():
-            self._last_ui_image_time = time.time()
-            screenbar = self.deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar
-            screenbar.image.set_image(image)
-        else:
-            # Window unmapped mid-throttle: mark dirty (P5.4) instead of
-            # keeping this frame -- the remap restore recomposites fresh.
-            self.deck_controller.ui_image_changes_while_hidden[self.identifier] = True
-        return False
 
     def get_current_image(self) -> Image.Image:
         active_state = self.get_active_state()
