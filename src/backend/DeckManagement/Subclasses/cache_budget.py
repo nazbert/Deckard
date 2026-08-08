@@ -123,6 +123,14 @@ NOTIFY_WATERMARK_BYTES = 1024 * 1024
 # the common case (a page change, a few hundred entries) is never split.
 MAX_PICKS_PER_PASS = 2000
 
+# How often, in picks, a pass re-reads the live sum instead of trusting its
+# own running subtraction. A clear() elsewhere in the process -- a background
+# change or a deck teardown, both of which drop a whole cache at once -- frees
+# bytes the pass cannot see, and every pick made against the stale-high total
+# after that is another deck's entry evicted for no reason. Costs one
+# budget_bytes() lock per registrant, once per this many evictions.
+RECHECK_EVERY_PICKS = 64
+
 LOG_INTERVAL_S = 5.0
 
 # --------------------------------------------------------------------- #
@@ -435,7 +443,9 @@ def _drain_once() -> bool:
     # Per-pass skip set: a cache that is at its floor, entirely younger than
     # its min-age, or empty is out for the rest of this pass. Every loop
     # iteration therefore either strictly decreases `total` or grows `skip`
-    # -- both finite, so the drain provably terminates. ids are stable here:
+    # -- both finite. The periodic re-read below can push `total` back up
+    # (painters are still putting), so MAX_PICKS_PER_PASS, not that argument
+    # alone, is what makes termination unconditional. ids are stable here:
     # `caches` holds strong references for the duration.
     skip: set = set()
     freed = 0
@@ -478,6 +488,12 @@ def _drain_once() -> bool:
         total -= got
         freed += got
         evicted += 1
+        if picks % RECHECK_EVERY_PICKS == 0:
+            # Re-anchor on the live sum: `total` is a running subtraction and
+            # a clear() elsewhere (background change, deck teardown) frees
+            # bytes it cannot see, so a long pass can keep shedding other
+            # decks' entries against a total that is already stale-high.
+            total = evictable_bytes()
 
     global _evictions, _evicted_bytes
     with _lock:

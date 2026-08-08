@@ -86,6 +86,70 @@ def _fill(cache: ByteLRUCache, prefix: str, count: int, size: int) -> None:
         cache.put((prefix, i), bytes(size))
 
 
+def check_mid_pass_clear_is_noticed() -> None:
+    """(f) A pass must not keep evicting against its own running total after
+    something else freed bytes underneath it. clear() is called wholesale --
+    a background change, a rotation change, a deck teardown -- and every pick
+    made after that against the stale-high total is another deck's entry
+    re-encoded for nothing.
+
+    Runs FIRST, before anything in this scenario has crossed the notify
+    watermark: the daemon this check's own register() spawns then sits in its
+    60 s wait for the duration, so the only pass running is the synchronous
+    one below."""
+    clock = _FakeClock()
+    byte_lru_cache.time = clock
+    _set_ceiling(0.5)  # 512 KiB -> a 486 KiB target
+    old = ByteLRUCache(max_bytes=4 * MIB)
+    other = ByteLRUCache(max_bytes=4 * MIB)
+    entry = 2 * 1024
+    try:
+        cache_budget.register(old, label="draining:test", floor_bytes=0)
+        cache_budget.register(other, label="cleared:test", floor_bytes=0)
+
+        # Both fills stay under NOTIFY_WATERMARK_BYTES, so no put in this
+        # check ever wakes the daemon.
+        _fill(old, "o", 300, entry)      # 600 KiB, the only evictable source
+        clock.advance(100.0)
+        _fill(other, "c", 150, entry)    # 300 KiB, inside min-age
+
+        # The wholesale free, injected mid-pass at the first re-read boundary.
+        real_evict = old.budget_evict_oldest
+        calls = {"n": 0}
+
+        def evict_then_clear(want_bytes, min_age_s, floor_bytes):
+            got = real_evict(want_bytes, min_age_s, floor_bytes)
+            calls["n"] += 1
+            if calls["n"] == cache_budget.RECHECK_EVERY_PICKS:
+                other.clear()
+            return got
+
+        old.budget_evict_oldest = evict_then_clear
+        cache_budget._drain_once()
+
+        assert calls["n"] == cache_budget.RECHECK_EVERY_PICKS, (
+            f"the pass must re-anchor on the live sum and stop: it made "
+            f"{calls['n']} picks, not {cache_budget.RECHECK_EVERY_PICKS} -- "
+            f"everything past the clear() was over-eviction"
+        )
+        assert old.total_bytes == 300 * entry - cache_budget.RECHECK_EVERY_PICKS * entry, (
+            f"the draining cache lost more than the picks it should have made: "
+            f"{old.total_bytes}"
+        )
+        assert cache_budget.evictable_bytes() <= cache_budget.ceiling_bytes(), (
+            "fixture sanity: the freed bytes must actually have put the sum under "
+            "the ceiling, or stopping was not the right call"
+        )
+    finally:
+        cache_budget.unregister(old)
+        cache_budget.unregister(other)
+        byte_lru_cache.time = time
+        _set_ceiling(None)
+
+    print("PASS: a pass re-anchors on the live sum instead of over-evicting "
+          "against a stale total")
+
+
 def check_cross_cache_lru_order() -> None:
     """(b) The manager must prefer the globally-oldest head, not each
     cache's own -- an idle deck's warm memo has to yield to a painting
@@ -495,8 +559,11 @@ def main() -> None:
     fixtures.start_watchdog(120, label="scenario_cache_budget")
 
     # The deterministic checks run first, on a fake clock and a synchronous
-    # _drain_once(): the daemon spawned by the first register() only ever
-    # acts on a wake, and nothing notifies it until the hammer below.
+    # _drain_once(). The daemon spawned by the first register() only acts on
+    # a wake, and the one check whose assertions count individual picks runs
+    # before any fill crosses the notify watermark, so nothing has woken it
+    # yet when it matters.
+    check_mid_pass_clear_is_noticed()
     check_cross_cache_lru_order()
     check_min_age_and_floor()
     check_lifecycle()
