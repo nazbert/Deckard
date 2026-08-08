@@ -318,8 +318,14 @@ def evictable_bytes() -> int:
 
 def eviction_stats() -> tuple[int, int]:
     """(cumulative entries evicted by the budget, cumulative bytes freed).
-    Both are monotonic for the life of the process."""
-    return _evictions, _evicted_bytes
+    Both are monotonic for the life of the process.
+
+    Read under `_lock` because the writes are: `_drain_once()` is documented
+    as drivable from any thread (the daemon drives it, the scenarios call it
+    directly), so `+=` on a module global is a read-modify-write two passes
+    can interleave and a torn pair is what telemetry would then report."""
+    with _lock:
+        return _evictions, _evicted_bytes
 
 
 # --------------------------------------------------------------------- #
@@ -429,8 +435,9 @@ def _drain_once() -> bool:
         evicted += 1
 
     global _evictions, _evicted_bytes
-    _evictions += evicted
-    _evicted_bytes += freed
+    with _lock:
+        _evictions += evicted
+        _evicted_bytes += freed
 
     if evicted:
         _log_evictions(evicted, freed, before, total, ceiling)
