@@ -19,6 +19,8 @@ from loguru import logger as log
 # Import typing
 from typing import TYPE_CHECKING
 
+import globals as gl
+
 from src.backend.DeckManagement.InputIdentifier import Input
 from src.backend import timer_wheel
 if TYPE_CHECKING:
@@ -135,6 +137,18 @@ class ScreenSaver:
         kind, payload = self.deck_controller.background.prebuild_from_path(
             self.media_path, fps=self.fps, loop=self.loop
         )
+        if kind == "noop":
+            # A configured screensaver media file that no longer exists
+            # (deleted/moved, or a config carried to another machine)
+            # prebuilds as "noop" -- and apply_prebuilt() early-returns on
+            # "noop" WITHOUT touching the background (issue #144 §1.2). The
+            # underlying page's video capture would then stay open behind
+            # the showing screensaver and keep decoding/compositing at full
+            # rate for the screensaver's entire duration, which is exactly
+            # what showing it is supposed to stop. Nothing renderable
+            # exists in that case, so blank is both what the user sees and
+            # what releases the old page's media.
+            kind = "blank"
 
         with self.deck_controller._load_page_lock:
             # Coalesce: a concurrent second show() (e.g. a manual show()
@@ -328,6 +342,13 @@ class ScreenSaver:
             # load_page().
             return
         self.last_key_change_time = time.time()
+        # Deck presses never reach the compositor, so this funnel -- which
+        # every key/dial/touch interaction already passes through -- is the
+        # only thing that can tell the presence monitor a user drumming on
+        # the deck is present (issue #144). None-guarded: the unit-tier
+        # harness never installs one.
+        if gl.presence_monitor is not None:
+            gl.presence_monitor.notify_activity()
         if self.showing:
             self.hide()
         else:

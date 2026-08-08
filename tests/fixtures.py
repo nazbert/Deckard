@@ -185,6 +185,15 @@ class StubBackground:
         self.video = None
 
 
+class StubScreenSaver:
+    """Only `showing` is dereferenced by the code paths the unit tier
+    drives -- DeckController.animations_gated()'s second term (issue #144),
+    bound to the real method below like the rest of the M2 protocol."""
+
+    def __init__(self):
+        self.showing = False
+
+
 class _QuietInputState:
     """The attrs MediaPlayerThread._needs_key_ticks dereferences on an
     input's active state, all quiet (no videos, no scrolling labels) so the
@@ -271,6 +280,7 @@ class StubDeckController:
         self._page_load_generation = 0
         self._page_gen_lock = threading.Lock()
         self.background = StubBackground()
+        self.screen_saver = StubScreenSaver()
         self.inputs = {
             Input.Key: [StubInput(self, i) for i in range(n_keys)],
             Input.Dial: [],
@@ -356,6 +366,7 @@ def _bind_real_deckcontroller_methods() -> None:
     StubDeckController._schedule_full_repaint = _RealDeckController._schedule_full_repaint
     StubDeckController._run_pending_repaint = _RealDeckController._run_pending_repaint
     StubDeckController._on_write_result = _RealDeckController._on_write_result
+    StubDeckController.animations_gated = _RealDeckController.animations_gated
     _stub_methods_bound = True
 
 
@@ -394,7 +405,33 @@ def make_test_png(path: str, size=(72, 72), color=(255, 0, 0)) -> str:
     return path
 
 
-def seed_page_with_background(page_name: str, media_path: str, data_dir: str = None) -> str:
+def make_test_mp4(path: str, size=(200, 100), n_frames=30, fps=15,
+                  color=(64, 128)) -> str:
+    """A tiny solid-color video whose blue channel varies per frame, so
+    consecutive frames hash differently (a constant video would be
+    dedup-skipped at the write point and look like "not playing").
+
+    `color` is the fixed (green, red) pair in BGR terms -- two files built
+    with different pairs are visually and hash-wise distinct, which is what
+    lets a scenario tell one page's frames from another's in the journal.
+
+    Hoisted out of scenario_touchscreen_video_bg.py so the quiescence
+    scenarios can seed a background video from the same fixture."""
+    import cv2
+    import numpy as np
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), fps, size)
+    green, red = color
+    for i in range(n_frames):
+        frame = np.full((size[1], size[0], 3), (i * 8 % 255, green, red), dtype=np.uint8)
+        writer.write(frame)
+    writer.release()
+    assert os.path.getsize(path) > 0
+    return path
+
+
+def seed_page_with_background(page_name: str, media_path: str, data_dir: str = None,
+                              loop: bool = False, fps: int = 30) -> str:
     """Like seed_page(), but the page overwrites the deck background with
     `media_path` -- used to make two pages visually (and hash-) distinct in
     the journal for switch-storm-style scenarios."""
@@ -410,8 +447,8 @@ def seed_page_with_background(page_name: str, media_path: str, data_dir: str = N
                     "overwrite": True,
                     "show": True,
                     "media-path": media_path,
-                    "loop": False,
-                    "fps": 30,
+                    "loop": loop,
+                    "fps": fps,
                 },
             },
         }, f)

@@ -109,6 +109,7 @@ from src.backend.GnomeExtensions import GnomeExtensions
 from src.backend.PermissionManagement.FlatpakPermissionManager import FlatpakPermissionManager
 from src.backend.Wayland.Wayland import Wayland
 from src.backend.LockScreenManager.LockScreenManager import LockScreenManager
+from src.backend.PresenceMonitor.PresenceMonitor import PresenceMonitor
 from src.tray import TrayIcon
 from src.backend.Logger import Logger, LoggerConfig, Loglevel
 from src.backend.log_hooks import install_exception_hooks, redirect_faulthandler
@@ -228,6 +229,11 @@ def create_global_objects():
 
     if os.getenv("WAYLAND_DISPLAY", False):
         gl.wayland = Wayland()
+
+    # Before LockScreenManager on purpose (issue #144): its __init__ starts
+    # setup() on a daemon thread immediately, so a lock arriving in the gap
+    # would find gl.presence_monitor still None and be dropped.
+    gl.presence_monitor = PresenceMonitor()
 
     gl.lock_screen_detector = LockScreenManager()
 

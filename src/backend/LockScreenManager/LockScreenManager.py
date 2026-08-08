@@ -61,6 +61,21 @@ class LockScreenManager:
     @log.catch
     def lock(self, active):
         gl.screen_locked = active
+        if gl.presence_monitor:
+            # Issue #144. Position is deliberate: the monitor must see the lock
+            # before the screensaver work below reads its consequences. Which
+            # makes self-containment the price -- this method's @log.catch
+            # would swallow an exception from the monitor by returning, and
+            # the lock would then never reach allow_interaction, the
+            # screensaver, or self.locked. A presence signal is an optional
+            # extra; the lock screen is not.
+            try:
+                gl.presence_monitor.on_lock_changed(active)
+            except Exception:
+                log.opt(exception=True).warning(
+                    "LockScreenManager: the presence monitor failed to handle a "
+                    "lock change; continuing with the lock itself"
+                )
 
         if active:
             if not gl.settings_manager.app().lock_on_lock_screen:
