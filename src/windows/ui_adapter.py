@@ -266,7 +266,11 @@ class GtkUIAdapter(ui_port.UIPort):
             mark_dirty(controller, identifier)
             return False
         try:
-            state.last_push = time.time()
+            # last_push is read+written by the media thread in
+            # _push_touchscreen; every other access is under the lock, so
+            # this one must be too.
+            with self._ts_lock:
+                state.last_push = time.time()
             screenbar.image.set_image(image)
         except Exception:
             log.opt(exception=True).warning("Touchscreen mirror flush failed")
