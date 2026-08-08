@@ -536,7 +536,7 @@ class MediaPlayerThread(threading.Thread):
         self.check_resume_gap(start)
         self.deck_controller._run_pending_repaint()
 
-        # 2. Quiescence gate (issue #144). STRICTLY after the control-queue
+        # Quiescence gate (issue #144). STRICTLY after the control-queue
         # drain and the _stop check above: quit/clear/brightness must never
         # wait on quiescence. When it holds, this tick skips the whole
         # animation section below -- no background decode/composite, no key/
