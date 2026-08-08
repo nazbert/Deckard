@@ -29,21 +29,6 @@ from loguru import logger as log
 from src.backend.DeckManagement.InputIdentifier import Input
 
 
-def make_test_mp4(path: str, size=(200, 100), n_frames=30) -> str:
-    import cv2
-    import numpy as np
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 15, size)
-    for i in range(n_frames):
-        # frame i is solid BGR(i*8, 64, 128) == RGB(128, 64, i*8):
-        # red/green fixed across the video, blue varies per frame.
-        frame = np.full((size[1], size[0], 3), (i * 8 % 255, 64, 128), dtype=np.uint8)
-        writer.write(frame)
-    writer.release()
-    assert os.path.getsize(path) > 0
-    return path
-
-
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_touchscreen_video_bg")
 
@@ -51,7 +36,7 @@ def main() -> None:
     log.add(lambda m: error_logs.append(str(m)), level="ERROR",
             filter=lambda r: "background" in r["message"].lower())
 
-    video_path = make_test_mp4(os.path.join(fixtures.DATA_DIR, "assets", "ts_bg.mp4"))
+    video_path = fixtures.make_test_mp4(os.path.join(fixtures.DATA_DIR, "assets", "ts_bg.mp4"))
     image_path = fixtures.make_test_png(
         os.path.join(fixtures.DATA_DIR, "assets", "ts_bg.png"),
         size=(200, 100), color=(0, 200, 30),
