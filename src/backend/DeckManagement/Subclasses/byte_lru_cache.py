@@ -11,6 +11,35 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+---
+
+The byte-capped LRU shared by both native-image caches (gl#142).
+
+`EncodedImageCache` (pixel-hash keys + doorkeeper) and `NativeTileCache`
+(frame-identity keys + kill switch) were the same OrderedDict-as-LRU with the
+same byte accounting, twice. This is that core once; the subclasses supply
+only their admission policy and their teardown bookkeeping.
+
+Cost on the paint path, which is the sole device writer's thread and the
+reason this class exists in this shape:
+
+    get() hit   -- one dict lookup, one move_to_end, one float store.
+    put()       -- the same, plus the local-cap eviction loop, plus one
+                   `Event.set()` per ~1 MiB admitted (see cache_budget's
+                   wake damping). Nothing outside this instance's lock.
+    eviction    -- `popitem`-scale, one lock, never nested with another.
+
+Last-use stamps live OUT OF BAND, in a parallel `dict[key, float]`, never as
+`(data, ts)` tuples inside `_entries`. `_entries` values stay the exact
+`bytes` object that was put -- callers (and the pinned scenarios) introspect
+them and assert identity across a hit -- and a cache hit allocates nothing.
+
+Instances additionally implement `cache_budget.BudgetParticipant`, which is
+how a process-wide manager compares LRU heads across caches and sheds from
+the globally-oldest one without ever holding two cache locks at once. See
+`cache_budget`'s module docstring for the ceiling, the overshoot bound, and
+the disabled/degenerate behaviors.
 """
 import threading
 import time

@@ -11,6 +11,60 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+---
+
+Process-wide budget for the native-image caches (gl#142).
+
+Each deck's `encode_memo` and `native_tile_cache` is byte-capped on its own,
+but nothing capped their SUM: total image-cache RAM scaled with deck count,
+and eviction was per-silo, so a cold deck's full memo never yielded a byte to
+a hot one no matter how hard the hot one was thrashing. This module adds the
+missing aggregate: a ceiling over Σ(evictable caches) and a cross-cache LRU
+that sheds from whichever cache owns the globally-oldest entry.
+
+WHAT A PAINTER THREAD PAYS
+    Nothing but its own per-cache lock, plus one `Event.set()` per ~1 MiB of
+    admitted bytes. There is no global lock, no cross-cache walk, and no
+    cross-deck coordination anywhere on the paint path -- that constraint is
+    what shaped every other decision here. Caches keep their own exact LRU;
+    this module only compares their heads.
+
+THE OVERSHOOT BOUND (the "provably bounded" claim, stated honestly)
+    Enforcement is DEFERRED, so the sum is not bounded by the ceiling at
+    every instant -- it is bounded by
+
+        ceiling + (put rate x wake latency)
+
+    Between the put that crosses the ceiling and the daemon being scheduled,
+    painters keep putting: a painter can complete a whole tick of up to
+    key-count puts in that window. With ~5-20 KiB native key JPEGs, and the
+    notify fired on the growing put itself (so the window is one scheduler
+    latency plus the damping interval, not the 60 s periodic pass), that is
+    KBs to low MBs in practice. Steady state, once puts stop, settles at or
+    below the ceiling. Strict synchronous enforcement was rejected: it would
+    put cross-cache work on the sole device writer's thread.
+
+WHEN IT DOES NOTHING
+    - Ceiling 0 (`DECKARD_IMAGE_CACHE_MB=0`, or negative): global eviction
+      is disabled entirely. Every cache's own cap still applies, so the sum
+      is still bounded -- by Σ(local caps), which is what shipped before this
+      module existed.
+    - Malformed ceiling: warns once per distinct value and uses the default.
+      This is read on the DeckController.__init__ path; it must never raise.
+    - Degenerate pressure (over the ceiling, but every registrant is at its
+      floor or entirely younger than its min-age): the pass warns loudly and
+      STOPS. Getting here means the live working set is physically larger
+      than the ceiling, so evicting anyway would only re-encode the frames
+      being painted right now. Σ(local caps) still bounds the sum, the
+      operator gets a log line naming the knob, and the thrash tripwire
+      counts any key that comes straight back.
+
+WHY EVICTION IS NEVER A CORRECTNESS RISK
+    Cache values are immutable `bytes` handed out by reference, so
+    refcounting keeps any paint that already holds one alive across an
+    eviction. Evicting the wrong entry costs one re-encode, never a wrong or
+    torn frame. That is why there is no pin API.
 """
 import os
 import threading

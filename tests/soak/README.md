@@ -57,6 +57,23 @@ each:
 - **Right-click x50** (key grid and dial context menus): each leaks one
   `PopoverMenu` today (bug 4 in the design doc's appendix, fixed in Phase
   1) -- Phase 0's read here is a baseline, not a pass/fail gate.
+- **Image-cache ceiling leg (#142)**, 2 h minimum, on a page with a looping
+  background video and `soak_driver.py --cycles 200` cycling pages
+  underneath it. Run it with the ceiling deliberately tuned *below* the
+  per-deck local caps so the eviction path is actually exercised:
+
+  ```sh
+  SC_MEM_TELEMETRY=1 DECKARD_IMAGE_CACHE_MB=48 .venv/bin/python main.py
+  ```
+
+  Gates: every CSV row's `img_cache_kb` at or under the ceiling (one wake's
+  worth of paints of slack, no more); `img_cache_evictions` rising but not
+  in lockstep with the sample count (that would be thrashing -- cross-check
+  `logs.log` for `cache-budget: ... re-admitted`); media-loop fps
+  (`DECKARD_MEDIA_PROFILE=1`) within noise of the same run on `main`, since
+  the whole design premise is that the writer never stalls for the budget.
+  Then repeat once at the default ceiling to confirm it does not bind on a
+  normal rig (`img_cache_evictions` stays 0).
 - **2+ hour idle** with the deck showing a page with looping bg video: this
   is the number that matters for Phase 0 -- with `MALLOC_ARENA_MAX=2` and
   the thread caps in place, does `VmSwap` still grow, or was it mostly
