@@ -60,6 +60,7 @@ from src.backend.mem_telemetry import page_switches
 from src.backend import timer_wheel
 from src.backend.PageManagement.Page import ActionOutdated, Page, NoActionHolderFound
 from src.api import notify_active_page_changed
+from src.backend import ui_port
 
 process = psutil.Process()
 
@@ -5434,28 +5435,16 @@ class ControllerKey(ControllerInput):
     def set_ui_key_image(self, image: Image.Image) -> None:
         if image is None:
             return
-        
-        x, y = ControllerKey.Index_To_Coords(self.deck_controller.deck, self.index)
 
-        if self.deck_controller.get_own_key_grid() is None or not gl.app.main_win.get_mapped():
-            # Mark dirty only (P5.4) -- KeyGrid.load_from_changes
+        if not ui_port.get().push_input_image(self.deck_controller, self.identifier, image):
+            # Refused (no UI, window unmapped, grid mid-rebuild) or the push
+            # raised: mark dirty only (P5.4) -- KeyGrid.load_from_changes
             # recomposites a fresh image on map instead of replaying `image`.
+            # A frame the port ACCEPTS but later drops marks itself; see
+            # ui_adapter.mark_dirty.
             self.deck_controller.ui_image_changes_while_hidden[self.identifier] = True
-        else:
-            try:
-                # Racing the check above: the grid can go away, and the button
-                # grid can be smaller than this key's coords mid-rebuild.
-                # set_image converts on this thread and idles only the paint.
-                self.deck_controller.get_own_key_grid().buttons[x][y].set_image(image)
-            except Exception:
-                # Open failure set since the conversion moved here: the lookup
-                # races above, plus PIL convert/tobytes and
-                # GdkPixbuf.new_from_bytes. Contain all of it -- the mirror is
-                # best-effort, and we run under the media tick, whose catch-all
-                # backs off 0.25s per exception. A failing preview must never
-                # throttle the deck writer loop.
-                log.opt(exception=True).warning(f"Failed to set ui key image for {self.identifier}")
-        
+
+
     def get_own_ui_key(self) -> KeyButton:
         x, y = ControllerKey.Index_To_Coords(self.deck_controller.deck, self.index)
         buttons = self.deck_controller.get_own_key_grid().buttons # The ui key coords are in reverse order
@@ -5566,54 +5555,12 @@ class ControllerTouchScreen(ControllerInput):
         return Image.new("RGBA", (screen_width // n_dials, screen_height), (0, 0, 0, 0))
 
     def set_ui_image(self, image: Image.Image) -> None:
-        if recursive_hasattr(self, "deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar.image") and gl.app.main_win.get_mapped():
-            # Throttle the on-screen preview to a few FPS; the physical
-            # touchscreen still gets every frame.
-            now = time.time()
-            if now - getattr(self, "_last_ui_image_time", 0) < 0.1:
-                # Within the throttle window: keep the latest frame and flush it
-                # after the window, so the final frame (when a scroll stops) isn't lost.
-                self._pending_ui_image = image
-                if not getattr(self, "_ui_flush_scheduled", False):
-                    self._ui_flush_scheduled = True
-                    GLib.timeout_add(100, self._flush_pending_ui_image)
-                return
-            self._last_ui_image_time = now
-            self._pending_ui_image = None
-            screenbar = self.deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar
-            try:
-                # set_image converts on this thread and idles only the paint.
-                # Contain everything it can raise (PIL thumbnail/crop, pixbuf
-                # build, and the dial branch's sidebar.key_editor.icon_selector
-                # chain -- only checked down to `sidebar` there): the mirror is
-                # best-effort, and we run under the media tick, whose catch-all
-                # backs off 0.25s per exception. A failing preview must never
-                # throttle the deck writer loop.
-                screenbar.image.set_image(image)
-            except Exception:
-                log.opt(exception=True).warning("Touchscreen mirror update failed")
-        else:
+        if not ui_port.get().push_input_image(self.deck_controller, self.identifier, image):
             # Mark dirty only (P5.4) -- ScreenBar.load_from_changes
             # recomposites a fresh image on map instead of replaying `image`.
+            # The preview throttle (and its tail flush, which re-marks a frame
+            # the window unmapped out from under) lives in the adapter now.
             self.deck_controller.ui_image_changes_while_hidden[self.identifier] = True
-
-    def _flush_pending_ui_image(self) -> bool:
-        # Runs on the GTK main loop; pushes the last throttled frame so the preview
-        # doesn't freeze mid-scroll. Skipped if a fresh frame already superseded it.
-        self._ui_flush_scheduled = False
-        image = getattr(self, "_pending_ui_image", None)
-        self._pending_ui_image = None
-        if image is None:
-            return False
-        if recursive_hasattr(self, "deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar.image") and gl.app.main_win.get_mapped():
-            self._last_ui_image_time = time.time()
-            screenbar = self.deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar
-            screenbar.image.set_image(image)
-        else:
-            # Window unmapped mid-throttle: mark dirty (P5.4) instead of
-            # keeping this frame -- the remap restore recomposites fresh.
-            self.deck_controller.ui_image_changes_while_hidden[self.identifier] = True
-        return False
 
     def get_current_image(self) -> Image.Image:
         active_state = self.get_active_state()

@@ -35,6 +35,7 @@ import globals as gl
 # Import own modules
 from src.backend.DeckManagement.ImageHelpers import image2pixbuf
 from src.backend.DeckManagement.HelperMethods import recursive_hasattr
+from src.windows.ui_adapter import mark_dirty
 
 class KeyGrid(Gtk.Grid):
     """
@@ -333,10 +334,21 @@ class KeyButton(Gtk.Frame):
         # callback: painting a disposed widget crashes GTK.
         try:
             if not self.get_mapped():
+                # Late failure (#141): push_input_image already answered True
+                # for this frame, so the engine did NOT dirty-mark it. Record
+                # the drop here or load_from_changes has nothing to replay on
+                # remap and the preview goes stale.
+                self._mark_dropped()
                 return
             self.image.set_from_pixbuf(self.pixbuf)
         except Exception as e:
             log.debug(f"Key mirror paint skipped: {e}")
+            self._mark_dropped()
+
+    def _mark_dropped(self) -> None:
+        controller = getattr(self.key_grid, "deck_controller", None)
+        if controller is not None:
+            mark_dirty(controller, self.identifier)
 
     def set_icon_selector_previews(self, pixbuf):
         # Main loop only: the gating below reads widget state.
