@@ -28,7 +28,6 @@ from loguru import logger as log
 # Import own modules
 from src.backend import ui_port
 from src.windows.mainWindow.elements.DeckStackChild import DeckStackChild
-from src.windows.ui_adapter import GtkUIAdapter
 
 # Import typing
 from typing import TYPE_CHECKING
@@ -81,9 +80,14 @@ class DeckStack(Gtk.Stack):
         # binding would consume the markers into dead widgets and leave the
         # new screenbar with nothing to replay on map. Unbound, that replay
         # defers and the markers survive for the new widgets.
+        # Duck-typed, not isinstance(GtkUIAdapter): a wrapper/proxy port
+        # (a recording port in tests, an IPC forwarder later) implements the
+        # same bind/unbind pair without inheriting, and an isinstance gate
+        # would silently drop every binding for it.
         adapter = ui_port.get()
-        if isinstance(adapter, GtkUIAdapter):
-            adapter.unbind(deck_controller)
+        unbind = getattr(adapter, "unbind", None)
+        if callable(unbind):
+            unbind(deck_controller)
         page = DeckStackChild(self, deck_controller)
         self.add_titled(page, deck_number, deck_type)
         # Bind by reference only once the child is actually in the stack:
@@ -92,8 +96,9 @@ class DeckStack(Gtk.Stack):
         # contention at boot) or the window was rebuilt. Binding after
         # add_titled also means an exception mid-construction can never
         # leave the controller bound to a child that is not in the stack.
-        if isinstance(adapter, GtkUIAdapter):
-            adapter.bind(deck_controller, page)
+        bind = getattr(adapter, "bind", None)
+        if callable(bind):
+            bind(deck_controller, page)
 
         page.page_settings.deck_config.grid.select_key(0, 0)
 
@@ -139,8 +144,9 @@ class DeckStack(Gtk.Stack):
 
     def remove_page(self, deck_controller) -> str:
         adapter = ui_port.get()
-        if isinstance(adapter, GtkUIAdapter):
-            adapter.unbind(deck_controller)
+        unbind = getattr(adapter, "unbind", None)
+        if callable(unbind):
+            unbind(deck_controller)
 
         was_visible: bool = False
         for i, page in enumerate(self.get_pages()):
