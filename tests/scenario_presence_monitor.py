@@ -19,21 +19,32 @@ true, so everything the media loop's gate depends on is pinned here:
   6. set_mode() re-evaluates immediately (the Settings dialog's runtime push),
   7. the constructor seeds mode/minutes from AppSettings AND evaluates against
      the current gl.screen_locked -- without that seed the setting is silently
-     off after every restart.
+     off after every restart,
+  8. the logind idle detector over a FAKE system bus: the session resolver's
+     GetSession/GetSessionByPID order, the PropertiesChanged subscription and
+     its interface filter, the initial-state read (a session already idle at
+     startup must gate without waiting for a signal that may never come), and
+     the inert-on-GLib.Error posture that keeps lock gating alive when logind
+     is unreachable.
 
-Unit tier: no deck, no GTK, no D-Bus.
+Unit tier: no deck, no GTK, no real bus.
 """
 import fixtures  # noqa: F401  (isolates gl.DATA_PATH before anything reads it)
 
+import os
 import time
 
 import globals as gl
+from gi.repository import GLib
 
 from src.backend.PresenceMonitor.PresenceMonitor import (  # noqa: E402
+    LOGIND_SESSION_IFACE,
     MODE_SCREENSAVER,
     MODE_SYSTEM_IDLE,
     PresenceMonitor,
 )
+
+SESSION_PATH = "/org/freedesktop/login1/session/_31"
 
 
 class WakeRecorder:
@@ -60,7 +71,9 @@ def install_controllers(*controllers):
 
 
 def make_monitor(mode=MODE_SYSTEM_IDLE, minutes=1) -> PresenceMonitor:
-    return PresenceMonitor(mode=mode, minutes=minutes)
+    # idle_detector=False everywhere except the fake-bus checks below: the
+    # harness must never reach for the real system bus.
+    return PresenceMonitor(mode=mode, minutes=minutes, idle_detector=False)
 
 
 def set_locked(monitor: PresenceMonitor, locked: bool) -> None:
@@ -199,7 +212,7 @@ def check_constructor_seeds_from_settings() -> None:
     })
     gl.screen_locked = True
     try:
-        monitor = PresenceMonitor()
+        monitor = PresenceMonitor(idle_detector=False)
         assert monitor.mode == MODE_SYSTEM_IDLE, (
             f"mode not seeded from AppSettings: {monitor.mode!r}"
         )
@@ -217,7 +230,7 @@ def check_constructor_seeds_from_settings() -> None:
     # And with the shipped default the same restart changes nothing.
     gl.screen_locked = True
     try:
-        monitor = PresenceMonitor()
+        monitor = PresenceMonitor(idle_detector=False)
         assert monitor.mode == MODE_SCREENSAVER
         assert monitor.is_quiescent() is False, (
             "the DEFAULT mode must not gate on a locked-at-startup session"
@@ -262,6 +275,175 @@ def check_fan_out_is_snapshot_and_contained() -> None:
     print("PASS: the wake fan-out iterates a snapshot and contains failures")
 
 
+# ===================================================================== #
+# logind IdleHint detector (fake system bus)
+# ===================================================================== #
+
+class FakeSystemBus:
+    """The three Gio.DBusConnection methods LogindIdleDetector uses. Records
+    every call so the resolver's method/argument choice is assertable."""
+
+    def __init__(self, idle_hint: bool = False, idle_since: float = 0.0,
+                 fail_on: set = None):
+        self.idle_hint = idle_hint
+        self.idle_since_usec = int(idle_since * 1_000_000)
+        self.calls: list = []
+        self.subscriptions: list = []
+        self.unsubscribed: list = []
+        self._fail_on = fail_on or set()
+        self._next_id = 100
+
+    def call_sync(self, name, path, iface, method, args, reply_type, flags,
+                  timeout, cancellable):
+        unpacked = args.unpack() if args is not None else None
+        self.calls.append((method, unpacked))
+        if method in self._fail_on:
+            raise GLib.Error(f"fake bus refuses {method}")
+        if method in ("GetSession", "GetSessionByPID"):
+            return GLib.Variant("(o)", (SESSION_PATH,))
+        if method == "Get":
+            prop = unpacked[1]
+            if prop == "IdleHint":
+                return GLib.Variant("(v)", (GLib.Variant("b", self.idle_hint),))
+            if prop == "IdleSinceHint":
+                return GLib.Variant("(v)", (GLib.Variant("t", self.idle_since_usec),))
+        raise AssertionError(f"unexpected D-Bus call: {method} {unpacked}")
+
+    def signal_subscribe(self, sender, iface, member, path, arg0, flags, callback):
+        self.subscriptions.append((sender, iface, member, path, arg0, callback))
+        self._next_id += 1
+        return self._next_id
+
+    def signal_unsubscribe(self, subscription_id):
+        self.unsubscribed.append(subscription_id)
+
+    def emit(self, changed: dict, iface: str = LOGIND_SESSION_IFACE) -> None:
+        """Fires PropertiesChanged at every subscriber, exactly as GDBus
+        would from the GLib main context."""
+        params = GLib.Variant("(sa{sv}as)", (iface, changed, []))
+        for sub in self.subscriptions:
+            sub[5](self, ":1.7", SESSION_PATH, "org.freedesktop.DBus.Properties",
+                   "PropertiesChanged", params)
+
+
+def with_session_id(value):
+    """Sets/clears XDG_SESSION_ID and returns the previous value."""
+    previous = os.environ.get("XDG_SESSION_ID")
+    if value is None:
+        os.environ.pop("XDG_SESSION_ID", None)
+    else:
+        os.environ["XDG_SESSION_ID"] = value
+    return previous
+
+
+def check_detector_resolves_by_session_id() -> None:
+    """An already-idle session must gate at construction: the detector reads
+    IdleHint/IdleSinceHint up front rather than waiting for a
+    PropertiesChanged that may never come."""
+    bus = FakeSystemBus(idle_hint=True, idle_since=time.time() - 600)
+    previous = with_session_id("31")
+    try:
+        monitor = PresenceMonitor(mode=MODE_SYSTEM_IDLE, minutes=1, bus=bus)
+    finally:
+        with_session_id(previous)
+
+    assert bus.calls[0] == ("GetSession", ("31",)), (
+        f"XDG_SESSION_ID must resolve via GetSession: {bus.calls[0]}"
+    )
+    assert len(bus.subscriptions) == 1, "the detector did not subscribe"
+    _sender, iface, member, path, arg0, _cb = bus.subscriptions[0]
+    assert member == "PropertiesChanged" and arg0 == LOGIND_SESSION_IFACE, (
+        f"wrong subscription filter: {iface}/{member}/{arg0}"
+    )
+    assert path == SESSION_PATH, f"subscribed to {path}, not the resolved session"
+    assert monitor.is_quiescent() is True, (
+        "a session already idle past the deadline must gate at construction"
+    )
+
+    monitor.stop()
+    assert bus.unsubscribed, "stop() left the signal subscription behind"
+    print("PASS: detector resolves via GetSession and seeds the initial idle state")
+
+
+def check_detector_falls_back_to_pid() -> None:
+    bus = FakeSystemBus(idle_hint=False)
+    previous = with_session_id(None)
+    try:
+        monitor = PresenceMonitor(mode=MODE_SYSTEM_IDLE, minutes=1, bus=bus)
+    finally:
+        with_session_id(previous)
+
+    method, args = bus.calls[0]
+    assert method == "GetSessionByPID", (
+        f"without XDG_SESSION_ID the resolver must fall back to GetSessionByPID, "
+        f"got {method}"
+    )
+    assert args == (os.getpid(),), f"GetSessionByPID called with {args}"
+    assert monitor.is_quiescent() is False
+    monitor.stop()
+    print("PASS: detector falls back to GetSessionByPID")
+
+
+def check_detector_dispatches_property_changes() -> None:
+    bus = FakeSystemBus(idle_hint=False)
+    previous = with_session_id("31")
+    try:
+        monitor = PresenceMonitor(mode=MODE_SYSTEM_IDLE, minutes=1, bus=bus)
+    finally:
+        with_session_id(previous)
+    assert monitor.is_quiescent() is False
+
+    # A change on an unrelated interface must be ignored outright.
+    bus.emit({"IdleHint": GLib.Variant("b", True)}, iface="org.freedesktop.login1.User")
+    assert monitor.is_quiescent() is False, "a foreign interface's signal was acted on"
+
+    # Idle since ten minutes ago, residual one minute -> gates.
+    bus.idle_since_usec = int((time.time() - 600) * 1_000_000)
+    bus.emit({"IdleHint": GLib.Variant("b", True)})
+    assert monitor.is_quiescent() is True, "PropertiesChanged did not reach the monitor"
+
+    # The signal carrying IdleSinceHint itself is preferred over a property
+    # read -- and a just-started idle must NOT gate yet.
+    bus.emit({"IdleHint": GLib.Variant("b", False)})
+    assert monitor.is_quiescent() is False
+    bus.emit({
+        "IdleHint": GLib.Variant("b", True),
+        "IdleSinceHint": GLib.Variant("t", int(time.time() * 1_000_000)),
+    })
+    assert monitor.is_quiescent() is False, (
+        "an idle that started just now must wait out the residual delay"
+    )
+
+    # A malformed signal must not escape into the GLib main context.
+    bus.emit({"IdleHint": GLib.Variant("s", "not-a-bool")})
+
+    monitor.stop()
+    print("PASS: PropertiesChanged dispatch, interface filter and signal-carried timestamp")
+
+
+def check_detector_is_inert_on_dbus_failure() -> None:
+    """House posture: a detector that cannot reach its bus logs once and stays
+    inert -- it must not raise out of the constructor, and the LOCK input must
+    keep working."""
+    bus = FakeSystemBus(fail_on={"GetSession", "GetSessionByPID"})
+    previous = with_session_id("31")
+    try:
+        monitor = PresenceMonitor(mode=MODE_SYSTEM_IDLE, minutes=1, bus=bus)
+    finally:
+        with_session_id(previous)
+
+    assert bus.subscriptions == [], "a failed resolve must not subscribe"
+    assert monitor.is_quiescent() is False
+
+    set_locked(monitor, True)
+    assert monitor.is_quiescent() is True, (
+        "lock gating must survive an unavailable idle detector"
+    )
+    set_locked(monitor, False)
+    monitor.stop()
+    print("PASS: an unreachable logind leaves the idle half inert and lock gating live")
+
+
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_presence_monitor")
     fixtures.install_stub_globals()
@@ -273,6 +455,10 @@ def main() -> None:
     check_set_mode_reevaluates()
     check_constructor_seeds_from_settings()
     check_fan_out_is_snapshot_and_contained()
+    check_detector_resolves_by_session_id()
+    check_detector_falls_back_to_pid()
+    check_detector_dispatches_property_changes()
+    check_detector_is_inert_on_dbus_failure()
 
     print("\nALL PASS: scenario_presence_monitor")
 

@@ -66,7 +66,7 @@ def main() -> None:
         controller.screen_saver.show()
         assert controller.screen_saver.showing is True
 
-        monitor = PresenceMonitor(mode=MODE_SYSTEM_IDLE, minutes=1)
+        monitor = PresenceMonitor(mode=MODE_SYSTEM_IDLE, minutes=1, idle_detector=False)
         gl.presence_monitor = monitor
         gl.screen_locked = True
         monitor.on_lock_changed(True)

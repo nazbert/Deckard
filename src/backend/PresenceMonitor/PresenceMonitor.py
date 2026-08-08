@@ -15,8 +15,8 @@ Inputs, all event-driven (no polling anywhere):
   `on_lock_changed()` right after, so lock is a usable presence input even
   for users who deliberately keep their decks live on lock.
 * **system idle** -- logind's `IdleHint`/`IdleSinceHint` on the session
-  object, plus a configurable residual delay counted from `IdleSinceHint`
-  (the detector that feeds `on_idle_hint_changed()` lands separately).
+  object (see `LogindIdleDetector` below), plus a configurable residual
+  delay counted from `IdleSinceHint`.
 * **deck activity** -- `notify_activity()` from `ScreenSaver.on_key_change()`,
   the funnel every key/dial/touch interaction already passes through. Deck
   presses never reach the compositor, so without this the session would
@@ -42,6 +42,7 @@ Gio callbacks, timer_wheel dispatch threads for the idle deadline, deck
 reader threads for `notify_activity`) and no GTK call is made anywhere in
 this module.
 """
+import os
 import threading
 import time
 
@@ -49,6 +50,8 @@ from loguru import logger as log
 
 import globals as gl
 from src.backend import timer_wheel
+
+from gi.repository import Gio, GLib
 
 
 # The two `performance.animation-pause-mode` values. "screensaver" is the
@@ -60,6 +63,12 @@ MODE_SYSTEM_IDLE = "system-idle"
 # reachable yet (early startup, unit-tier harness).
 FALLBACK_MODE = MODE_SCREENSAVER
 FALLBACK_IDLE_MINUTES = 5
+
+LOGIND_BUS_NAME = "org.freedesktop.login1"
+LOGIND_MANAGER_PATH = "/org/freedesktop/login1"
+LOGIND_MANAGER_IFACE = "org.freedesktop.login1.Manager"
+LOGIND_SESSION_IFACE = "org.freedesktop.login1.Session"
+PROPERTIES_IFACE = "org.freedesktop.DBus.Properties"
 
 
 def _settings_seed() -> tuple[str, int]:
@@ -79,7 +88,8 @@ def _settings_seed() -> tuple[str, int]:
 class PresenceMonitor:
     """The quiescence signal. See the module docstring for the rule."""
 
-    def __init__(self, mode: str = None, minutes: int = None):
+    def __init__(self, mode: str = None, minutes: int = None,
+                 idle_detector: bool = True, bus=None):
         # Hot read (media thread, every tick): a plain bool attribute, never
         # guarded by the lock below. A torn read is impossible and a stale
         # one costs a single tick of animation either way.
@@ -102,6 +112,13 @@ class PresenceMonitor:
         # reports as hours idle.
         self._last_deck_activity: float = 0.0
         self._deadline: "timer_wheel.TimerHandle" = None
+
+        # Built before the seeding evaluation below so an already-idle
+        # session is reflected in the very first verdict. `idle_detector` is
+        # the harness's opt-out; `bus` is the detector's test seam.
+        self.idle_detector: "LogindIdleDetector" = None
+        if idle_detector:
+            self.idle_detector = LogindIdleDetector(self, bus=bus)
 
         # Evaluate once at construction: without this, `system-idle` mode
         # would be silently off after every restart until the first lock or
@@ -165,11 +182,13 @@ class PresenceMonitor:
         self._evaluate()
 
     def stop(self) -> None:
-        """Releases the idle deadline. Nothing in the app calls this (the
-        monitor lives for the process); it exists so scenarios can leave no
-        timers behind."""
+        """Releases the idle deadline and the D-Bus subscription. Nothing in
+        the app calls this (the monitor lives for the process); it exists so
+        scenarios can leave no timers behind."""
         with self._lock:
             self._cancel_deadline_locked()
+        if self.idle_detector is not None:
+            self.idle_detector.stop()
 
     # -- evaluation -----------------------------------------------------
 
@@ -241,3 +260,164 @@ class PresenceMonitor:
                 log.opt(exception=True).warning(
                     "PresenceMonitor: failed to wake a deck's media thread"
                 )
+
+
+class LogindIdleDetector:
+    """Feeds `PresenceMonitor.on_idle_hint_changed()` from logind's session
+    `IdleHint`/`IdleSinceHint` properties.
+
+    Deliberately shaped like `LockScreenManager/Detectors/Logind.py` (issue
+    #195) -- same system-bus `Gio` connection, same `resolve_session_path()`
+    (`GetSession($XDG_SESSION_ID)` with a `GetSessionByPID` fallback), same
+    `bus=` test seam, same inert-on-`GLib.Error` posture -- so the two can be
+    deduplicated onto one shared resolver once both have landed.
+
+    `IdleHint` is a hint the *desktop environment* maintains: GNOME and KDE
+    set it from their own idle policy; Niri/Sway/river need a user-side agent
+    (`swayidle idlehint N`). Where nothing sets it, this component stays
+    permanently false and the monitor degrades to lock-only gating.
+    """
+
+    def __init__(self, monitor: PresenceMonitor, bus=None):
+        self.monitor = monitor
+        self.bus = None
+        self.session_path: str = None
+        self._subscription_id: int = None
+        if bus is not None:
+            # An injected bus is an in-process double: there is no I/O to get
+            # stuck on, so wire up inline and keep scenarios deterministic.
+            self.setup_dbus(bus)
+        else:
+            # The real system bus goes on a daemon thread, exactly like
+            # LockScreenManager.__init__ ("in case something gets stuck"):
+            # this object is constructed on main()'s startup path, and
+            # Gio.bus_get_sync + a synchronous GetSession round trip would
+            # otherwise hold app startup hostage to a wedged logind for the
+            # call's full timeout.
+            threading.Thread(target=self.setup_dbus, name="PresenceIdleSetup",
+                             daemon=True).start()
+
+    def setup_dbus(self, bus=None) -> None:
+        if gl.IS_MAC:
+            return
+        try:
+            # logind lives on the system bus. `bus` is a test seam; production
+            # passes None. Compared against None rather than truthiness so a
+            # falsy-but-valid double cannot silently pull in the real bus.
+            self.bus = bus if bus is not None else Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+            self.session_path = self.resolve_session_path()
+
+            # This runs on a plain daemon thread, which has no thread-default
+            # main context, so GDBus dispatches this callback on the global
+            # default one -- the GTK main loop, same as every lock detector.
+            self._subscription_id = self.bus.signal_subscribe(
+                LOGIND_BUS_NAME,
+                PROPERTIES_IFACE,
+                "PropertiesChanged",
+                self.session_path,
+                LOGIND_SESSION_IFACE,
+                Gio.DBusSignalFlags.NONE,
+                self.on_properties_changed,
+            )
+
+            self.read_initial_state()
+        except GLib.Error as e:
+            # House posture for detectors: report once at info and stay
+            # inert. The lock input keeps working; only the idle half of the
+            # rule goes dark.
+            log.info(f"Presence: logind IdleHint unavailable, idle gating inert ({e})")
+        except Exception:
+            log.opt(exception=True).warning(
+                "Presence: unexpected failure wiring up the logind idle detector; "
+                "idle gating inert"
+            )
+
+    def resolve_session_path(self) -> str:
+        session_id = os.getenv("XDG_SESSION_ID")
+        if session_id:
+            method = "GetSession"
+            args = GLib.Variant("(s)", (session_id,))
+        else:
+            method = "GetSessionByPID"
+            args = GLib.Variant("(u)", (os.getpid(),))
+
+        reply = self.bus.call_sync(
+            LOGIND_BUS_NAME,
+            LOGIND_MANAGER_PATH,
+            LOGIND_MANAGER_IFACE,
+            method,
+            args,
+            None,
+            Gio.DBusCallFlags.NONE,
+            -1,
+            None,
+        )
+        return reply.unpack()[0]
+
+    def read_property(self, name: str):
+        reply = self.bus.call_sync(
+            LOGIND_BUS_NAME,
+            self.session_path,
+            PROPERTIES_IFACE,
+            "Get",
+            GLib.Variant("(ss)", (LOGIND_SESSION_IFACE, name)),
+            None,
+            Gio.DBusCallFlags.NONE,
+            -1,
+            None,
+        )
+        return reply.unpack()[0]
+
+    def read_initial_state(self) -> None:
+        """Seeds the monitor from the session's current properties: a
+        process started (or restarted) into an already-idle session must gate
+        without waiting for the next PropertiesChanged, which may never
+        come."""
+        hint = bool(self.read_property("IdleHint"))
+        self.monitor.on_idle_hint_changed(hint, self._read_idle_since() if hint else None)
+
+    def _read_idle_since(self, changed: dict = None):
+        """`IdleSinceHint` as wall-clock seconds, or None when logind has no
+        usable timestamp (it reports 0 when the session was never idle).
+        Prefers the value carried by the signal; falls back to a property
+        read, since logind does not always emit it alongside IdleHint."""
+        raw = None
+        if changed is not None:
+            raw = changed.get("IdleSinceHint")
+        if raw is None:
+            try:
+                raw = self.read_property("IdleSinceHint")
+            except GLib.Error:
+                return None
+        try:
+            usec = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return usec / 1_000_000 if usec > 0 else None
+
+    def on_properties_changed(self, connection, sender_name, object_path,
+                              interface_name, signal_name, parameters) -> None:
+        try:
+            iface, changed, _invalidated = parameters.unpack()
+            if iface != LOGIND_SESSION_IFACE or "IdleHint" not in changed:
+                return
+            hint = bool(changed["IdleHint"])
+            self.monitor.on_idle_hint_changed(
+                hint, self._read_idle_since(changed) if hint else None
+            )
+        except Exception:
+            # This runs on the GTK main context; an escaping exception there
+            # is swallowed by GLib with no useful attribution.
+            log.opt(exception=True).warning(
+                "Presence: failed to handle a logind PropertiesChanged signal"
+            )
+
+    def stop(self) -> None:
+        if self.bus is not None and self._subscription_id is not None:
+            try:
+                self.bus.signal_unsubscribe(self._subscription_id)
+            except Exception:
+                log.opt(exception=True).debug(
+                    "Presence: failed to unsubscribe the logind idle signal"
+                )
+        self._subscription_id = None
