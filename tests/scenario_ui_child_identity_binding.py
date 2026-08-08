@@ -19,13 +19,29 @@ name-matching resurrection fails here.
 Headless tier: children are plain namespaces and no widget is constructed, so
 importing the adapter (and hence Gtk) without a display is fine.
 """
+import time
 from types import SimpleNamespace
 
 import fixtures
 
+import globals as gl
+from gi.repository import GLib
+
 from src.backend import ui_port
 from src.backend.DeckManagement.InputIdentifier import Input
 from src.windows.ui_adapter import GtkUIAdapter
+
+
+def _pump(duration: float = 0.1) -> None:
+    """Run the default MainContext's pending idles -- the adapter queues its
+    stack mutations with GLib.idle_add and this harness runs no main loop
+    (precedent: scenario_offmain_ui_construction.py)."""
+    context = GLib.MainContext.default()
+    deadline = time.time() + duration
+    while time.time() < deadline:
+        while context.iteration(False):
+            pass
+        time.sleep(0.005)
 
 
 class _FakeStack:
@@ -37,6 +53,8 @@ class _FakeStack:
             None if c is None else SimpleNamespace(get_child=lambda c=c: c)
             for c in children
         ]
+        self.added = []
+        self.removed = []
 
     def get_pages(self):
         return list(self._pages)
@@ -46,6 +64,12 @@ class _FakeStack:
         # name-based reimplementation of the lookup should fail the
         # meaningful assertions below, not crash on a missing API.
         return None
+
+    def add_page(self, controller):
+        self.added.append(controller)
+
+    def remove_page(self, controller):
+        self.removed.append(controller)
 
 
 class _FakeButton:
@@ -72,7 +96,14 @@ def _fake_child(controller, grid):
 
 
 def _fake_window(deck_stack):
-    return SimpleNamespace(leftArea=SimpleNamespace(deck_stack=deck_stack))
+    # get_mapped/connect are what attach_window() needs; without them it
+    # would take its except branch and skip nothing else, but the real path
+    # is worth exercising.
+    return SimpleNamespace(
+        leftArea=SimpleNamespace(deck_stack=deck_stack),
+        get_mapped=lambda: False,
+        connect=lambda *args: None,
+    )
 
 
 def main() -> None:
@@ -151,6 +182,71 @@ def main() -> None:
             "be silently lost instead of dirty-marked"
         )
         assert len(new_grid.buttons[0][0].images) == 1, "an unbound push still painted"
+
+        # 6. Hotplug DURING MainWindow construction (#141 review). The adapter
+        # is installed before the constructor but `_window` is only set by
+        # attach_window() after it, so on_deck_added/on_deck_removed are
+        # no-ops for the whole build. A deck the USB monitor registered in
+        # that window would get no stack child at all (rescan only re-binds
+        # children that already exist), and one it dropped would leave a
+        # stale child behind. attach_window must reconcile BOTH directions.
+        assert controller in gl.deck_manager.deck_controller, "fixture invariant"
+
+        # 6a. Missed add: the deck is live but the stack was built without it.
+        # detach_window() first, to drop the strangers sections 3/3b bound.
+        adapter.detach_window()
+        stack = _FakeStack([])
+        adapter.attach_window(_fake_window(stack))
+        _pump()
+        assert stack.added == [controller], (
+            f"attach_window queued add_page for {stack.added}, expected the "
+            "one live-but-unbound controller -- a deck plugged in during "
+            "window construction would never get a stack child"
+        )
+        assert stack.removed == [], "attach_window removed a live deck's page"
+
+        # 6b. Stale child: bound to a controller the deck manager no longer
+        # knows (unplugged during construction) -> remove + unbind.
+        ghost = object()
+        ghost_child = _fake_child(ghost, _fake_grid())
+        stack = _FakeStack([ghost_child])
+        adapter.attach_window(_fake_window(stack))
+        _pump()
+        assert stack.removed == [ghost], (
+            f"attach_window queued remove_page for {stack.removed}, expected "
+            "the stale child of an unplugged deck"
+        )
+        assert adapter.query_deck_widget(ghost, "deck_stack_child") is None, (
+            "the stale binding survived the reconcile"
+        )
+
+        # 6b'. No deck manager at all: reconciling against an unknown world
+        # must be a no-op, NOT "no decks exist, remove everything".
+        settled_child = _fake_child(controller, _fake_grid())
+        stack = _FakeStack([settled_child])
+        real_deck_manager = gl.deck_manager
+        gl.deck_manager = None
+        try:
+            adapter.attach_window(_fake_window(stack))
+            _pump()
+        finally:
+            gl.deck_manager = real_deck_manager
+        assert stack.removed == [], (
+            "reconcile tore down bound children when it could not see a deck "
+            f"manager: {stack.removed}"
+        )
+
+        # 6c. Steady state: a stack that already matches the deck manager
+        # must produce no churn at all (attach_window runs on every window
+        # rebuild).
+        settled_child = _fake_child(controller, _fake_grid())
+        stack = _FakeStack([settled_child])
+        adapter.attach_window(_fake_window(stack))
+        _pump()
+        assert stack.added == [] and stack.removed == [], (
+            f"a settled stack was churned: added={stack.added} "
+            f"removed={stack.removed}"
+        )
 
         print("PASS: identity binding resolves, rejects strangers, heals re-binds, gates pushes")
     finally:

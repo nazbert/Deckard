@@ -97,6 +97,39 @@ class GtkUIAdapter(ui_port.UIPort):
         except Exception:
             log.opt(exception=True).warning("Could not track the main window's mapped state")
         self.rescan_children()
+        self.reconcile_children()
+
+    def reconcile_children(self) -> None:
+        """Heal decks the window constructor could not see.
+
+        `on_deck_added`/`on_deck_removed` are no-ops while `_window` is None
+        -- which is exactly the window in which `MainWindow.__init__` runs
+        (the adapter is installed BEFORE the constructor so boot-time
+        `add_page` calls still bind, but `attach_window` only lands after
+        it). A deck the USB monitor plugged in during that window would
+        therefore never get a stack child, and one unplugged during it would
+        leave a stale one. `rescan_children` only re-binds children that
+        already exist, so reconcile both directions against the deck
+        manager's live list here.
+        """
+        window = self._window
+        if not recursive_hasattr(window, "leftArea.deck_stack"):
+            return
+        deck_stack = window.leftArea.deck_stack
+        registered = getattr(getattr(gl, "deck_manager", None), "deck_controller", None)
+        if registered is None:
+            # No deck manager to reconcile against. Bail rather than treat
+            # that as "no decks exist" -- the removal pass below would then
+            # tear down every bound child. (main.py builds gl.deck_manager
+            # before App, so this is belt-and-braces, not an expected state.)
+            return
+        live = list(registered)
+        for controller in live:
+            if controller not in self._children:
+                GLib.idle_add(deck_stack.add_page, controller)
+        for controller in [c for c in self._children if c not in live]:
+            GLib.idle_add(deck_stack.remove_page, controller)
+            self.unbind(controller)
 
     def detach_window(self) -> None:
         self._window = None
