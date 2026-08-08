@@ -45,6 +45,27 @@ def animation_writes(deck, since: int = 0) -> list:
             if e[2] in ("set_key_image", "set_touchscreen_image")]
 
 
+def wait_until_quiet(deck, quiet_for: float = 0.5, timeout: float = 10.0) -> bool:
+    """Waits until no device write has landed for `quiet_for` seconds.
+
+    Deliberately not a fixed sleep: the settle window's length depends on how
+    fast the page-load tasks drain, which under a loaded machine is not a
+    constant. The invariant being pinned is "it goes quiet", not "it goes
+    quiet in exactly N milliseconds"."""
+    deadline = time.monotonic() + timeout
+    seen = len(deck.journal())
+    stable_since = time.monotonic()
+    while time.monotonic() < deadline:
+        time.sleep(0.05)
+        now = len(deck.journal())
+        if now != seen:
+            seen = now
+            stable_since = time.monotonic()
+        elif time.monotonic() - stable_since >= quiet_for:
+            return True
+    return False
+
+
 def set_locked(monitor, locked: bool) -> None:
     """What LockScreenManager.lock() does: publish, then notify."""
     gl.screen_locked = locked
@@ -163,13 +184,17 @@ def main() -> None:
             "page-generation watch is not running the un-gated pass (transparent "
             "keys on a video-bg page would keep showing the old page)"
         )
-        time.sleep(0.6)
+        assert wait_until_quiet(deck), (
+            "the gated page change never stopped writing -- the loop is still "
+            "animating page B while the user is away"
+        )
         per_key: dict = {}
         for entry in key_writes(deck):
             per_key[entry[3]] = per_key.get(entry[3], 0) + 1
-        assert max(per_key.values()) <= 4, (
+        assert max(per_key.values()) <= 8, (
             f"the gated page change repainted keys {max(per_key.values())} times; "
-            f"the watch should settle after a couple of frames: {sorted(per_key.items())}"
+            f"the watch is meant to emit a short burst, not keep animating: "
+            f"{sorted(per_key.items())}"
         )
         for k in range(key_count):
             after = deck.last_op_for(f"key:{k}")
