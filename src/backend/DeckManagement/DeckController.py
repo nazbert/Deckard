@@ -50,6 +50,7 @@ from src.backend.DeckManagement.Subclasses.KeyLayout import ImageLayout
 from src.backend.DeckManagement.Subclasses.KeyVideo import InputVideo
 from src.backend.DeckManagement.Subclasses.ScreenSaver import ScreenSaver
 from src.backend.DeckManagement.Subclasses.SingleKeyAsset import SingleKeyAsset
+from src.backend.DeckManagement.Subclasses import cache_budget
 from src.backend.DeckManagement.Subclasses.background_video_cache import BackgroundVideoCache
 from src.backend.DeckManagement.Subclasses.mp4_tile_cache import get_video_md5
 from src.backend.DeckManagement.Subclasses.encoded_image_cache import EncodedImageCache
@@ -1097,6 +1098,18 @@ class DeckController:
         # passthrough path (#163) -- a bare key over a video background skips
         # the tobytes+hash too, so a warmed loop costs a dict lookup per key.
         self.native_tile_cache = NativeTileCache(max_bytes=native_tile_cache_max_bytes())
+        # Enrol both in the process-wide image-cache budget (#142): their own
+        # caps bound each cache, the budget bounds the SUM across decks --
+        # without it, total image-cache RAM scales with deck count and a cold
+        # deck's full memo never yields a byte to a hot one. The registry is
+        # weak, so close() needs no matching unregister. Wrapped here as well
+        # as inside register(): DeckManager swallows anything raised out of
+        # __init__ as "Failed to initialize deck" and silently skips the whole
+        # device, which no telemetry/housekeeping feature may ever cost a user.
+        try:
+            self._register_image_caches()
+        except Exception as e:
+            log.warning(f"Could not register the image caches with the budget: {e}")
 
         self.inputs = {}
         for i in Input.All:
@@ -1431,6 +1444,57 @@ class DeckController:
             cache = getattr(self, cache_name, None)
             if cache is not None:
                 cache.clear()
+
+    def _register_image_caches(self) -> None:
+        """Enrols this deck's two native-image caches with the process-wide
+        budget (#142). Labels carry the serial so a multi-deck rig's
+        eviction/thrash logs are attributable; `totals()` sums per group, so
+        the telemetry columns stay deck-agnostic."""
+        serial = self.serial_number()
+        cache_budget.register(self.encode_memo, label=f"encode_memo:{serial}")
+        cache_budget.register(self.native_tile_cache, label=f"native_tiles:{serial}")
+
+    def refresh_tile_cache_min_age(self, video: "BackgroundVideo" = None) -> None:
+        """Retunes how long the native tile cache's entries are shielded from
+        GLOBAL eviction, to the duration of the background video now playing
+        (clamped to DEFAULT_MIN_AGE_S..MAX_MIN_AGE_S); back to the default
+        when there is no video.
+
+        Native tile entries are keyed per FRAME, so an entry is re-touched
+        once per loop of the content, not once per media tick. Under a
+        binding ceiling a flat 2 s min-age would therefore make a playing
+        video's whole frame set eligible for eviction exactly one loop before
+        it is needed again -- silently reinstating the per-frame encode this
+        cache exists to remove. A closed video's frames become immediately
+        eligible again, which is what we want: they are stale.
+
+        frames/source_fps is only the loop period once the tile cache is
+        BUILT. While it is still building, get_next_tiles() advances the
+        frame sequentially -- one frame per media tick, deliberately, so no
+        frame is skipped and no seek is forced -- and the media tick can be
+        slower than the source's fps, sometimes far slower on a heavy page.
+        The real loop period is then unknown and strictly longer than
+        frames/fps, so installing that number would under-protect exactly the
+        frame set the build is racing to fill. The clamp maximum goes in
+        instead, and the first tick past completion (BackgroundVideo.
+        get_next_tiles) calls back in here for the real value. The wrong
+        direction to err in is the short one: over-protection costs a stale
+        entry surviving a pass, under-protection costs the re-encode."""
+        min_age = cache_budget.DEFAULT_MIN_AGE_S
+        if video is not None:
+            min_age = cache_budget.MAX_MIN_AGE_S
+            try:
+                if video.is_cache_complete():
+                    fps = float(video.get_source_fps() or getattr(video, "fps", 0) or 0)
+                    frames = int(getattr(video, "n_frames", 0) or 0)
+                    if fps > 0 and frames > 0:
+                        min_age = max(cache_budget.DEFAULT_MIN_AGE_S,
+                                      min(cache_budget.MAX_MIN_AGE_S, frames / fps))
+            except Exception:
+                min_age = cache_budget.MAX_MIN_AGE_S
+        cache = getattr(self, "native_tile_cache", None)
+        if cache is not None:
+            cache_budget.set_min_age(cache, min_age)
 
     def get_touchscreen_image_size(self) -> tuple[int]:
         if self._touchscreen_image_size is not None:
@@ -2489,6 +2553,7 @@ class Background:
         # eviction happened to churn through it.
         self._identified_tiles = None
         self.deck_controller.clear_encoded_key_caches()
+        self.deck_controller.refresh_tile_cache_min_age(None)
         gc.collect()
 
         self.update_tiles()
@@ -2508,6 +2573,9 @@ class Background:
         # clear is what stops the old video's frames lingering.
         self._identified_tiles = None
         self.deck_controller.clear_encoded_key_caches()
+        # The new video's loop duration is what its frame entries must be
+        # shielded for; see refresh_tile_cache_min_age.
+        self.deck_controller.refresh_tile_cache_min_age(video)
         gc.collect()
 
         self.update_tiles()
@@ -2921,6 +2989,11 @@ class BackgroundVideo(BackgroundVideoCache):
         self.active_frame: int = -1
         self._play_start: float = None  # wall-clock playback start, set on first real-time frame
         self._last_frame_tick: float = None  # last real-time frame pick, for gap clamping
+        # Whether the tile cache's min-age has been retuned to this video's
+        # real loop period. False until the first tick after the cache
+        # completes: before that, playback is not running at source fps and
+        # the loop period is not knowable (refresh_tile_cache_min_age).
+        self._min_age_synced: bool = False
 
         super().__init__(video_path, deck_controller=deck_controller, extend_touchscreen=extend_touchscreen)
 
@@ -2932,6 +3005,14 @@ class BackgroundVideo(BackgroundVideoCache):
         the frame actually served is not always the one asked for (see
         Mp4FrameCache.get_frame_and_index)."""
         if self.is_cache_complete():
+            if not self._min_age_synced:
+                # First tick past cache completion. Up to here the frame set
+                # was shielded by the conservative clamp maximum, because
+                # sequential build playback has no knowable loop period; from
+                # here frames are picked by wall clock at source fps, so the
+                # real one can go in. One bool test per tick to get it.
+                self._min_age_synced = True
+                self.deck_controller.refresh_tile_cache_min_age(self)
             # Cache built -> any frame is a free lookup. Pick it by wall-clock so a
             # slow media loop drops frames (stays real-time) instead of playing the
             # video in slow-motion. Playback runs at the SOURCE's fps -- the
@@ -3320,6 +3401,26 @@ class KeyGIF(SingleKeyAsset):
             self.gif_path, max_size=fit_size, saturation=saturation,
         )
         self._total_delay: float = self._cum_delays[-1] if self._cum_delays else 0.0
+
+        # #142 census, accounting-only. The frame list is the largest image
+        # holder in the app with NO byte cap at all: P2.3 caps each frame at
+        # 2x tile, but nothing caps the frame count or the number of GIFs, so
+        # a 32-key page of 200-frame GIFs is ~0.9 GiB -- roughly 10x the
+        # entire evictable budget the ceiling governs. Capping it means
+        # re-architecting decode (opaque GIFs through Mp4FrameCache, the
+        # deferred follow-up noted above); this makes it VISIBLE first, so
+        # that work can be sized against real pages instead of arithmetic.
+        # Never evictable: these frames ARE the asset's per-frame memo.
+        self._frames_bytes = sum(
+            frame.width * frame.height * len(frame.getbands()) for frame in self.frames
+        )
+        cache_budget.register(
+            self, label=f"gif_frames:{os.path.basename(self.gif_path)}", evictable=False)
+
+    def budget_bytes(self) -> int:
+        """Pixel bytes of the retained frame list (#142 census). Computed
+        once at decode time: the list is immutable for this object's life."""
+        return self._frames_bytes
 
     def get_next_frame(self, now: float = None) -> Image.Image:
         n = len(self.frames)

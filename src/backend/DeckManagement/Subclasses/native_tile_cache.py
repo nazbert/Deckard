@@ -12,11 +12,12 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
+import math
 import os
-import threading
-from collections import OrderedDict
 
 from loguru import logger as log
+
+from src.backend.DeckManagement.Subclasses.byte_lru_cache import ByteLRUCache
 
 DEFAULT_MAX_MB = 64
 
@@ -27,13 +28,22 @@ def native_tile_cache_max_bytes() -> int:
     falling playback back to the pixel-hash encode memo). A malformed value
     degrades to the default with a warning -- it must never raise out of
     DeckController.__init__, where DeckManager would swallow it as "Failed to
-    initialize deck" and silently skip the whole device."""
+    initialize deck" and silently skip the whole device.
+
+    "Malformed" has to include the values float() ACCEPTS but int() cannot
+    take: "nan", "inf", and any overflowing literal ("1e400"). They parse,
+    survive the sign test (every nan comparison is False), and then raise
+    from the int() below -- ValueError for nan, OverflowError for inf -- i.e.
+    exactly the lost-deck failure this function exists to prevent."""
     raw = os.environ.get("DECKARD_NATIVE_TILE_CACHE_MB")
     if raw is None:
         return DEFAULT_MAX_MB * 1024 * 1024
     try:
         mb = float(raw)
+        usable = math.isfinite(mb)
     except ValueError:
+        usable = False
+    if not usable:
         log.warning(
             f"Ignoring malformed DECKARD_NATIVE_TILE_CACHE_MB={raw!r}; "
             f"using the default {DEFAULT_MAX_MB}"
@@ -44,7 +54,7 @@ def native_tile_cache_max_bytes() -> int:
     return int(mb * 1024 * 1024)
 
 
-class NativeTileCache:
+class NativeTileCache(ByteLRUCache):
     """LRU of encoded (device-native) background key tiles, keyed by FRAME
     IDENTITY -- (video md5, frame index, key index, rotation, quality,
     native format) -- instead of by composited pixels. Capped by total byte
@@ -66,58 +76,10 @@ class NativeTileCache:
     Kept separate from `encode_memo` rather than sharing its namespace:
     identity keys and pixel-hash keys would otherwise collide in one key
     space, and the two want independent sizing.
+
+    Everything else -- byte accounting, LRU order, `clear()`, the `<= 0`
+    kill switch, and the budget-participant surface -- is `ByteLRUCache`
+    exactly; this class is that core with the default (first-sighting)
+    admission policy and no extra teardown bookkeeping.
     """
 
-    def __init__(self, max_bytes: int):
-        # <= 0 disables: get() always misses and put() stores nothing, so
-        # callers fall back to the pixel-hash path with no extra branching
-        # of their own (env kill-switch, see native_tile_cache_max_bytes).
-        self._max_bytes = max(0, max_bytes)
-        self._lock = threading.Lock()
-        self._entries: "OrderedDict[object, bytes]" = OrderedDict()
-        self._total_bytes = 0
-
-    @property
-    def enabled(self) -> bool:
-        return self._max_bytes > 0
-
-    @property
-    def total_bytes(self) -> int:
-        with self._lock:
-            return self._total_bytes
-
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self._entries)
-
-    def get(self, key) -> bytes | None:
-        if self._max_bytes <= 0:
-            return None
-        with self._lock:
-            data = self._entries.get(key)
-            if data is not None:
-                self._entries.move_to_end(key)
-            return data
-
-    def put(self, key, data: bytes) -> None:
-        if self._max_bytes <= 0:
-            return
-        with self._lock:
-            old = self._entries.pop(key, None)
-            if old is not None:
-                self._total_bytes -= len(old)
-            self._entries[key] = data
-            self._total_bytes += len(data)
-            while self._total_bytes > self._max_bytes and self._entries:
-                _, evicted = self._entries.popitem(last=False)
-                self._total_bytes -= len(evicted)
-
-    def clear(self) -> None:
-        """Drops every entry. Called wherever the encode memo is cleared: a
-        background content change orphans every entry (they are all keyed
-        against the OLD video's frames), and a torn-down deck must not keep
-        referencing encoded frames from a dead controller until LRU eviction
-        eventually gets around to them."""
-        with self._lock:
-            self._entries.clear()
-            self._total_bytes = 0

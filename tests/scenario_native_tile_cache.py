@@ -127,6 +127,18 @@ def check_env_knob() -> None:
             "a malformed DECKARD_NATIVE_TILE_CACHE_MB must fall back to the default"
         )
 
+        # float() accepts these; int() does not (ValueError for nan,
+        # OverflowError for inf), and nan even survives the sign test since
+        # every nan comparison is False. They must take the same
+        # degrade-with-a-warning path as a typo, not raise out of
+        # DeckController.__init__.
+        for hostile in ("nan", "inf", "-inf", "1e400"):
+            os.environ["DECKARD_NATIVE_TILE_CACHE_MB"] = hostile
+            assert native_tile_cache_max_bytes() == DEFAULT_MAX_MB * 1024 * 1024, (
+                f"a non-finite DECKARD_NATIVE_TILE_CACHE_MB={hostile!r} must fall back "
+                f"to the default"
+            )
+
         os.environ["DECKARD_NATIVE_TILE_CACHE_MB"] = "-5"
         assert native_tile_cache_max_bytes() == 0, "a negative cap must disable, not go negative"
     finally:
