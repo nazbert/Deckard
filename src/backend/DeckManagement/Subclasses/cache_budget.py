@@ -93,6 +93,12 @@ MEM_TOTAL_DIVISOR = 64
 # Per-registrant defaults, overridable at register().
 DEFAULT_MIN_AGE_S = 2.0
 DEFAULT_FLOOR_BYTES = 4 * 1024 * 1024
+# Upper bound on a retuned min-age (set_min_age). Also what gets installed
+# when the right value is not yet knowable -- see
+# DeckController.refresh_tile_cache_min_age: over-protecting a cache costs
+# at most a stale entry surviving a pass, while under-protecting it costs
+# the re-encode the cache exists to remove.
+MAX_MIN_AGE_S = 30.0
 
 # Evict down to this fraction of the ceiling, so a hot loop that keeps
 # crossing the line doesn't get one eviction pass per put.

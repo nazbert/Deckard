@@ -199,8 +199,29 @@ def check_tile_cache_min_age_tracks_the_video(controller) -> None:
     video.page = None
     controller.background.set_video(video, update=False)
 
+    # While the tile cache is still building, playback advances one frame per
+    # MEDIA TICK rather than at source fps, so the true loop period is longer
+    # than frames/fps -- unknowably so. The conservative clamp maximum holds
+    # the frame set until the build lands.
+    assert not video.is_cache_complete(), "fixture sanity: the cache should still be building"
+    assert controller.native_tile_cache.budget_min_age_s == cache_budget.MAX_MIN_AGE_S, (
+        f"an unbuilt tile cache must be shielded by the clamp maximum, not by a "
+        f"loop period that does not apply yet: "
+        f"{controller.native_tile_cache.budget_min_age_s}"
+    )
+
+    # Play it through: the build completes, and the first tick past that
+    # installs the real loop duration.
+    for _ in range(video.n_frames * 3 + 10):
+        if video.is_cache_complete():
+            break
+        controller.background.update_tiles()
+    assert video.is_cache_complete(), "fixture sanity: the tile cache never completed"
+    controller.background.update_tiles()
+
     assert abs(controller.native_tile_cache.budget_min_age_s - 6.0) < 0.5, (
-        f"min-age must follow the loop duration (90 frames / 15 fps = 6 s), got "
+        f"min-age must follow the loop duration (90 frames / 15 fps = 6 s) once the "
+        f"cache is built and playback is real-time, got "
         f"{controller.native_tile_cache.budget_min_age_s}"
     )
 

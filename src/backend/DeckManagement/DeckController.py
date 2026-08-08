@@ -1456,7 +1456,8 @@ class DeckController:
     def refresh_tile_cache_min_age(self, video: "BackgroundVideo" = None) -> None:
         """Retunes how long the native tile cache's entries are shielded from
         GLOBAL eviction, to the duration of the background video now playing
-        (clamped to 2-30 s); back to the 2 s default when there is no video.
+        (clamped to DEFAULT_MIN_AGE_S..MAX_MIN_AGE_S); back to the default
+        when there is no video.
 
         Native tile entries are keyed per FRAME, so an entry is re-touched
         once per loop of the content, not once per media tick. Under a
@@ -1464,16 +1465,32 @@ class DeckController:
         video's whole frame set eligible for eviction exactly one loop before
         it is needed again -- silently reinstating the per-frame encode this
         cache exists to remove. A closed video's frames become immediately
-        eligible again, which is what we want: they are stale."""
+        eligible again, which is what we want: they are stale.
+
+        frames/source_fps is only the loop period once the tile cache is
+        BUILT. While it is still building, get_next_tiles() advances the
+        frame sequentially -- one frame per media tick, deliberately, so no
+        frame is skipped and no seek is forced -- and the media tick can be
+        slower than the source's fps, sometimes far slower on a heavy page.
+        The real loop period is then unknown and strictly longer than
+        frames/fps, so installing that number would under-protect exactly the
+        frame set the build is racing to fill. The clamp maximum goes in
+        instead, and the first tick past completion (BackgroundVideo.
+        get_next_tiles) calls back in here for the real value. The wrong
+        direction to err in is the short one: over-protection costs a stale
+        entry surviving a pass, under-protection costs the re-encode."""
         min_age = cache_budget.DEFAULT_MIN_AGE_S
         if video is not None:
+            min_age = cache_budget.MAX_MIN_AGE_S
             try:
-                fps = float(video.get_source_fps() or getattr(video, "fps", 0) or 0)
-                frames = int(getattr(video, "n_frames", 0) or 0)
-                if fps > 0 and frames > 0:
-                    min_age = max(2.0, min(30.0, frames / fps))
+                if video.is_cache_complete():
+                    fps = float(video.get_source_fps() or getattr(video, "fps", 0) or 0)
+                    frames = int(getattr(video, "n_frames", 0) or 0)
+                    if fps > 0 and frames > 0:
+                        min_age = max(cache_budget.DEFAULT_MIN_AGE_S,
+                                      min(cache_budget.MAX_MIN_AGE_S, frames / fps))
             except Exception:
-                min_age = cache_budget.DEFAULT_MIN_AGE_S
+                min_age = cache_budget.MAX_MIN_AGE_S
         cache = getattr(self, "native_tile_cache", None)
         if cache is not None:
             cache_budget.set_min_age(cache, min_age)
@@ -2953,6 +2970,11 @@ class BackgroundVideo(BackgroundVideoCache):
         self.active_frame: int = -1
         self._play_start: float = None  # wall-clock playback start, set on first real-time frame
         self._last_frame_tick: float = None  # last real-time frame pick, for gap clamping
+        # Whether the tile cache's min-age has been retuned to this video's
+        # real loop period. False until the first tick after the cache
+        # completes: before that, playback is not running at source fps and
+        # the loop period is not knowable (refresh_tile_cache_min_age).
+        self._min_age_synced: bool = False
 
         super().__init__(video_path, deck_controller=deck_controller, extend_touchscreen=extend_touchscreen)
 
@@ -2964,6 +2986,14 @@ class BackgroundVideo(BackgroundVideoCache):
         the frame actually served is not always the one asked for (see
         Mp4FrameCache.get_frame_and_index)."""
         if self.is_cache_complete():
+            if not self._min_age_synced:
+                # First tick past cache completion. Up to here the frame set
+                # was shielded by the conservative clamp maximum, because
+                # sequential build playback has no knowable loop period; from
+                # here frames are picked by wall clock at source fps, so the
+                # real one can go in. One bool test per tick to get it.
+                self._min_age_synced = True
+                self.deck_controller.refresh_tile_cache_min_age(self)
             # Cache built -> any frame is a free lookup. Pick it by wall-clock so a
             # slow media loop drops frames (stays real-time) instead of playing the
             # video in slow-motion. Playback runs at the SOURCE's fps -- the
