@@ -178,17 +178,35 @@ def check_deck_manager_usb_callback_guards() -> None:
     finally:
         gl.app = saved_app
 
-    # (b) Trailing-dot typo: with the UI present, add_newly_connected_deck
-    # must actually reach check_for_errors() (the old
-    # recursive_hasattr(gl, "app.main_win.") was always False).
-    check_recorder = Recorder()
-    gl.app = Obj(main_win=Obj(check_for_errors=check_recorder))
+    # (b) Trailing-dot typo: add_newly_connected_deck must actually reach the
+    # "re-check whether any deck is available" call (the old
+    # recursive_hasattr(gl, "app.main_win.") was always False). Since #141 that
+    # is a port call, not a direct main_win poke, so the recorder is a port.
+    from src.backend import ui_port
+
+    class _RecordingPort(ui_port.UIPort):
+        def __init__(self):
+            self.added = []
+            self.availability_refreshes = 0
+            self.page_list_changes = 0
+
+        def on_deck_added(self, controller):
+            self.added.append(controller)
+
+        def refresh_deck_availability(self):
+            self.availability_refreshes += 1
+
+        def on_page_list_changed(self):
+            self.page_list_changes += 1
+
+    port = _RecordingPort()
+    ui_port.install(port)
     saved_ctor = dm_mod.DeckController
     dm_mod.DeckController = lambda manager, deck: Obj(deck=deck)
     try:
         # !8 (fix/boot-lifecycle) wraps the controller construction in
         # _init_deck_controller_with_retry(); stub it so the method reaches
-        # the check_for_errors() call this test verifies.
+        # the availability refresh this test verifies.
         stub = Obj(
             deck_controller=[],
             fake_deck_controller=[],
@@ -197,13 +215,15 @@ def check_deck_manager_usb_callback_guards() -> None:
         dm_mod.DeckManager.add_newly_connected_deck(stub, deck=Obj())
     finally:
         dm_mod.DeckController = saved_ctor
+        ui_port.install(None)
         gl.app = saved_app
 
-    assert len(check_recorder.calls) == 1, (
-        "add_newly_connected_deck must call main_win.check_for_errors() when "
-        "the UI exists -- the trailing-dot recursive_hasattr typo made this "
-        "dead code"
+    assert port.availability_refreshes == 1, (
+        "add_newly_connected_deck must refresh deck availability when the UI "
+        "exists -- the trailing-dot recursive_hasattr typo made this dead code"
     )
+    assert len(port.added) == 1, "the new deck was never announced to the UI"
+    assert port.page_list_changes == 1, "the page selector was never refreshed"
     print("  PASS: DeckManager USB callbacks guarded; typo'd guard is live again")
 
 

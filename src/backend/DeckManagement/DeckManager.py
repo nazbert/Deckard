@@ -27,15 +27,14 @@ import os
 # Import own modules
 from src.backend.DeckManagement.Subclasses.RemoteDeckManager import RemoteDeckManager
 from src.backend.DeckManagement.DeckController import DeckController, ClearAndCloseMsg
+from src.backend import ui_port
 from src.backend.SettingsManager import SettingsManager
-from src.backend.DeckManagement.HelperMethods import recursive_hasattr
 from src.backend.DeckManagement.Subclasses.FakeDeck import FakeDeck
 
 # Import globals first to get IS_MAC
 import globals as gl
 
 import gi
-from gi.repository import GLib
 
 if not gl.IS_MAC:
     gi.require_version("Xdp", "1.0")
@@ -138,21 +137,16 @@ class DeckManager:
                 continue
 
             self.deck_controller.append(controller)
-            if recursive_hasattr(gl, "app.main_win.leftArea.deck_stack"):
-                # Add to deck stack
-                for controller in self.remote_deck_manager.deck_controllers:
-                    GLib.idle_add(gl.app.main_win.leftArea.deck_stack.add_page, controller)
+            for remote_controller in self.remote_deck_manager.deck_controllers:
+                ui_port.get().on_deck_added(remote_controller)
 
-        if recursive_hasattr(gl, "app.main_win.sidebar.page_selector"):
-            GLib.idle_add(gl.app.main_win.sidebar.page_selector.update)
-
-        if recursive_hasattr(gl, "app.main_win"):
-            gl.app.main_win.check_for_errors()
+        ui_port.get().on_page_list_changed()
+        ui_port.get().refresh_deck_availability()
 
     def remove_remote_decks(self):
         for controller in self.remote_deck_manager.deck_controllers:
             self.remove_controller(controller)
-        gl.app.main_win.check_for_errors()
+        ui_port.get().refresh_deck_availability()
         self.remote_deck_manager.stop()
 
     def load_decks(self):
@@ -300,12 +294,6 @@ class DeckManager:
                 fake_deck = FakeDeck(serial_number = f"fake-deck-{len(self.fake_deck_controller)+1}", deck_type=f"Fake Deck {len(self.fake_deck_controller)+1}")
                 self.add_newly_connected_deck(fake_deck, is_fake=True)
 
-            # Update header deck switcher if the new deck is the only one
-            if len(self.deck_controller) == 1 and False:
-                # Check if ui is loaded - if not it will grab the controller automatically
-                if recursive_hasattr(gl, "app.main_win.header_bar.deckSwitcher"):
-                    gl.app.main_win.header_bar.deckSwitcher.set_show_switcher(True)
-
         elif n_fake_decks < old_n_fake_decks:
             # Remove difference in number of fake decks
             log.info(f"Removing {old_n_fake_decks - n_fake_decks} fake deck(s)")
@@ -319,13 +307,7 @@ class DeckManager:
                 # forever after "removing" a fake deck.
                 self.remove_controller(controller)
 
-            # Update header deck switcher if there are no more decks
-            if len(self.deck_controller) == 0 and False:
-                # Check if ui is loaded - if not it will grab the controller automatically
-                if recursive_hasattr(gl, "app.main_win.header_bar.deckSwitcher"):
-                    gl.app.main_win.header_bar.deckSwitcher.set_show_switcher(False)
-        if hasattr(gl.app, "main_win"):
-            gl.app.main_win.check_for_errors()
+        ui_port.get().refresh_deck_availability()
 
     def on_connect(self, device_id, device_info):
         log.info(f"Device {device_id} with info: {device_info} connected")
@@ -373,12 +355,10 @@ class DeckManager:
             loaded_after = {controller.deck.id() for controller in self.deck_controller}
             n_registered = sum(1 for deck in decks if deck.id() in loaded_after)
 
-        # Guarded: the boot rescan (or an early hotplug event) can fire
-        # before the main window exists. idle_add: this method runs on the
-        # USB monitor thread or the boot rescan thread, and
+        # Null-safe by contract, and idled by the adapter: this method runs on
+        # the USB monitor thread or the boot rescan thread, and
         # check_for_errors() is pure GTK work.
-        if recursive_hasattr(gl, "app.main_win"):
-            GLib.idle_add(gl.app.main_win.check_for_errors)
+        ui_port.get().refresh_deck_availability()
 
         return n_registered
 
@@ -392,9 +372,9 @@ class DeckManager:
             if not controller.deck.connected():
                 self.remove_controller(controller)
 
-        # USB events can arrive before on_activate has set gl.app / main_win.
-        if recursive_hasattr(gl, "app.main_win"):
-            gl.app.main_win.check_for_errors()
+        # USB events can arrive before the window exists; the port is
+        # null-safe, and this used to be a DIRECT off-main GTK call.
+        ui_port.get().refresh_deck_availability()
 
     def remove_controller(self, deck_controller: DeckController) -> None:
         # Idempotent: several threads may call this for the same controller;
@@ -404,15 +384,11 @@ class DeckManager:
                 return
             self.deck_controller.remove(deck_controller)
 
-        # UI detach first, as one early idle (plan P1.3): this method runs
-        # from the USB monitor thread (or the Flatpak disconnect poll
-        # thread), and DeckStack.remove_page does pure GTK work -- calling
-        # it directly here was already a latent off-main-thread GTK bug.
-        # Queuing it ahead of the slow close() below also means a fast
-        # unplug/replug can't race a late detach against a fresh add_page
-        # idle and leave two stack children registered for one serial.
-        if recursive_hasattr(gl, "app.main_win.leftArea.deck_stack"):
-            GLib.idle_add(gl.app.main_win.leftArea.deck_stack.remove_page, deck_controller)
+        # UI detach first (plan P1.3): on_deck_removed queues the detach
+        # SYNCHRONOUSLY before returning, so a fast unplug/replug can't race a
+        # late detach against a fresh add and leave two stack children
+        # registered for one serial.
+        ui_port.get().on_deck_removed(deck_controller)
 
         # The teardown sweep runs plugin hooks (step 6) and can block on a
         # wedged callback; it must never run on the USB monitor thread
@@ -441,25 +417,16 @@ class DeckManager:
         if deck_controller is None:
             return
 
-        # Check if ui is loaded - if not it will grab the controller automatically
-        if recursive_hasattr(gl, "app.main_win.leftArea.deck_stack"):
-            # Add to deck stack
-            GLib.idle_add(gl.app.main_win.leftArea.deck_stack.add_page, deck_controller)
-
-        if recursive_hasattr(gl, "app.main_win.sidebar.page_selector"):
-            GLib.idle_add(gl.app.main_win.sidebar.page_selector.update)
-
-
+        # Null-safe: with no UI attached these no-op and the controller is
+        # picked up by the deck stack when the window is eventually built.
+        ui_port.get().on_deck_added(deck_controller)
+        ui_port.get().on_page_list_changed()
 
         self.deck_controller.append(deck_controller)
         if is_fake:
             self.fake_deck_controller.append(deck_controller)
 
-        # The trailing dot ("app.main_win.") made this check always False and
-        # the call below dead code.
-        if not recursive_hasattr(gl, "app.main_win"):
-            return
-        gl.app.main_win.check_for_errors()
+        ui_port.get().refresh_deck_availability()
 
     def close_all(self):
         log.info("Closing all decks")
@@ -505,4 +472,7 @@ class FlatpakDeckDisconnectThread(threading.Thread):
             for controller in list(self.deck_manager.deck_controller):
                 if not controller.deck.connected():
                     self.deck_manager.remove_controller(controller)
-                    gl.app.main_win.check_for_errors()
+                    # Was an UNGUARDED, off-main gl.app.main_win call: it
+                    # crashed this poll thread outright before the window
+                    # existed.
+                    ui_port.get().refresh_deck_availability()
