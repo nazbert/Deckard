@@ -66,6 +66,7 @@ WHY EVICTION IS NEVER A CORRECTNESS RISK
     eviction. Evicting the wrong entry costs one re-encode, never a wrong or
     torn frame. That is why there is no pin API.
 """
+import math
 import os
 import threading
 import time
@@ -180,6 +181,13 @@ def ceiling_bytes() -> int:
     raise out of DeckController.__init__, where DeckManager would swallow it
     as "Failed to initialize deck".
 
+    "Malformed" includes the values float() ACCEPTS but int() cannot take:
+    "nan", "inf", and any overflowing literal ("1e400"). Those parse fine and
+    then explode two lines down (int(nan) raises ValueError, int(inf) raises
+    OverflowError) -- from the daemon that would read as a "pass failed" log
+    line every 5 s forever with enforcement silently off, and from
+    DeckController.__init__ as a lost deck.
+
     Re-read from os.environ on every call rather than snapshotted at import,
     mirroring native_tile_cache_max_bytes() -- the env legs of the scenarios
     have to be able to change it inside one process."""
@@ -188,7 +196,10 @@ def ceiling_bytes() -> int:
         return default_ceiling_bytes()
     try:
         mb = float(raw)
+        usable = math.isfinite(mb)
     except ValueError:
+        usable = False
+    if not usable:
         if raw not in _warned_ceiling_values:
             _warned_ceiling_values.add(raw)
             log.warning(

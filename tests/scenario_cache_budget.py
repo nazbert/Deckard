@@ -247,6 +247,26 @@ def check_env_contract() -> None:
                 "a malformed ceiling must warn once per distinct value, not per read"
             )
 
+        # The values float() ACCEPTS but int() cannot take. Each parses, and
+        # nan even survives the `mb <= 0` sign test (every nan comparison is
+        # False), so without an explicit finiteness test each one reaches
+        # int(mb * MiB) and raises -- ValueError for nan, OverflowError for
+        # inf. On the daemon that is a "pass failed" warning every 5 s
+        # forever with enforcement silently off; on the __init__ path it is a
+        # lost deck.
+        for hostile in ("nan", "inf", "-inf", "1e400"):
+            cache_budget._warned_ceiling_values.discard(hostile)
+            _set_ceiling(hostile)
+            with _WarningSink() as sink:
+                assert cache_budget.ceiling_bytes() == cache_budget.default_ceiling_bytes(), (
+                    f"a non-finite ceiling ({hostile!r}) must fall back to the default, "
+                    f"not raise"
+                )
+                assert sink.matching("malformed"), (
+                    f"a non-finite ceiling ({hostile!r}) must warn like any other "
+                    f"malformed value; got {sink.messages!r}"
+                )
+
         # 0 disables global eviction entirely; the local caps still bound
         # each cache, so the sum is still bounded -- by Σ(local caps).
         _set_ceiling(0)

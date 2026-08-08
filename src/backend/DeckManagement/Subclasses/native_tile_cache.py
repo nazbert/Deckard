@@ -12,6 +12,7 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
+import math
 import os
 
 from loguru import logger as log
@@ -27,13 +28,22 @@ def native_tile_cache_max_bytes() -> int:
     falling playback back to the pixel-hash encode memo). A malformed value
     degrades to the default with a warning -- it must never raise out of
     DeckController.__init__, where DeckManager would swallow it as "Failed to
-    initialize deck" and silently skip the whole device."""
+    initialize deck" and silently skip the whole device.
+
+    "Malformed" has to include the values float() ACCEPTS but int() cannot
+    take: "nan", "inf", and any overflowing literal ("1e400"). They parse,
+    survive the sign test (every nan comparison is False), and then raise
+    from the int() below -- ValueError for nan, OverflowError for inf -- i.e.
+    exactly the lost-deck failure this function exists to prevent."""
     raw = os.environ.get("DECKARD_NATIVE_TILE_CACHE_MB")
     if raw is None:
         return DEFAULT_MAX_MB * 1024 * 1024
     try:
         mb = float(raw)
+        usable = math.isfinite(mb)
     except ValueError:
+        usable = False
+    if not usable:
         log.warning(
             f"Ignoring malformed DECKARD_NATIVE_TILE_CACHE_MB={raw!r}; "
             f"using the default {DEFAULT_MAX_MB}"
