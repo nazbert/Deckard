@@ -2,9 +2,13 @@
 Scenario (issue #141 step (c)): the render engine's import closure must be
 WIDGET-FREE.
 
-A real DeckController -- page loads, key/dial input, media ticks, teardown --
-must run without ever importing `gi.repository.Gtk/Adw/Gdk/GdkPixbuf/Pango`,
-`src.windows.*`, `GtkHelper.GtkHelper` or `GtkHelper.GenerativeUI.*`.
+A real DeckController -- page loads (background AND action pages, so
+ActionCore construction / initialize_actions / on_ready are covered too),
+key/dial input, media ticks, teardown -- must run without ever importing
+`gi.repository.Gtk/Adw/Gdk/GdkPixbuf/Pango`, `src.windows.*`,
+`GtkHelper.GtkHelper` or `GtkHelper.GenerativeUI.*`. `DeckManager` is
+imported here too: the harness substitutes a stub for it, so without an
+explicit import its module-level closure would go unproven.
 
 Scope honesty: this proves the `make_headless_controller` ENGINE closure only.
 The running app with plugins still loads Gtk/Adw at module scope
@@ -42,6 +46,20 @@ FORBIDDEN_PREFIXES = ("src.windows.", "GtkHelper.GenerativeUI.")
 # so a sweep over an engine that somehow imported nothing can't pass silently.
 REQUIRED_PRESENT = ("gi.repository.GLib", "gi.repository.Gio")
 
+# The COMPLETE set the engine closure is allowed to pull in. GLib/Gio are the
+# ones engine code names (SignalManager, api, notify, HelperMethods.open_web);
+# GObject/GModule come with gi itself; Xdp is DeckManager's flatpak probe
+# (libportal, not a widget toolkit -- and absent on Mac, hence a subset check
+# rather than equality). Anything OUTSIDE this set is a new dependency that
+# has to be argued for, which is the point of pinning it.
+ALLOWED_GI_RESIDUE = frozenset({
+    "gi.repository.GLib",
+    "gi.repository.GModule",
+    "gi.repository.GObject",
+    "gi.repository.Gio",
+    "gi.repository.Xdp",
+})
+
 
 def _is_forbidden(name: str) -> bool:
     return name in FORBIDDEN_EXACT or name.startswith(FORBIDDEN_PREFIXES)
@@ -72,6 +90,12 @@ import globals as gl  # noqa: E402
 
 from src.backend.DeckManagement.InputIdentifier import Input  # noqa: E402
 
+# The harness runs a StubDeckManager (the real one starts a USBMonitor and an
+# Xdp portal probe), so the real module would otherwise never be imported at
+# all and its closure -- which #141 also cleaned of gl.app.main_win reads --
+# would go unproven. Importing the module alone starts nothing.
+import src.backend.DeckManagement.DeckManager  # noqa: E402,F401
+
 WATCHDOG_SECONDS = 60
 
 
@@ -95,17 +119,39 @@ def check_tripwire_is_armed() -> None:
     print("PASS: the meta-path tripwire refuses widget-stack imports")
 
 
+def _any_action_ready(page) -> bool:
+    for by_ident in page.action_objects.values():
+        for by_state in by_ident.values():
+            for by_index in by_state.values():
+                for action in by_index.values():
+                    if getattr(action, "on_ready_called", False):
+                        return True
+    return False
+
+
 def check_engine_runs_headless() -> None:
-    """Drive the real engine: two visually distinct pages, a page switch, key
-    and dial input, media ticks, teardown."""
+    """Drive the real engine: two visually distinct pages (the second carrying
+    a real ActionCore subclass), a page switch, key and dial input, media
+    ticks, teardown.
+
+    Page B is deliberately an ACTION page: ActionCore construction,
+    Page.initialize_actions and on_ready are a large slice of the engine
+    closure -- including ActionCore's function-local
+    `from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI` -- and a
+    background-only page never reaches any of it, leaving it outside the
+    tripwire's proof.
+    """
     import os
 
     red = fixtures.make_test_png(
         os.path.join(gl.DATA_PATH, "media", "engine_red.png"), color=(220, 20, 20))
-    blue = fixtures.make_test_png(
-        os.path.join(gl.DATA_PATH, "media", "engine_blue.png"), color=(20, 20, 220))
+    green = fixtures.make_test_png(
+        os.path.join(gl.DATA_PATH, "media", "engine_green.png"), color=(20, 220, 20))
     page_a_path = fixtures.seed_page_with_background("EngineA", red)
-    page_b_path = fixtures.seed_page_with_background("EngineB", blue)
+
+    # Before the controller: load_default_page() runs at the end of
+    # DeckController.__init__ and would hit an unset plugin_manager.
+    fixtures.install_stub_plugin_manager(fixtures.make_latch_action_class(), green)
 
     controller = fixtures.make_headless_controller(serial="headless-nogtk-1")
     try:
@@ -129,6 +175,9 @@ def check_engine_runs_headless() -> None:
             deck.fire_dial_event(0, DialEventType.PUSH, True)
             deck.fire_dial_event(0, DialEventType.PUSH, False)
 
+        key_ident = controller.inputs[Input.Key][0].identifier.json_identifier
+        page_b_path = fixtures.seed_action_page("EngineB", key_ident)
+
         before_switch = deck.current_seq()
         page_b = gl.page_manager.get_page(page_b_path, controller)
         controller.load_page(page_b, allow_reload=True)
@@ -136,6 +185,19 @@ def check_engine_runs_headless() -> None:
             lambda: any(e[2] == "set_key_image" for e in deck.ops_after(before_switch)),
             timeout=10), "page B never reached the device"
         b_hashes = {e[4] for e in deck.ops_after(before_switch) if e[2] == "set_key_image"}
+
+        # The action actually ran: construction + initialize_actions +
+        # on_ready, all inside the engine closure, all under the tripwire.
+        assert fixtures.wait_until(lambda: _any_action_ready(page_b), timeout=10), (
+            "page B's action never reached on_ready -- ActionCore init / "
+            "initialize_actions / on_ready would be outside this scenario's "
+            "widget-free proof"
+        )
+
+        # And its paint reached the device, which is what proves the action
+        # ran for real rather than merely being constructed.
+        deck.fire_key_event(0, True)
+        deck.fire_key_event(0, False)
 
         assert a_hashes, "fixture sanity: page A produced no key writes"
         assert b_hashes, "fixture sanity: page B produced no key writes"
@@ -150,7 +212,8 @@ def check_engine_runs_headless() -> None:
             "no dirty markers accumulated -- the null port should refuse every "
             "push and the engine should mark instead"
         )
-        print("PASS: real controller loaded two pages, took input, painted, headless")
+        print("PASS: real controller loaded a background page and an ACTION page, "
+              "took input, painted, headless")
     finally:
         fixtures.teardown(controller)
 
@@ -169,6 +232,12 @@ def check_no_widget_modules_loaded() -> None:
         f"passing vacuously"
     )
     gi_loaded = sorted(m for m in sys.modules if m.startswith("gi.repository."))
+    unexpected = sorted(set(gi_loaded) - ALLOWED_GI_RESIDUE)
+    assert not unexpected, (
+        f"the engine closure pulled in unlisted gi namespaces: {unexpected}. "
+        "The FORBIDDEN_* lists only name the widget stack; this check is what "
+        "makes 'the residue is GLib/GModule/GObject/Gio/Xdp' literally true."
+    )
     print(f"PASS: no widget-stack modules; gi residue is {gi_loaded}")
 
 
