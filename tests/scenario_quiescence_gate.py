@@ -18,9 +18,15 @@ pins that:
       to the video loop -- and then quiets again (the page-generation watch;
       without it the deck would show the previous page's imagery on every
       transparent key for the entire away window),
+  (d2) that render window is bounded in WALL CLOCK: a steady producer keeps
+      the task queues non-empty forever, and the window's tick countdown
+      re-arms on exactly that -- so without the deadline one busy plugin
+      pins the loop un-gated at full FPS for the whole away window,
   (e) restoring presence resumes animation within the 500ms acceptance bound.
 """
+import itertools
 import os
+import threading
 import time
 
 import fixtures
@@ -64,6 +70,21 @@ def wait_until_quiet(deck, quiet_for: float = 0.5, timeout: float = 10.0) -> boo
         elif time.monotonic() - stable_since >= quiet_for:
             return True
     return False
+
+
+def _window_closed(media_player, for_s: float = 0.25) -> bool:
+    """True once the settle window has stopped rendering ticks for `for_s`.
+
+    `gate_window_ticks` is the loop's own count of ticks the window rendered
+    instead of gating, so this reads the mechanism directly rather than
+    inferring it from device writes (which a producer is generating anyway)."""
+    seen = media_player.gate_window_ticks
+    deadline = time.monotonic() + for_s
+    while time.monotonic() < deadline:
+        time.sleep(0.02)
+        if media_player.gate_window_ticks != seen:
+            return False
+    return True
 
 
 def set_locked(monitor, locked: bool) -> None:
@@ -235,6 +256,77 @@ def main() -> None:
         assert media_player.gated_ticks > gated_before
         print("PASS: a gated page change paints the new page once, then re-gates")
 
+        # (d2) the render window is bounded in wall clock, not only in quiet
+        # ticks. Its countdown re-arms whenever the task queues are non-empty
+        # -- and that is a STEADY STATE for a producer running at the loop's
+        # own rate (a plugin looping set_media; the touchscreen latest-wins
+        # re-queue under a low DECKARD_VIDEO_WRITE_HZ, which refills the slot
+        # from inside the loop itself). Without the deadline such a producer
+        # holds the window open at full FPS for the entire away window and
+        # the gate silently does nothing at all -- verified: with
+        # GATE_WINDOW_MAX_S neutered this leg hangs open past its timeout.
+        # The producer at MediaPlayerThread.FPS is what makes that
+        # deterministic; at half the loop rate the countdown still finds its
+        # three consecutive quiet ticks and closes on its own.
+        # The producer's own paints must keep landing throughout -- that
+        # traffic is interactive by design and the gate never touches it.
+        stop_producer = threading.Event()
+        fills = itertools.count(11)
+
+        def produce():
+            while not stop_producer.is_set():
+                # A fresh fill every frame: identical payloads are dedup-
+                # skipped at the enqueue point and would not keep the queue
+                # non-empty, which is the whole mechanism under test.
+                media_player.add_image_task(0, fixtures.make_native_image(fill=next(fills) % 251))
+                stop_producer.wait(1 / media_player.FPS)
+
+        producer = threading.Thread(target=produce, name="GateProducer", daemon=True)
+        producer.start()
+        try:
+            window_before = media_player.gate_window_ticks
+            controller.load_page(page_a, allow_reload=True)
+            assert fixtures.wait_until(
+                lambda: media_player.gate_window_ticks > window_before, timeout=3
+            ), "the page change never opened the render window at all"
+
+            # Bound: the window opens on the tick that observes the new
+            # generation and must close GATE_WINDOW_MAX_S later. Allow ~1s of
+            # slack for the observation itself and a loaded machine.
+            assert fixtures.wait_until(
+                lambda: _window_closed(media_player, for_s=0.25), timeout=3
+            ), (
+                "the render window never closed while a full-rate producer kept "
+                "the task queues non-empty -- the gate is doing nothing at all "
+                "for the entire away window"
+            )
+
+            deck.clear_journal()
+            window_before = media_player.gate_window_ticks
+            gated_before = media_player.gated_ticks
+            time.sleep(OBSERVE_S)
+            assert media_player.gate_window_ticks == window_before, (
+                "the render window re-opened under producer traffic"
+            )
+            assert media_player.gated_ticks > gated_before, (
+                "the loop is not gating again after the window closed"
+            )
+            # Animation is off, but the producer is not: every write in that
+            # observation is its own key-0 paint.
+            foreign = [e for e in animation_writes(deck) if e[3] != "key:0"]
+            assert not foreign, (
+                f"{len(foreign)} animation write(s) beyond the producer's own key "
+                f"while gated: {[(e[2], e[3]) for e in foreign[:5]]}"
+            )
+            assert [e for e in deck.journal() if e[3] == "key:0"], (
+                "the producer's paints stopped landing -- the deadline gated "
+                "interactive traffic, which it must never do"
+            )
+        finally:
+            stop_producer.set()
+            producer.join(timeout=2)
+        print("PASS: the render window closes on its deadline under a full-rate producer")
+
         # (e) presence restored -> animation back within the acceptance bound.
         deck.clear_journal()
         gl.screen_locked = False
@@ -246,7 +338,7 @@ def main() -> None:
         print(f"PASS: animation resumed {1000 * (time.monotonic() - started):.0f}ms "
               f"after presence restore")
 
-        wait_for_playback(deck, "page B after resume")
+        wait_for_playback(deck, "page A after resume")
         print("PASS: video playback continues after the resume")
     finally:
         if monitor is not None:

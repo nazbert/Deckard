@@ -341,6 +341,22 @@ class MediaPlayerThread(threading.Thread):
     # purpose: these run at full FPS, so the window costs ~100ms of frames
     # per page change made while the user is away.
     GATE_SETTLE_TICKS = 3
+    # Hard wall-clock bound on that window. The countdown above re-arms
+    # whenever the task queues are non-empty ("page-load work is still
+    # landing") -- but that predicate is ALSO permanently true under any
+    # >=10Hz producer: a plugin looping set_media -> add_image_task, or the
+    # touchscreen latest-wins re-queue (see perform_media_player_tasks)
+    # under a low DECKARD_VIDEO_WRITE_HZ. Unbounded, such a producer pins
+    # the loop un-gated at full FPS for the entire away window -- a silent
+    # total failure of the gate, with nothing in the logs to say so. So the
+    # window also closes on this deadline, whatever the queues say. It is
+    # generous next to what it bounds (a settle is GATE_SETTLE_TICKS quiet
+    # ticks ~= 100ms plus however long the page-load tasks take to drain),
+    # and the cost if it ever truncates a genuinely slow page load is one
+    # away window of stale imagery on that page's transparent keys -- the
+    # same failure the watch exists to avoid, but for one page instead of
+    # for the whole gate.
+    GATE_WINDOW_MAX_S = 0.5
 
     def __init__(self, deck_controller: "DeckController"):
         # Suffix the thread name with the deck serial so per-deck writer
@@ -394,11 +410,20 @@ class MediaPlayerThread(threading.Thread):
         # the hardware driver; `media_ticks - gated_ticks` is the number of
         # ticks that actually rendered.
         self.gated_ticks = 0
+        # Ticks the settle window rendered instead of gating (issue #144).
+        # Lives next to gated_ticks so "the render window is open" is
+        # observable from outside the loop: a window that never closes is
+        # this gate's worst failure mode and would otherwise be invisible --
+        # `gated_ticks` merely stops advancing, which is also what a
+        # not-yet-quiescent user looks like.
+        self.gate_window_ticks = 0
         # Page-generation watch state (see _run_one_tick): the generation
-        # last observed while gated, and how many more render ticks the
-        # settle window owes it.
+        # last observed while gated, how many more render ticks the settle
+        # window owes it, and the monotonic instant the window closes no
+        # matter what (GATE_WINDOW_MAX_S).
         self._gated_generation = None
         self._gate_render_ticks = 0
+        self._gate_window_deadline = 0.0
 
         self._stop = False
 
@@ -508,6 +533,13 @@ class MediaPlayerThread(threading.Thread):
             # stop() would burn its full join timeout waiting on a corpse.
             self.running = False
 
+    def _open_gate_window(self) -> None:
+        """(Re-)opens the gated render window (issue #144): GATE_SETTLE_TICKS
+        quiet render ticks, and never more than GATE_WINDOW_MAX_S of wall
+        clock however busy the task queues stay. Writer thread only."""
+        self._gate_render_ticks = self.GATE_SETTLE_TICKS
+        self._gate_window_deadline = time.monotonic() + self.GATE_WINDOW_MAX_S
+
     def _run_one_tick(self) -> bool:
         """One iteration of the writer loop. Returns False to stop."""
         start = time.time()
@@ -546,6 +578,7 @@ class MediaPlayerThread(threading.Thread):
         # functional. Only *animation* pauses.
         gated = self.deck_controller.animations_gated()
         force_render = False
+        gate_window_open = False
         if gated:
             # Page-generation watch: update_all_inputs() deliberately leaves
             # the DEVICE paint of non-opaque keys to this loop whenever a
@@ -567,14 +600,16 @@ class MediaPlayerThread(threading.Thread):
             # correctly, and then never again. So the window keeps rendering
             # while task queues are non-empty (page-load work still landing)
             # and only counts down over ticks where they are quiet; the last
-            # of those is the pass that paints the settled new page. Same
+            # of those is the pass that paints the settled new page -- with a
+            # wall-clock stop on the whole thing, since "queues non-empty" is
+            # a producer's permanent state (GATE_WINDOW_MAX_S). Same
             # snapshot-under-_page_gen_lock pattern perform_media_player_tasks
             # uses.
             with self.deck_controller._page_gen_lock:
                 current_gen = self.deck_controller._page_load_generation
             if current_gen != self._gated_generation:
                 self._gated_generation = current_gen
-                self._gate_render_ticks = self.GATE_SETTLE_TICKS
+                self._open_gate_window()
             if repaint_fired:
                 # A full repaint that just fired (suspend/resume, or the 2s
                 # retry after write failures) bumps no generation but runs
@@ -583,17 +618,30 @@ class MediaPlayerThread(threading.Thread):
                 # window for it too, or a machine that wakes from sleep while
                 # the user is still away leaves those keys showing whatever
                 # survived the suspend.
-                self._gate_render_ticks = self.GATE_SETTLE_TICKS
+                self._open_gate_window()
             if self._gate_render_ticks > 0:
-                gated = False
-                # The pass has to actually paint: the video block's source-fps
-                # tick divider would otherwise skip this single frame outright
-                # on any video whose fps is below the loop's.
-                force_render = True
-                if self.tasks or self.image_tasks or self.touchscreen_task:
-                    self._gate_render_ticks = self.GATE_SETTLE_TICKS
+                if time.monotonic() >= self._gate_window_deadline:
+                    # Wall-clock stop (GATE_WINDOW_MAX_S): the window has been
+                    # open long enough. Closed here regardless of the queue
+                    # state below -- that predicate is exactly the one a
+                    # steady producer holds true forever.
+                    self._gate_render_ticks = 0
                 else:
-                    self._gate_render_ticks -= 1
+                    gated = False
+                    gate_window_open = True
+                    self.gate_window_ticks += 1
+                    # The pass has to actually paint: the video block's
+                    # source-fps tick divider would otherwise skip this single
+                    # frame outright on any video whose fps is below the
+                    # loop's. That bypass is bounded by the same deadline --
+                    # it only applies while this window is open, so no video
+                    # is forced above its own frame rate for longer than
+                    # GATE_WINDOW_MAX_S.
+                    force_render = True
+                    if self.tasks or self.image_tasks or self.touchscreen_task:
+                        self._gate_render_ticks = self.GATE_SETTLE_TICKS
+                    else:
+                        self._gate_render_ticks -= 1
 
         if gated:
             self.gated_ticks += 1
@@ -686,6 +734,15 @@ class MediaPlayerThread(threading.Thread):
         # the skipped decode/composite/encode/write, not the wait length.
         has_pending = bool(self.tasks or self.image_tasks or self.touchscreen_task)
         if has_pending:
+            target_fps = self.FPS
+        elif gate_window_open:
+            # The settle window is open: run it out at full FPS. It is a
+            # RENDER window, and it is bounded in wall clock
+            # (GATE_WINDOW_MAX_S) -- at the 2Hz gated/idle cadence a single
+            # tick would sleep through the entire window, so a page loaded
+            # while gated would get exactly one pass, fired before its
+            # background finished installing, and its transparent keys would
+            # never be painted at all.
             target_fps = self.FPS
         elif gated:
             target_fps = 2
