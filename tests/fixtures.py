@@ -26,8 +26,13 @@ Two fixture tiers:
     `PageManagerBackend` / `SignalManager` rooted at the temp data dir and a
     `StubDeckManager` standing in for `DeckManager` (the real one starts a
     `USBMonitor` + an `Xdp` portal probe -- unwanted/unavailable in a
-    harness process). `gl.app` / `gl.app.main_win` are never set; every UI
-    touch on the paths this harness exercises is `recursive_hasattr`-guarded.
+    harness process). No UI is attached, so `src.backend.ui_port` serves the
+    NULL port (issue #141): every engine->UI call no-ops and
+    `push_input_image` returns False, which is what makes the engine
+    dirty-mark instead of painting. A scenario that wants to observe the
+    positive direction installs its own recording port -- see
+    `scenario_ui_port_events.py`. (`gl.app` is still never set; nothing in
+    `src/backend/DeckManagement/` reads it any more.)
 """
 import atexit
 import json
@@ -603,8 +608,7 @@ def start_watchdog(seconds: float, label: str = "scenario") -> None:
 
 def teardown(controller) -> None:
     """Bounded, best-effort shutdown mirroring DeckManager.remove_controller
-    (minus the UI-stack removal, which is recursive_hasattr-guarded out
-    anyway since gl.app is never set here)."""
+    (minus the UI-stack removal, which the null port no-ops away here)."""
     try:
         if controller in gl.deck_manager.deck_controller:
             gl.deck_manager.deck_controller.remove(controller)
