@@ -135,7 +135,10 @@ def main() -> None:
             f"3 queued triggers produced {update.calls} refreshes, expected "
             "1 -- coalescing broken"
         )
-        assert adapter._page_sync_queued.get(controller) is False, "queue flag not cleared"
+        # Cleared means "not set": the flag is POPPED, not written back to
+        # False -- re-inserting the key after an interleaved unbind() would
+        # pin the whole DeckController graph of an unplugged deck.
+        assert not adapter._page_sync_queued.get(controller), "queue flag not cleared"
 
         # 5. An unbound controller (window gone / deck detached) -> no refresh,
         # no crash. The None-child must not match a None visible child.

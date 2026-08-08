@@ -288,7 +288,10 @@ class GtkUIAdapter(ui_port.UIPort):
         GLib.idle_add(self._run_page_changed, controller)
 
     def _run_page_changed(self, controller) -> bool:
-        self._page_sync_queued[controller] = False
+        # pop, not `= False`: an idle queued before unbind() still runs after
+        # it, and re-inserting the key would resurrect a pinned reference to
+        # an unplugged controller's whole graph -- one leak per replug.
+        self._page_sync_queued.pop(controller, None)
         window = self._window
         if not recursive_hasattr(window, "sidebar"):
             return False
