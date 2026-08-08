@@ -333,6 +333,15 @@ def eviction_stats() -> tuple[int, int]:
 # --------------------------------------------------------------------- #
 
 def _ensure_thread() -> None:
+    """Spawns the budget daemon on the first register(), once per process.
+
+    The latch is claimed under the lock (so exactly one caller spawns) but
+    RELEASED again if the spawn fails: this is the only place the daemon is
+    ever created, and register() swallows what escapes it, so a latch left
+    standing over a failed start() -- a thread-limit RuntimeError under
+    memory pressure, exactly when a budget matters most -- would leave
+    enforcement dead for the life of the process with nothing to retry it.
+    Released, the next registrant tries again."""
     global _thread_started
     if _thread_started:
         return
@@ -340,7 +349,12 @@ def _ensure_thread() -> None:
         if _thread_started:
             return
         _thread_started = True
-    threading.Thread(target=_budget_loop, name="cache_budget", daemon=True).start()
+    try:
+        threading.Thread(target=_budget_loop, name="cache_budget", daemon=True).start()
+    except Exception as e:
+        with _lock:
+            _thread_started = False
+        log.warning(f"cache-budget: could not start the budget thread: {e}")
 
 
 def _budget_loop() -> None:

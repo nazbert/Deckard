@@ -240,6 +240,50 @@ def check_lifecycle() -> None:
     print("PASS: clear() is visible immediately and a dropped cache leaves the registry")
 
 
+class _BoomThreading:
+    """Stands in for the `threading` module inside cache_budget for exactly
+    one _ensure_thread() call. Only `Thread` is ever looked up there (the
+    module's lock/event objects already exist), so a two-line shim is the
+    whole surface -- and swapping the module reference keeps the failure
+    injection out of the real threading module, which every other thread in
+    this process is using at the same time."""
+
+    @staticmethod
+    def Thread(*args, **kwargs):
+        raise RuntimeError("can't start new thread")
+
+
+def check_thread_latch_survives_a_failed_spawn() -> None:
+    """A failed daemon spawn must not leave the "started" latch standing.
+    _ensure_thread() is the only place the daemon is ever created and
+    register() swallows what escapes it, so a latched failure is enforcement
+    dead for the life of the process -- silently, since every later
+    register() takes the early return."""
+    saved_started = cache_budget._thread_started
+    saved_threading = cache_budget.threading
+    try:
+        cache_budget._thread_started = False
+        cache_budget.threading = _BoomThreading
+        with _WarningSink() as sink:
+            cache_budget._ensure_thread()
+        assert not cache_budget._thread_started, (
+            "a spawn that raised must release the latch so the next register() "
+            "retries; latched, nothing ever enforces the ceiling again"
+        )
+        assert sink.matching("could not start"), (
+            f"a failed spawn must say so; got {sink.messages!r}"
+        )
+    finally:
+        cache_budget.threading = saved_threading
+        # Restored rather than left False: the daemon spawned by the first
+        # register() of this scenario is still running, and the storm check
+        # below needs that one, not a second.
+        cache_budget._thread_started = saved_started
+
+    print("PASS: a failed budget-thread spawn releases the latch instead of "
+          "disabling enforcement forever")
+
+
 def check_env_contract() -> None:
     """(e) Same degrade-never-raise contract as DECKARD_NATIVE_TILE_CACHE_MB:
     this is read on the DeckController.__init__ path, where an exception is
@@ -414,6 +458,7 @@ def main() -> None:
     check_cross_cache_lru_order()
     check_min_age_and_floor()
     check_lifecycle()
+    check_thread_latch_survives_a_failed_spawn()
     check_env_contract()
     check_bound_under_concurrent_load()
 
