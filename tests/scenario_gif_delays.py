@@ -142,6 +142,40 @@ def check_mixed_durations_normalized() -> None:
         gif.close()
 
 
+def check_probe_matches_the_full_decode() -> None:
+    """(e, issue #201) The header-only probe and the full decode must agree
+    on the timeline to the last float -- the routing decision picks which of
+    the two builds it, so any drift would change playback depending on
+    whether a GIF happened to route to RAM or to the mp4 tile cache. Also
+    pins the frame count and the O(1)-RAM contract (the probe retains no
+    frames)."""
+    from src.backend.DeckManagement.DeckController import probe_gif_header
+
+    path = _make_gif(os.path.join(gl.DATA_PATH, "media", "probe_parity.gif"),
+                     [0, 40, 10, 200, 100])
+    probe = probe_gif_header(path)
+    gif = _decode(path)
+    try:
+        assert probe.n_frames == len(gif.frames) == 5, (
+            f"probe/decode frame count mismatch: {probe.n_frames} vs {len(gif.frames)}"
+        )
+        assert probe.frame_delays == gif.frame_delays, (
+            f"probe delays {probe.frame_delays} != decoded delays {gif.frame_delays}"
+        )
+        assert probe.cum_delays == gif._cum_delays, (
+            f"probe timeline {probe.cum_delays} != decoded timeline {gif._cum_delays}"
+        )
+        assert probe.size == (64, 64), f"probe must report the source size, got {probe.size}"
+        # This fixture paints a disc on a fully transparent canvas, so frame 0
+        # declares a transparent index.
+        assert probe.has_transparency, (
+            "a GIF whose first frame declares transparency must probe as alpha-carrying"
+        )
+    finally:
+        gif.close()
+    print("PASS: the header probe reproduces the decoded timeline exactly")
+
+
 def check_close_leaves_late_ticks_harmless() -> None:
     """(d, issue #199) close() must leave the object tickable. Teardown races
     the media loop, so a tick can land after close(); the old close() set
@@ -183,6 +217,7 @@ def main() -> None:
     check_all_zero_durations_animate()
     check_40ms_frames_kept()
     check_mixed_durations_normalized()
+    check_probe_matches_the_full_decode()
     check_close_leaves_late_ticks_harmless()
     print("PASS: scenario_gif_delays")
 

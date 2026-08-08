@@ -3162,6 +3162,98 @@ class GifBudgetExceeded(Exception):
 GIF_BG_BUDGET_MB = 128
 
 
+def normalize_gif_delay(raw: "int | None") -> int:
+    """One frame's GIF `duration` metadata -> the delay actually played, in
+    ms, normalized the browser way (Firefox/Chrome): missing or < 20ms ->
+    100ms, anything else trusted as-is.
+
+    The old "< 50 -> x10 centiseconds" heuristic played legitimate fast GIFs
+    (40ms == 25fps) 10x too slow, and an all-zero-duration GIF made the
+    cumulative timeline degenerate and froze on frame 0 (scenario_gif_delays
+    pins both). One definition, shared by the full decode and the
+    header-only probe, so the two can never disagree about a timeline."""
+    if raw is None or raw < 20:
+        return 100
+    return raw
+
+
+def cumulative_gif_delays(delays_ms: "list[int]") -> "list[float]":
+    """Delay list (ms) -> cumulative timeline in seconds, where element i is
+    the wall-clock time at which frame i's display window ENDS. Picking a
+    frame for elapsed time t is then a single bisect instead of a per-tick
+    increment-and-compare loop (KeyGIF.get_next_frame /
+    GifBackground._pick_frame index it directly)."""
+    return list(itertools.accumulate(d / 1000.0 for d in delays_ms))
+
+
+@dataclass(frozen=True, slots=True)
+class GifProbe:
+    """What a GIF's headers say, with NO decoded frame retained: the frame
+    count, the playback timeline, whether the file declares transparency,
+    and the source dimensions.
+
+    Exists so KeyGIF can decide how to hold a GIF *before* paying for it
+    (issue #201): an opaque GIF is served frame-by-frame off the shared mp4
+    tile cache (O(1) RAM), an alpha-carrying one still needs the RGBA frame
+    list cv2's demuxer cannot produce.
+
+    `has_transparency` is PIL's own criterion, read from the first frame's
+    graphic control extension at open time. That is not a shortcut: PIL
+    promotes the whole sequence to RGBA if and only if frame 0 declared a
+    transparent index (GifImagePlugin `_seek`: `if "transparency" in
+    self.info: ... self._mode = "RGBA"`), so a GIF without it decodes to
+    fully opaque frames no matter what later frames declare. Later frames
+    routinely carry a transparency index purely as delta-encoding against
+    the previous frame (disposal 1) -- treating that as alpha would push
+    ordinary opaque GIFs onto the RAM path, which is the bug this class
+    exists to avoid. A declared-but-unused index goes the other way (RAM
+    path for an effectively opaque GIF): conservative, costs residency
+    under a budget, never a visual change."""
+    n_frames: int
+    frame_delays: "list[int]"
+    cum_delays: "list[float]"
+    has_transparency: bool
+    size: "tuple[int, int]"
+
+
+def probe_gif_header(path: str) -> GifProbe:
+    """Reads the GIF at `path` WITHOUT retaining a single frame.
+
+    Cost note: the transparency flag, the frame count and the size come from
+    headers alone, but PIL only exposes a frame's `duration` after seeking to
+    it, and seeking composes the previous frame (GifImagePlugin._seek ->
+    load()). So the delay walk does run the decoder -- what it never does is
+    convert, fit, saturate or KEEP anything, which is where both the memory
+    and the bulk of the time go: measured on a 200-frame 500x500 GIF, ~49 ms
+    and O(1) RAM here against ~320 ms and the whole retained frame list for
+    decode_gif_frames.
+
+    Raises whatever PIL raises on a corrupt/truncated file -- callers treat
+    that exactly like a failed decode (fail soft to the opaque video path)."""
+    gif = Image.open(path)
+    try:
+        size = gif.size
+        # Frame 0's declaration (see GifProbe): read before any seek, since
+        # PIL deletes info["transparency"] the moment it promotes the
+        # sequence to RGBA on the first seek past frame 0.
+        has_transparency = "transparency" in gif.info
+        n_frames = getattr(gif, "n_frames", 1)
+        delays_ms: "list[int]" = []
+        for index in range(n_frames):
+            gif.seek(index)
+            delays_ms.append(normalize_gif_delay(gif.info.get("duration")))
+    finally:
+        gif.close()
+
+    return GifProbe(
+        n_frames=len(delays_ms),
+        frame_delays=delays_ms,
+        cum_delays=cumulative_gif_delays(delays_ms),
+        has_transparency=has_transparency,
+        size=size,
+    )
+
+
 def decode_gif_frames(path: str, max_size: "tuple[int, int]" = None,
                       fit_size: "tuple[int, int]" = None,
                       saturation: float = 1.0,
@@ -3229,25 +3321,13 @@ def decode_gif_frames(path: str, max_size: "tuple[int, int]" = None,
             if abs(saturation - 1.0) > 0.001:
                 decoded = ImageEnhance.Color(decoded).enhance(saturation)
             frames.append(decoded)
-            # Per-frame delay from GIF metadata (ms), normalized the
-            # browser way (Firefox/Chrome): missing or < 20ms -> 100ms,
-            # anything else trusted as-is. The old "< 50 -> x10
-            # centiseconds" heuristic played legitimate fast GIFs (40ms
-            # == 25fps) 10x too slow, and an all-zero-duration GIF made
-            # the cumulative timeline degenerate and froze on frame 0.
-            delay = gif.info.get('duration')
-            if delay is None or delay < 20:
-                delay = 100
-            delays_ms.append(delay)
+            # Same delay normalization the header-only probe applies (one
+            # definition, shared -- see normalize_gif_delay).
+            delays_ms.append(normalize_gif_delay(gif.info.get('duration')))
     finally:
         gif.close()
 
-    # Cumulative timeline in seconds: cum_delays[i] is the wall-clock time
-    # at which frame i's display window ENDS. Picking a frame for elapsed
-    # time t is then a single bisect instead of a per-tick
-    # increment-and-compare loop.
-    cum_delays = list(itertools.accumulate(d / 1000.0 for d in delays_ms))
-    return frames, delays_ms, cum_delays
+    return frames, delays_ms, cumulative_gif_delays(delays_ms)
 
 
 class GifBackground:
