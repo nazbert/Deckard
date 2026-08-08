@@ -24,6 +24,7 @@ import os
 import shutil
 import uuid
 from loguru import logger as log
+from PIL import Image
 
 # Import own modules
 from src.backend.DeckManagement.HelperMethods import is_video, is_image, sha256, file_in_dir, create_empty_json, download_file, is_svg
@@ -75,7 +76,19 @@ class AssetManagerBackend(list):
             id = self.get_by_sha256(hash)["id"]
             asset = self.get_by_id(id)
             return id
-        
+
+        # Refuse undecodable files at import time (#197), BEFORE the copy --
+        # the user is right there to see the dialog and retry. This gate is
+        # import-only: assets already in the library are never auto-deleted
+        # for failing to decode (transient-failure policy, see
+        # remove_invalid_data / fill_missing_thumbnails). The decoded image
+        # is kept and fed to save_thumbnail below so the gate stays a
+        # ONE-time decode per add, not a second full decode for videos/svgs.
+        decoded = self._decode_for_import(asset_path)
+        if decoded is None:
+            log.warning(f"Refusing to import undecodable asset {asset_path}")
+            return None
+
         # Copy the asset into the internal folder -- ALWAYS (#112 rev1). The
         # old `if not file_in_dir(basename, DATA_PATH/cache)` skip was a
         # non-recursive top-level name match that nothing legitimately hits
@@ -93,13 +106,13 @@ class AssetManagerBackend(list):
             return None
 
         thumbnail_path = internal_path
-        
+
         if is_video(asset_path):
-            thumbnail_path = self.save_thumbnail(asset_path, hash)
+            thumbnail_path = self.save_thumbnail(asset_path, hash, image=decoded)
 
         if is_svg(asset_path):
-            thumbnail_path = self.save_thumbnail(asset_path, hash)
-            
+            thumbnail_path = self.save_thumbnail(asset_path, hash, image=decoded)
+
 
         asset = {
             "name": os.path.splitext(os.path.basename(asset_path))[0],
@@ -121,8 +134,19 @@ class AssetManagerBackend(list):
 
         # Return id of added asset
         return asset["id"]
-    
-    def save_thumbnail(self, asset_path, asset_hash):
+
+    def _decode_for_import(self, path: str) -> Image.Image | None:
+        # Decodability gate for add() (#197): the decoded image on success,
+        # None if the file cannot be decoded. Keyed off the sc_broken marker,
+        # not try/except: our generate_thumbnail never raises (#112) -- it
+        # returns the tagged placeholder on any decode failure, so an
+        # exception-based check would be a silent always-True.
+        thumbnail = gl.media_manager.generate_thumbnail(path)
+        if thumbnail.info.get("sc_broken"):
+            return None
+        return thumbnail
+
+    def save_thumbnail(self, asset_path, asset_hash, image: Image.Image = None):
         thumbnail_path = os.path.join(gl.DATA_PATH, "Assets", "AssetManager", "thumbnails", f"{asset_hash}.png")
 
         if os.path.exists(thumbnail_path):
@@ -140,8 +164,10 @@ class AssetManagerBackend(list):
         # and fill_missing_thumbnails retries None entries on every boot, so
         # a TRANSIENT failure (file mid-download, network mount hiccup) heals
         # itself instead of wedging the asset until delete+re-import.
+        # `image`: add() passes its gate decode through so an import decodes
+        # the file once, not twice (#197).
         try:
-            thumbnail = gl.media_manager.generate_thumbnail(asset_path)
+            thumbnail = image if image is not None else gl.media_manager.generate_thumbnail(asset_path)
             if thumbnail.info.get("sc_broken"):
                 # generate_thumbnail already logged the decode failure; don't
                 # persist the placeholder (keeps the file retryable).
@@ -288,23 +314,33 @@ class AssetManagerBackend(list):
                 self.remove(asset)
         self.save_json()
 
+    def _alert_on_main(self, window, message: str, detail: str) -> None:
+        # Construct the dialog INSIDE the idle callback (house pattern): this
+        # path runs on the Chooser's import worker thread (add_files spawns a
+        # bare Thread per drop), and GTK objects must only be built on the
+        # main thread. show(window) rather than show(): without a parent,
+        # modal=True binds to nothing.
+        def show():
+            dial = Gtk.AlertDialog(message=message, detail=detail, modal=True)
+            dial.show(window)
+        GLib.idle_add(show)
+
     def add_custom_media_set_by_ui(self, url: str, path: str):
         window = gl.app.main_win
         if gl.store is not None:
             window = gl.store
-            
+
         if path is None and url is not None:
             # Lower domain and remove point
             extension = os.path.splitext(url)[1].lower().replace(".", "")
             if extension not in (set(gl.video_extensions) | set(gl.image_extensions) | set(gl.svg_extensions)):
 
                 # Not a valid url
-                dial = Gtk.AlertDialog(
+                self._alert_on_main(
+                    window,
                     message="The image is invalid.",
                     detail="You can only use urls directly pointing to images (not directly from Google).",
-                    modal=True
                 )
-                GLib.idle_add(dial.show)
                 return -1
 
             os.makedirs(os.path.join(gl.DATA_PATH, "cache", "downloads"), exist_ok=True)
@@ -318,12 +354,11 @@ class AssetManagerBackend(list):
                 path = download_file(url=url, path=os.path.join(gl.DATA_PATH, "cache", "downloads"))
             except Exception as e:
                 log.opt(exception=True).error(f"Could not download asset from {url}: {e}")
-                dial = Gtk.AlertDialog(
+                self._alert_on_main(
+                    window,
                     message="The download failed.",
                     detail="The image or video could not be downloaded. Check the url and your connection.",
-                    modal=True
                 )
-                GLib.idle_add(dial.show)
                 # None, not -1: KeyGrid.handle_file_drop only bails on None
                 # and would otherwise write the sentinel into the key's
                 # media path.
@@ -334,17 +369,24 @@ class AssetManagerBackend(list):
         if not os.path.exists(path):
             return
         if not is_video(path) and not is_image(path) and not is_svg(path):
-            dial = Gtk.AlertDialog(
-                    message="No valid image or video.",
-                    detail="Only images and videos are supported.",
-                    modal=True
-                )
-            GLib.idle_add(dial.show)
+            self._alert_on_main(
+                window,
+                message="No valid image or video.",
+                detail="Only images and videos are supported.",
+            )
             return
         asset_id = gl.asset_manager_backend.add(asset_path=path)
         if asset_id is None:
+            # add() refuses undecodable files (#197) and fails soft on
+            # unreadable/uncopyable ones (#112) -- without a dialog the
+            # drop/import silently does nothing.
+            self._alert_on_main(
+                window,
+                message="No valid image or video.",
+                detail="Only images and videos are supported. The file may also be corrupt or unreadable.",
+            )
             return
-        
+
         asset = self.get_by_id(asset_id)
         # Add to asset chooser ui if opened
         if gl.asset_manager is not None:

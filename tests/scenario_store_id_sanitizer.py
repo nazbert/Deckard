@@ -253,8 +253,9 @@ def test_clone_repo_rejects_injection_and_never_shells() -> None:
 
     # 3) A CLEAN branch reaches git only as an argv list (no shell). git is
     #    fully stubbed above (fake_subp_call), so this needs no real binary
-    #    and asserts the exact argv shape. `git switch` is the token we care
-    #    about; shutil.which("git") inside clone_repo is monkeypatched so the
+    #    and asserts the exact argv shape. `git checkout` is the token we
+    #    care about (checkout, not switch, so tag refs work -- #197);
+    #    shutil.which("git") inside clone_repo is monkeypatched so the
     #    "git not installed" 404 branch can't fire on a git-less box.
     calls.clear()
     import src.backend.Store.StoreBackend as backend_module
@@ -267,13 +268,13 @@ def test_clone_repo_rejects_injection_and_never_shells() -> None:
     finally:
         backend_module.shutil.which = real_which
     assert result == 200, f"clean clone must succeed, got {result!r}"
-    switch_calls = [c for c in calls if len(c) >= 4 and c[3] == "switch"]
-    assert switch_calls, f"expected an argv 'git switch' call, got {calls}"
-    argv = switch_calls[0]
+    checkout_calls = [c for c in calls if len(c) >= 4 and c[3] == "checkout"]
+    assert checkout_calls, f"expected an argv 'git checkout' call, got {calls}"
+    argv = checkout_calls[0]
     # Since gl#82 the clone is prepared in a staging dir under cache/ and
     # swapped into local_path afterwards -- the -C target is the staging
     # tree. The property under test is unchanged: argv list, no shell.
-    assert argv[:2] == ["git", "-C"] and argv[3] == "switch", f"unexpected argv {argv!r}"
+    assert argv[:2] == ["git", "-C"] and argv[3] == "checkout", f"unexpected argv {argv!r}"
     assert argv[2].startswith(os.path.join(gl.DATA_PATH, "cache") + os.sep), (
         f"clone must be prepared in the cache staging area, got {argv[2]!r}"
     )

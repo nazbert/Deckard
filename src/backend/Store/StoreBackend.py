@@ -1108,7 +1108,7 @@ class StoreBackend:
 
             # Add repository to the safe directory list to avoid dubious ownership warnings
             # -- both the final home and the staging clone, since the
-            # pull/reset/switch below now run in staging.
+            # pull/reset/checkout below now run in staging.
             # FIXME: Check if not already added
             self.subp_call(["git", "config", "--global", "--add", "safe.directory", os.path.abspath(local_path)])
             self.subp_call(["git", "config", "--global", "--add", "safe.directory", os.path.abspath(staging)])
@@ -1122,7 +1122,15 @@ class StoreBackend:
             if commit_sha is not None:
                 self.subp_call(["git", "-C", staging, "reset", "--hard", commit_sha])
             elif branch_name is not None:
-                self.subp_call(["git", "-C", staging, "switch", branch_name])
+                # checkout, not switch: custom plugins may pin a TAG (or any
+                # detachable ref), which `git switch` refuses without
+                # --detach (#197). The rc must be checked -- ignoring it
+                # shipped the default-branch tip stamped as the ref whenever
+                # the (user-typed) ref didn't exist.
+                rc = self.subp_call(["git", "-C", staging, "checkout", branch_name])
+                if rc != 0:
+                    log.error(f"git checkout {branch_name!r} failed with exit code {rc} for {repo_url}")
+                    return 404
 
             # Same order as download_repo: validate the staged tree first,
             # then stamp VERSION, then swap.
