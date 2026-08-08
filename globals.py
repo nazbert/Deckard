@@ -116,6 +116,7 @@ pyro_daemon: "Pyro5.api.Daemon" = None  # never actually set/read (P3.2 grep); P
 signal_manager: "SignalManager" = None
 window_grabber: "WindowGrabber" = None
 lock_screen_detector: "LockScreenManager" = None
+presence_monitor: "PresenceMonitor" = None  # quiescence signal; see src/backend/PresenceMonitor
 store: "Store" = None # Only if opened
 flatpak_permission_manager: "FlatpakPermissionManager" = None
 threads_running: bool = True

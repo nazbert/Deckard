@@ -811,6 +811,16 @@ class MediaPlayerThread(threading.Thread):
         GLib.idle_add(deck_stack_child.low_fps_banner.set_revealed, state)
 
 
+    def wake(self) -> None:
+        """Cuts short the loop's inter-tick wait. Safe from any thread
+        (Event.set()). The in-module producers (submit_control, add_task,
+        add_image_task, add_touchscreen_task, stop) poke `_wake_event`
+        directly; this is the public name for external callers with no task
+        to submit -- the presence monitor's transition fan-out (issue #144),
+        whose whole effect is that the NEXT tick evaluates the gate
+        differently."""
+        self._wake_event.set()
+
     def stop(self, timeout: float = 2.0) -> None:
         self._stop = True
         self._wake_event.set()  # wake an idle loop so it sees _stop promptly

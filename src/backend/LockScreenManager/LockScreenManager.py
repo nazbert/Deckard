@@ -61,6 +61,7 @@ class LockScreenManager:
     @log.catch
     def lock(self, active):
         gl.screen_locked = active
+        if gl.presence_monitor: gl.presence_monitor.on_lock_changed(active)  # issue #144
 
         if active:
             if not gl.settings_manager.app().lock_on_lock_screen:

@@ -61,6 +61,12 @@ DEFAULTS: dict[str, dict] = {
     "performance": {
         "n-cached-pages": 3,
         "cache-videos": True,
+        # Quiescence gating (issue #144). "screensaver" is today's behavior
+        # exactly (the deck screensaver's own transition already releases the
+        # underlying page's media, so nothing extra engages); "system-idle"
+        # also pauses deck animations while the session is idle or locked.
+        "animation-pause-mode": "screensaver",
+        "animation-idle-minutes": 5,
     },
     "store": {
         "auto-update": True,
@@ -264,6 +270,22 @@ class AppSettings:
     @cache_videos.setter
     def cache_videos(self, value: bool) -> None:
         self.set("performance", "cache-videos", value)
+
+    @property
+    def animation_pause_mode(self) -> str:
+        return self.get("performance", "animation-pause-mode")
+
+    @animation_pause_mode.setter
+    def animation_pause_mode(self, value: str) -> None:
+        self.set("performance", "animation-pause-mode", value)
+
+    @property
+    def animation_idle_minutes(self) -> int:
+        return self.get("performance", "animation-idle-minutes")
+
+    @animation_idle_minutes.setter
+    def animation_idle_minutes(self, value: int) -> None:
+        self.set("performance", "animation-idle-minutes", value)
 
     # -- store ---------------------------------------------------------
     @property

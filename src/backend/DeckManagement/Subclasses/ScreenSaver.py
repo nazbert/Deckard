@@ -19,6 +19,8 @@ from loguru import logger as log
 # Import typing
 from typing import TYPE_CHECKING
 
+import globals as gl
+
 from src.backend.DeckManagement.InputIdentifier import Input
 from src.backend import timer_wheel
 if TYPE_CHECKING:
@@ -340,6 +342,13 @@ class ScreenSaver:
             # load_page().
             return
         self.last_key_change_time = time.time()
+        # Deck presses never reach the compositor, so this funnel -- which
+        # every key/dial/touch interaction already passes through -- is the
+        # only thing that can tell the presence monitor a user drumming on
+        # the deck is present (issue #144). None-guarded: the unit-tier
+        # harness never installs one.
+        if gl.presence_monitor is not None:
+            gl.presence_monitor.notify_activity()
         if self.showing:
             self.hide()
         else:
