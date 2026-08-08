@@ -385,7 +385,15 @@ def check_bound_under_concurrent_load() -> None:
     putting. That is the deliberate trade for never stalling the writer
     (plan-142 §3.3), so the in-storm assertion carries generous slack while
     the post-quiescence assertion is strict. Without the manager, the sum
-    would settle at Σ(local caps) = 16 MiB and stay there."""
+    would settle at Σ(local caps) = 16 MiB and stay there.
+
+    The bound is a STEADY-STATE claim, so sampling starts once enforcement
+    has engaged rather than at the first put. A cold start is bounded by
+    Σ(local caps), not by the ceiling, and the daemon can enter this check
+    already inside its 5 s degenerate backoff from an earlier one -- long
+    enough to sleep through the whole storm and report a "violation" that is
+    really the documented wake damping. Engagement itself is asserted (with
+    a timeout), so a daemon that never acts still fails, loudly."""
     _set_ceiling(1)
     ceiling = MIB
     slack = 2 * MIB
@@ -432,6 +440,17 @@ def check_bound_under_concurrent_load() -> None:
     try:
         for t in threads:
             t.start()
+        evictions_before = cache_budget.eviction_stats()[0]
+        engaged = fixtures.wait_until(
+            lambda: (cache_budget.eviction_stats()[0] > evictions_before
+                     and cache_budget.evictable_bytes() <= ceiling + slack),
+            timeout=20)
+        assert engaged, (
+            f"the budget never engaged under load: the sum sat at "
+            f"{cache_budget.evictable_bytes() // 1024} KiB against a "
+            f"{ceiling // 1024} KiB ceiling after "
+            f"{cache_budget.eviction_stats()[0] - evictions_before} evictions"
+        )
         poller.start()
         time.sleep(2.0)
         stop.set()
