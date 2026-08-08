@@ -667,6 +667,11 @@ class MediaPlayerThread(threading.Thread):
                     self._last_video_write = start
                 # Background video: guard the tick divider against fps<=0/None
                 # (would ZeroDivisionError) and >FPS; 0/None plays at loop FPS.
+                # `force_render` bypasses this divider so the gate's settle
+                # pass actually paints; that bypass is bounded by
+                # GATE_WINDOW_MAX_S (see the window block above), so a
+                # sub-loop-fps video is never driven above its own rate for
+                # longer than the window itself lasts.
                 video_fps = video.fps or self.FPS
                 video_each_nth_frame = max(1, self.FPS // min(self.FPS, video_fps))
                 if video_repaint and (force_render or self.media_ticks % video_each_nth_frame == 0):
