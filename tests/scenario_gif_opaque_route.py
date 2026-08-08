@@ -24,7 +24,13 @@ Covers:
       captures closed) and leaves late media ticks harmless;
   (e) a non-square opaque GIF is built at an aspect-preserving, shrink-only
       tile size -- the same geometry decode_gif_frames' ImageOps.contain
-      would have produced, so the route cannot change what a key looks like.
+      would have produced, so the route cannot change what a key looks like;
+  (f) DECKARD_GIF_KEY_BUDGET_MB follows the house env contract (malformed
+      degrades to the default with a warning rather than raising out of a
+      page load; 0 disables the retained list entirely);
+  (g) an alpha GIF over that budget degrades to the opaque route -- alpha
+      dropped, key still playing, footprint bounded -- and the census
+      follows the outcome rather than the intent.
 
 GIF fixtures are generated with PIL at runtime (no binary fixtures in-repo,
 house convention); frames are visually distinct so PIL never merges them.
@@ -282,6 +288,94 @@ def check_video_route_geometry_matches_the_frame_list() -> None:
         small.close()
 
 
+def check_budget_env_contract() -> None:
+    """(f) DECKARD_GIF_KEY_BUDGET_MB follows the house env contract
+    (native_tile_cache.native_tile_cache_max_bytes): a malformed value
+    degrades to the default with a warning instead of raising out of a page
+    load, including the values float() accepts but int() cannot take. 0 and
+    negatives disable the RAM route entirely."""
+    from src.backend.DeckManagement.DeckController import (
+        GIF_KEY_BUDGET_MB, gif_key_budget_bytes,
+    )
+
+    default = GIF_KEY_BUDGET_MB * 1024 * 1024
+    previous = os.environ.get("DECKARD_GIF_KEY_BUDGET_MB")
+    try:
+        os.environ.pop("DECKARD_GIF_KEY_BUDGET_MB", None)
+        assert gif_key_budget_bytes() == default, "unset must use the default"
+
+        for malformed in ("plenty", "", "nan", "inf", "-inf", "1e400"):
+            os.environ["DECKARD_GIF_KEY_BUDGET_MB"] = malformed
+            assert gif_key_budget_bytes() == default, (
+                f"malformed DECKARD_GIF_KEY_BUDGET_MB={malformed!r} must degrade "
+                f"to the default, got {gif_key_budget_bytes()}"
+            )
+
+        os.environ["DECKARD_GIF_KEY_BUDGET_MB"] = "8"
+        assert gif_key_budget_bytes() == 8 * 1024 * 1024, "a valid value must apply"
+        os.environ["DECKARD_GIF_KEY_BUDGET_MB"] = "0.5"
+        assert gif_key_budget_bytes() == 512 * 1024, "fractional MB must apply"
+        for off in ("0", "-4"):
+            os.environ["DECKARD_GIF_KEY_BUDGET_MB"] = off
+            assert gif_key_budget_bytes() == 0, (
+                f"{off!r} must disable the retained frame list entirely"
+            )
+    finally:
+        if previous is None:
+            os.environ.pop("DECKARD_GIF_KEY_BUDGET_MB", None)
+        else:
+            os.environ["DECKARD_GIF_KEY_BUDGET_MB"] = previous
+    print("PASS: the GIF key budget env var degrades instead of raising")
+
+
+def check_over_budget_alpha_degrades_to_the_video_route() -> None:
+    """(g) An alpha GIF over the per-GIF budget degrades to the opaque route
+    -- alpha is dropped, the key keeps playing, and the footprint stays
+    bounded (the same ladder GifBackground walks down to cv2). The census
+    must follow the outcome: no gif_frames registration for a GIF that never
+    built a frame list."""
+    path = _make_gif("over_budget_alpha.gif", opaque=False,
+                     durations_ms=[100, 100, 100, 100, 100])
+    previous = os.environ.get("DECKARD_GIF_KEY_BUDGET_MB")
+    os.environ["DECKARD_GIF_KEY_BUDGET_MB"] = "0.01"  # 10 KB: one frame is ~83 KB
+    census_before = _gif_frames_census()
+    try:
+        gif = _decode(path)
+    finally:
+        if previous is None:
+            os.environ.pop("DECKARD_GIF_KEY_BUDGET_MB", None)
+        else:
+            os.environ["DECKARD_GIF_KEY_BUDGET_MB"] = previous
+    try:
+        assert gif.frames == [], (
+            f"an over-budget GIF must retain no frames, got {len(gif.frames)}"
+        )
+        assert gif.video_cache is not None, (
+            "an over-budget alpha GIF must degrade to the mp4 tile cache, not fail"
+        )
+        assert _gif_frames_census() == census_before, (
+            "a GIF that never built a frame list must not appear under gif_frames"
+        )
+        frame = gif.get_next_frame(now=1_000_000.0)
+        assert frame is not None, "the degraded key must still play"
+        # The documented cost of the degrade: cv2 has no alpha channel.
+        assert frame.mode == "RGB", (
+            f"the video route serves opaque frames, got mode {frame.mode}"
+        )
+        # Under the default budget the very same GIF keeps its frame list.
+        unbudgeted = _decode(path)
+        try:
+            assert unbudgeted.video_cache is None and len(unbudgeted.frames) == 5, (
+                "at the default budget this GIF must stay on the frame list -- "
+                "otherwise the degrade above proved nothing"
+            )
+        finally:
+            unbudgeted.close()
+        print("PASS: an over-budget alpha GIF degrades to the bounded video route")
+    finally:
+        gif.close()
+
+
 def main() -> None:
     fixtures.install_stub_globals({"performance": {"cache-videos": True}})
     fixtures.start_watchdog(WATCHDOG_SECONDS, label="scenario_gif_opaque_route")
@@ -290,6 +384,8 @@ def main() -> None:
     check_both_routes_pick_the_same_frames()
     check_close_releases_the_reader()
     check_video_route_geometry_matches_the_frame_list()
+    check_budget_env_contract()
+    check_over_budget_alpha_degrades_to_the_video_route()
     print("PASS: scenario_gif_opaque_route")
 
 

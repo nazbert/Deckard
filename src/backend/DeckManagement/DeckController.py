@@ -3162,6 +3162,46 @@ class GifBudgetExceeded(Exception):
 # what the old unbounded cv2 canvas pool used to swallow (mem-plan §3).
 GIF_BG_BUDGET_MB = 128
 
+# Per-GIF ceiling for a KEY's retained RGBA frame list (issue #201). Only
+# alpha-carrying GIFs build one at all -- opaque ones play off the mp4 tile
+# cache at O(1) RAM -- so this bounds the exception, not the common case.
+# 32MB is ~220 frames at 2x an SD+ tile / ~110 at 2x an XL tile: far beyond
+# the looping badges and spinners this feature targets, and small enough that
+# a pathological page cannot outweigh the whole #142 budget by itself.
+GIF_KEY_BUDGET_MB = 32
+
+
+def gif_key_budget_bytes() -> int:
+    """Byte ceiling for one key GIF's retained frame list, from
+    DECKARD_GIF_KEY_BUDGET_MB. 0 (or a negative value) disables the frame
+    list entirely: every GIF then plays off the mp4 tile cache, trading alpha
+    for a hard bound.
+
+    A malformed value degrades to the default with a warning, per the
+    house contract (native_tile_cache.native_tile_cache_max_bytes): this is
+    read during page load, where an exception would surface as a key that
+    silently lost its media -- a tuning knob typo must never cost content.
+    "Malformed" includes the values float() ACCEPTS but int() cannot take
+    ("nan", "inf", "1e400"): they parse, survive the sign test (every nan
+    comparison is False), then raise from int()."""
+    raw = os.environ.get("DECKARD_GIF_KEY_BUDGET_MB")
+    if raw is None:
+        return GIF_KEY_BUDGET_MB * 1024 * 1024
+    try:
+        mb = float(raw)
+        usable = math.isfinite(mb)
+    except ValueError:
+        usable = False
+    if not usable:
+        log.warning(
+            f"Ignoring malformed DECKARD_GIF_KEY_BUDGET_MB={raw!r}; "
+            f"using the default {GIF_KEY_BUDGET_MB}"
+        )
+        return GIF_KEY_BUDGET_MB * 1024 * 1024
+    if mb < 0:
+        return 0
+    return int(mb * 1024 * 1024)
+
 
 def contained_size(source_size: "tuple[int, int]", max_size: "tuple[int, int]") -> "tuple[int, int]":
     """The dimensions ImageOps.contain would land on: aspect-preserving,
@@ -3624,19 +3664,40 @@ class KeyGIF(SingleKeyAsset):
         self._cum_delays = list(probe.cum_delays)
         self._total_delay: float = self._cum_delays[-1] if self._cum_delays else 0.0
 
-        if probe.has_transparency:
-            self._open_frame_list(fit_size, saturation)
-        else:
-            self._open_video_route(probe, fit_size, saturation)
+        if probe.has_transparency and self._open_frame_list(fit_size, saturation):
+            return
+        self._open_video_route(probe, fit_size, saturation)
 
-    def _open_frame_list(self, fit_size: "tuple[int, int]", saturation: float) -> None:
+    def _open_frame_list(self, fit_size: "tuple[int, int]", saturation: float) -> bool:
         """Alpha route: decode every frame to RGBA and keep them (issue #196;
         the shared helper also serves GifBackground). max_size keeps the
         shrink-only 2x-tile policy (mem-plan P2.3); the wall-clock picking
-        over _cum_delays stays in get_next_frame."""
-        self.frames, self.frame_delays, self._cum_delays = decode_gif_frames(
-            self.gif_path, max_size=fit_size, saturation=saturation,
-        )
+        over _cum_delays stays in get_next_frame.
+
+        Returns False when this GIF must not be held in RAM after all -- over
+        DECKARD_GIF_KEY_BUDGET_MB, or a decode that failed where the header
+        probe had succeeded. The caller then degrades to the opaque video
+        route: alpha is lost, the key keeps playing, and the footprint stays
+        bounded. Bounded beats pretty -- the same ladder GifBackground walks
+        down to the cv2 path (Background.set_video). One warning, at
+        construction, never per tick."""
+        try:
+            self.frames, self.frame_delays, self._cum_delays = decode_gif_frames(
+                self.gif_path, max_size=fit_size, saturation=saturation,
+                budget_bytes=gif_key_budget_bytes(),
+            )
+        except GifBudgetExceeded as error:
+            log.warning(
+                f"{error}; playing this GIF key off the mp4 tile cache instead "
+                f"(alpha dropped, footprint bounded)"
+            )
+            return False
+        except Exception:
+            log.opt(exception=True).warning(
+                f"GIF frame decode failed after its headers parsed cleanly, "
+                f"falling back to the opaque tile-cache route: {self.gif_path}"
+            )
+            return False
         self._total_delay = self._cum_delays[-1] if self._cum_delays else 0.0
 
         # #142 census, accounting-only, and only for this route: the video
@@ -3650,6 +3711,7 @@ class KeyGIF(SingleKeyAsset):
         )
         cache_budget.register(
             self, label=f"gif_frames:{os.path.basename(self.gif_path)}", evictable=False)
+        return True
 
     def _open_video_route(self, probe: GifProbe, fit_size: "tuple[int, int]",
                           saturation: float) -> None:
