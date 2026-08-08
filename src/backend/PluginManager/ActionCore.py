@@ -18,12 +18,10 @@ from loguru import logger as log
 import subprocess
 import os
 from PIL import Image
-import gi
 
 from src.backend.PluginManager.EventManager import EventManager
 from src.backend.PluginManager.EventAssigner import EventAssigner
 
-gi.require_version("Gtk", "4.0")
 from gi.repository import GLib
 
 import rpyc

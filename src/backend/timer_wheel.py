@@ -35,14 +35,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 # process behind it (the "50 concurrent schedules" / "slow callback doesn't
 # delay an unrelated timer" scenarios in scenario_timer_wheel.py exist
 # precisely to catch that class of regression). Each fire is dispatched to
-# its own short-lived daemon thread rather than GtkHelper's shared
+# its own short-lived daemon thread rather than main_loop's shared
 # `@background` pool: that pool is documented I/O-bound-only and shared with
-# plugin/asset work (8 workers total) -- routing screensaver/overlay/hold
-# fires through it would (a) contend with unrelated plugin work and (b) pull
-# a GTK-adjacent import into this module, which the test harness also
-# exercises headless. Timer fires here are rare (per-keypress reset, one
-# overlay-hide, one hold-timer) so a fresh daemon thread per fire is cheap
-# and keeps this module a plain backend/ dependency.
+# plugin/asset work (8 workers total), so routing screensaver/overlay/hold
+# fires through it would contend with unrelated plugin work. Timer fires
+# here are rare (per-keypress reset, one overlay-hide, one hold-timer) so a
+# fresh daemon thread per fire is cheap and keeps this module free of even a
+# GLib dependency (stdlib + loguru only), which the test harness exercises
+# headless.
 import heapq
 import itertools
 import threading
