@@ -58,6 +58,11 @@ ALLOWED_GI_RESIDUE = frozenset({
     "gi.repository.GObject",
     "gi.repository.Gio",
     "gi.repository.Xdp",
+    # PyGObject >= 3.56 splits the Unix-only portions of GLib/Gio into their
+    # own namespaces and loads them transitively with Gio (#229). Still no
+    # widget stack — same argument as GLib/Gio themselves.
+    "gi.repository.GLibUnix",
+    "gi.repository.GioUnix",
 })
 
 
