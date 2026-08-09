@@ -17,13 +17,16 @@ Pins, all against the real load path (no GTK, no hardware):
 2. WRITE PATH -- set_settings() on a corrupt file preserves it BEFORE the
    atomic write replaces it: the sidecar holds the corrupt bytes and the
    primary holds the new settings.
-3. MANIFEST DEGRADES EXACTLY LIKE A MISSING MANIFEST -- the corrupt file is
-   quarantined and the plugin lands in PluginManager.load_errors with the
-   identical "did not register (invalid or incomplete manifest?)" reason a
-   manifest-less plugin gets. Never registered, never disabled, and the scan
-   continues (a healthy neighbor still loads).
+3. MANIFEST DEGRADES EXACTLY LIKE A MISSING MANIFEST -- the plugin lands in
+   PluginManager.load_errors with the identical "did not register (invalid or
+   incomplete manifest?)" reason a manifest-less plugin gets. Never
+   registered, never disabled, and the scan continues (a healthy neighbor
+   still loads). The corrupt manifest is NOT quarantined: it is a plugin
+   SOURCE file, which the app never writes, so there is no save to protect it
+   from -- and moving it would mutate the developer's git working tree.
 4. ABOUT -- a corrupt about.json degrades to the missing-file result ({})
-   instead of raising into the plugin-about window, and is quarantined too.
+   instead of raising into the plugin-about window, and a valid-but-non-object
+   one no longer raises AttributeError downstream. Source file: left in place.
 5. A PRIOR .corrupt IS NEVER CLOBBERED -- a second corruption takes the next
    free slot (.corrupt.1); the first forensic copy survives intact.
 6. RETENTION, ONCE PER WIRED QUARANTINE CALL SITE (the plugin loader, the
@@ -229,14 +232,21 @@ def check_manifest_degrades_like_missing(pm, PluginBase, corrupt_dir, missing_di
         f"{sorted(PluginBase.plugins)}, errors={pm.load_errors}"
     )
 
+    # The manifest lives in the plugin's SOURCE tree, which the app never
+    # writes -- so it must be left exactly where it is. Renaming it aside
+    # would mutate the developer's git working tree (dev plugins are symlinks
+    # into ~/dev): a manifest corrupt mid-rebase would show up as a DELETED
+    # file. Nothing overwrites it either, so there is nothing to protect.
     manifest_path = os.path.join(corrupt_dir, "manifest.json")
-    assert not os.path.exists(manifest_path), "the corrupt manifest was left in place"
-    assert sidecars(manifest_path) == ["manifest.json.corrupt"], (
-        f"the corrupt manifest was not preserved: {os.listdir(corrupt_dir)}"
+    assert os.path.isfile(manifest_path), (
+        "the corrupt manifest was moved out of the plugin's source tree"
     )
-    assert '"id": ' in read(os.path.join(corrupt_dir, "manifest.json.corrupt"))
+    assert read(manifest_path) == '{"name": "x", "id": ', "the source manifest was modified"
+    assert sidecars(manifest_path) == [], (
+        f"a plugin SOURCE file must never be quarantined: {os.listdir(corrupt_dir)}"
+    )
     assert not os.path.exists(os.path.join(missing_dir, "manifest.json"))
-    print("PASS(6): a quarantined manifest degrades exactly like a missing one")
+    print("PASS(6): a corrupt manifest degrades exactly like a missing one, left in place")
 
 
 def check_about_degrades_to_empty(plugin) -> None:
@@ -247,10 +257,18 @@ def check_about_degrades_to_empty(plugin) -> None:
     got = plugin.get_about()  # used to raise straight into the about window
 
     assert got == {}, f"a corrupt about.json must degrade to the missing-file result, got {got}"
-    assert sidecars(about_path) == ["about.json.corrupt"], (
-        f"the corrupt about.json was not preserved: {os.listdir(plugin.PATH)}"
+    # Source file again: log, do not touch.
+    assert os.path.isfile(about_path) and read(about_path) == '{"copyright": "me"'
+    assert sidecars(about_path) == [], (
+        f"a plugin SOURCE file must never be quarantined: {os.listdir(plugin.PATH)}"
     )
-    print("PASS(7): corrupt about.json degrades to {} instead of raising")
+
+    # Valid JSON that is not an object used to reach PluginAbout and raise
+    # AttributeError on .get().
+    with open(about_path, "w") as f:
+        f.write('["not", "an", "object"]')
+    assert plugin.get_about() == {}, "a non-object about.json must degrade to {}"
+    print("PASS(7): corrupt/non-object about.json degrades to {} instead of raising, left in place")
 
 
 def main() -> None:

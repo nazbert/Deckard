@@ -37,7 +37,7 @@ from src.backend.atomic_json import atomic_write_json, prune_corrupt_sidecars, q
 
 
 def _quarantine_corrupt_json(file_path: str, context: str, error: Exception) -> None:
-    """Move a plugin JSON file that failed to DECODE aside, loudly.
+    """Move an APP-WRITTEN plugin JSON file that failed to DECODE aside, loudly.
 
     The same failure class SettingsManager.load_settings_reporting_corruption
     handles for pages/app settings (issue #32), applied to the disjoint
@@ -48,6 +48,14 @@ def _quarantine_corrupt_json(file_path: str, context: str, error: Exception) -> 
     silent fallback. Renamed aside it stays recoverable by hand; plugin
     settings have no backup to heal from, so preserving the file plus a loud
     diagnostic IS the recovery path here.
+
+    ONLY for files the app itself writes -- i.e. settings.json under
+    DATA_PATH. Plugin SOURCE files (manifest.json, about.json) are never
+    quarantined: the app never writes them, so nothing is going to overwrite
+    a corrupt one, and renaming a file out of a plugin's source tree would
+    mean the app mutating a git working tree (dev plugins are symlinks into
+    ~/dev) to fix a problem that does not exist there. Those sites log and
+    leave the file alone.
 
     DECODE failures only. An OSError (EACCES, EIO, a directory in the way,
     ...) means the file could not be READ -- not that its content is bad --
@@ -62,9 +70,14 @@ def _quarantine_corrupt_json(file_path: str, context: str, error: Exception) -> 
         for pruned in prune_corrupt_sidecars(file_path):
             log.info(f"Pruned old quarantined copy {pruned}")
     else:
+        # Either the rename genuinely failed (read-only fs, permissions) or a
+        # concurrent reader quarantined the same file first and won the race
+        # -- the primitive reports both as not-moved, and the caller's
+        # recovery is identical either way, so do not claim which happened.
         log.error(
-            f"{context} {file_path} contains invalid JSON: {error} -- could NOT move it "
-            f"aside (left in place); the next save will overwrite it"
+            f"{context} {file_path} contains invalid JSON: {error} -- it was NOT moved "
+            f"aside here (rename failed, or another thread quarantined it first); if it "
+            f"is still in place, the next save will overwrite it"
         )
 
 
@@ -630,14 +643,25 @@ class PluginBase(rpyc.Service):
                 with open(manifest_path, "r") as f:
                     manifest = json.load(f)
             except json.JSONDecodeError as e:
-                # Quarantining the manifest degrades the plugin EXACTLY like a
-                # missing manifest does, which is the pre-existing (and pinned)
-                # behavior: get_plugin_id() falls back to the folder name and
-                # register() bails out at "Please specify a plugin name", which
+                # NOT quarantined, deliberately: manifest.json lives in the
+                # plugin's SOURCE tree, which the app never writes. There is no
+                # later save to overwrite it, so moving it aside protects
+                # nothing -- and it would mean the app renaming a file out of
+                # the developer's git working tree (dev plugins here are
+                # symlinks into ~/dev), turning a mid-rebase manifest into a
+                # deleted file. Log loudly, leave it exactly where it is.
+                #
+                # The degradation is unchanged and matches a MISSING manifest:
+                # get_plugin_id() falls back to the folder name and register()
+                # bails at "Please specify a plugin name", which
                 # PluginManager.init_plugins() records in load_errors as "did
                 # not register (invalid or incomplete manifest?)". The scan
                 # continues; neighboring plugins still load.
-                _quarantine_corrupt_json(manifest_path, "Plugin manifest", e)
+                log.error(
+                    f"Plugin manifest {manifest_path} contains invalid JSON: {e} -- treating "
+                    f"it as empty and leaving it in place (the app never writes plugin "
+                    f"source files)"
+                )
                 return {}
             except OSError as e:
                 log.opt(exception=e).error(
@@ -653,6 +677,11 @@ class PluginBase(rpyc.Service):
         """
         Retrieves the content from the about file from the plugin's directory if it exists.
 
+        A missing, undecodable or non-object about.json all yield {}. An
+        OSError (unreadable file) still PROPAGATES, as it always has: an
+        unreadable file is a system problem, not bad content, and this file
+        is read from the plugin's source tree rather than the app's own data.
+
          Returns:
             dict: The contents of the about file as a dictionary, or an empty dictionary if the file does not exist.
         """
@@ -661,12 +690,26 @@ class PluginBase(rpyc.Service):
         if os.path.exists(about_path):
             try:
                 with open(about_path, "r") as f:
-                    return json.load(f)
+                    about = json.load(f)
             except json.JSONDecodeError as e:
-                # Used to raise straight into the plugin-about UI. Degrade to
-                # the missing-file result instead, with the bad file kept.
-                _quarantine_corrupt_json(about_path, "Plugin about file", e)
+                # Degrade to the missing-file result instead of raising into
+                # the about window. NOT quarantined: about.json is a plugin
+                # SOURCE file the app never writes -- see
+                # _quarantine_corrupt_json's docstring.
+                log.error(
+                    f"Plugin about file {about_path} contains invalid JSON: {e} -- treating "
+                    f"it as empty and leaving it in place (the app never writes plugin "
+                    f"source files)"
+                )
                 return {}
+            if isinstance(about, dict):
+                return about
+            # A valid-but-non-object about.json (a list, a bare string) used to
+            # reach PluginAbout as-is and raise AttributeError on .get().
+            log.error(
+                f"Plugin about file {about_path} does not contain a JSON object "
+                f"-- treating it as empty"
+            )
         return {}
     
     def set_settings(self, settings):
