@@ -118,14 +118,20 @@ class BackgroundVideoCache(Mp4FrameCache):
     # --- frame access ------------------------------------------------------
 
     def _require_strip_size(self) -> tuple[int, int]:
-        """`strip_size` is set exactly when `extend_touchscreen` is on, which
-        is the only condition under which any of the strip helpers below run.
-        Stating that here keeps the invariant in one place instead of
-        surfacing as a None unpack three call sites deep."""
+        """The strip size, or a raise.
+
+        `strip_size` is normally set exactly when `extend_touchscreen` is on,
+        which is the only condition under which the strip helpers below run
+        -- but not always: get_touchscreen_image_size() returns None for a
+        deck that is no longer alive, so a cache constructed against a dying
+        deck can legitimately reach here extended and sizeless. Raising keeps
+        that contained at one site instead of surfacing as a None unpack
+        three call sites deep."""
         strip_size = self.strip_size
         if strip_size is None:
             raise RuntimeError(
-                "this background video cache does not extend onto the touchscreen strip")
+                "this background video cache has no touchscreen strip size "
+                "(not extended, or the deck was already gone when it was built)")
         return strip_size
 
     def _generate_alpha_frame(self) -> list:

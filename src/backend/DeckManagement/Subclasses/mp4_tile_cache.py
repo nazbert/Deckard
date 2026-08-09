@@ -324,7 +324,7 @@ class Mp4FrameCache:
         if not self.is_builder or not self._writer_enabled():
             return
         fps = self.cap.get(cv2.CAP_PROP_FPS) or 30
-        writer = cv2.VideoWriter(self._writer_tmp_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, self.out_size)  # type: ignore[attr-defined]  # cv2 stub: VideoWriter_fourcc is a module-level alias at runtime, absent from the stubs
+        writer = cv2.VideoWriter(self._writer_tmp_path, cv2.VideoWriter.fourcc(*"mp4v"), fps, self.out_size)
         if writer.isOpened():
             self._writer = writer
         else:
@@ -848,7 +848,7 @@ def _write_tile_mp4(path: str, out_size: tuple[int, int], frames, fps: float) ->
     tmp_path = f"{path}.{os.getpid()}-{threading.get_ident():x}.tmp.mp4"
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        writer = cv2.VideoWriter(tmp_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, out_size)  # type: ignore[attr-defined]  # cv2 stub: VideoWriter_fourcc is a module-level alias at runtime, absent from the stubs
+        writer = cv2.VideoWriter(tmp_path, cv2.VideoWriter.fourcc(*"mp4v"), fps, out_size)
         if not writer.isOpened():
             log.warning(f"Could not open tile cache writer for {path}; playing uncached")
             return 0
