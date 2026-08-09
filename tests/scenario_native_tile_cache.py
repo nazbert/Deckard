@@ -24,6 +24,7 @@ import fixtures  # noqa: F401  (isolated data dir + sys.path, house convention)
 
 import hashlib
 import os
+import threading
 import time
 
 import src.backend.DeckManagement.DeckController as deck_controller_module
@@ -226,41 +227,146 @@ def _record_cached_keys(controller) -> list:
 def _settle(controller) -> None:
     """Waits out the page load. load_page/load_all_inputs finish on their own
     threads and REBUILD each state's managers, so anything staged on a state
-    before that lands (a label) is silently discarded."""
-    assert fixtures.wait_until(lambda: controller.active_page is not None, timeout=5), \
+    before that lands (a label) is silently discarded.
+
+    The background future is part of that wait, not an extra: load_page hands
+    load_background to a worker thread, and for a page with no background of
+    its own that thread ends in `Background.set_video(None)`. A scenario that
+    installs its own video before that lands has it evicted mid-build, and
+    the tile cache then never completes -- the exact shape #202 was reported
+    as, produced by CPU contention delaying that thread into the window.
+    Every wait here is content-based, so a loaded runner is slower, not
+    wrong."""
+    assert fixtures.wait_until(lambda: controller.active_page is not None, timeout=15), \
         "fixture sanity: no page loaded"
-    fixtures.wait_until(lambda: not controller.media_player.image_tasks, timeout=5)
-    time.sleep(0.5)
+    def _background_load_done() -> bool:
+        future = getattr(controller, "_bg_future", None)
+        return future is None or future.done()
+
+    assert fixtures.wait_until(_background_load_done, timeout=15), \
+        "fixture sanity: the page's background load never finished"
+    assert fixtures.wait_until(
+        lambda: not controller.media_player.tasks and not controller.media_player.image_tasks,
+        timeout=15), \
+        "fixture sanity: the media player never drained its page-load tasks"
+
+    # Empty queues mean DEQUEUED, not done: perform_media_player_tasks pops
+    # the whole batch and only then runs it, so load_all_inputs can still be
+    # executing while `tasks` reads empty. Wait for a marker instead. It is
+    # submitted through the same path, and tasks run in order within a batch
+    # and across batches, so the marker having RUN means everything queued
+    # ahead of it has finished -- a real completion signal rather than a
+    # sleep long enough to usually cover one (which is exactly the
+    # loaded-runner assumption #202 is about).
+    ran = threading.Event()
+    controller.media_player.add_task(ran.set)
+    assert ran.wait(timeout=15), (
+        "fixture sanity: the media player never ran the settle marker -- the "
+        "page-load tasks queued ahead of it have not completed"
+    )
 
 
 def _start_video(controller, path: str) -> "BackgroundVideo":
     """Installs `path` as the deck background and detaches it from the media
     thread (video.page is what the tick predicate matches on), so the
-    scenario is the only thing advancing frames."""
+    scenario is the only thing advancing frames.
+
+    Call _settle() first: the media thread's predicate is `video.page is
+    active_page`, so `page = None` only detaches once a page is actually
+    loaded -- before that it MATCHES, and the media thread drives the
+    sequential build concurrently (interleaved frame requests go backwards,
+    which aborts the writer for good)."""
+    assert controller.active_page is not None, (
+        "fixture sanity: _start_video needs a loaded page -- with active_page "
+        "still None, `video.page = None` matches the media thread's tick "
+        "predicate instead of detaching from it"
+    )
     video = BackgroundVideo(controller, path, loop=True, fps=30)
     video.page = None
     controller.background.set_video(video, update=False)
     # Playing straight through builds the tile cache; from then on frames
     # are picked by wall clock, which _show_frame drives deterministically.
-    for _ in range(video.n_frames * 3 + 10):
-        if video.is_cache_complete():
-            break
+    # Bounded by a deadline, not by a tick count: the old budget was sized
+    # for the decode count, so a starved runner read as a broken cache (#202).
+    # A deadline alone would let the build get arbitrarily wasteful without
+    # anyone noticing, so keep an efficiency bound too -- just a generous one,
+    # since the count is what a starved runner cannot be judged on. A clean
+    # build takes exactly n_frames ticks (measured: 6); 10x catches the
+    # 100x-class regression (a re-seek or a re-decode per tick) and nothing
+    # a slow machine can produce.
+    max_ticks = video.n_frames * 10
+    deadline = time.monotonic() + 30.0
+    ticks = 0
+    while not video.is_cache_complete():
+        assert ticks <= max_ticks, (
+            f"the tile cache build took {ticks} ticks for {video.n_frames} frames "
+            f"(budget {max_ticks}); a clean build spends one tick per frame, so "
+            f"this is re-seeking or re-decoding rather than progressing"
+        )
+        assert controller.background.video is video, (
+            "fixture sanity: the background was replaced mid-build -- a page-load "
+            "background thread landed inside the window (see _settle)"
+        )
+        assert not video.is_build_terminal(), (
+            f"fixture sanity: the tile cache build went terminal after {ticks} ticks "
+            f"(source frame {video.last_frame_index} of {video.n_frames})"
+        )
+        assert time.monotonic() < deadline, (
+            f"fixture sanity: the tile cache never completed -- {ticks} ticks, source "
+            f"frame {video.last_frame_index} of {video.n_frames}, writer "
+            f"{'open' if video._writer is not None else 'closed'}"
+        )
         controller.background.update_tiles()
-    assert video.is_cache_complete(), "fixture sanity: the tile cache never completed"
+        ticks += 1
     return video
+
+
+# Retry budget for _show_frame, deliberately tiny. A clean run needs ZERO
+# retries (measured: 0 across the 14 calls this scenario makes), and the cause
+# the retry exists to absorb -- one deschedule longer than a frame period --
+# costs exactly one. Anything beyond that is not scheduler noise, it is the
+# landing ceasing to be a deterministic function of the timebase, and an
+# unbounded retry would hide precisely that: retry until it lands and every
+# downstream contract assert goes green again on a background that is no
+# longer frame-accurate.
+_MAX_ATTEMPTS_PER_CALL = 3
+_MAX_TOTAL_RETRIES = 3
+_frame_retries = 0
 
 
 def _show_frame(video, controller, index: int) -> None:
     """Advances the background to a SPECIFIC frame. get_next_tiles() picks
     by wall clock once the cache is complete, so the timebase is rewound to
     place `index` at now; _last_frame_tick is cleared so the resume-gap
-    clamp (which shifts the timebase after a >1s stall) can't move it."""
+    clamp (which shifts the timebase after a >1s stall) can't move it.
+
+    Retried on a miss, on a budget: the rewind and the pick are two separate
+    wall-clock reads, so a thread descheduled between them for longer than one
+    frame period (67ms at this fixture's 15fps source) lands one frame late
+    (#202). The landing requirement stays exact, the retry only absorbs that
+    one deschedule, and the budget is what keeps 'retry until it lands' from
+    standing in for 'lands where the timebase says'."""
+    global _frame_retries
     playback_fps = float(video.get_source_fps() or video.fps or 30)
-    video._last_frame_tick = None
-    video._play_start = time.time() - index / playback_fps
-    controller.background.update_tiles()
-    assert video.active_frame == index, (
-        f"fixture sanity: wanted frame {index}, background advanced to {video.active_frame}"
+    for attempt in range(1, _MAX_ATTEMPTS_PER_CALL + 1):
+        if attempt > 1:
+            _frame_retries += 1
+            assert _frame_retries <= _MAX_TOTAL_RETRIES, (
+                f"_show_frame has now spent {_frame_retries} retries across this "
+                f"scenario (budget {_MAX_TOTAL_RETRIES}, clean runs need 0): the "
+                f"frame the background lands on is no longer a deterministic "
+                f"function of the timebase, and retrying until it lands would "
+                f"leave every contract assert below green on a background that "
+                f"is not frame-accurate"
+            )
+        video._last_frame_tick = None
+        video._play_start = time.time() - index / playback_fps
+        controller.background.update_tiles()
+        if video.active_frame == index:
+            return
+    raise AssertionError(
+        f"fixture sanity: wanted frame {index}, background advanced to "
+        f"{video.active_frame} on all {_MAX_ATTEMPTS_PER_CALL} attempts"
     )
 
 
@@ -346,6 +452,10 @@ def check_background_swap_drops_stale_natives() -> None:
 
     controller = fixtures.make_headless_controller(serial="native-tile-2")
     try:
+        # Before anything is read off the controller: load_all_inputs rebuilds
+        # the inputs, and the page's own background load ends in
+        # set_video(None), which would evict the video installed below (#202).
+        _settle(controller)
         keys = sorted(controller.inputs[Input.Key], key=lambda k: k.index)
         probe = keys[0]
         deck = fixtures.raw_deck(controller)
