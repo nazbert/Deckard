@@ -19,6 +19,20 @@ class AssetManager:
         self.colors = Manager(Color, "colors")
         self.icons = Manager(Icon, "icons")
 
+    def _quarantine(self, error: Exception) -> None:
+        """Quarantine the plugin's corrupt settings file.
+
+        Imported lazily: PluginBase imports THIS module at module scope, so a
+        top-level import back into it would be circular.
+        """
+        from src.backend.PluginManager.PluginBase import _quarantine_corrupt_json
+        plugin = self.plugin_base
+        _quarantine_corrupt_json(
+            plugin.settings_path,
+            f"Plugin {getattr(plugin, 'plugin_name', None) or plugin.PATH}: settings file",
+            error,
+        )
+
     def load_assets(self):
         if not os.path.exists(self.plugin_base.settings_path):
             return {}
@@ -29,7 +43,15 @@ class AssetManager:
         try:
             with open(self.plugin_base.settings_path, "r") as f:
                 assets = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
+        except ValueError as e:
+            # The EARLIEST reader of this file: __init__ runs before
+            # register(), and a plugin that never registers (version-gated,
+            # incomplete manifest) has no other reader at all -- so without
+            # quarantine here a corrupt settings file could survive every
+            # load and still be destroyed by the next save (#152).
+            self._quarantine(e)
+            return {}
+        except OSError as e:
             log.opt(exception=e).error(
                 f"Could not read plugin assets from {self.plugin_base.settings_path} "
                 f"-- continuing without custom assets"
@@ -54,11 +76,21 @@ class AssetManager:
 
         content = {}
         if os.path.isfile(self.plugin_base.settings_path):
-            with open(self.plugin_base.settings_path, "r") as f:
-                try:
+            try:
+                with open(self.plugin_base.settings_path, "r") as f:
                     content = json.load(f)
-                except json.JSONDecodeError:
-                    content = {}
+            except ValueError as e:
+                # This method is reached from five live UI call sites and the
+                # write below replaces the file wholesale -- it is the same
+                # data-loss moment PluginBase.set_settings guards, on the same
+                # file. Preserve the corrupt bytes before overwriting them.
+                self._quarantine(e)
+                content = {}
+
+        if not isinstance(content, dict):
+            # A settings file holding valid JSON that is not an object used to
+            # raise TypeError on the assignment below.
+            content = {}
 
         content["assets"] = assets
 

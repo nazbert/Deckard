@@ -17,12 +17,19 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 # must still be able to import this.
 import json
 import os
+import stat
 import tempfile
 import time
 
 # Temps orphaned by a hard kill between write and rename are reaped on the
 # next write for the same target once they're older than this (seconds).
 STALE_TMP_MAX_AGE = 60 * 60
+
+# How many ``.corrupt*`` sidecars to keep per primary file. They exist for
+# post-mortem, not as a version history: a file that keeps getting corrupted
+# would otherwise fill the config dir forever (issue #152), and three
+# generations is already more than anyone reads.
+CORRUPT_SIDECAR_KEEP = 3
 
 
 def _process_umask() -> int:
@@ -102,6 +109,99 @@ def quarantine_corrupt_file(file_path: str) -> tuple[bool, str]:
         # Rename failed (or the source vanished under a concurrent
         # quarantine). Leave the caller to recover from a backup regardless.
         return False, file_path
+
+
+def prune_corrupt_sidecars(primary_path: str, keep: int = CORRUPT_SIDECAR_KEEP,
+                           protect: "str | list[str] | tuple[str, ...] | None" = None) -> list[str]:
+    """Best-effort, oldest-first pruning of ``<primary_path>.corrupt*``.
+
+    Call this from a loader immediately after it quarantined something --
+    never as a startup-wide filesystem walk. The scope is exactly one primary
+    file's own sidecars, so the work is bounded by how often that one file has
+    been corrupt, and only names the quarantine primitive itself can produce
+    are considered: ``<name>.corrupt`` and ``<name>.corrupt.<n>`` with a
+    purely numeric suffix. A user's own ``settings.json.corrupt.bak`` (or a
+    directory that happens to match) is never touched. A user-created regular
+    file named exactly ``<name>.corrupt`` IS indistinguishable from our own
+    sidecar and would be prunable -- unreachable in the layouts we own
+    (nothing but this module writes that name next to a config file), so it is
+    documented rather than defended against.
+
+    ``protect`` names sidecars that must survive regardless of age -- pass the
+    sidecar the caller just created. Age is the sidecar's mtime, which
+    os.replace carries over from the corrupt PRIMARY, i.e. when that corrupt
+    content was written. That is the interesting timestamp, but it is not the
+    same as when the sidecar appeared: a corrupt primary restored with its
+    mtime preserved (backup tools, ``os.rename`` of an old settings dir) is
+    born older than sidecars already on disk, so without ``protect`` the
+    freshly written forensic copy is the first thing pruned -- one line after
+    the loader logged "preserved at". Protected entries still count toward
+    ``keep``, so the surviving total is unchanged; the next-oldest unprotected
+    sidecar goes instead.
+
+    Names are NOT an age order: quarantine_corrupt_file takes the first free
+    slot, so a pruned ``.corrupt`` is recycled by the next corruption. The
+    name is used only as a tie-break for equal mtimes, and on a
+    coarse-granularity filesystem that tie-break can therefore invert the true
+    age (recycled ``.corrupt`` sorts before ``.corrupt.1``). It buys
+    determinism, not correctness, and only within the same mtime.
+
+    Returns the paths actually removed. Every filesystem error is swallowed:
+    failing to tidy up must never break the load that triggered it.
+    """
+    keep = max(keep, 0)
+    if protect is None:
+        protected = set()
+    elif isinstance(protect, str):
+        protected = {os.path.abspath(protect)}
+    else:
+        protected = {os.path.abspath(p) for p in protect}
+    dir_path = os.path.dirname(primary_path) or "."
+    plain = os.path.basename(primary_path) + ".corrupt"
+    numbered = plain + "."
+
+    try:
+        entries = os.listdir(dir_path)
+    except OSError:
+        return []
+
+    sidecars: list[tuple[float, str, str]] = []
+    for entry in entries:
+        if entry != plain:
+            suffix = entry[len(numbered):] if entry.startswith(numbered) else ""
+            if not (suffix.isascii() and suffix.isdigit()):
+                continue
+        path = os.path.join(dir_path, entry)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        # Name as a stable tie-break for equal mtimes (see the docstring: it
+        # buys determinism, not age correctness).
+        sidecars.append((st.st_mtime, entry, path))
+
+    n_remove = len(sidecars) - keep
+    if n_remove <= 0:
+        return []
+
+    sidecars.sort()
+    removed: list[str] = []
+    for _mtime, _entry, path in sidecars:
+        if n_remove <= 0:
+            break
+        if os.path.abspath(path) in protected:
+            continue
+        try:
+            os.remove(path)
+            removed.append(path)
+        except OSError:
+            pass
+        # Counted either way: a sidecar that vanished under a concurrent
+        # pruner is just as gone as one this call removed.
+        n_remove -= 1
+    return removed
 
 
 def atomic_write_json(file_path: str, data, indent: int | None = 4) -> None:

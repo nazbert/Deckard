@@ -33,7 +33,55 @@ import globals as gl
 from locales.LegacyLocaleManager import LegacyLocaleManager
 from src.backend.PluginManager.ActionHolder import ActionHolder
 from src.backend.PluginManager.EventHolder import EventHolder
-from src.backend.atomic_json import atomic_write_json
+from src.backend.atomic_json import atomic_write_json, prune_corrupt_sidecars, quarantine_corrupt_file
+
+
+def _quarantine_corrupt_json(file_path: str, context: str, error: Exception) -> None:
+    """Move an APP-WRITTEN plugin JSON file that failed to DECODE aside, loudly.
+
+    The same failure class SettingsManager.load_settings_reporting_corruption
+    handles for pages/app settings (issue #32), applied to the disjoint
+    plugin file set (issue #152). A file whose content cannot be parsed is
+    indistinguishable from "no settings" to every caller, so it used to sit
+    in place until the next set_settings()/save overwrote the only surviving
+    copy of the user's plugin configuration -- silent data loss on top of a
+    silent fallback. Renamed aside it stays recoverable by hand; plugin
+    settings have no backup to heal from, so preserving the file plus a loud
+    diagnostic IS the recovery path here.
+
+    ONLY for files the app itself writes -- i.e. settings.json under
+    DATA_PATH. Plugin SOURCE files (manifest.json, about.json) are never
+    quarantined: the app never writes them, so nothing is going to overwrite
+    a corrupt one, and renaming a file out of a plugin's source tree would
+    mean the app mutating a git working tree (dev plugins are symlinks into
+    ~/dev) to fix a problem that does not exist there. Those sites log and
+    leave the file alone.
+
+    DECODE failures only. An OSError (EACCES, EIO, a directory in the way,
+    ...) means the file could not be READ -- not that its content is bad --
+    and quarantining then would move a perfectly healthy file out of the
+    user's way the moment permissions hiccup. Those keep their old behavior.
+    """
+    moved, dest = quarantine_corrupt_file(file_path)
+    if moved:
+        log.error(f"{context} {file_path} contains invalid JSON: {error} -- preserved at {dest}")
+        # Bounded retention, scoped to this one file and only on the path that
+        # just added a sidecar -- no startup-wide sweep (#152). The copy just
+        # made is protected: it inherits the corrupt primary's mtime, which
+        # can be older than every sidecar already on disk.
+        for pruned in prune_corrupt_sidecars(file_path, protect=dest):
+            log.info(f"Pruned old quarantined copy {pruned}")
+    else:
+        # Either the rename genuinely failed (read-only fs, permissions) or a
+        # concurrent reader quarantined the same file first and won the race
+        # -- the primitive reports both as not-moved, and the caller's
+        # recovery is identical either way, so do not claim which happened.
+        log.error(
+            f"{context} {file_path} contains invalid JSON: {error} -- it was NOT moved "
+            f"aside here (rename failed, or another thread quarantined it first); if it "
+            f"is still in place, the next save will overwrite it"
+        )
+
 
 class PluginBase(rpyc.Service):
     """
@@ -150,6 +198,28 @@ class PluginBase(rpyc.Service):
                         f"(used) and {folder_dir} (ignored, left in place)"
                     )
             elif os.path.isfile(folder_settings):
+                # Visibility for the quarantine/legacy interplay (#152): if the
+                # id-path settings were quarantined, that file is GONE and this
+                # branch fires, migrating the old folder-name settings in --
+                # so a corruption silently resurrects pre-rename configuration
+                # instead of starting empty. Whether that is the right outcome
+                # is a #102-adjacent design question and deliberately NOT
+                # decided here; it must not happen invisibly in the meantime.
+                try:
+                    quarantined = sorted(
+                        e for e in os.listdir(id_dir)
+                        if e.startswith("settings.json.corrupt")
+                    )
+                except OSError:
+                    quarantined = []
+                if quarantined:
+                    log.warning(
+                        f"Plugin {plugin_id}: the id-path settings in {id_dir} were "
+                        f"quarantined ({', '.join(quarantined)}) and the legacy "
+                        f"folder-name settings in {folder_dir} are being migrated in "
+                        f"-- the plugin will come back with those OLDER settings, not "
+                        f"the quarantined ones"
+                    )
                 # Only the legacy folder-name path has settings -- migrate it
                 # to the id path so the plugin keeps its data.
                 try:
@@ -537,7 +607,23 @@ class PluginBase(rpyc.Service):
             try:
                 with open(self.settings_path, "r") as f:
                     settings = json.load(f)
-            except (json.JSONDecodeError, OSError) as e:
+            except ValueError as e:
+                # Corrupt, not merely unreadable: move it aside so the next
+                # set_settings() cannot overwrite the only copy that is left
+                # (plugin settings have no backup to heal from -- #152).
+                # ValueError rather than JSONDecodeError: a file of garbage
+                # bytes raises UnicodeDecodeError while decoding, which is a
+                # ValueError but NOT a JSON error, so it used to escape every
+                # one of these handlers -- the loudest corruption was the one
+                # kind that bypassed quarantine. JSONDecodeError is a
+                # ValueError subclass, so one clause covers both.
+                _quarantine_corrupt_json(
+                    self.settings_path,
+                    f"Plugin {self.plugin_name or self.PATH}: settings file",
+                    e,
+                )
+                return {}
+            except OSError as e:
                 log.opt(exception=e).error(
                     f"Plugin {self.plugin_name or self.PATH}: could not read settings file "
                     f"{self.settings_path} -- falling back to empty settings"
@@ -586,7 +672,28 @@ class PluginBase(rpyc.Service):
             try:
                 with open(manifest_path, "r") as f:
                     manifest = json.load(f)
-            except (json.JSONDecodeError, OSError) as e:
+            except ValueError as e:
+                # NOT quarantined, deliberately: manifest.json lives in the
+                # plugin's SOURCE tree, which the app never writes. There is no
+                # later save to overwrite it, so moving it aside protects
+                # nothing -- and it would mean the app renaming a file out of
+                # the developer's git working tree (dev plugins here are
+                # symlinks into ~/dev), turning a mid-rebase manifest into a
+                # deleted file. Log loudly, leave it exactly where it is.
+                #
+                # The degradation is unchanged and matches a MISSING manifest:
+                # get_plugin_id() falls back to the folder name and register()
+                # bails at "Please specify a plugin name", which
+                # PluginManager.init_plugins() records in load_errors as "did
+                # not register (invalid or incomplete manifest?)". The scan
+                # continues; neighboring plugins still load.
+                log.error(
+                    f"Plugin manifest {manifest_path} contains invalid JSON: {e} -- treating "
+                    f"it as empty and leaving it in place (the app never writes plugin "
+                    f"source files)"
+                )
+                return {}
+            except OSError as e:
                 log.opt(exception=e).error(
                     f"Could not read plugin manifest {manifest_path} -- treating it as empty"
                 )
@@ -600,13 +707,39 @@ class PluginBase(rpyc.Service):
         """
         Retrieves the content from the about file from the plugin's directory if it exists.
 
+        A missing, undecodable or non-object about.json all yield {}. An
+        OSError (unreadable file) still PROPAGATES, as it always has: an
+        unreadable file is a system problem, not bad content, and this file
+        is read from the plugin's source tree rather than the app's own data.
+
          Returns:
             dict: The contents of the about file as a dictionary, or an empty dictionary if the file does not exist.
         """
 
-        if os.path.exists(os.path.join(self.PATH, "about.json")):
-            with open(os.path.join(self.PATH, "about.json"), "r") as f:
-                return json.load(f)
+        about_path = os.path.join(self.PATH, "about.json")
+        if os.path.exists(about_path):
+            try:
+                with open(about_path, "r") as f:
+                    about = json.load(f)
+            except ValueError as e:
+                # Degrade to the missing-file result instead of raising into
+                # the about window. NOT quarantined: about.json is a plugin
+                # SOURCE file the app never writes -- see
+                # _quarantine_corrupt_json's docstring.
+                log.error(
+                    f"Plugin about file {about_path} contains invalid JSON: {e} -- treating "
+                    f"it as empty and leaving it in place (the app never writes plugin "
+                    f"source files)"
+                )
+                return {}
+            if isinstance(about, dict):
+                return about
+            # A valid-but-non-object about.json (a list, a bare string) used to
+            # reach PluginAbout as-is and raise AttributeError on .get().
+            log.error(
+                f"Plugin about file {about_path} does not contain a JSON object "
+                f"-- treating it as empty"
+            )
         return {}
     
     def set_settings(self, settings):
@@ -627,7 +760,16 @@ class PluginBase(rpyc.Service):
                 try:
                     with open(self.settings_path, "r") as f:
                         content = json.load(f)
-                except (json.JSONDecodeError, OSError) as e:
+                except ValueError as e:
+                    # THE data-loss moment: the atomic write below replaces the
+                    # corrupt file wholesale. Preserve it first (#152).
+                    _quarantine_corrupt_json(
+                        self.settings_path,
+                        f"Plugin {self.plugin_name or self.PATH}: settings file",
+                        e,
+                    )
+                    content = {}
+                except OSError as e:
                     log.opt(exception=e).error(
                         f"Plugin {self.plugin_name or self.PATH}: could not read settings file "
                         f"{self.settings_path} before saving -- rewriting it"
