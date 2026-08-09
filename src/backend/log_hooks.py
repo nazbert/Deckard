@@ -40,6 +40,12 @@ stored on their Future and NEVER reach threading.excepthook -- submit sites
 must attach a done-callback (the main_loop.run_in_background /
 DeckController._log_callback_exception convention).
 
+Pressure valve (issue #91): _log_exc() rate-limits per failing SITE -- one
+record per (exception type, innermost frame) per RATE_LIMIT_WINDOW_S, with
+the suppressed count reported on that site's next record. A raising GTK
+signal handler on a hot path would otherwise put a full diagnose=True
+traceback into every sink on every emission.
+
 Kill switch (issue #92): SC_NO_ERROR_HOOKS=1 makes install_exception_hooks()
 and redirect_faulthandler() no-ops, so a field anomaly suspected to involve
 the hooks (double logging, exit-path interaction, a hook firing where it
@@ -62,6 +68,7 @@ import signal
 import sys
 import tempfile
 import threading
+import time
 from datetime import datetime
 
 from loguru import logger as _LOG
@@ -83,7 +90,110 @@ _prev_sys_hook = None
 _fault_file = None
 
 
+# --- Per-site rate limiting (issue #91) ------------------------------------
+#
+# GLib idle/timeout sources self-cancel on exception, but GTK signal handlers
+# are NOT disconnected: a raising handler on a frequent signal (notify::, a
+# 20-30Hz media-tick path) reaches sys.excepthook on EVERY emission, and one
+# broken __del__ hits sys.unraisablehook once per object during a GC sweep.
+# Unthrottled that is ~30 diagnose=True tracebacks per second into a
+# 3-day-rotated logs.log and into the About-dialog ring -- the safety net's
+# first big catch would DoS the log it reports to.
+#
+# One record per site per window; repeats within the window are counted and
+# reported as a summary riding on the NEXT record from that same site.
+# Deliberately per-SITE, never global: a storm on one signal handler must
+# never mask a different, one-shot failure somewhere else. A storm that
+# simply stops leaves its trailing count unreported rather than flushed by a
+# timer -- these hooks own no thread and must not grow one.
+RATE_LIMIT_WINDOW_S = 5.0  # module-level so scenarios can shrink the window
+_RATE_LIMIT_MAX_KEYS = 256
+# _log_exc runs on whatever thread failed: any worker (threading.excepthook),
+# the main/GLib thread (sys.excepthook), whichever thread happened to trigger
+# a GC sweep (sys.unraisablehook), and the dispatch loop thread (asyncio). The
+# window test is a read-modify-write over shared state, so it needs a lock.
+# RLock, not Lock: GC can fire on an allocation INSIDE the guarded region, and
+# a raising __del__ collected there re-enters this module on the same thread
+# -- a plain Lock would self-deadlock inside the crash handler. The lock is
+# never held across the loguru call.
+_rate_lock = threading.RLock()
+_rate_state: dict[tuple, list] = {}  # site key -> [window start, suppressed]
+
+
+def _exc_site(exc_type, exc_value, exc_tb) -> tuple[tuple, str]:
+    """(key, printable label) for the code site that raised: exception type
+    plus the INNERMOST traceback frame. The same handler failing on every
+    emission collapses onto one key, while the same exception type raised
+    from two different places keeps two.
+
+    The type NAME, not the type object: a key must not pin a plugin's
+    exception class (and through it, its module) alive for the life of the
+    dict. Tracebackless calls (asyncio message-only contexts, synthesized
+    errors) fall back to the message text, so two unrelated tb-less failures
+    still get independent budgets instead of silencing each other."""
+    type_name = getattr(exc_type, "__name__", None) or str(exc_type)
+    tb = exc_tb
+    while tb is not None and tb.tb_next is not None:
+        tb = tb.tb_next
+    if tb is not None:
+        where = (tb.tb_frame.f_code.co_filename, tb.tb_lineno)
+        return (type_name, where), f"{type_name} at {where[0]}:{where[1]}"
+    where = ("<no-traceback>", str(exc_value)[:120])
+    return (type_name, where), f"{type_name} <no traceback> ({where[1]})"
+
+
+def _prune_locked(now: float) -> None:
+    """Cap the dict; called with _rate_lock held, only once it is oversized.
+    A BROAD storm (many distinct sites) must not turn the guard itself into
+    an unbounded leak. Expired windows go first -- dropping their pending
+    counts unreported is the right trade, those sites stopped firing so
+    nothing is waiting on their summary -- and if that is not enough, the
+    oldest half goes too, which bounds the dict unconditionally. Items are
+    list()ed up front so a GC-time re-entrant hook mutating the dict cannot
+    turn a prune into a 'changed size during iteration' RuntimeError."""
+    for key, entry in list(_rate_state.items()):
+        if now - entry[0] >= RATE_LIMIT_WINDOW_S:
+            _rate_state.pop(key, None)
+    if len(_rate_state) > _RATE_LIMIT_MAX_KEYS:
+        oldest = sorted(list(_rate_state.items()), key=lambda kv: kv[1][0])
+        for key, _entry in oldest[: len(oldest) // 2]:
+            _rate_state.pop(key, None)
+
+
+def _rate_limit(key: tuple) -> tuple[bool, int]:
+    """(suppress this occurrence?, repeats suppressed since the last record).
+
+    The first hit of a site is always logged immediately -- throttling must
+    never delay the record that says the failure exists; only its repeats."""
+    now = time.monotonic()
+    with _rate_lock:
+        entry = _rate_state.get(key)
+        if entry is not None and now - entry[0] < RATE_LIMIT_WINDOW_S:
+            entry[1] += 1
+            return True, 0
+        suppressed = entry[1] if entry is not None else 0
+        _rate_state[key] = [now, 0]
+        if len(_rate_state) > _RATE_LIMIT_MAX_KEYS:
+            _prune_locked(now)
+        return False, suppressed
+
+
 def _log_exc(kind: str, exc_type, exc_value, exc_tb, extra: str = "") -> None:
+    # Rate limiting sits HERE rather than in the individual hooks, so all four
+    # #80 surfaces inherit it (issue #91). Any failure inside the guard falls
+    # through to logging: it may drop repeats, never an original.
+    try:
+        key, label = _exc_site(exc_type, exc_value, exc_tb)
+        suppress, suppressed = _rate_limit(key)
+        if suppress:
+            return
+        if suppressed:
+            extra = (
+                f"{extra} (suppressed {suppressed} repeats of {label} "
+                f"in the last {RATE_LIMIT_WINDOW_S:g}s)"
+            )
+    except Exception:
+        pass
     # A hook must never raise or recurse. If loguru itself fails (sink error,
     # ring lock, interpreter teardown) fall back to plain stderr; if even
     # that fails, swallow -- losing one traceback beats crashing the process

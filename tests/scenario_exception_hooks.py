@@ -21,7 +21,12 @@ why run_all.py's per-scenario interpreter matters):
   8. SC_NO_ERROR_HOOKS (issue #92) -- in a flagged child process, install
      leaves the three interpreter hooks stock, redirect_faulthandler writes
      no file, and the redaction patcher still rides along (the flag is a
-     hook switch, not a privacy switch).
+     hook switch, not a privacy switch);
+  9. per-site rate limiting (issue #91) -- a 100x storm from one site yields
+     one record plus a suppressed-count summary on the next one; two
+     distinct sites never mask each other; non-repeating failures are
+     untouched (no throttling, no summary noise); the state dict stays
+     bounded under a broad storm.
 
 Out of harness scope (manual QA): the real PyGObject-callback -> excepthook
 path under a live GTK loop, and the config_logger()/main() ordering.
@@ -222,6 +227,118 @@ def main() -> None:
     )
     assert flagged.returncode == 0, f"flagged child failed: {flagged.stderr}"
     assert "flagged-ok" in flagged.stdout
+
+    # 9. per-site rate limiting (issue #91). Every leg above fires each site
+    # exactly once, which is why they are unaffected by the guard.
+    original_window = log_hooks.RATE_LIMIT_WINDOW_S
+    log_hooks._rate_state.clear()
+    try:
+        # 9a. 100 identical thread exceptions -> ONE record. Fired under the
+        # real 5s window (the whole burst takes well under it), so this is
+        # the production configuration, not a test-only one.
+        records.clear()
+
+        def storm() -> None:
+            raise ValueError("boom-storm")  # one fixed site, fired 100x
+
+        for _ in range(100):
+            st = threading.Thread(target=storm, name="storm-worker")
+            st.start()
+            st.join()
+        assert sum("boom-storm" in r for r in records) == 1, (
+            f"a 100x storm from one site must log once, got "
+            f"{sum('boom-storm' in r for r in records)} records"
+        )
+
+        # ...and the suppressed count rides on that site's NEXT record.
+        # Shrinking the window (read per call) expires the open one without
+        # a sleep.
+        records.clear()
+        log_hooks.RATE_LIMIT_WINDOW_S = 0.001
+        time.sleep(0.01)
+        st = threading.Thread(target=storm, name="storm-worker")
+        st.start()
+        st.join()
+        assert sum("boom-storm" in r for r in records) == 1
+        assert "suppressed 99 repeats" in joined(), (
+            f"the next record must carry the suppressed count, got: {joined()[:300]!r}"
+        )
+        assert "ValueError at" in joined() and "scenario_exception_hooks.py" in joined(), (
+            "the summary must name the site it is summarizing"
+        )
+
+        # 9b. two distinct sites, same exception type, interleaved: each gets
+        # its own budget -- a storm on one must never silence the other.
+        log_hooks.RATE_LIMIT_WINDOW_S = original_window
+        log_hooks._rate_state.clear()
+        records.clear()
+
+        def site_a() -> None:
+            raise ValueError("boom-site-a")
+
+        def site_b() -> None:
+            raise ValueError("boom-site-b")
+
+        for target in (site_a, site_b, site_a, site_b, site_a):
+            st = threading.Thread(target=target, name="two-sites")
+            st.start()
+            st.join()
+        assert sum("boom-site-a" in r for r in records) == 1
+        assert sum("boom-site-b" in r for r in records) == 1, (
+            "a repeating site must not consume another site's budget"
+        )
+
+        # 9c. non-repeating failures are unchanged: every distinct site logs,
+        # with no summary noise. Includes the sys.excepthook surface, proving
+        # the guard is inherited from _log_exc rather than wired per hook.
+        log_hooks._rate_state.clear()
+        records.clear()
+
+        def uniq_one() -> None:
+            raise ValueError("uniq-1")
+
+        def uniq_two() -> None:
+            raise ValueError("uniq-2")
+
+        def uniq_three() -> None:
+            raise RuntimeError("uniq-3")
+
+        for target in (uniq_one, uniq_two, uniq_three):
+            st = threading.Thread(target=target, name=target.__name__)
+            st.start()
+            st.join()
+        try:
+            raise KeyError("uniq-4")
+        except KeyError:
+            sys.excepthook(*sys.exc_info())
+        for tag in ("uniq-1", "uniq-2", "uniq-3", "uniq-4"):
+            assert sum(tag in r for r in records) == 1, f"{tag} must log exactly once"
+        assert "suppressed" not in joined(), (
+            "non-repeating failures must not gain suppression noise"
+        )
+
+        # ...and the main-thread surface throttles too (same line, 3 hits).
+        records.clear()
+        for _ in range(3):
+            try:
+                raise TypeError("boom-main-storm")
+            except TypeError:
+                sys.excepthook(*sys.exc_info())
+        assert sum("boom-main-storm" in r for r in records) == 1, (
+            "sys.excepthook must inherit the same per-site guard"
+        )
+
+        # 9d. a BROAD storm (many distinct sites) must not leak: the dict is
+        # pruned, never unbounded.
+        log_hooks._rate_state.clear()
+        for i in range(4 * log_hooks._RATE_LIMIT_MAX_KEYS):
+            log_hooks._rate_limit(("SyntheticError", (f"/fake/mod_{i}.py", i)))
+        assert len(log_hooks._rate_state) <= log_hooks._RATE_LIMIT_MAX_KEYS, (
+            f"rate-limit state must stay bounded, got {len(log_hooks._rate_state)} keys"
+        )
+    finally:
+        log_hooks.RATE_LIMIT_WINDOW_S = original_window
+        log_hooks._rate_state.clear()
 
     print("PASS: scenario_exception_hooks")
 
