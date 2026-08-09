@@ -40,6 +40,13 @@ stored on their Future and NEVER reach threading.excepthook -- submit sites
 must attach a done-callback (the main_loop.run_in_background /
 DeckController._log_callback_exception convention).
 
+Kill switch (issue #92): SC_NO_ERROR_HOOKS=1 makes install_exception_hooks()
+and redirect_faulthandler() no-ops, so a field anomaly suspected to involve
+the hooks (double logging, exit-path interaction, a hook firing where it
+shouldn't) can be A/B'd against pre-#80 behavior with an env var instead of
+a revert + rebuild. See install_exception_hooks() for the one thing the flag
+deliberately does NOT disable.
+
 Import discipline: this module must stay importable before `globals` (the
 test harness's fixtures.py contract) -- stdlib + loguru only, nothing from
 src/ or globals.py. log_redaction is the one allowed sibling import: it
@@ -60,6 +67,13 @@ from datetime import datetime
 from loguru import logger as _LOG
 
 from src.backend.log_redaction import install_log_redaction, scrub
+
+# Issue #92 bisect switch, read once at import -- like SC_STRONG_CALLBACKS
+# this is a debugging knob, not something that may change behavior mid-run
+# (the hooks are process-global; a mid-run flip would leave half of them
+# installed). Any value except "" and "0" enables it, so the documented
+# SC_NO_ERROR_HOOKS=1 and the reflexive =true both work.
+_HOOKS_DISABLED = os.environ.get("SC_NO_ERROR_HOOKS", "").strip() not in ("", "0")
 
 _installed = False
 _prev_sys_hook = None
@@ -116,6 +130,14 @@ def asyncio_exception_handler(loop, context) -> None:
     """loop.set_exception_handler target for long-lived loops (see
     event_dispatch._get_loop): an un-retrieved task exception or failing
     call_soon callback otherwise dies in asyncio's default stderr handler."""
+    if _HOOKS_DISABLED:
+        # SC_NO_ERROR_HOOKS covers this surface too (issue #92): it is one of
+        # the four #80 hooks, and the wiring lives in event_dispatch, not in
+        # a call this module's install path owns -- so the opt-out has to be
+        # here. Delegating (rather than returning) is what makes the flag
+        # "pre-#80 behavior exactly": asyncio's own stderr handler.
+        loop.default_exception_handler(context)
+        return
     exc = context.get("exception")
     if exc is not None:
         _log_exc("asyncio", type(exc), exc, getattr(exc, "__traceback__", None))
@@ -131,10 +153,18 @@ def install_exception_hooks() -> None:
     Also installs the issue-#105 redaction patcher: these hooks are what
     route full tracebacks into the sinks, so they must never fire without
     the scrubbing layer in place. main()'s boot path relies on this
-    piggyback -- scenario_log_redaction asserts the coupling."""
+    piggyback -- scenario_log_redaction asserts the coupling.
+
+    SC_NO_ERROR_HOOKS=1 (issue #92) turns the hook installs into a no-op --
+    sys.excepthook/threading.excepthook/sys.unraisablehook are left exactly
+    as the interpreter set them. The redaction patcher is deliberately NOT
+    part of that opt-out: this call is its ONLY boot-path install site, so
+    skipping it would silently ship a run with no PII scrubbing on ANY log
+    line, turning a debugging switch into a privacy regression. The flag
+    disables the hooks it is named after, nothing else."""
     global _installed, _prev_sys_hook
     install_log_redaction()
-    if _installed:
+    if _HOOKS_DISABLED or _installed:
         return
     _prev_sys_hook = sys.excepthook
     sys.excepthook = _sys_hook
@@ -236,9 +266,13 @@ def redirect_faulthandler(directory: str) -> None:
     file), and the short-lived CLI invocations that return before
     config_logger() must not touch the running app's files. Any failure
     falls back silently to the stderr enable() -- a missing dump target must
-    never block startup. Idempotent."""
+    never block startup. Idempotent.
+
+    SC_NO_ERROR_HOOKS=1 (issue #92) skips the redirection entirely, leaving
+    main.py's import-time faulthandler.enable() pointed at stderr: the
+    pre-#80 arrangement, and no logs/faulthandler.log is opened or scrubbed."""
     global _fault_file
-    if _fault_file is not None:
+    if _HOOKS_DISABLED or _fault_file is not None:
         return
     try:
         os.makedirs(directory, exist_ok=True)

@@ -17,7 +17,11 @@ why run_all.py's per-scenario interpreter matters):
   6. re-entrancy -- if the logging call itself raises, the fallback prints
      the original traceback to sys.__stderr__ and the process survives;
   7. faulthandler redirection -- a SIGQUIT in a child process appends a
-     boot-marked all-thread dump to <dir>/faulthandler.log.
+     boot-marked all-thread dump to <dir>/faulthandler.log;
+  8. SC_NO_ERROR_HOOKS (issue #92) -- in a flagged child process, install
+     leaves the three interpreter hooks stock, redirect_faulthandler writes
+     no file, and the redaction patcher still rides along (the flag is a
+     hook switch, not a privacy switch).
 
 Out of harness scope (manual QA): the real PyGObject-callback -> excepthook
 path under a live GTK loop, and the config_logger()/main() ordering.
@@ -180,6 +184,44 @@ def main() -> None:
     assert "Thread" in dump or "Current thread" in dump, (
         f"SIGQUIT must produce an all-thread dump, got: {dump[:200]!r}"
     )
+
+    # 8. SC_NO_ERROR_HOOKS=1 (issue #92): the flag is read at import, and the
+    # hooks are process-global, so this has to be a child process.
+    flagged_dir = os.path.join(fixtures.DATA_DIR, "logs_flagged")
+    flagged_code = (
+        "import os, sys, threading\n"
+        f"sys.path.insert(0, {REPO_ROOT!r})\n"
+        "from loguru import logger\n"
+        "from src.backend import log_hooks\n"
+        "from src.backend.log_redaction import redact_record\n"
+        "assert log_hooks._HOOKS_DISABLED, 'the flag must be read at import time'\n"
+        "log_hooks.install_exception_hooks()\n"
+        "assert sys.excepthook is sys.__excepthook__, 'sys.excepthook must stay stock'\n"
+        "assert threading.excepthook is threading.__excepthook__, "
+        "'threading.excepthook must stay stock'\n"
+        "assert sys.unraisablehook is sys.__unraisablehook__, "
+        "'sys.unraisablehook must stay stock'\n"
+        "assert not log_hooks._installed, 'a flagged install must not latch _installed'\n"
+        "assert logger._core.patcher is redact_record, "
+        "'the flag is a hook switch, not a privacy switch: redaction must survive it'\n"
+        "log_hooks.redirect_faulthandler(sys.argv[1])\n"
+        "assert log_hooks._fault_file is None, 'no dump file may be opened under the flag'\n"
+        "assert not os.path.exists(sys.argv[1]), 'the log dir must not even be created'\n"
+        "class FakeLoop:\n"
+        "    seen = []\n"
+        "    def default_exception_handler(self, context): FakeLoop.seen.append(context)\n"
+        "log_hooks.asyncio_exception_handler(FakeLoop(), {'message': 'flagged'})\n"
+        "assert FakeLoop.seen == [{'message': 'flagged'}], "
+        "'the asyncio surface must fall back to asyncio own handler'\n"
+        "print('flagged-ok')\n"
+    )
+    flagged = subprocess.run(
+        [sys.executable, "-c", flagged_code, flagged_dir],
+        capture_output=True, text=True, timeout=60,
+        env={**os.environ, "SC_NO_ERROR_HOOKS": "1"},
+    )
+    assert flagged.returncode == 0, f"flagged child failed: {flagged.stderr}"
+    assert "flagged-ok" in flagged.stdout
 
     print("PASS: scenario_exception_hooks")
 
