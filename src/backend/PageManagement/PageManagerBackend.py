@@ -791,7 +791,7 @@ class PageManagerBackend:
         page_settings = self.get_page_settings(path)
         return page_settings.get("screensaver", {})
 
-    def set_screensaver_settings(self, path: str, overwrite: bool = False, enable: bool = False, time_delay: int = 5, loop: bool = False, fps: int = 30, brightness: float = 75, media_path: str = ""):
+    def set_screensaver_settings(self, path: str, overwrite: bool = False, enable: bool = False, time_delay: int = 5, loop: bool = True, fps: int = 30, brightness: float = 75, media_path: str = ""):
         settings = self.get_page_settings(path)
 
         settings["screensaver"] = {
