@@ -5,12 +5,17 @@ Year: 2024
 
 import json
 import os.path
+from typing import TYPE_CHECKING
 
 from loguru import logger as log
 
 from .Manager import Manager
 from .Asset import Color, Icon
 from src.backend.atomic_json import atomic_write_json
+
+if TYPE_CHECKING:
+    # PluginBase imports this module at module scope -- type-only here.
+    from src.backend.PluginManager.PluginBase import PluginBase
 
 
 class AssetManager:

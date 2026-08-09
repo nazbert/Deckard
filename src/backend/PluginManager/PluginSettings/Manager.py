@@ -1,6 +1,8 @@
 import enum
 import json
+from collections.abc import Callable
 from types import MappingProxyType
+from typing import Any, Generic, TypeVar
 
 from .Observer import Observer
 from .Asset import Asset
@@ -11,11 +13,16 @@ class ManagerEvent(enum.Enum):
     OVERRIDE_ADD = "override_add",
     OVERRIDE_REMOVE = "override_remove",
 
-class Manager:
-    def __init__(self, asset_type: type, json_key: str):
-        self._asset_type: type = asset_type
-        self._assets: dict[str, asset_type] = {}
-        self._asset_overrides: dict[str, asset_type] = {}
+# The manager is keyed to the concrete Asset subclass it was built with
+# (Manager(Icon, "icons") -> Manager[Icon]), so get_asset() hands back that
+# subclass rather than a bare Asset.
+A = TypeVar("A", bound=Asset)
+
+class Manager(Generic[A]):
+    def __init__(self, asset_type: type[A], json_key: str):
+        self._asset_type: type[A] = asset_type
+        self._assets: dict[str, A] = {}
+        self._asset_overrides: dict[str, A] = {}
         # The json_key ("colors"/"icons") is what names this manager's
         # dispatch lane in a wedge warning -- an unlabeled lane would just
         # read "default" there.
@@ -24,7 +31,7 @@ class Manager:
 
     # Assets
 
-    def add_asset(self, key: str, asset: Asset, override: bool = False):
+    def add_asset(self, key: str, asset: A, override: bool = False):
         if not self._assets.__contains__(key) or override:
             self._assets[key] = asset
             self._observer.notify(ManagerEvent.ADD, key, asset)
@@ -40,7 +47,7 @@ class Manager:
 
     # Overrides
 
-    def add_override(self, key: str, asset: Asset, skip_asset_check: bool = False, override: bool = False):
+    def add_override(self, key: str, asset: A, skip_asset_check: bool = False, override: bool = False):
         if not self._assets.__contains__(key) and not skip_asset_check:
             return
 
@@ -55,7 +62,7 @@ class Manager:
 
     # Getter
 
-    def get_asset(self, key: str, skip_override: bool = False) -> Asset | None:
+    def get_asset(self, key: str, skip_override: bool = False) -> A | None:
         """
         Returns the Override before the Asset if it exists
         :param key: The key of said asset
@@ -72,22 +79,22 @@ class Manager:
             return asset.get_values()
         return None
 
-    def get_assets(self) -> MappingProxyType[str, Asset]:
+    def get_assets(self) -> MappingProxyType[str, A]:
         return MappingProxyType(self._assets)
 
-    def get_overrides(self) -> MappingProxyType[str, Asset]:
+    def get_overrides(self) -> MappingProxyType[str, A]:
         return MappingProxyType(self._asset_overrides)
 
-    def get_assets_merged(self) -> MappingProxyType[str, Asset]:
+    def get_assets_merged(self) -> MappingProxyType[str, A]:
         combined = {**self._assets, **self._asset_overrides}
         return MappingProxyType(combined)
 
     # Observer
 
-    def add_listener(self, callback: callable):
+    def add_listener(self, callback: Callable[..., Any]):
         self._observer.subscribe(callback)
 
-    def remove_listener(self, callback: callable):
+    def remove_listener(self, callback: Callable[..., Any]):
         self._observer.unsubscribe(callback)
 
     # Save/Load

@@ -77,7 +77,7 @@ import asyncio
 import threading
 import time
 from collections import deque
-from typing import Callable, Iterable
+from typing import Callable, Iterable, TypedDict
 from weakref import WeakSet
 
 from loguru import logger as log
@@ -204,6 +204,14 @@ def _monitor_loop() -> None:
             log.opt(exception=True).error("event dispatch watchdog tick failed")
 
 
+class _CurrentObserver(TypedDict):
+    """Lane.current: which observer this lane is inside right now, if any."""
+    name: str | None
+    label: str | None
+    started: float
+    next_warn: float
+
+
 class DispatchShutdown(RuntimeError):
     """Raised by dispatch() once shutdown() has run.
 
@@ -238,8 +246,9 @@ class Lane:
         self._runner: threading.Thread | None = None
         # Watchdog state, guarded by the module-wide _watch_lock (contention
         # is trivial: a handful of lanes, one short critical section per
-        # observer).
-        self.current = {"name": None, "label": None, "started": 0.0, "next_warn": 0.0}
+        # observer). Typed as a TypedDict so the heterogeneous slots keep
+        # their real types -- it is a plain dict at runtime.
+        self.current: _CurrentObserver = {"name": None, "label": None, "started": 0.0, "next_warn": 0.0}
         self.backlog = 0
         self.backlog_warned = False
         with _watch_lock:

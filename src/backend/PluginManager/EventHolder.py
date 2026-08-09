@@ -1,7 +1,13 @@
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+
 from loguru import logger as log
 
 from src.backend.PluginManager import event_dispatch
 from src.Signals.weak_callbacks import CallbackRegistry
+
+if TYPE_CHECKING:
+    from src.backend.PluginManager.PluginBase import PluginBase
 
 class EventHolder:
     """
@@ -30,14 +36,14 @@ class EventHolder:
         # needed (two holders can legitimately share an event_id).
         self._lane = event_dispatch.Lane(label=self.event_id)
 
-    def add_listener(self, callback: callable):
+    def add_listener(self, callback: Callable[..., Any]):
         if not self.observers.add(callback):
             # functools.partial (and other callable objects) have no
             # __name__ -- the warning must not crash the connect (issue #56).
             name = getattr(callback, "__name__", repr(callback))
             log.warning(f"Callback {name} is already subscribed to: {self.event_id}")
 
-    def remove_listener(self, callback: callable):
+    def remove_listener(self, callback: Callable[..., Any]):
         self.observers.remove(callback)
 
     def trigger_event(self, *args, **kwargs):
