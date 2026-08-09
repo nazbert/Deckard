@@ -3605,13 +3605,41 @@ class LabelManager:
         self.page_labels = {}
         self.action_labels = {}
         self.scroll_wait = 25
-        # position -> text width, for composed labels that are wider than the
-        # key AND rolling labels are enabled -- i.e. the labels that actually
-        # scroll. None = needs recompute (invalidated with the label setters;
-        # a rolling-labels toggle lands via reload_page, which rebuilds these
-        # managers). get_has_scroll_labels() derives from this.
-        self._scroll_widths_cache: dict[str, int] = None
-        self._has_visible_labels_cache: bool = None
+        # Monotonic version stamp for the three LATCH-style memos below --
+        # the ones whose stored value carries no identity of its own, so a
+        # reader cannot tell fresh data from resurrected data.
+        #
+        # Those memos are filled lazily on the RENDER path (media thread) and
+        # dropped on the EDIT path (UI/plugin threads), unlocked. A plain
+        # None-latch loses the race: reader sees None, composes, editor
+        # invalidates, reader stores -- and the pre-edit value is now pinned
+        # FOREVER. Reproduced in review round 2 for _composed_labels_cache
+        # (the old label text stays on screen) and it pre-exists on main for
+        # _has_visible_labels_cache (a stale False makes
+        # ControllerKey._tile_passthrough_ok paint a labelled key as a bare
+        # tile, permanently).
+        #
+        # The fix is to stamp every publication with the epoch it was
+        # computed UNDER: builders capture the epoch BEFORE composing and
+        # publish (epoch, value); readers accept the memo only while its
+        # stamp still equals the current epoch. A late store therefore
+        # publishes a stamp the readers already reject. Two concurrent
+        # increments can collapse into one -- harmless, because the counter
+        # never decreases, so any change still leaves the epoch past every
+        # stamp captured before it. No lock, no ordering assumption.
+        #
+        # _bbox_cache / _scroll_strips / _static_ops deliberately do NOT need
+        # this; see _bump_label_epoch().
+        self._label_epoch: int = 0
+        # (epoch, {position -> text width}), for composed labels that are
+        # wider than the key AND rolling labels are enabled -- i.e. the
+        # labels that actually scroll. None = needs recompute (invalidated
+        # with the label setters; a rolling-labels toggle lands via
+        # reload_page, which rebuilds these managers).
+        # get_has_scroll_labels() derives from this.
+        self._scroll_widths_cache: tuple[int, dict[str, int]] = None
+        # (epoch, bool): whether any composed label has non-empty text.
+        self._has_visible_labels_cache: tuple[int, bool] = None
         # position -> (cache key, strip image, ax, ay): the label's text +
         # outline rasterized ONCE onto a transparent strip; scroll frames
         # composite a window of it instead of re-running draw.text
@@ -3627,9 +3655,9 @@ class LabelManager:
         # composed label; the freetype layout pass is the second-biggest
         # per-frame cost after the raster itself.
         self._bbox_cache: dict[str, tuple] = {}
-        # The merged page+action+defaults labels (None = needs recompute).
-        # See get_composed_labels() for the invalidation contract.
-        self._composed_labels_cache: dict[str, "KeyLabel"] = None
+        # (epoch, {position -> KeyLabel}): the merged page+action+defaults
+        # labels. See get_composed_labels() for the invalidation contract.
+        self._composed_labels_cache: tuple[int, dict[str, "KeyLabel"]] = None
 
         self.init_labels()
         # Rolling-label animation state per position: the current scroll
@@ -3648,6 +3676,36 @@ class LabelManager:
             self.page_labels[position] = KeyLabel(self.controller_input)
             self.action_labels[position] = KeyLabel(self.controller_input)
  
+    def _bump_label_epoch(self) -> None:
+        """Retire the latch-style label memos: move the epoch, then drop
+        them.
+
+        Every site that changes what a composed label looks like must go
+        through here -- dropping a memo without moving the epoch reopens the
+        store-after-clear window (see _label_epoch), and moving the epoch
+        without dropping the memo would leave the pre-edit value reachable
+        until the next successful publish. One method so the two can never
+        drift apart.
+
+        _bbox_cache, _scroll_strips and _static_ops are NOT reset here and do
+        NOT need the epoch: each entry stores its own CONTENT KEY alongside
+        the value and every reader re-checks that key on the hit path. Their
+        keys cover every input to what they hold -- text, resolved font file
+        (which is what encodes family/weight/style) and size for the bbox,
+        plus colors, outline, alignment, anchor, absolute draw coordinates
+        and target geometry for the blits/strip -- so equal key implies equal
+        pixels. A store that lands after a clear can therefore only
+        resurrect an entry that is still CORRECT for the current label (the
+        next reader hits it and skips a recompute) or one whose key no longer
+        matches (the next reader misses and rebuilds). Neither is a
+        correctness bug, and the retained bytes are bounded by the size caps
+        below. The reset calls that do exist are eager memory release, not a
+        correctness requirement."""
+        self._label_epoch += 1
+        self._scroll_widths_cache = None
+        self._has_visible_labels_cache = None
+        self._composed_labels_cache = None
+
     def invalidate_scroll_caches(self) -> None:
         """Drop the derived label caches so the next tick/render recomputes
         scroll detection and geometry. Any code path that mutates a label's
@@ -3659,18 +3717,14 @@ class LabelManager:
         a page reload (#115 through the editor, review round 1). Cheap: the
         widths/visible flags are recomputed lazily and the strip/bbox/static
         dicts are re-keyed on demand."""
-        self._scroll_widths_cache = None
-        self._has_visible_labels_cache = None
-        self._composed_labels_cache = None
+        self._bump_label_epoch()
         self._bbox_cache.clear()
         self._scroll_strips.clear()
         self._static_ops.clear()
 
     def clear_labels(self):
         self.init_labels()
-        self._scroll_widths_cache = None
-        self._has_visible_labels_cache = None
-        self._composed_labels_cache = None
+        self._bump_label_epoch()
         self._scroll_strips.clear()
         self._static_ops.clear()
         self._bbox_cache.clear()
@@ -3682,9 +3736,7 @@ class LabelManager:
         else:
             self.page_labels[position] = label
 
-        self._scroll_widths_cache = None
-        self._has_visible_labels_cache = None
-        self._composed_labels_cache = None
+        self._bump_label_epoch()
         self._static_ops.clear()
         if update:
             self.update_label(position)
@@ -3708,9 +3760,7 @@ class LabelManager:
                 return
             self.action_labels[position] = label
 
-        self._scroll_widths_cache = None
-        self._has_visible_labels_cache = None
-        self._composed_labels_cache = None
+        self._bump_label_epoch()
         self._static_ops.clear()
         self.update_label_editor()
         if update:
@@ -3794,21 +3844,41 @@ class LabelManager:
         Invalidation: every label mutation goes through set_page_label /
         set_action_label / clear_labels, or -- for the in-place editor path --
         Page.set_label_*, which calls invalidate_scroll_caches(); all of them
-        drop this memo. A change to the app-wide FONT DEFAULTS is not a label
-        mutation, but the Settings font rows spawn a full page reload (#78)
-        which rebuilds these managers, so it needs no separate channel; that
-        is the same lifecycle assumption get_scroll_label_widths() documents
-        for the rolling-labels toggle.
+        land on _bump_label_epoch(), which retires this memo even against a
+        concurrent render already halfway through composing one.
+
+        A change to the app-wide FONT DEFAULTS is not a label mutation and
+        needs no separate channel: all four Settings writers that touch
+        gl.settings_manager.font_defaults (the font row, the font-color row,
+        the outline-color row and the outline-width row -- Settings.py:448,
+        478, 502, 527) call page_manager.reload_all_pages(), and reloading a
+        page runs create_n_states(), which REPLACES every input state object
+        and with it every LabelManager. So a font-defaults change does not
+        invalidate this memo, it destroys the object holding it -- a stronger
+        guarantee than any clear_labels()-style reasoning, and one that
+        covers dials and touchscreens too (verified on main, review round 2).
+        get_scroll_label_widths() documents the weaker sibling assumption for
+        the rolling-labels toggle.
 
         The returned KeyLabels are SHARED, so treat them as read-only.
         get_composed_label() still returns a fresh object per call for
         callers that want to mutate one (e.g. the label editor)."""
-        if self._composed_labels_cache is None:
-            self._composed_labels_cache = {
-                position: self.get_composed_label(position)
-                for position in ("top", "center", "bottom")
-            }
-        return self._composed_labels_cache
+        memo = self._composed_labels_cache
+        if memo is not None and memo[0] == self._label_epoch:
+            return memo[1]
+        # Stamp with the epoch read BEFORE composing: an invalidation that
+        # lands during the compose moves the epoch past this stamp, so the
+        # store below publishes something every reader rejects instead of
+        # silently reinstating pre-edit labels.
+        epoch = self._label_epoch
+        labels = {
+            position: self.get_composed_label(position)
+            for position in ("top", "center", "bottom")
+        }
+        self._composed_labels_cache = (epoch, labels)
+        # Return the dict we just built rather than re-reading the attribute,
+        # so a concurrent publish cannot swap the result mid-call.
+        return labels
 
     
     def inject_defaults(self, label: "KeyLabel"):
@@ -3847,11 +3917,18 @@ class LabelManager:
 
     def get_has_visible_labels(self) -> bool:
         # A label is drawn iff its text is non-empty (see add_labels_to_image).
-        if self._has_visible_labels_cache is None:
-            labels = self.get_composed_labels()
-            self._has_visible_labels_cache = any(
-                label.text not in (None, "") for label in labels.values())
-        return self._has_visible_labels_cache
+        # Epoch-stamped: a stale False here is not just a missed repaint, it
+        # sends ControllerKey._tile_passthrough_ok down the bare-tile fast
+        # path, so the labelled key renders as an empty tile until something
+        # else invalidates (see _label_epoch).
+        memo = self._has_visible_labels_cache
+        if memo is not None and memo[0] == self._label_epoch:
+            return memo[1]
+        epoch = self._label_epoch
+        labels = self.get_composed_labels()
+        visible = any(label.text not in (None, "") for label in labels.values())
+        self._has_visible_labels_cache = (epoch, visible)
+        return visible
 
     def _measure_text(self, position: str, label: "KeyLabel") -> tuple[int, int]:
         """(w, h) of the composed label's rendered text block, cached per
@@ -3881,8 +3958,14 @@ class LabelManager:
         # NOT reload_page and so leaves this cache stale until the next label
         # edit or page load -- a pre-existing lifecycle assumption, acceptable
         # because that path isn't a supported runtime toggle.
-        if self._scroll_widths_cache is not None:
-            return self._scroll_widths_cache
+        #
+        # Epoch-stamped like the other latch memos: a store landing after a
+        # concurrent edit would otherwise pin the pre-edit overflow set --
+        # exactly #115/#116's "a shortened label keeps scrolling forever".
+        memo = self._scroll_widths_cache
+        if memo is not None and memo[0] == self._label_epoch:
+            return memo[1]
+        epoch = self._label_epoch
 
         widths: dict[str, int] = {}
         rolling_labels_enabled = gl.settings_manager.app().rolling_labels
@@ -3896,7 +3979,7 @@ class LabelManager:
                 w, _ = self._measure_text(position, labels[position])
                 if w > available_width:
                     widths[position] = w
-        self._scroll_widths_cache = widths
+        self._scroll_widths_cache = (epoch, widths)
         return widths
 
     def get_has_scroll_labels(self) -> bool:
