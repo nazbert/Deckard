@@ -26,3 +26,22 @@ mypy_path = "."
 explicit_package_bases = true   # src/ has no __init__.py files; imports are `src.backend...` from repo root
 ignore_missing_imports = true   # dasbus, evdev, pulsectl, StreamDeck, ... ship no stubs
 implicit_optional = true        # large pre-PEP-484 population; ratchet later
+
+# Zero errors under THIS config is not "fully type-checked" -- #220 drove the
+# tree to zero without changing a single value above, so the blind spots the
+# defaults leave are still there. Ratchet candidates, each a separate campaign
+# (the full ledger, with the errors each would resurface, is on #220):
+#
+#   check_untyped_defs    -- bodies of unannotated defs are not checked at all;
+#                            e.g. the ActionCore has_*_control derefs #220 could
+#                            not see. Biggest single blind spot by volume.
+#   warn_unreachable      -- `if x is None:` on a non-Optional narrows to
+#                            uninhabited and the branch body is SILENTLY SKIPPED,
+#                            so a wrong late-init annotation reads as clean
+#                            (#220 amendment 8 -- it hid seven real optionals).
+#   implicit_optional     -- `def f(x: str = None)` is silently rewritten to
+#                            `str | None`, so parameter lies never surface.
+#   warn_unused_ignores   -- stale `# type: ignore`s do not self-report; #220
+#                            had to sweep them with a manual diagnostic run.
+#   disallow_any_generics -- bare generics decay to Any; DeckController.inputs
+#                            (list[Any]) is the load-bearing example.

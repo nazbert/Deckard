@@ -74,11 +74,10 @@ lint:ruff:
     - ruff --version
     - ruff check .
 
-lint:types:                # non-blocking type-check lane (#171 pt. 3)
+lint:types:                # blocking type-check gate (lane added by #171 pt. 3, driven to zero and flipped by #220)
   stage: test
   image: python:3.13-slim
   interruptible: true
-  allow_failure: true      # advisory: visibility + ratchet, not a gate
   needs: []
   script:
     # quoted: the ' #' inside the regex would otherwise start a YAML comment
