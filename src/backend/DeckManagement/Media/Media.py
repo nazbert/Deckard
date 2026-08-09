@@ -35,8 +35,14 @@ class Media:
         Returns:
             Media: A new Media object with the added image layer.
         """
+        # from_image_path returns None for a path that is neither an image
+        # nor an SVG. A [None] layer list used to crash get_final_media on
+        # `self.layers[0].image` (before its own `if not layer` guard ever
+        # ran); an empty one composes to None, which every caller of
+        # get_final_media already handles.
         layer = ImageLayer.from_image_path(path)
-        return cls(size=size, halign=halign, valign=valign, layers=[layer])
+        layers = [layer] if layer is not None else []
+        return cls(size=size, halign=halign, valign=valign, layers=layers)
 
     def add_layer(self, layer: ImageLayer | list[ImageLayer]):
         """
@@ -93,15 +99,16 @@ class Media:
         result.extend(self.layers)
         self.layers = result
 
-    def get_final_media(self) -> Image:
+    def get_final_media(self) -> Image.Image | None:
         """
         Transforms the layers list into a final image. The result of this image should be used sparingly because it takes some processing power and could be slow.
 
         Returns:
-            Image: The final image that can be displayed by using set_media.
+            Image: The final image that can be displayed by using set_media,
+                or None when there are no layers to compose.
         """
         if not self.layers or len(self.layers) <= 0:
-            return
+            return None
 
         pre_image = Image.new('RGBA', self.layers[0].image.size)
 

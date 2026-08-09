@@ -145,6 +145,14 @@ class Mp4FrameCache:
     # anything larger, or backward, is a real seek.
     MAX_DECODE_AHEAD = 30
 
+    # Registry bookkeeping, attached from outside by the acquire() /
+    # attach_promoted() entry points below on the readers they hand out.
+    # Declaration only (no class-level value): a directly-constructed
+    # instance genuinely has neither attribute, which is why every read of
+    # them goes through getattr(..., None).
+    _registry_key: "tuple | None"
+    _registry_entry: "_TileCacheEntry | None"
+
     def __init__(self, source_path: str, out_size: tuple[int, int], saturation: float = 1.0,
                  cache_path: str = None, is_builder: bool = True) -> None:
         self.lock = threading.Lock()
@@ -169,20 +177,20 @@ class Mp4FrameCache:
         )
 
         self._complete = False
-        self._cache_cap: cv2.VideoCapture = None
+        self._cache_cap: cv2.VideoCapture | None = None
         self._cache_pos = 0  # index of the next frame _cache_cap will return
-        self._last_entry: tuple[int, object] = None
+        self._last_entry: tuple[int, object] | None = None
         self.last_payload = None  # last good decode, served over a transient failure
-        self.last_payload_index: int = None  # source frame `last_payload` holds (see get_frame_and_index)
+        self.last_payload_index: int | None = None  # source frame `last_payload` holds (see get_frame_and_index)
         self._adopt_failures = 0  # failed shared-cache adoptions (see _maybe_adopt_shared_cache)
 
-        self.cap: cv2.VideoCapture = None
-        self._writer: cv2.VideoWriter = None
+        self.cap: cv2.VideoCapture | None = None
+        self._writer: cv2.VideoWriter | None = None
         self._frames_written = 0
         self.last_frame_index = -1  # source decode position while building/reading
 
         self.n_frames = 0
-        self._source_fps: float = None
+        self._source_fps: float | None = None
 
         if not self._open_existing_cache():
             self._open_source()
@@ -230,7 +238,7 @@ class Mp4FrameCache:
                 total += self.CAPTURE_OVERHEAD_BYTES
         return total
 
-    def get_source_fps(self) -> float:
+    def get_source_fps(self) -> float | None:
         """Native fps of the source video; None if unknown. The cache mp4 is
         written at the source's fps, so whichever capture is open (source or
         cache) can answer."""
@@ -316,7 +324,7 @@ class Mp4FrameCache:
         if not self.is_builder or not self._writer_enabled():
             return
         fps = self.cap.get(cv2.CAP_PROP_FPS) or 30
-        writer = cv2.VideoWriter(self._writer_tmp_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, self.out_size)
+        writer = cv2.VideoWriter(self._writer_tmp_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, self.out_size)  # type: ignore[attr-defined]  # cv2 stub: VideoWriter_fourcc is a module-level alias at runtime, absent from the stubs
         if writer.isOpened():
             self._writer = writer
         else:
@@ -425,6 +433,12 @@ class Mp4FrameCache:
                 self.n_frames = max(1, self._cache_pos)
                 return None
             self._cache_pos += 1
+        if frame is None:
+            # Not reachable: the seek above pins _cache_pos to n whenever it
+            # ran ahead, so the loop always reads at least once. Kept as a
+            # cheap guard rather than an assert -- this is the media thread's
+            # per-frame path.
+            return None
         payload = self._payload_from_bgr(frame)
         self._last_entry = (n, payload)
         return payload
@@ -610,7 +624,7 @@ class _TileCacheEntry:
         # A previous run may have already built (and left on disk) this
         # exact cache -- no builder needed, first acquire() just reads it.
         self.ready = os.path.isfile(path)
-        self.builder_thread: threading.Thread = None
+        self.builder_thread: threading.Thread | None = None
         self.stop_event = threading.Event()
 
 
@@ -649,7 +663,10 @@ def acquire(source_path: str, out_size: tuple[int, int], saturation: float = 1.0
     key = _registry_key(source_path, out_size, saturation)
     path = _cache_file_path(key[0], out_size, saturation)
 
-    start_builder = False
+    # The thread to start is carried out of the lock directly rather than as
+    # a flag plus a re-read of entry.builder_thread (which another acquire()
+    # could have replaced by then).
+    start_builder: threading.Thread | None = None
     with _registry_lock:
         entry = _registry.get(key)
         if entry is None:
@@ -663,10 +680,10 @@ def acquire(source_path: str, out_size: tuple[int, int], saturation: float = 1.0
                 name="tile-cache-builder",
                 daemon=True,
             )
-            start_builder = True
+            start_builder = entry.builder_thread
 
-    if start_builder:
-        entry.builder_thread.start()
+    if start_builder is not None:
+        start_builder.start()
 
     reader = KeyVideoCache(source_path, out_size, saturation, cache_path=path, is_builder=False)
     reader._registry_key = key
@@ -727,7 +744,7 @@ EXTERNAL_TILE_FPS = 15.0
 
 
 def attach_promoted(source_path: str, out_size: tuple[int, int],
-                    saturation: float = 1.0, variant: str = "") -> KeyVideoCache:
+                    saturation: float = 1.0, variant: str = "") -> KeyVideoCache | None:
     """Attach a reader to an ALREADY-BUILT tile cache for this key, or
     return None when there is nothing built to attach to.
 
@@ -759,7 +776,7 @@ def attach_promoted(source_path: str, out_size: tuple[int, int],
 
 def acquire_from_frames(source_path: str, out_size: tuple[int, int], saturation: float,
                         frames, fps: float = EXTERNAL_TILE_FPS,
-                        variant: str = "") -> KeyVideoCache:
+                        variant: str = "") -> KeyVideoCache | None:
     """Write the shared tile cache for this key from CALLER-SUPPLIED frames,
     then attach a reader to it. Returns None if the cache could not be
     written or read back (the caller keeps whatever it already has -- it
@@ -806,7 +823,7 @@ def acquire_from_frames(source_path: str, out_size: tuple[int, int], saturation:
 
 
 def _attach_promoted_reader(source_path: str, out_size: tuple[int, int], saturation: float,
-                            key: tuple, entry: "_TileCacheEntry", path: str) -> KeyVideoCache:
+                            key: tuple, entry: "_TileCacheEntry", path: str) -> KeyVideoCache | None:
     """A reader on this entry, or None -- the caller's refcount is dropped
     on the None path. Rejects a reader that did not open the promoted cache:
     `Mp4FrameCache.__init__` falls back to opening the SOURCE when the cache
@@ -831,7 +848,7 @@ def _write_tile_mp4(path: str, out_size: tuple[int, int], frames, fps: float) ->
     tmp_path = f"{path}.{os.getpid()}-{threading.get_ident():x}.tmp.mp4"
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        writer = cv2.VideoWriter(tmp_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, out_size)
+        writer = cv2.VideoWriter(tmp_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, out_size)  # type: ignore[attr-defined]  # cv2 stub: VideoWriter_fourcc is a module-level alias at runtime, absent from the stubs
         if not writer.isOpened():
             log.warning(f"Could not open tile cache writer for {path}; playing uncached")
             return 0

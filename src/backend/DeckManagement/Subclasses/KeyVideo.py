@@ -44,7 +44,7 @@ class InputVideo(SingleKeyAsset):
         # are shared with any other key/dial showing the same
         # (source, tile size, saturation). release() (see close()) detaches
         # this reader; it does not necessarily tear down the shared file.
-        self.video_cache = mp4_tile_cache.acquire(
+        self.video_cache: mp4_tile_cache.KeyVideoCache | None = mp4_tile_cache.acquire(
             video_path,
             self.controller_input.get_image_size(),
             self.deck_controller.get_display_saturation(),
@@ -62,10 +62,10 @@ class InputVideo(SingleKeyAsset):
         # Wall-clock picking state (mirrors BackgroundVideo.get_next_tiles,
         # DeckController.py -- both branches are load-bearing, see
         # presenter-migration-plan.md §4 M4 / §6 deviation 2).
-        self._play_start: float = None  # wall-clock playback start, set on first real-time frame
-        self._last_frame_tick: float = None  # last real-time frame pick, for gap clamping
+        self._play_start: float | None = None  # wall-clock playback start, set on first real-time frame
+        self._last_frame_tick: float | None = None  # last real-time frame pick, for gap clamping
 
-    def get_next_frame(self, now: float = None) -> Image:
+    def get_next_frame(self, now: float | None = None) -> Image.Image | None:
         # Check-then-hold: the unlocked peek makes the post-close hot path
         # (stragglers after teardown) free, then the lock is re-checked --
         # close() may have won the race between peek and acquire. While a
@@ -140,7 +140,9 @@ class InputVideo(SingleKeyAsset):
         self.fps = fps
         self.loop = loop
 
-    def get_raw_image(self) -> Image.Image:
+    def get_raw_image(self) -> Image.Image | None:
+        # None once the reader is closed / the source is degenerate -- see
+        # get_next_frame's early returns.
         return self.get_next_frame()
 
     def close(self) -> None:

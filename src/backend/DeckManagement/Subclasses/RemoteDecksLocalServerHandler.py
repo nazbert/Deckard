@@ -20,8 +20,9 @@ def create_handler(remote_deck_manager: "RemoteDeckManager"):
         # Store the manager as a class variable
         manager = remote_deck_manager
         
-        # Dictionary to store button images {button_id: base64_image_data}
-        button_images = {}
+        # Dictionary to store button images
+        # {button_id: {"data": <data: URI>, "timestamp": <epoch seconds>}}
+        button_images: dict[int, dict[str, str | int]] = {}
 
         def _set_cors_headers(self):
             """Set CORS headers to allow cross-origin requests."""

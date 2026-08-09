@@ -22,7 +22,7 @@ import sys
 import math
 import re
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 from loguru import logger as log
 from PIL import Image
@@ -65,7 +65,7 @@ def sha256(text: str) -> str:
     return hash_sha256.hexdigest()
 
 
-def file_in_dir(file_path, directory) -> None:
+def file_in_dir(file_path, directory) -> bool | None:
     """
     Check if a file is present in a directory.
 
@@ -74,10 +74,13 @@ def file_in_dir(file_path, directory) -> None:
         dir (str, optional): The directory to check. Defaults to None.
 
     Returns:
-        bool: True if the file is present in the directory, False otherwise.
+        bool: True if the file is present in the directory, False otherwise;
+            None if `directory` names something that is not a directory
+            (callers use the result in a boolean context, where that reads
+            as "not present").
     """
     if not os.path.isdir(directory) and directory is not None:
-        return
+        return None
 
     return os.path.split(file_path)[1] in os.listdir(directory)
 
@@ -109,16 +112,16 @@ def font_name_from_path(font_path: str):
     return font_resolver.font_name_from_path(font_path)
 
 
-def get_last_dir(path: str) -> str:
+def get_last_dir(path: str) -> str | None:
     if os.path.isdir(path):
         return os.path.basename(os.path.normpath(path))
     elif os.path.isfile(path):
         return os.path.basename(os.path.normpath(os.path.dirname(path)))
-    return
+    return None
 
 
-def has_dict_recursive(dictionary: dict, *args):
-    working_dict = dictionary
+def has_dict_recursive(dictionary: dict, *args) -> bool:
+    working_dict: Any = dictionary
     for arg in args:
         working_dict = working_dict.get(arg)
         if working_dict is None:
@@ -126,11 +129,12 @@ def has_dict_recursive(dictionary: dict, *args):
     return True
 
 
-def get_sys_param_value(param_name: str) -> str:
+def get_sys_param_value(param_name: str) -> str | None:
     for i, param in enumerate(sys.argv):
         if param.startswith(param_name):
             if i + 1 < len(sys.argv):
                 return sys.argv[i + 1]
+    return None
 
 
 def get_sys_args_without_param(param_name: str) -> list:
@@ -152,16 +156,16 @@ def get_sys_args_without_param(param_name: str) -> list:
     return args
 
 
-def is_video(path: str) -> bool:
+def is_video(path: str | None) -> bool:
     if path is None:
-        return
+        return False
     if os.path.isfile(path):
         return os.path.splitext(path)[1][1:].lower().replace(".", "") in gl.video_extensions
 
     return False
 
 
-def is_image(path: str) -> bool:
+def is_image(path: str | None) -> bool:
     if path is None:
         return False
     if os.path.isfile(path):
@@ -170,7 +174,7 @@ def is_image(path: str) -> bool:
     return False
 
 
-def is_svg(path: str) -> bool:
+def is_svg(path: str | None) -> bool:
     if path is None:
         return False
     if os.path.isfile(path):
@@ -179,7 +183,7 @@ def is_svg(path: str) -> bool:
     return path.startswith("<svg ")
 
 
-def get_image_aspect_ratio(img: Image) -> str:
+def get_image_aspect_ratio(img: Image.Image) -> str:
     width, height = img.size
     gcd = math.gcd(width, height)
     aspect_ratio = f"{width//gcd}:{height//gcd}"
@@ -351,7 +355,11 @@ def get_pango_font_description(font_family: str, font_size: int, font_weight: in
     return desc
 
 
-def get_values_from_pango_font_description(desc: "Pango.FontDescription") -> tuple[str, int, int, str]:
+def get_values_from_pango_font_description(desc: "Pango.FontDescription") -> tuple[str | None, float, int, str]:
+    # The size really is fractional (Pango sizes are in 1024ths and the
+    # division keeps the remainder) and the family really can be unset --
+    # both values go straight into the persisted font settings, so the
+    # annotation follows the data rather than the other way round.
     Pango = _load_pango()
     font_family = desc.get_family()
     font_size = desc.get_size() / Pango.SCALE
@@ -359,13 +367,13 @@ def get_values_from_pango_font_description(desc: "Pango.FontDescription") -> tup
     font_style = desc.get_style()
 
     if font_style == Pango.Style.ITALIC:
-        font_style = "italic"
+        style_name = "italic"
     elif font_style == Pango.Style.OBLIQUE:
-        font_style = "oblique"
+        style_name = "oblique"
     else:
-        font_style = "normal"
+        style_name = "normal"
 
-    return font_family, font_size, font_weight, font_style
+    return font_family, font_size, font_weight, style_name
 
 
 def get_sub_folders(parent: str) -> list[str]:

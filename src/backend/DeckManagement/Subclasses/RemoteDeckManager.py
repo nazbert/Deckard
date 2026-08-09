@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 class RemoteDeckManager:
     def __init__(self, deck_manager: "DeckManager"):
         self.deck_manager = deck_manager
-        self.deck_controllers = []
+        self.deck_controllers: list[DeckController] = []
         self.httpd = None
         self.server_thread = None
         self.handler_class = None

@@ -72,7 +72,9 @@ class InputImage(SingleKeyAsset):
         # _ensure_fits_composed(). None until then (the constructor's `image`
         # may already be a fitted copy, so its size is not the source's).
         self._source_native_size = None
-        self.image = self._fit_to_budget(image)
+        # Cleared to None (and then deleted) by close(); every reader guards
+        # on both hasattr and None.
+        self.image: Image.Image | None = self._fit_to_budget(image)
 
         if self.image is None:
             self.image = self.controller_input.get_empty_background()
@@ -173,9 +175,9 @@ class InputImage(SingleKeyAsset):
         # the last composite releases it.
         self.image = fresh
 
-    def get_raw_image(self) -> Image.Image:
+    def get_raw_image(self) -> Image.Image | None:
         if not hasattr(self, "image") or self.image is None:
-            return
+            return None
         self._ensure_fits_composed()
         return self.image
 
@@ -183,7 +185,8 @@ class InputImage(SingleKeyAsset):
         if not hasattr(self, "image"):
             # Already closed
             return
-        self.image.close()
+        if self.image is not None:
+            self.image.close()
         self.image = None
         del self.image
         return

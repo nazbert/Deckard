@@ -22,14 +22,19 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.backend.DeckManagement.DeckController import ControllerInput
 
-_error_image: Image.Image = None
+_error_image: Image.Image | None = None
 
 class SingleKeyAsset:
     def __init__(self, controller_input: "ControllerInput"):
         self.controller_input = controller_input
         self.deck_controller = controller_input.deck_controller
 
-    def get_raw_image(self) -> Image.Image:
+    def get_raw_image(self) -> Image.Image | None:
+        # None is part of the contract for the hierarchy, not for this base
+        # implementation: InputImage returns None once its image has been
+        # closed (KeyImage.get_raw_image), so the declaration has to allow it
+        # here or that override is not substitutable.
+        #
         # Decode the fallback/error image once; return a copy so callers can
         # composite/close it freely.
         global _error_image

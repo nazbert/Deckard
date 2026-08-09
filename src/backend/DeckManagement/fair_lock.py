@@ -14,6 +14,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 import threading
 import time
+from typing import Literal
 
 # FIFO ticket lock, used as the Stream Deck per-device transport mutex
 # (issue #164). CPython's threading.Lock is unfair: a thread that releases
@@ -108,6 +109,6 @@ class FairLock:
     def __enter__(self) -> bool:
         return self.acquire()
 
-    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+    def __exit__(self, exc_type, exc_value, traceback) -> Literal[False]:
         self.release()
         return False

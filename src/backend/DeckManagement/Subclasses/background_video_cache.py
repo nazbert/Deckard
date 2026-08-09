@@ -42,14 +42,20 @@ class BackgroundVideoCache(Mp4FrameCache):
         # the frame is fitted to is taller — so extended caches are
         # incompatible with plain ones and live in their own directory.
         self.extend_touchscreen = extend_touchscreen and self.deck_controller.deck.is_touch()
-        self.strip_size = self.deck_controller.get_touchscreen_image_size() if self.extend_touchscreen else None
+        # The annotation follows the real value -- a (width, height) pair.
+        # DeckController.get_touchscreen_image_size is declared `-> tuple[int]`,
+        # which is what the ignore is for; drop it once that declaration is
+        # corrected (#224 owns it).
+        self.strip_size: tuple[int, int] | None = (
+            self.deck_controller.get_touchscreen_image_size()  # type: ignore[assignment]  # upstream decl: DeckController.get_touchscreen_image_size -> tuple[int] for a pair (#224)
+            if self.extend_touchscreen else None)
         self.entries_per_frame = self.key_count + (1 if self.extend_touchscreen else 0)
 
         self.key_layout_str = f"{self.key_layout[0]}x{self.key_layout[1]}"
         if self.extend_touchscreen:
             self.key_layout_str += "+strip"
 
-        self._legacy_cache_path: str = None  # set by _default_cache_path()
+        self._legacy_cache_path: str | None = None  # set by _default_cache_path()
 
         saturation = deck_controller.get_display_saturation()
         super().__init__(video_path, out_size=self._canvas_size(), saturation=saturation)
@@ -111,11 +117,22 @@ class BackgroundVideoCache(Mp4FrameCache):
 
     # --- frame access ------------------------------------------------------
 
+    def _require_strip_size(self) -> tuple[int, int]:
+        """`strip_size` is set exactly when `extend_touchscreen` is on, which
+        is the only condition under which any of the strip helpers below run.
+        Stating that here keeps the invariant in one place instead of
+        surfacing as a None unpack three call sites deep."""
+        strip_size = self.strip_size
+        if strip_size is None:
+            raise RuntimeError(
+                "this background video cache does not extend onto the touchscreen strip")
+        return strip_size
+
     def _generate_alpha_frame(self) -> list:
         """Fallback frame: transparent key tiles (and strip slice if extended)."""
         entries = [self.deck_controller.generate_alpha_key() for _ in range(self.key_count)]
         if self.extend_touchscreen:
-            entries.append(Image.new("RGBA", self.strip_size, (0, 0, 0, 0)))
+            entries.append(Image.new("RGBA", self._require_strip_size(), (0, 0, 0, 0)))
         return entries
 
     def _fallback_payload(self):
@@ -144,7 +161,7 @@ class BackgroundVideoCache(Mp4FrameCache):
 
     def _get_strip_canvas_height(self, canvas_width: int) -> int:
         """Height of the touchscreen strip in key-grid canvas coordinates."""
-        strip_width, strip_height = self.strip_size
+        strip_width, strip_height = self._require_strip_size()
         return round(strip_height * canvas_width / strip_width)
 
     def crop_strip_from_deck_sized_image(self, image: Image.Image) -> Image.Image:
@@ -153,7 +170,7 @@ class BackgroundVideoCache(Mp4FrameCache):
         strip_slice = image.crop(
             (0, image.height - slice_height, image.width, image.height)
         )
-        return strip_slice.resize(self.strip_size, Image.Resampling.HAMMING)
+        return strip_slice.resize(self._require_strip_size(), Image.Resampling.HAMMING)
 
     def crop_key_image_from_deck_sized_image(self, image: Image.Image, key):
         key_rows, key_cols = self.key_layout
