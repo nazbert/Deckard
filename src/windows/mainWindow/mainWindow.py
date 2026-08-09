@@ -78,7 +78,7 @@ class MainWindow(Adw.ApplicationWindow):
         else:
             # self._on_close(keep_running)
             self.hide()
-            if not keep_running:
+            if not keep_running and gl.app is not None:
                 GLib.idle_add(gl.app.on_quit)
 
         return True

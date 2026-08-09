@@ -374,13 +374,6 @@ class EventAssignerUI(BetterPreferencesGroup):
             action_input_type = type(action.input_ident)
             row.set_visible(row.event in action_input_type.Events)  # type: ignore[attr-defined]  # cross-MR: Events is declared on the concrete Input.Key/Dial/Touchscreen subclasses, not on the InputIdentifier base (root cause: src/backend/DeckManagement/InputIdentifier.py, MR 5/#225)
 
-    def change_assignment_for_event(self, event: InputEvent, new_assignment: InputEvent):
-        assignments = self.action.get_event_assignments()
-        # The persisted map is keyed and valued by the events' string names
-        # (Page.get_action_event_assignments reads them straight out of JSON).
-        assignments[str(event)] = str(new_assignment)
-        self.action.set_event_assignments(assignments)
-
     def reset_assignments(self):
         self.action.set_all_events_to_null()
         # for event, assigner in self.action.event_manager.get_event_map(True).items():
@@ -518,14 +511,3 @@ class EventAssignerRow(Adw.ComboRow):
 
         event_assigner = self.event_assigner.action.event_manager.get_event_assigner_by_id(event_id)
         self.event_assigner.action.set_event_assignment(self.event, event_assigner)
-
-
-        return
-
-        if selected == Gtk.INVALID_LIST_POSITION:
-            event = None
-        else:
-            string_name = self.str_list[selected].get_string()
-            event = Input.EventFromStringName(string_name)
-
-        self.event_assigner.change_assignment_for_event(self.event, event)
