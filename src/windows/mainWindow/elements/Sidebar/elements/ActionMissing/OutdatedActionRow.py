@@ -15,6 +15,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 # Import gtk modules
 import gi
 
+from src.backend.DeckManagement.InputIdentifier import InputIdentifier
 from src.windows.mainWindow.elements.Sidebar.elements.ActionMissing.MissingRow import MissingRow
 
 gi.require_version("Gtk", "4.0")
@@ -22,10 +23,15 @@ gi.require_version("Adw", "1")
 
 
 class OutdatedActionRow(MissingRow):
-    def __init__(self, action_id:str, index:int, state:int, coords:str = None, dial: int = None, touch: bool = None):
+    # Same shape as the sibling MissingActionButtonRow -- and as the call
+    # site in ActionManager.load_for_actions. The old (index, state, coords,
+    # dial, touch) signature predated InputIdentifier and passed coords= to a
+    # parent that has no such parameter, so constructing this row raised
+    # TypeError for every outdated action (#227).
+    def __init__(self, action_id:str, identifier: InputIdentifier, state:int, index: int):
         super().__init__(
             action_id=action_id,
-            coords=coords,
+            identifier=identifier,
             index=index,
             state=state,
             install_label="Update outdated plugin",

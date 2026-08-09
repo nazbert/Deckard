@@ -73,7 +73,8 @@ class LabelExpanderRow(Adw.ExpanderRow):
     def __init__(self, label_group):
         super().__init__(title=gl.lm.get("label-editor-header"), subtitle=gl.lm.get("label-editor-expander-subtitle"))
         self.label_group = label_group
-        self.active_identifier: InputIdentifier = None
+        # Unset until load_for_identifier binds this row to an input.
+        self.active_identifier: InputIdentifier | None = None
         self.build()
 
     def build(self):
@@ -99,7 +100,8 @@ class LabelRow(Adw.PreferencesRow):
         super().__init__(**kwargs)
         self.label_text = label_text
         self.sidebar = sidebar
-        self.active_identifier: InputIdentifier = None
+        # Unset until load_for_identifier binds this row to an input.
+        self.active_identifier: InputIdentifier | None = None
         self.state: int = 0
         self.label_index = label_index
         self.key_name = key_name
@@ -231,6 +233,8 @@ class LabelRow(Adw.PreferencesRow):
         self.active_identifier = identifier
         self.state = state
 
+        if gl.app is None:
+            return
         controller = gl.app.main_win.get_active_controller()
         if controller is None:
             return
@@ -263,7 +267,11 @@ class LabelRow(Adw.PreferencesRow):
     def _update_values_locked(self, composed_label: KeyLabel = None):
         self.disconnect_signals()
         if composed_label is None:
+            if gl.app is None:
+                return
             controller = gl.app.main_win.get_active_controller()
+            if controller is None:
+                return
             controller_input = controller.get_input(self.active_identifier)
             composed_label = controller_input.get_active_state().label_manager.get_composed_label(position=self.key_name)
 
@@ -297,14 +305,14 @@ class LabelRow(Adw.PreferencesRow):
         self.connect_signals()
 
     def set_color(self, color_values: list):
-        color = color_values_to_gdk(color_values)
+        color = color_values_to_gdk(color_values)  # type: ignore[arg-type]  # cross-MR: color_values_to_gdk declares tuple[int,...] but every caller passes a list and the body handles both (root cause: src/backend/DeckManagement/HelperMethods.py:308, MR 5/#225)
         self.color_chooser_button.button.set_rgba(color)
 
     def set_outline_width(self, outline_width: int):
         self.outline_width.button.set_value(outline_width)
 
     def set_outline_color(self, color_values: list):
-        color = color_values_to_gdk(color_values)
+        color = color_values_to_gdk(color_values)  # type: ignore[arg-type]  # cross-MR: color_values_to_gdk declares tuple[int,...] but every caller passes a list and the body handles both (root cause: src/backend/DeckManagement/HelperMethods.py:308, MR 5/#225)
         self.outline_color_chooser_button.button.set_rgba(color)
 
     def set_alignment(self, alignment: str):

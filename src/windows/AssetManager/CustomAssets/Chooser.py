@@ -33,7 +33,8 @@ from src.windows.AssetManager.CustomAssets.FlowBox import CustomAssetChooserFlow
 import globals as gl
 
 # Import typing modules
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.windows.AssetManager.AssetManager import AssetManager
 
@@ -42,9 +43,9 @@ class CustomAssetChooser(ChooserPage):
         super().__init__()
         self.asset_manager = asset_manager
 
-        self.asset_chooser: CustomAssetChooserFlowBox = None
+        self.asset_chooser: CustomAssetChooserFlowBox | None = None
         self.build_finished = False
-        self.build_task_finished_tasks: list[callable] = []
+        self.build_task_finished_tasks: list[Callable[[], Any]] = []
         # Serializes build_finished with the deferred-task queue -- see
         # _finish_build / show_for_path.
         self._build_tasks_lock = threading.Lock()
@@ -121,10 +122,19 @@ class CustomAssetChooser(ChooserPage):
         # asset_chooser.items is the same live list object as gl.asset_manager_backend, so the
         # new asset is already visible to it -- just re-render the recycler. This may run off
         # the main thread (called from add_custom_media_set_by_ui's worker thread), so marshal.
-        GLib.idle_add(self.asset_chooser.refresh)
-    
+        chooser = self.asset_chooser
+        if chooser is None:
+            return
+        GLib.idle_add(chooser.refresh)
+
     def add_files(self, files: list) -> None:
-        gl.asset_manager.set_cursor_from_name("wait")
+        # The window owning the cursor can already be gone when a drop or a
+        # file-dialog callback lands (AssetManager.on_close nulls
+        # gl.asset_manager): skip the busy-cursor feedback in that case, but
+        # still add the files.
+        asset_manager = gl.asset_manager
+        if asset_manager is not None:
+            asset_manager.set_cursor_from_name("wait")
         for path in files:
 
             url = path.get_uri()
@@ -133,21 +143,26 @@ class CustomAssetChooser(ChooserPage):
             # gl.asset_manager_backend.add_custom_media_set_by_ui(url=url, path=path)
             threading.Thread(target=gl.asset_manager_backend.add_custom_media_set_by_ui, args=(url, path), name="add_custom_media_set_by_ui").start()
 
-        gl.asset_manager.set_cursor_from_name("default")
+        if asset_manager is not None:
+            asset_manager.set_cursor_from_name("default")
 
     def show_for_path(self, path):
+        def show_now() -> None:
+            chooser = self.asset_chooser
+            if chooser is None:
+                # build() failed before the flow box existed -- the failure is
+                # already logged; don't raise into the caller as well.
+                return
+            chooser.show_for_path(path)
+
         with self._build_tasks_lock:
             if not self.build_finished:
                 # Deferred under the same lock _finish_build drains with:
                 # the task either makes the snapshot or sees the flag True
                 # here and dispatches directly -- never stranded in between.
-                self.build_task_finished_tasks.append(lambda: self.asset_chooser.show_for_path(path))
+                self.build_task_finished_tasks.append(show_now)
                 return
-        if self.asset_chooser is None:
-            # build() failed before the flow box existed -- the failure is
-            # already logged; don't raise into the caller as well.
-            return
-        self.asset_chooser.show_for_path(path)
+        show_now()
 
     def on_video_toggled(self, button):
         settings = gl.settings_manager.load_settings_from_file(os.path.join(gl.DATA_PATH, "settings", "ui", "AssetManager.json"))
@@ -155,7 +170,8 @@ class CustomAssetChooser(ChooserPage):
         gl.settings_manager.save_settings_to_file(os.path.join(gl.DATA_PATH, "settings", "ui", "AssetManager.json"), settings)
 
         # Update ui
-        self.asset_chooser.refresh()
+        if self.asset_chooser is not None:
+            self.asset_chooser.refresh()
 
     def on_image_toggled(self, button):
         settings = gl.settings_manager.load_settings_from_file(os.path.join(gl.DATA_PATH, "settings", "ui", "AssetManager.json"))
@@ -163,7 +179,8 @@ class CustomAssetChooser(ChooserPage):
         gl.settings_manager.save_settings_to_file(os.path.join(gl.DATA_PATH, "settings", "ui", "AssetManager.json"), settings)
 
         # Update ui
-        self.asset_chooser.refresh()
+        if self.asset_chooser is not None:
+            self.asset_chooser.refresh()
 
     def load_defaults(self):
         settings = gl.settings_manager.load_settings_from_file(os.path.join(gl.DATA_PATH, "settings", "ui", "AssetManager.json"))
@@ -172,7 +189,8 @@ class CustomAssetChooser(ChooserPage):
         run_on_main(self.image_button.set_active, settings.get("image-toggle", True))
 
     def on_search_changed(self, entry):
-        self.asset_chooser.refresh()
+        if self.asset_chooser is not None:
+            self.asset_chooser.refresh()
 
     def on_browse_files_clicked(self, button):
         ChooseFileDialog(self) #TODO: Change to Xdp Portal call

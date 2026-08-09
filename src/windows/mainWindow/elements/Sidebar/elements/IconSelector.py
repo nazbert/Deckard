@@ -170,9 +170,11 @@ class IconSelector(Gtk.Box):
 
         self.remove_button.set_visible(self.has_image_to_remove())
 
-    def get_selected_state(self) -> int:
+    def get_selected_state(self) -> int | None:
+        if gl.app is None:
+            return None
         controller = gl.app.main_win.get_active_controller()
         if controller is None:
-            return
+            return None
         key_index = controller.coords_to_index(self.sidebar.active_coords)
         return controller.keys[key_index].get_active_state().state

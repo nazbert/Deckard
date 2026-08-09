@@ -120,7 +120,11 @@ class ActionExpanderRow(BetterExpander):
 
         self.clear_actions(keep_add_button=True)
 
+        if gl.app is None:
+            return
         controller = gl.app.main_win.get_active_controller()
+        if controller is None or controller.active_page is None:
+            return
 
         actions = controller.active_page.action_objects.get(identifier.input_type, {}).get(identifier.json_identifier, {}).get(state, {})
         self.load_for_actions(actions.values())
@@ -140,12 +144,10 @@ class ActionExpanderRow(BetterExpander):
 
                 self.add_action_row(action.action_name, action.action_id, action.plugin_base.plugin_name, action, controls_image=controls_image, controls_labels=controls_labels, controls_background=controls_background, comment=comment, index=i, total_rows=number_of_actions)
             elif isinstance(action, NoActionHolderFound):
-                action: NoActionHolderFound
                 missing_button_row = MissingActionButtonRow(action.id, action.identifier, self.active_state, i)
                 self.add_row(missing_button_row)
             elif isinstance(action, ActionOutdated):
                 # No plugin installed for this action
-                action: ActionOutdated
                 missing_button_row = OutdatedActionRow(action.id, action.identifier, self.active_state, i)
                 self.add_row(missing_button_row)
 
@@ -555,15 +557,19 @@ class ActionRow(Adw.ActionRow):
 
         self.allow_background_toggle.connect("toggled", self.on_allow_background_toggled)
 
-    def set_label_toggled(self, value: bool):
-        try:
-            self.allow_label_toggle.disconnect_by_func(self.on_allow_label_toggled)
-        except TypeError:
-            pass
-
-        self.allow_label_toggle.set_active(value)
-
-        self.allow_label_toggle.connect("toggled", self.on_allow_label_toggled)
+    # Disabled: this referenced an on_allow_label_toggled handler that
+    # exists on no class (the label toggle is an ActionRowLabelToggle button
+    # with its own on_label_toggled), so calling it raised AttributeError.
+    # Its only call site -- in label_toggled -- is already commented out.
+    # def set_label_toggled(self, value: bool):
+    #     try:
+    #         self.allow_label_toggle.disconnect_by_func(self.on_allow_label_toggled)
+    #     except TypeError:
+    #         pass
+    #
+    #     self.allow_label_toggle.set_active(value)
+    #
+    #     self.allow_label_toggle.connect("toggled", self.on_allow_label_toggled)
         
     def get_own_index(self) -> int:
         return self.expander.get_index_of_child(self)
@@ -666,7 +672,9 @@ class ActionRow(Adw.ActionRow):
         else:
             self.left_bottom_box.set_visible(True)
 
-        self.comment_row.set_text(comment)
+        # comment_label is the widget build() puts in left_bottom_box;
+        # there has never been a comment_row (AttributeError on every call).
+        self.comment_label.set_label(comment)
 
 class AddActionButtonRow:
     def __init__(self, expander: ActionExpanderRow, **kwargs):

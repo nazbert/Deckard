@@ -64,6 +64,11 @@ class StorePage(Gtk.Stack):
         self._loaded = True
         threading.Thread(target=self._load_guarded, name=f"load_{type(self).__name__}").start()
 
+    def load(self) -> None:
+        """Subclass hook: fetches this tab's catalog and appends its
+        previews. Runs on the loader thread started by ensure_loaded."""
+        raise NotImplementedError
+
     def _load_guarded(self) -> None:
         """Runs the subclass load() and keeps the tab retryable: an exception
         used to die in the load()'s @log.catch with the spinner still up and

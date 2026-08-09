@@ -41,6 +41,10 @@ class IconPackChooser(GenericPackChooserPage):
     LEAF_CHILD_NAME = "icon-chooser"
 
     def get_packs(self) -> dict:
+        if gl.icon_pack_manager is None:
+            # Boot order: the window cannot be opened before the manager
+            # exists, but the type says it may be absent.
+            return {}
         return gl.icon_pack_manager.get_icon_packs()
 
     def get_leaf_chooser(self) -> "IconChooserPage":

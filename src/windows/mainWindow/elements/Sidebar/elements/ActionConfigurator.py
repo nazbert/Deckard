@@ -126,19 +126,23 @@ class CommentGroup(Adw.PreferencesGroup):
         self.comment_row.disconnect_by_func(self.on_comment_changed)
     
 
-    def get_comment(self) -> str:
+    def get_comment(self) -> str | None:
+        if gl.app is None:
+            return None
         visible_child = gl.app.main_win.leftArea.deck_stack.get_visible_child()
         if visible_child is None:
-            return
+            return None
         controller = visible_child.deck_controller
         if controller is None:
-            return
+            return None
         page = controller.active_page
         if page is None:
-            return
+            return None
         return page.get_action_comment(self.index, self.action.state, self.action.input_ident)
     
     def set_comment(self, comment: str) -> None:
+        if gl.app is None:
+            return
         visible_child = gl.app.main_win.leftArea.deck_stack.get_visible_child()
         if visible_child is None:
             return
@@ -308,7 +312,7 @@ class EventAssignerUI(BetterPreferencesGroup):
     def __init__(self, action_configurator: ActionConfigurator, **kwargs):
         super().__init__(**kwargs)
         self.action_configurator = action_configurator
-        self.action: ActionCore = None
+        self.action: ActionCore = None  # type: ignore[assignment]  # late-init: EventAssignerUI.load_for_action
         self.build()
 
     def build(self):
@@ -356,7 +360,7 @@ class EventAssignerUI(BetterPreferencesGroup):
             row.select_event(event_assigner_map.get(row.event, None))
 
             action_input_type = type(action.input_ident)
-            row.set_visible(row.event in action_input_type.Events)
+            row.set_visible(row.event in action_input_type.Events)  # type: ignore[attr-defined]  # cross-MR: Events is declared on the concrete Input.Key/Dial/Touchscreen subclasses, not on the InputIdentifier base (root cause: src/backend/DeckManagement/InputIdentifier.py, MR 5/#225)
 
 
         return
@@ -368,11 +372,13 @@ class EventAssignerUI(BetterPreferencesGroup):
             row.select_event(new_assignment)
 
             action_input_type = type(action.input_ident)
-            row.set_visible(row.event in action_input_type.Events)
+            row.set_visible(row.event in action_input_type.Events)  # type: ignore[attr-defined]  # cross-MR: Events is declared on the concrete Input.Key/Dial/Touchscreen subclasses, not on the InputIdentifier base (root cause: src/backend/DeckManagement/InputIdentifier.py, MR 5/#225)
 
     def change_assignment_for_event(self, event: InputEvent, new_assignment: InputEvent):
         assignments = self.action.get_event_assignments()
-        assignments[event] = new_assignment
+        # The persisted map is keyed and valued by the events' string names
+        # (Page.get_action_event_assignments reads them straight out of JSON).
+        assignments[str(event)] = str(new_assignment)
         self.action.set_event_assignments(assignments)
 
     def reset_assignments(self):
@@ -412,7 +418,7 @@ class EventAssignerRowItem(GObject.Object):
     # event_assigner = GObject.Property(type=EventAssigner)
 
 
-    def __init__(self, event_assigner: EventAssigner):
+    def __init__(self, event_assigner: EventAssigner | None):
         super().__init__()
         if not event_assigner:
             self.ui_label = "None"
@@ -475,19 +481,27 @@ class EventAssignerRow(Adw.ComboRow):
         self.set_selected(0)
         self._connect_signal()
 
-    def select_event(self, event_assigner: EventAssigner):
+    def select_event(self, event_assigner: EventAssigner | None):
         self._disconnect_signal()
 
         model = self.get_model()
+        if model is None:
+            self._connect_signal()
+            return
 
         for i in range(model.get_n_items()):
             e = model.get_item(i)
+            if e is None:
+                continue
             if event_assigner is None:
                 if e.id is None:
                     self.set_selected(i)
                     self._connect_signal()
                     return
-                
+                # Not the "None" entry -- keep looking. Falling through here
+                # dereferenced the None event_assigner below.
+                continue
+
             if e.id == event_assigner.id:
                 self.set_selected(i)
                 self._connect_signal()

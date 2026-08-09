@@ -245,7 +245,7 @@ class ExtensionOnboardingScreen(Gtk.Box):
         else:
             self.set_button_status("uninstalled")
 
-    def set_button_status(self, status: str) -> None:
+    def set_button_status(self, status: str) -> bool:
         """
         uninstalled, installed, failed
         """

@@ -93,8 +93,11 @@ class InfoPage(Gtk.Box):
     def set_license(self, license:str):
         self.license_row.set_url(license)
 
-    def set_stargazer(self, stargazer: int):
-        self.stargazer_row.set_url(str(stargazer))
+    # Disabled together with self.stargazer_row (see build) and both of its
+    # call sites in IconPage/PluginPage; it referenced an attribute that no
+    # longer exists, so calling it raised AttributeError.
+    # def set_stargazer(self, stargazer: int):
+    #     self.stargazer_row.set_url(str(stargazer))
 
     def set_copyright(self, copyright:str):
         self.copyright_row.set_url(copyright)

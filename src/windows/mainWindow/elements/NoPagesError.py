@@ -33,6 +33,9 @@ import globals as gl
 # Import signals
 from src.Signals import Signals
 
+from collections.abc import Callable
+from typing import Any
+
 class NoPagesError(Gtk.Box):
     """
     This error gets shown if there are no pages registered/available
@@ -74,6 +77,8 @@ class NoPagesError(Gtk.Box):
         dial.show(self.add_page_callback)
 
     def add_page_callback(self, name:str):
+        if gl.page_manager is None or gl.app is None:
+            return
         try:
             path = gl.page_manager.add_page(name)
         except FileExistsError:
@@ -124,7 +129,7 @@ class Popover(Gtk.PopoverMenu):
         importer.import_pages(selected_file.get_path(), "streamdeck-ui", gl.app.main_win.check_for_errors)
 
 class ChooseFileDialog(Gtk.FileDialog):
-    def __init__(self, menu_button: Gtk.MenuButton, callback: callable = None):
+    def __init__(self, menu_button: Gtk.MenuButton, callback: Callable[[Any], Any] | None = None):
         super().__init__(title=gl.lm.get("asset-chooser.custom.browse-files.dialog.title"),
                          accept_label=gl.lm.get("asset-chooser.custom.browse-files.dialog.select-button"))
         self.menu_button = menu_button

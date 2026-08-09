@@ -26,6 +26,11 @@ from gi.repository import Gtk, Adw, GLib
 # Import globals
 import globals as gl
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    # Runtime import would cycle: DeckSettingsPage imports this module.
+    from src.windows.mainWindow.elements.DeckSettings.DeckSettingsPage import DeckSettingsPage
+
 # Import own modules
 from src.backend.DeckManagement.ImageHelpers import image2pixbuf
 
@@ -46,7 +51,7 @@ class DeckGroup(Adw.PreferencesGroup):
 
 
 class Rotation(Adw.PreferencesRow):
-    def __init__(self, settings_page: "PageSettings", deck_serial_number, **kwargs):
+    def __init__(self, settings_page: "DeckSettingsPage", deck_serial_number, **kwargs):
         super().__init__()
         self.settings_page = settings_page
         self.deck_serial_number = deck_serial_number
@@ -103,7 +108,7 @@ class Rotation(Adw.PreferencesRow):
 
 
 class Brightness(Adw.PreferencesRow):
-    def __init__(self, settings_page: "PageSettings", deck_serial_number, **kwargs):
+    def __init__(self, settings_page: "DeckSettingsPage", deck_serial_number, **kwargs):
         super().__init__()
         self.settings_page = settings_page
         self.deck_serial_number = deck_serial_number
@@ -188,7 +193,7 @@ class Saturation(Adw.PreferencesRow):
     immediately and, for background/key video, lazily rebuilds the video
     cache under the new factor's cache filename on next playthrough.
     """
-    def __init__(self, settings_page: "PageSettings", deck_serial_number, **kwargs):
+    def __init__(self, settings_page: "DeckSettingsPage", deck_serial_number, **kwargs):
         super().__init__()
         self.settings_page = settings_page
         self.deck_serial_number = deck_serial_number
@@ -257,7 +262,7 @@ class Saturation(Adw.PreferencesRow):
 
 
 class Screensaver(Adw.PreferencesRow):
-    def __init__(self, settings_page: "PageSettings", deck_serial_number, **kwargs):
+    def __init__(self, settings_page: "DeckSettingsPage", deck_serial_number, **kwargs):
         super().__init__()
         self.settings_page = settings_page
         self.deck_serial_number = deck_serial_number

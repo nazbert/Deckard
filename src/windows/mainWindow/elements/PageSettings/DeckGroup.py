@@ -25,6 +25,10 @@ from gi.repository import Gtk, Adw, GLib
 # Import globals
 import globals as gl
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from src.windows.PageManager.elements.PageEditor import PageEditor
+
 # Import own modules
 from src.backend.DeckManagement.ImageHelpers import image2pixbuf
 

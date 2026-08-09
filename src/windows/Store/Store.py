@@ -38,7 +38,7 @@ from src.windows.Store.Wallpapers.WallpaperPage import WallpaperPage
 
 class Store(Gtk.ApplicationWindow):
     def __init__(self, main_window: "MainWindow", *args, **kwargs):
-        super().__init__(
+        super().__init__(  # type: ignore[misc]  # gi stub: the stub models GObject properties as positional-or-keyword params, so *args reads as a second binding for them; at runtime GObject.__init__ takes properties by keyword only
             title="Store",
             default_width=1050,
             default_height=750,

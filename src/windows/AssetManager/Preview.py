@@ -38,7 +38,9 @@ class Preview(Gtk.FlowBoxChild):
         self.set_margin_top(5)
         self.set_margin_bottom(5)
 
-        self.pixbuf: GdkPixbuf.Pixbuf = None
+        # None whenever no image is bound: a failed decode shows the
+        # broken-image icon instead (see show_broken_image).
+        self.pixbuf: GdkPixbuf.Pixbuf | None = None
         self.can_be_deleted = can_be_deleted
 
         self._build()
@@ -85,7 +87,7 @@ class Preview(Gtk.FlowBoxChild):
         self.overlay.add_overlay(self.remove_button)
 
     @staticmethod
-    def decode_pixbuf(path: str) -> GdkPixbuf.Pixbuf:
+    def decode_pixbuf(path: str | None) -> GdkPixbuf.Pixbuf | None:
         """Decodes `path` at preview size, or returns None if it can't be
         decoded (missing, corrupt, unreadable).
 
@@ -121,7 +123,7 @@ class Preview(Gtk.FlowBoxChild):
     def set_image(self, path:str):
         self.set_pixbuf(self.decode_pixbuf(path))
 
-    def set_pixbuf(self, pixbuf: GdkPixbuf.Pixbuf) -> None:
+    def set_pixbuf(self, pixbuf: GdkPixbuf.Pixbuf | None) -> None:
         """Shows an already-decoded pixbuf. None means the decode failed, so
         the broken-image icon shows instead (#112)."""
         if pixbuf is None:

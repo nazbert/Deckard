@@ -40,7 +40,7 @@ class StorePreview(Gtk.FlowBoxChild):
         self.store_page = store_page
         self.store = store_page.store
 
-        self.url = None
+        self.url: str | None = None
 
         self.install_state = 0
 
@@ -148,27 +148,28 @@ class StorePreview(Gtk.FlowBoxChild):
             self.install_spinner_box.set_visible(False)
             self.install_spinner.set_spinning(False)
 
-    def set_image(self, image:Image):
+    def set_image(self, image: Image.Image | None):
         if image is None:
             return
         image.thumbnail((250, 360))
         pixbuf = image2pixbuf(image, force_transparency=True)
         GLib.idle_add(self.image.set_pixbuf, pixbuf)
 
-    def set_official(self, official:bool):
-        self.official_badge.set_visible(official)
+    def set_official(self, official: bool | None):
+        # A catalog entry without the field reads as None -- not official.
+        self.official_badge.set_visible(bool(official))
 
     def set_verified(self, verified:bool):
         self.verified_badge.set_visible(verified)
         self.warning_badge.set_visible(not verified)
 
-    def set_author_label(self, author:str):
-        self.author_label.set_text(author)
+    def set_author_label(self, author: str | None):
+        self.author_label.set_text(author or "")
 
-    def set_name_label(self, name:str):
-        self.name_label.set_text(name)
+    def set_name_label(self, name: str | None):
+        self.name_label.set_text(name or "")
 
-    def set_url(self, url:str):
+    def set_url(self, url: str | None):
         self.url = url
 
     def on_github_clicked(self, button: Gtk.Button):
@@ -247,7 +248,7 @@ class StorePreview(Gtk.FlowBoxChild):
             self.install_uninstall_button.add_css_class("confirm-button")
             self.install_uninstall_button.remove_css_class("red-background")
 
-    def set_description(self, description: str) -> None:
+    def set_description(self, description: str | None) -> None:
         if description is None:
             return
         description = description.strip()
@@ -264,6 +265,6 @@ class StorePreview(Gtk.FlowBoxChild):
             description = description[:(cutoff-3)] + "..."
         self.description_label.set_label(description)
 
-    def check_required_version(self, app_version_to_check: str):
+    def check_required_version(self, app_version_to_check: str | None):
         # Single shared gate -- see StoreData.is_min_app_version_satisfied.
         return is_min_app_version_satisfied(app_version_to_check)

@@ -34,7 +34,7 @@ from src.backend.PluginManager.ActionHolder import ActionHolder
 # Import typing
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from src.windows.mainWindow.elements.Sidebar import Sidebar
+    from src.windows.mainWindow.elements.Sidebar.Sidebar import Sidebar
 
 # Import globals
 import globals as gl
@@ -47,7 +47,8 @@ class ActionChooser(Gtk.Box):
         self.callback_function = None
         self.callback_args = None
         self.callback_kwargs = None
-        self.identifier: InputIdentifier = None
+        # Cleared again whenever show() is handed an invalid callback.
+        self.identifier: InputIdentifier | None = None
 
         self.build()
 
@@ -120,7 +121,7 @@ class ActionChooser(Gtk.Box):
         self.empty_state_label.set_label(text)
         self.empty_state_label.set_visible(True)
 
-    def show(self, callback_function, current_stack_page, identifier: InputIdentifier, callback_args, callback_kwargs):
+    def show(self, callback_function, current_stack_page, identifier: InputIdentifier, callback_args, callback_kwargs):  # type: ignore[override]  # gi stub: deliberately shadows Gtk.Widget.show() with the chooser's own "show for this action slot" entry point (its single caller is Sidebar.let_user_select_action)
         # The current-stack_page is usefull in case the let_user_select_action is called by an plugin action in the action_configurator
 
         # Validate the callback function
@@ -412,7 +413,8 @@ class ActionGroupExpander(ActionChooserExpander):
 
         # set icon to not activated
         image = self.get_arrow_image()
-        image.set_css_classes(["expander-arrow-not-activated"])
+        if image is not None:
+            image.set_css_classes(["expander-arrow-not-activated"])
 
         self.connect("notify::expanded", self.on_expanded)
 
@@ -430,6 +432,10 @@ class ActionGroupExpander(ActionChooserExpander):
     def on_expanded(self, *args):
         # This expander is nested in another expander causing the icon to be stuck at the expanded state - this fixes it
         image = self.get_arrow_image()
+        if image is None:
+            # libadwaita's internal expander tree did not have the shape
+            # get_arrow_image walks; the arrow just keeps its default state.
+            return
         if self.get_expanded():
             image.set_css_classes(["expander-arrow-activated"])
         else:
@@ -502,8 +508,9 @@ class PluginActionRow(Adw.ActionRow):
 
         # self.icon = Gtk.Image(icon_name="insert-image", icon_size=Gtk.IconSize.LARGE, margin_start=5)
         self.icon = action_holder.icon
-        if action_holder.icon.get_parent() is not None:
-            self.action_holder.icon.get_parent().remove(self.action_holder.icon)
+        icon_parent = action_holder.icon.get_parent()
+        if icon_parent is not None:
+            icon_parent.remove(self.action_holder.icon)  # type: ignore[union-attr]  # gi stub: remove() lives on the container subclasses (Gtk.Box here), not on Gtk.Widget, which is all get_parent() promises
         self.main_box.append(self.icon)
 
         self.label = Gtk.Label(label=self.action_holder.action_name, margin_start=10, css_classes=["bold", "large-text"])

@@ -39,6 +39,9 @@ from src.windows.mainWindow.elements.HeaderHamburgerMenuButton import HeaderHamb
 from src.backend.DeckManagement.DeckController import DeckController
 from src.backend.PageManagement.Page import Page
 
+from collections.abc import Callable
+from typing import Any
+
 
 # Import globals
 import globals as gl
@@ -53,7 +56,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.key_dict = {}
 
         # Add tasks to run if build is complete
-        self.on_finished: list = []
+        self.on_finished: list[Callable[[], Any]] = []
 
         self.build()
         self.init_actions()
@@ -80,9 +83,9 @@ class MainWindow(Adw.ApplicationWindow):
 
         return True
 
-    def _on_close(self, keep_running: bool) -> None:
+    def _on_close(self, keep_running: bool) -> bool:
         self.hide()
-        if not keep_running:
+        if not keep_running and gl.app is not None:
             gl.app.on_quit()
         return True
 
@@ -263,7 +266,7 @@ class MainWindow(Adw.ApplicationWindow):
         else:
             self.set_main_error(None)
 
-    def add_on_finished(self, task: callable) -> None:
+    def add_on_finished(self, task: Callable[[], Any]) -> None:
         if not callable(task):
             return
         if task in self.on_finished:
@@ -331,16 +334,23 @@ class MainWindow(Adw.ApplicationWindow):
         self.toast_overlay.add_toast(toast)
         return GLib.SOURCE_REMOVE
 
-    def get_active_controller(self) -> DeckController:
-        if not recursive_hasattr(self, "leftArea.deck_stack"): return
+    def get_active_controller(self) -> DeckController | None:
+        if not recursive_hasattr(self, "leftArea.deck_stack"): return None
         visible_child = self.leftArea.deck_stack.get_visible_child()
         if visible_child is None:
-            return
+            return None
         return visible_child.deck_controller
-    
-    def get_active_page(self) -> Page:
+
+    def get_active_page(self) -> Page | None:
+        """The page shown by the selected deck, or None while nothing is
+        selected/loaded. Callers must tolerate None -- it is the normal
+        state between deck selection and the first page load."""
         controller = self.get_active_controller()
         if controller is None:
-            return gl.page_manager.dummy_page
+            # Was `return gl.page_manager.dummy_page`, an attribute that
+            # exists nowhere in the codebase -- so the no-deck-selected path
+            # raised AttributeError instead of reporting "no page" (#227).
+            return None
         if hasattr(controller, "active_page"):
             return controller.active_page
+        return None

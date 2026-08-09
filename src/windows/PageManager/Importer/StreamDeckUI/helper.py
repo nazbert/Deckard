@@ -28,7 +28,7 @@ def font_family_from_path(path: str) -> str:
         if name and family: break
     return family
 
-def hex_to_rgba255(color_hex: str) -> list[int]:
+def hex_to_rgba255(color_hex: str | None) -> list[int] | None:
     if color_hex in [None, ""]: return None
     color = Gdk.RGBA()
     if not color.parse(color_hex):

@@ -6,6 +6,13 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, GdkPixbuf, Pango, Gdk
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    # The page classes in the settings *window* (IconPage / ColorPage), not
+    # the same-named plugin list page in src/windows/Settings. Runtime import
+    # would cycle: PluginSettingsWindow imports this module.
+    from src.windows.Settings.PluginSettingsWindow.PluginSettingsWindow import PluginSettingsPage
+
 class AssetPreview(Gtk.FlowBoxChild):
     def __init__(self, window: "PluginSettingsPage", name: str, size: tuple[int, int] = (50,50), *args, **kwargs):
         super().__init__(*args, **kwargs)

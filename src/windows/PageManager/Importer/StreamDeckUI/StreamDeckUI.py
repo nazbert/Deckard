@@ -21,7 +21,8 @@ class StreamDeckUIImporter:
     def index_to_page_coords(self, index: int, deck_serial: int) -> str:
         # Find deck
         rows, cols = 3, 5
-        for deck_controller in gl.app.deck_manager.deck_controller:
+        deck_manager = gl.app.deck_manager if gl.app is not None else None
+        for deck_controller in (deck_manager.deck_controller if deck_manager is not None else []):
             if deck_controller.serial_number() == deck_serial:
                 rows, cols = deck_controller.deck.key_layout()
                 break
@@ -70,11 +71,11 @@ class StreamDeckUIImporter:
         return page_paths
 
     def get_state_map(self, available_states: list[str]):
-        available_states = [int(state) for state in available_states]
-        available_states.sort()
+        state_numbers = [int(state) for state in available_states]
+        state_numbers.sort()
 
         state_map = {}
-        for i, original_number in enumerate(available_states):
+        for i, original_number in enumerate(state_numbers):
             state_map[str(i)] = str(original_number)
 
         return state_map

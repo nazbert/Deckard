@@ -47,8 +47,11 @@ def is_min_app_version_satisfied(minimum_app_version: str | None) -> bool:
 @dataclass
 class StoreData:
     github: str | None = None # Link to the github repository
-    descriptions: dict[str, str] = field(default_factory=dict) # All the translations for the description
-    short_descriptions: dict[str, str] = field(default_factory=dict) # All the translations for the short descriptions
+    # StoreBackend passes `... or None` for every one of these, so absent is
+    # None, not an empty container (LocaleManager.get_custom_translation
+    # answers "" for None but None for {} -- the two are not interchangeable).
+    descriptions: dict[str, str] | None = field(default_factory=dict) # All the translations for the description
+    short_descriptions: dict[str, str] | None = field(default_factory=dict) # All the translations for the short descriptions
     description: str | None = None # Translated Description of the Content
     short_description: str | None = None # Translated short Description of the Content
     author: str | None = None # Author of the Content
@@ -58,9 +61,9 @@ class StoreData:
     minimum_app_version: str | None = None # Minimum app version that is required to use the Content
     app_version: str | None = None # The Current app version the Plugin is made for
     repository_name: str | None = None # Name of the Repository
-    tags: list[str] = field(default_factory=list) # If the asset has a compatible version
+    tags: list[str] | None = field(default_factory=list) # If the asset has a compatible version
     is_compatible: bool | None = None
-    branch: str = None
+    branch: str | None = None # Repo branch to install from; None = the repo default
     verified: bool = False
 
 @dataclass
@@ -73,7 +76,7 @@ class LicenceData:
     copyright: str | None = None
     original_url: str | None = None
     license: str | None = None # The actual licence
-    license_descriptions: dict[str, str] = field(default_factory=dict) # Translations for the Licence Description
+    license_descriptions: dict[str, str] | None = field(default_factory=dict) # Translations for the Licence Description
 
 @dataclass
 class PluginData(StoreData, ImageData, LicenceData):

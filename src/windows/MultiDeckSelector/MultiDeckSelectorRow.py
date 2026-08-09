@@ -23,8 +23,11 @@ from src.windows.MultiDeckSelector.MultiDeckSelector import MultiDeckSelector
 # Import globals
 import globals as gl
 
+from collections.abc import Callable
+from typing import Any
+
 class MultiDeckSelectorRow(Adw.ActionRow):
-    def __init__(self, source_window: Gtk.ApplicationWindow, title: str, subtitle: str, selected_deck_serials: list[str] = None, callback: callable = None):
+    def __init__(self, source_window: Gtk.ApplicationWindow, title: str, subtitle: str, selected_deck_serials: list[str] = None, callback: Callable[[str, bool], Any] | None = None):
         super().__init__(title = title, subtitle = subtitle, activatable=True)
 
         if selected_deck_serials is None:
@@ -34,7 +37,8 @@ class MultiDeckSelectorRow(Adw.ActionRow):
         self.selected_deck_serials = selected_deck_serials
         self.callback = callback
 
-        self.multi_deck_selector: MultiDeckSelector = None
+        # Built lazily on first activation and dropped again on close.
+        self.multi_deck_selector: MultiDeckSelector | None = None
 
         self.build()
 

@@ -51,7 +51,7 @@ class PluginAboutFactory:
         with open(full_path, "r") as f:
             about.set_release_notes(f.read())
 
-        about.set_release_notes_version(version or self.plugin_base.plugin_version)
+        about.set_release_notes_version(version or self.plugin_base.plugin_version or "")
 
     def add_credits(self, about: Adw.AboutDialog):
         credits = self.about.get("credits", {})

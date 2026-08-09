@@ -24,6 +24,9 @@ import globals as gl
 from .PluginAssetPreview import IconPreview, ColorPreview
 from loguru import logger as log
 
+from collections.abc import Callable
+from typing import Any
+
 class PluginSettingsWindow(Adw.PreferencesDialog):
     def __init__(self, plugin_base: PluginBase):
         super().__init__(title=f"{plugin_base.plugin_name} Settings")
@@ -68,10 +71,10 @@ class PluginSettingsPage(Adw.PreferencesPage):
 
         scrolled_window.set_child(self.flow_box)
 
-    def connect_flow_box(self, callback: callable):
+    def connect_flow_box(self, callback: Callable[..., Any]):
         self.flow_box.connect("child-activated", callback)
 
-    def disconnect_flow_box(self,callback: callable):
+    def disconnect_flow_box(self,callback: Callable[..., Any]):
         better_disconnect(self.flow_box, callback)
 
     def reset_button_clicked(self, *args):
@@ -185,8 +188,8 @@ class IconPage(PluginSettingsPage):
         try:
             file = dialog.open_finish(task)
 
-            if file:
-                file_path = file.get_path()
+            file_path = file.get_path() if file is not None else None
+            if file_path:
                 self.plugin_base.asset_manager.icons.add_override(preview.name, Icon(path=file_path), override=True)
 
                 _, render = self.plugin_base.asset_manager.icons.get_asset_values(preview.name)
@@ -249,6 +252,8 @@ class ColorPage(PluginSettingsPage):
         color_dialog = Gtk.ColorDialog.new()
         color_dialog.set_title("Color")
 
+        if gl.app is None:
+            return
         # Open the dialog
         color_dialog.choose_rgba(gl.app.get_active_window(), preview.get_rgba(), None, self.on_color_dialog_response, preview)
 

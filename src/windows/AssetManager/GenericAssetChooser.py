@@ -133,6 +133,11 @@ class _ChooserBuildPage(ChooserPage):
                          name=f"{type(self).__name__}.build").start()
         return True
 
+    def build(self) -> None:
+        """Subclass hook: gathers the page's data off the main thread and
+        constructs its widgets inside run_on_main callbacks."""
+        raise NotImplementedError
+
     def _run_build(self) -> None:
         try:
             self.build()
@@ -179,11 +184,11 @@ class GenericPackChooserPage(_ChooserBuildPage):
     and where the packs come from."""
 
     # Gtk.Box subclass owning a `.flow_box`; ctor (chooser, **props).
-    PACK_FLOW_BOX_CLASS: type = None
+    PACK_FLOW_BOX_CLASS: type = None  # type: ignore[assignment]  # late-init: subclass override, e.g. IconPacks.PackChooser
     # Preview subclass; ctor (chooser, pack), exposing `.pack`.
-    PACK_PREVIEW_CLASS: type = None
+    PACK_PREVIEW_CLASS: type = None  # type: ignore[assignment]  # late-init: subclass override, e.g. IconPacks.PackChooser
     # Name of the stack child holding this type's asset chooser.
-    LEAF_CHILD_NAME: str = None
+    LEAF_CHILD_NAME: str = None  # type: ignore[assignment]  # late-init: subclass override, e.g. IconPacks.PackChooser
     # Pack previews constructed per main-loop callback.
     PACK_APPEND_BATCH: int = 10
 
@@ -246,7 +251,12 @@ class GenericPackChooserPage(_ChooserBuildPage):
 
     def _append_packs(self, batch: list) -> None:
         """Runs on the main loop only: one batch of (pack, pixbuf) pairs."""
-        flow_box = self.pack_flow.flow_box
+        pack_flow = self.pack_flow
+        if pack_flow is None:
+            # _build_ui's marshal never landed (see _handle_build_failure):
+            # there is no grid left to append to.
+            return
+        flow_box = pack_flow.flow_box
         for pack, pixbuf in batch:
             preview = self.PACK_PREVIEW_CLASS(self, pack, pixbuf=pixbuf)
             flow_box.append(preview)
@@ -283,9 +293,9 @@ class GenericAssetChooserPage(_ChooserBuildPage):
     fuzzy search/sort."""
 
     # DynamicFlowBox subclass; ctor (preview_class, chooser).
-    FLOW_BOX_CLASS: type = None
+    FLOW_BOX_CLASS: type = None  # type: ignore[assignment]  # late-init: subclass override, e.g. IconPacks.Icons.IconChooser
     # Preview subclass; ctor takes no arguments (the flow box pools them).
-    PREVIEW_CLASS: type = None
+    PREVIEW_CLASS: type = None  # type: ignore[assignment]  # late-init: subclass override, e.g. IconPacks.Icons.IconChooser
     # Attribute holding an asset's file path.
     ASSET_PATH_ATTR: str = "path"
 
@@ -299,7 +309,9 @@ class GenericAssetChooserPage(_ChooserBuildPage):
         self.asset_manager = asset_manager
         self.stack = stack
 
-        self.selected_path: str = None
+        # None until select_asset pre-selects one; preview_factory only
+        # compares it, so None simply matches nothing.
+        self.selected_path: str | None = None
 
         # Bound by _build_ui on the main loop, i.e. not before this
         # constructor returns -- everything touching it tolerates None.

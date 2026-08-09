@@ -95,6 +95,8 @@ class DialEditor(Gtk.ScrolledWindow):
     def load_for_dial(self, identifier: Input.Dial, state: int):
         self.sidebar.active_identifier = identifier
 
+        if gl.app is None:
+            return
         controller = gl.app.main_win.get_active_controller()
         if controller is None:
             return

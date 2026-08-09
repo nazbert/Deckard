@@ -43,13 +43,19 @@ class PageEditor(Adw.NavigationPage):
     def __init__(self, page_manager: "PageManager"):
         super().__init__(title=gl.lm.get("page-manager.page-editor.title"))
         self.page_manager = page_manager
-        self.active_page_path: str = None
+        # None until load_for_page runs -- the editor opens on its
+        # "no page selected" stack child (see delete_active_page).
+        self.active_page_path: str | None = None
         self.build()
 
     def get_page_data(self) -> dict:
+        if gl.page_manager is None or self.active_page_path is None:
+            return {}
         return gl.page_manager.get_page_data(self.active_page_path, use_backup=False)
 
     def set_page_data(self, data: dict, reload_brightness: bool = True, reload_screensaver: bool = True, reload_background: bool = True, reload_inputs: bool = True):
+        if gl.page_manager is None or self.active_page_path is None:
+            return
         gl.page_manager.set_page_data(self.active_page_path, data, reload_brightness=reload_brightness, reload_screensaver=reload_screensaver, reload_background=reload_background, reload_inputs=reload_inputs)
 
     def build(self):
@@ -187,7 +193,10 @@ class NameGroup(PageEditorGroup):
         self.set_sensitive(is_user_page)
 
     def on_name_changed(self, entry: Adw.EntryRow, *args):
-        original_name = os.path.basename(self.page_editor.active_page_path).split(".")[0]
+        active_page_path = self.page_editor.active_page_path
+        if active_page_path is None or gl.page_manager is None:
+            return
+        original_name = os.path.basename(active_page_path).split(".")[0]
         new_name = entry.get_text()
 
         all_page_names = gl.page_manager.get_page_names()
@@ -203,6 +212,8 @@ class NameGroup(PageEditorGroup):
 
     def on_name_change_applied(self, entry: Adw.EntryRow, *args):
         original_path = self.page_editor.active_page_path
+        if original_path is None:
+            return
         new_path = os.path.join(os.path.dirname(original_path), f"{entry.get_text()}.json")
 
         if original_path == new_path:
@@ -225,18 +236,25 @@ class DefaultPageGroup(PageEditorGroup):
         self.add(self.deck_selector)
 
     def load_config_settings(self, page_path: str):
+        if gl.page_manager is None:
+            return
         serial_numbers = gl.page_manager.get_serial_numbers_from_page(page_path)
 
         self.deck_selector.set_label(len(serial_numbers))
         self.deck_selector.set_selected_deck_serials(serial_numbers)
 
     def on_deck_changed(self, serial_number: str, state: bool):
-        path = self.page_editor.active_page_path
+        if gl.page_manager is None:
+            return
+        path: str | None = self.page_editor.active_page_path
 
         if not state:
             path = None
 
-        gl.page_manager.set_default_page(serial_number, path)
+        # None clears the deck's default page -- see
+        # PageManagerBackend.get_all_default_page_serial_numbers, which skips
+        # falsy entries.
+        gl.page_manager.set_default_page(serial_number, path)  # type: ignore[arg-type]  # cross-MR: PageManagerBackend.set_default_page declares path: str, but None is the documented "no default" value (root cause: src/backend/PageManagement/PageManagerBackend.py, MR 6/#226)
 
 class AutoChangeGroup(PageEditorGroup):
     def __init__(self, page_editor: PageEditor):
@@ -280,7 +298,10 @@ class AutoChangeGroup(PageEditorGroup):
         better_disconnect(self.wm_class_entry, self.on_wm_class_entry_applied)
 
     def load_config_settings(self, page_path: str):
-        auto_change = gl.page_manager.get_auto_change_settings(self.page_editor.active_page_path)
+        active_page_path = self.page_editor.active_page_path
+        if gl.page_manager is None or active_page_path is None:
+            return
+        auto_change = gl.page_manager.get_auto_change_settings(active_page_path)
 
         self.enable_toggle.set_active(auto_change.get("enable", False))
         self.stay_on_page_toggle.set_active(auto_change.get("stay-on-page", True))
@@ -317,8 +338,11 @@ class AutoChangeGroup(PageEditorGroup):
         )
 
     def on_deck_changed(self, serial_number: str, state: bool):
+        page_manager = gl.page_manager
         path = self.page_editor.active_page_path
-        info = gl.page_manager.get_auto_change_settings(path)
+        if page_manager is None or path is None:
+            return
+        info = page_manager.get_auto_change_settings(path)
         decks = info.get("decks", [])
 
         if state and serial_number not in decks:
@@ -328,7 +352,7 @@ class AutoChangeGroup(PageEditorGroup):
         else:
             return
 
-        gl.page_manager.overwrite_auto_change_settings(path, decks=decks)
+        page_manager.overwrite_auto_change_settings(path, decks=decks)
 
 class BrightnessGroup(PageEditorGroup):
     def __init__(self, page_editor: PageEditor):
@@ -355,6 +379,8 @@ class BrightnessGroup(PageEditorGroup):
         better_disconnect(self.brightness_scale.scale, self.on_brightness_changed)
 
     def load_config_settings(self, page_path: str):
+        if gl.page_manager is None:
+            return
         settings = gl.page_manager.get_brightness_settings(page_path)
 
         self.enable_expander.set_enable_expansion(settings.get("overwrite", False))
@@ -448,6 +474,8 @@ class BackgroundGroup(PageEditorGroup):
         better_disconnect(self.media_selector_button, self.on_media_selector_click)
 
     def load_config_settings(self, page_path: str):
+        if gl.page_manager is None:
+            return
         background_settings = gl.page_manager.get_background_settings(page_path)
 
         self.enable_expander.set_enable_expansion(background_settings.get("overwrite", False))
@@ -600,6 +628,8 @@ class ScreensaverGroup(PageEditorGroup):
         better_disconnect(self.media_selector_button, self.on_media_selector_click)
 
     def load_config_settings(self, page_path: str):
+        if gl.page_manager is None:
+            return
         screensaver_settings = gl.page_manager.get_screensaver_settings(page_path)
 
         self.overwrite_expander.set_enable_expansion(screensaver_settings.get("overwrite", False))

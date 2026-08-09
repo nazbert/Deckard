@@ -22,15 +22,16 @@ import globals as gl
 
 class Badge(Gtk.Button):
     def __init__(self, label: str, tooltip: str = None, *args, **kwargs):
-        super().__init__(
+        super().__init__(  # type: ignore[misc]  # gi stub: the stub models GObject properties as positional-or-keyword params, so *args reads as a second binding for them; at runtime GObject.__init__ takes properties by keyword only
             label=gl.lm.get(label),
             *args, **kwargs
         )
         self.set_tooltip(tooltip)
 
-    def set_tooltip(self, tooltip: str):
+    def set_tooltip(self, tooltip: str | None):
         if tooltip:
             self.set_has_tooltip(True)
         else:
             self.set_has_tooltip(False)
-        self.set_tooltip_text(gl.lm.get(tooltip))
+        # No key -> no tooltip text (what gl.lm.get(None) already resolved to).
+        self.set_tooltip_text(gl.lm.get(tooltip) if tooltip else None)

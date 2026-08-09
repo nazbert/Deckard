@@ -21,7 +21,17 @@ from gi.repository import Gtk, GLib
 # Import python modules
 import functools
 
+from collections.abc import Callable
+from typing import Any
+
 from loguru import logger as log
+
+# The three pluggable hooks a chooser installs on a flow box. All three are
+# optional: an unconfigured box shows its items unfiltered/unsorted, and
+# show_range refuses to run without a factory.
+FilterFunc = Callable[[Any], bool]
+SortFunc = Callable[[Any, Any], int]
+FactoryFunc = Callable[[Gtk.Widget, Any], None]
 
 class DynamicFlowBox(Gtk.Box):
     def __init__(self, base_class: type, *args, **kwargs):
@@ -38,9 +48,9 @@ class DynamicFlowBox(Gtk.Box):
         self.base_class = base_class
         self.items: list = []
 
-        self.sort_func: callable = None
-        self.filter_func: callable = None
-        self.factory_func: callable = None
+        self.sort_func: SortFunc | None = None
+        self.filter_func: FilterFunc | None = None
+        self.factory_func: FactoryFunc | None = None
 
         self.build()
 
@@ -124,6 +134,11 @@ class DynamicFlowBox(Gtk.Box):
         GLib.idle_add(self._apply_range, start, end)
 
     def _apply_range(self, start: int, end: int) -> bool:
+        factory_func = self.factory_func
+        if factory_func is None:
+            # show_range refuses to schedule without one; None here means it
+            # was cleared between scheduling and the idle dispatch.
+            return False
         items = self.get_items_to_show()
         page_items = items[start:end]
 
@@ -142,7 +157,7 @@ class DynamicFlowBox(Gtk.Box):
                 # and a child whose bind failed must stay hidden, or it
                 # would be clickable with the PREVIOUS page's asset.
                 try:
-                    self.factory_func(preview, page_items[i])
+                    factory_func(preview, page_items[i])
                 except Exception as e:
                     log.opt(exception=True).error(f"Asset factory failed for item {i}: {e}")
                     preview.set_visible(False)
@@ -169,11 +184,11 @@ class DynamicFlowBox(Gtk.Box):
     def set_item_list(self, items: list) -> None:
         self.items = items
 
-    def set_factory(self, factory_func: callable) -> None:
+    def set_factory(self, factory_func: FactoryFunc) -> None:
         self.factory_func = factory_func
 
-    def set_sort_func(self, sort_func: callable) -> None:
+    def set_sort_func(self, sort_func: SortFunc) -> None:
         self.sort_func = sort_func
 
-    def set_filter_func(self, filter_func: callable) -> None:
+    def set_filter_func(self, filter_func: FilterFunc) -> None:
         self.filter_func = filter_func

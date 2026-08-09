@@ -37,6 +37,8 @@ from src.backend.DeckManagement.ImageHelpers import image2pixbuf
 from src.backend.DeckManagement.HelperMethods import recursive_hasattr
 from src.windows.ui_adapter import mark_dirty
 
+from typing import Any
+
 class KeyGrid(Gtk.Grid):
     """
     Child of PageSettingsPage
@@ -235,7 +237,9 @@ class KeyButton(Gtk.Frame):
     def on_button_accept(self, drop: Gtk.DropTarget, user_data):
         return True
 
-    def on_button_drop(self, drop: Gtk.DropTarget, value: Gdk.ContentProvider, x, y):
+    # GTK4 hands the "drop" signal the dropped VALUE, not the content
+    # provider -- here a KeyButton or a Gdk.FileList (see set_gtypes above).
+    def on_button_drop(self, drop: Gtk.DropTarget, value: Any, x, y):
         if isinstance(drop.get_value(), KeyButton):
             self.handle_key_button_drop(drop, value, x, y)
        
@@ -246,7 +250,7 @@ class KeyButton(Gtk.Frame):
             drop.reject()
             return False
         
-    def handle_key_button_drop(self, drop: Gtk.DropTarget, value: Gdk.ContentProvider, x, y):
+    def handle_key_button_drop(self, drop: Gtk.DropTarget, value: Any, x, y):
         active_page = self.key_grid.deck_controller.active_page
         if active_page is None:
             return
@@ -256,6 +260,8 @@ class KeyButton(Gtk.Frame):
 
         ## Fetch dropped key_dict
         dropped_button = drop.get_value()
+        if dropped_button is None:
+            return
         dropped_identifier = dropped_button.identifier
         dropped_key_dict = active_page.dict.get(dropped_identifier.input_type, {}).get(dropped_identifier.json_identifier, {})
 
@@ -280,9 +286,13 @@ class KeyButton(Gtk.Frame):
         active_page.save()
 
         # Reload sidebar
-        gl.app.main_win.sidebar.update()
+        if gl.app is not None:
+            gl.app.main_win.sidebar.update()
 
-    def handle_file_drop(self, drop: Gtk.DropTarget, value: Gdk.ContentProvider, x, y):
+    # `value` is the dropped Gdk.FileList, not the ContentProvider: on_button_drop
+    # only routes here once drop.get_value() is one (Gtk hands the "drop" signal
+    # the value, not the provider).
+    def handle_file_drop(self, drop: Gtk.DropTarget, value: Gdk.FileList, x, y):
         files = value.get_files()
         if len(files) > 1:
             drop.reject()
@@ -290,9 +300,12 @@ class KeyButton(Gtk.Frame):
         
         file = files[0]
         url = file.get_uri()
+        # A remote drop has a uri but no local path; the importer owns that
+        # case (it validates the extension and alerts the user) -- see
+        # tests/scenario_asset_reject_sentinel.py, so do NOT short-circuit it.
         path = file.get_path()
 
-        internal_path = gl.asset_manager_backend.add_custom_media_set_by_ui(url=url, path=path)
+        internal_path = gl.asset_manager_backend.add_custom_media_set_by_ui(url=url, path=path)  # type: ignore[arg-type]  # cross-MR: add_custom_media_set_by_ui declares path: str but its first branch is `if path is None and url is not None` (root cause: src/backend/AssetManagerBackend.py:328, MR 6/#226)
         # Anything that is not a path IS a refusal: the import used to answer
         # a rejected url with -1, which slipped past an `is None` test and
         # landed in the key's media path (#191).
@@ -315,6 +328,8 @@ class KeyButton(Gtk.Frame):
         self.key_grid.deck_controller.load_key(key_index, page=active_page)
 
         # Update icon selector if current key is selected
+        if gl.app is None:
+            return
         active_identifier = gl.app.main_win.sidebar.active_identifier
         if active_identifier == self.identifier:
             gl.app.main_win.sidebar.key_editor.icon_selector.load_for_identifier(self.identifier, self.get_key().state)
