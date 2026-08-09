@@ -198,6 +198,28 @@ class PluginBase(rpyc.Service):
                         f"(used) and {folder_dir} (ignored, left in place)"
                     )
             elif os.path.isfile(folder_settings):
+                # Visibility for the quarantine/legacy interplay (#152): if the
+                # id-path settings were quarantined, that file is GONE and this
+                # branch fires, migrating the old folder-name settings in --
+                # so a corruption silently resurrects pre-rename configuration
+                # instead of starting empty. Whether that is the right outcome
+                # is a #102-adjacent design question and deliberately NOT
+                # decided here; it must not happen invisibly in the meantime.
+                try:
+                    quarantined = sorted(
+                        e for e in os.listdir(id_dir)
+                        if e.startswith("settings.json.corrupt")
+                    )
+                except OSError:
+                    quarantined = []
+                if quarantined:
+                    log.warning(
+                        f"Plugin {plugin_id}: the id-path settings in {id_dir} were "
+                        f"quarantined ({', '.join(quarantined)}) and the legacy "
+                        f"folder-name settings in {folder_dir} are being migrated in "
+                        f"-- the plugin will come back with those OLDER settings, not "
+                        f"the quarantined ones"
+                    )
                 # Only the legacy folder-name path has settings -- migrate it
                 # to the id path so the plugin keeps its data.
                 try:
