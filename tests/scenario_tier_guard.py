@@ -1,5 +1,5 @@
 """
-Scenario (#69 tier-mixing guard): the unit tier (install_stub_globals /
+Scenario (the tier-mixing guard): the unit tier (install_stub_globals /
 make_stub_controller) and the integration tier (make_headless_controller /
 _install_integration_globals) install different, incompatible gl.* graphs.
 Mixing them in one process used to be silently order-dependent. Each installer

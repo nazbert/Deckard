@@ -1,5 +1,5 @@
 """
-Scenario: Page.save() must persist a consistent snapshot (issue #55).
+Scenario: Page.save() must persist a consistent snapshot.
 
 Three properties:
   A. save() while another thread mutates page.dict must not raise

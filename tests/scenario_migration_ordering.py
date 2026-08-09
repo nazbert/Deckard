@@ -1,5 +1,5 @@
 """
-Regression scenario for gl#31: version.parse("1.5.0-beta.5") <
+Regression scenario: version.parse("1.5.0-beta.5") <
 version.parse("1.5.0"), so MigrationManager runs Migrator_1_5_0_beta_5
 FIRST for a pre-beta.5 upgrader, nesting every key's labels/media under
 states.0 -- and Migrator_1_5_0.migrate_pages then walked the old FLAT key
@@ -150,7 +150,7 @@ def check_flat_shape_still_rewritten() -> None:
 def check_non_label_media_state_fields_untouched() -> None:
     """(c) The rename/normalize pass must touch ONLY labels/media -- the other
     state fields (actions, image-control-action, label-control-actions) must
-    survive verbatim. Also pins Fix 4 (MR !11 review): a key that is already
+    survive verbatim. Also pinned: a key that is already
     states-shaped AND carries a stray top-level media has that top-level media
     renamed too, instead of dangling."""
     _reset()

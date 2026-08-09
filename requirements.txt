@@ -19,7 +19,7 @@ CairoSVG==2.7.1           # src/backend/DeckManagement/HelperMethods.py (svg2png
 dasbus==1.7               # src/api.py (DBus API service)
 evdev==1.9.1              # src/backend/PageManagement/Page.py, StreamDeckUI importer; also used by OSPlugin/VolumeMixer
 fonttools==4.56.0         # src/backend/DeckManagement/Subclasses/KeyLabel.py (symbol-font detection)
-fuzzywuzzy==0.18.0        # ecosystem pin: VolumeMixer plugin (actions/Dial.py, actions/MuteKey.py) imports fuzzywuzzy and ships no requirements.txt of its own; app code migrated to rapidfuzz (#170)
+fuzzywuzzy==0.18.0        # ecosystem pin: VolumeMixer plugin (actions/Dial.py, actions/MuteKey.py) imports fuzzywuzzy and ships no requirements.txt of its own; app code has migrated to rapidfuzz
 Levenshtein==0.27.3       # ecosystem pin: fuzzywuzzy's own speedup backend (fuzzywuzzy/StringMatcher.py does `from Levenshtein import *`), and fuzzywuzzy itself stays only for VolumeMixer (see above); without it VolumeMixer's fuzzy matching falls back to the slow pure-Python matcher and fuzzywuzzy logs a warning on first use
 loguru==0.7.3             # logging, used throughout
 matplotlib==3.10.0        # ecosystem pin: OSPlugin imports matplotlib directly for its graph actions and ships no requirements.txt of its own; removal is blocked on an upstream OSPlugin release. The app's own font-rendering use of matplotlib is being replaced separately (perf/import-diet-fonts); the RSS win from that work lands regardless of this pin.

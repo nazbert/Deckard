@@ -1,4 +1,4 @@
-"""App._destroy_main_window must not abort on an unrealized window (#193).
+"""App._destroy_main_window must not abort on an unrealized window.
 
 GTK 4.22 segfaults on the dispose path of a window that was never realized.
 In background mode (-b) on_activate builds main_win but never presents it, so
@@ -56,7 +56,7 @@ def _run_in_app(body, app_id):
     """Drive `body(app)` from inside a running GtkApplication.
 
     The conditions matter: a bare Gtk.ApplicationWindow() with no application
-    and no main loop does NOT reproduce #193 (verified -- an earlier version
+    and no main loop does NOT reproduce the abort (verified -- an earlier version
     of this scenario passed with the guard removed, i.e. it was a false
     green). The abort needs a window bound to a running GtkApplication, which
     is what on_activate actually builds.

@@ -1,10 +1,10 @@
 """
-Scenario for issue #122 (stacked on !6 / issue #105): faulthandler.log must
+Scenario: faulthandler.log must
 not bypass log redaction.
 
 The hole: faulthandler writes its dumps at the C level straight to the
 stored fd -- by design, so they still land when the interpreter is wedged --
-which means the issue-#105 loguru patcher never sees them, and traceback
+which means the loguru redaction patcher never sees them, and traceback
 frame paths (File "/home/<user>/...") reach disk raw. A live Python-level
 intercept is impossible without breaking that wedged-interpreter guarantee.
 
@@ -19,7 +19,7 @@ Covers:
 
   1. first boot over a seeded raw dump (the "previous session crashed"
      case): home -> ~, username path segments -> <user>, URL credentials ->
-     ***@ (scrub() is reused wholesale, so all !6 rules apply), previous
+     ***@ (scrub() is reused wholesale, so all redaction rules apply), previous
      boot marker preserved, new marker appended AFTER the scrubbed content;
   2. fd attachment: faulthandler is enabled on the REWRITTEN file (inode
      check -- if the scrub ran after the append-open, the fd would point at
@@ -106,7 +106,7 @@ def main() -> None:
         "boot scrub changed the log's mode (tmp+replace must preserve it)"
     )
 
-    # Raw PII gone -- all !6 rule classes, since scrub() is reused wholesale.
+    # Raw PII gone -- all rule classes, since scrub() is reused wholesale.
     assert HOME not in content, "raw home path survived the boot scrub"
     assert "hunter2" not in content, "URL password survived the boot scrub"
     assert f"/run/media/{USER}/" not in content, "username path segment survived"

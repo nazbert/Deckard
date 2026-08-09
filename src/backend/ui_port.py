@@ -1,5 +1,5 @@
 """
-The engine -> UI port (#141).
+The engine -> UI port.
 
 The render engine (``src/backend/DeckManagement/``) must not know that a GTK
 window exists: no widget imports, no ``gl.app.main_win`` reads, no GTK state
@@ -36,7 +36,7 @@ class UIPort:
     thread, USB monitor, tick/action threads, GLib main loop) and MUST return
     without blocking on the GTK loop. Implementations marshal widget
     mutations with GLib.idle_add; run_on_main is banned inside implementations
-    (a wedged main loop must never stall the media writer). The #181
+    (a wedged main loop must never stall the media writer). The
     discipline -- convert on the calling thread, idle only the paint -- is the
     template for push_input_image.
     """

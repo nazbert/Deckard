@@ -27,7 +27,7 @@ Two fixture tiers:
     `StubDeckManager` standing in for `DeckManager` (the real one starts a
     `USBMonitor` + an `Xdp` portal probe -- unwanted/unavailable in a
     harness process). No UI is attached, so `src.backend.ui_port` serves the
-    NULL port (issue #141): every engine->UI call no-ops and
+    NULL port: every engine->UI call no-ops and
     `push_input_image` returns False, which is what makes the engine
     dirty-mark instead of painting. A scenario that wants to observe the
     positive direction installs its own recording port -- see
@@ -137,7 +137,7 @@ class StubDeckManager:
         self.connect_calls += 1
 
     def close_all(self) -> None:
-        """Delegates to the REAL close protocol (#69): both this stub and the
+        """Delegates to the REAL close protocol: both this stub and the
         real DeckManager.close_all now call close_all_controllers() in
         DeckManager.py, so scenarios that go through the stub exercise
         production code instead of a copy that could drift."""
@@ -146,7 +146,7 @@ class StubDeckManager:
         close_all_controllers(self.deck_controller)
 
 
-# Tier-mixing guard (#69): the unit and integration tiers install different,
+# Tier-mixing guard: the unit and integration tiers install different,
 # incompatible gl.* graphs (stub SettingsManager/DeckManager vs the real
 # SettingsManager + PageManagerBackend + SignalManager). Mixing them in one
 # process is silently order-dependent -- e.g. a real DeckController built after
@@ -162,9 +162,9 @@ def install_stub_globals(app_settings: dict = None) -> StubDeckManager:
     """Unit tier: installs a StubSettingsManager + StubDeckManager on `gl`.
     Returns the StubDeckManager for assertions (e.g. `.remove_calls`).
 
-    Refuses if the integration tier is already installed in this process
-    (#69 tier-mixing): the two gl.* graphs are incompatible, and mixing them
-    was previously silent and order-dependent."""
+    Refuses if the integration tier is already installed in this process --
+    the two gl.* graphs are incompatible, and mixing them was previously
+    silent and order-dependent."""
     global _stub_globals_installed
     if _integration_globals_installed:
         raise RuntimeError(
@@ -192,7 +192,7 @@ class StubBackground:
 
 class StubScreenSaver:
     """Only `showing` is dereferenced by the code paths the unit tier
-    drives -- DeckController.animations_gated()'s second term (issue #144),
+    drives -- DeckController.animations_gated()'s second term,
     bound to the real method below like the rest of the M2 protocol."""
 
     def __init__(self):
@@ -202,10 +202,10 @@ class StubScreenSaver:
 class _QuietInputState:
     """The attrs MediaPlayerThread._needs_key_ticks dereferences on an
     input's active state, all quiet (no videos, no scrolling labels) so the
-    live loop's animated-content branch stays off. Added for issue #1's
-    scenario, which runs the REAL run() loop over the stub tier -- before
+    live loop's animated-content branch stays off. Added for the
+    writer-survival scenario, which runs the REAL run() loop over the stub tier -- before
     that only perform_media_player_tasks() was driven directly, so this
-    path never executed on stubs (#69 stub-drift)."""
+    path never executed on stubs (stub-drift)."""
     key_video = None
     video = None
     background_video = None
@@ -268,7 +268,7 @@ class StubDeckController:
     The write-result/resume-repaint methods DeckController gained in M2
     (_on_write_result/_schedule_full_repaint/_run_pending_repaint/
     _reset_dedup_hashes) are NOT re-implemented here -- they're bound to the
-    REAL DeckController functions just below this class (#69 stub-drift:
+    REAL DeckController functions just below this class (stub-drift:
     scenario_error_swallow/resume_repaint/shutdown_clearclose used to test
     hand-mirrored copies; delegating makes drift impossible). The real
     methods only touch attributes/methods this stub already provides
@@ -322,7 +322,7 @@ class StubDeckController:
 
     # _reset_dedup_hashes / _schedule_full_repaint / _run_pending_repaint /
     # _on_write_result are bound to the REAL DeckController functions below
-    # this class (#69 stub-drift), not re-implemented here.
+    # this class (stub-drift), not re-implemented here.
 
     def update_all_inputs(self, gen=None) -> None:
         """Mirrors DeckController.update_all_inputs's key/touchscreen
@@ -350,7 +350,7 @@ _stub_methods_bound = False
 
 
 def _bind_real_deckcontroller_methods() -> None:
-    """#69 stub-drift: delegate the M2 write-result / resume-repaint protocol
+    """Stub-drift guard: delegate the M2 write-result / resume-repaint protocol
     to the REAL DeckController functions instead of hand-mirroring copies, so
     scenario_error_swallow / resume_repaint / shutdown_clearclose exercise
     production code and the copies can never silently drift.
@@ -527,7 +527,7 @@ def _install_integration_globals() -> None:
     dereference. Idempotent -- safe across multiple headless controllers in
     one process (see scenario_two_decks).
 
-    Refuses if the unit tier is already installed (#69 tier-mixing): the two
+    Refuses if the unit tier is already installed (tier-mixing): the two
     gl.* graphs are incompatible -- see install_stub_globals()."""
     global _integration_globals_installed
     if _integration_globals_installed:
@@ -625,14 +625,14 @@ def teardown(controller) -> None:
 
 
 # ===================================================================== #
-# Stub plugin manager + latch action (wipe-restore scenarios, issue #131)
+# Stub plugin manager + latch action (wipe-restore scenarios)
 # ===================================================================== #
 #
 # These drive the REAL DeckController/Page/ControllerKey/ActionCore state
 # lifecycle with a minimal action injected via a stub gl.plugin_manager --
 # the harness otherwise never installs a plugin_manager, so load_page over a
 # page whose keys carry actions needs this shim. Promoted out of the
-# graduated diag_wipe_contract.py (issue #70) so more than one scenario can
+# graduated diag_wipe_contract.py so more than one scenario can
 # reuse the pattern.
 
 STUB_ACTION_ID = "dev_test_LatchAction"
@@ -643,14 +643,14 @@ def make_latch_action_class():
 
     LatchAction is a *non-resetting deduping* action: it paints state 1 once
     (in on_ready/on_tick) and never calls set_media again. That is the worst
-    case the state-wipe robustness gap (issue #131) relies on the plugin to
+    case the state-wipe robustness gap relies on the plugin to
     cover -- a plugin whose on_update short-circuits without resetting never
     repaints after the framework wipes its key_image, so the key settles
     permanently blank.
 
     ActionCore is imported lazily so importing `fixtures` stays cheap for
     unit-tier scenarios that never touch this path. (It no longer pulls in
-    GTK -- since #141 its GenerativeUI import is TYPE_CHECKING-only plus one
+    GTK -- its GenerativeUI import is TYPE_CHECKING-only plus one
     function-local import, which is what lets an action page run under
     scenario_headless_engine_no_gtk's tripwire.) A fresh
     subclass per call keeps the injected `icon_path` closed over per test

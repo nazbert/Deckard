@@ -1,5 +1,5 @@
 """
-Scenario (#136): the six AssetManager chooser loaders must not construct GTK
+Scenario: the six AssetManager chooser loaders must not construct GTK
 widgets on their build worker threads.
 
 Every one of `IconPackChooser`, `IconChooserPage`, `WallpaperPackChooser`,
@@ -7,7 +7,7 @@ Every one of `IconPackChooser`, `IconChooserPage`, `WallpaperPackChooser`,
 `SDPlusBarWallpaperChooserPage` spawns a build thread in `__init__` and used to
 construct its `*FlowBox` (and, for the pack choosers, one `*PackPreview` per
 pack) on that thread. That is the documented off-main-GTK construction class
-(#10 / the CustomAssetChooser fix in scenario_offmain_ui_construction.py) --
+(see the CustomAssetChooser fix in scenario_offmain_ui_construction.py) --
 process-fatal, not a glitch. Data loading (pack discovery: disk I/O) stays on
 the worker; widget construction and append marshal via `run_on_main`.
 

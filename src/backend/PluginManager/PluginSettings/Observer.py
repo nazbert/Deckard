@@ -18,7 +18,7 @@ class Observer:
         # that never calls unsubscribe() on teardown doesn't keep this list
         # (and the objects it points at) growing forever.
         self.observers = CallbackRegistry()
-        # This notifier's own dispatch lane (issue #178): its subscribers are
+        # This notifier's own dispatch lane: its subscribers are
         # serialized on a thread of their own, so a blocking subscriber
         # stalls only this asset stream, not plugin events app-wide. `label`
         # is what the wedge watchdog names the lane by.

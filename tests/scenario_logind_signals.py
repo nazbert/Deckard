@@ -1,5 +1,5 @@
 """
-D-Bus mechanics of the gl#195 logind detector, driven through the `bus=`
+D-Bus mechanics of the logind detector, driven through the `bus=`
 ctor seam with a fake connection -- no real system bus is touched.
 
   1. XDG_SESSION_ID set   -> session path resolved via GetSession(id), and

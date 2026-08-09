@@ -1,16 +1,16 @@
 """
-Regression test (issue #156): a controller's UI child must be resolved by
+Regression test: a controller's UI child must be resolved by
 OBJECT IDENTITY, never by matching a fresh device serial read against the
 stack-child name.
 
 Field incident 2026-07-16/17: the child was registered under one serial
 string while later lookups re-read the serial from the device -- when the two
-disagreed (dual-instance USB contention at boot; or the whole window replaced,
-issue #158), the lookup missed forever, the key grid resolved to None forever,
+disagreed (dual-instance USB contention at boot; or the whole window
+replaced), the lookup missed forever, the key grid resolved to None forever,
 and the preview push silently dirty-marked instead of painting the visible
 grid: the app window only repainted on re-open.
 
-Since #141 the binding lives in `GtkUIAdapter` (bound by object at
+The binding lives in `GtkUIAdapter` (bound by object at
 DeckStack.add_page, unbound at remove_page) instead of in two cached fields on
 the controller -- so this pins the adapter. The guarded regression class is
 unchanged: the fakes deliberately carry NO name information at all, so any
@@ -156,7 +156,7 @@ def main() -> None:
         )
 
         # 4. Widget-tree replacement heals via re-binding (what add_page does
-        # on a rebuilt window, issue #158): the adapter must serve the NEW
+        # on a rebuilt window): the adapter must serve the NEW
         # grid, never the orphaned old one.
         new_grid = _fake_grid()
         new_child = _fake_child(controller, new_grid)
@@ -183,7 +183,7 @@ def main() -> None:
         )
         assert len(new_grid.buttons[0][0].images) == 1, "an unbound push still painted"
 
-        # 6. Hotplug DURING MainWindow construction (#141 review). The adapter
+        # 6. Hotplug DURING MainWindow construction. The adapter
         # is installed before the constructor but `_window` is only set by
         # attach_window() after it, so on_deck_added/on_deck_removed are
         # no-ops for the whole build. A deck the USB monitor registered in

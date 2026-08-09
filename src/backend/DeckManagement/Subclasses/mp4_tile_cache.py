@@ -195,7 +195,7 @@ class Mp4FrameCache:
         if not self._open_existing_cache():
             self._open_source()
 
-        # #142 census, accounting-only: these hold real image RAM but are
+        # Image-cache census, accounting-only: these hold real image RAM but are
         # never evictable -- dropping the one-frame memo would force a
         # re-decode every media tick, and the decoder buffers are not ours
         # to free. Registered last so budget_bytes() can never see a
@@ -214,7 +214,7 @@ class Mp4FrameCache:
     CAPTURE_OVERHEAD_BYTES = 2 * 1024 * 1024
 
     def budget_bytes(self) -> int:
-        """Estimated image RAM held by this reader (#142 census).
+        """Estimated image RAM held by this reader (image-cache census).
 
         LOCK-FREE ON PURPOSE. `self.lock` is held across whole decode, seek
         and build-frame operations, so taking it here would let one slow
@@ -342,7 +342,7 @@ class Mp4FrameCache:
         last good frame. The index is None when the payload's provenance is
         unknown (fallback frames, or a repeat served before any index was
         established), so a caller keying a cache off it can never file one
-        frame's pixels under another frame's identity (#163)."""
+        frame's pixels under another frame's identity."""
         if not self._complete:
             self._maybe_adopt_shared_cache()
         with self.lock:
@@ -755,7 +755,7 @@ def attach_promoted(source_path: str, out_size: tuple[int, int],
 
     Callers use this as the WARM path: the artifact's existence is itself
     the proof that the source was classified as buildable, so nothing has to
-    be re-derived from pixels to route (issue #201). That inference is only
+    be re-derived from pixels to route. That inference is only
     sound per `variant` -- see acquire_from_frames."""
     key = _registry_key(source_path, out_size, saturation, variant)
     path = _cache_file_path(key[0], out_size, saturation, variant)

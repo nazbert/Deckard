@@ -1,5 +1,5 @@
 """
-B-06 pin (gl#62): the icon / wallpaper / SD+ bar-wallpaper "update" path
+B-06 pin: the icon / wallpaper / SD+ bar-wallpaper "update" path
 used to delete the installed pack BEFORE the fallible download with no
 restore on failure -- a mid-download failure (429 throttle, offline
 warm-cache auto-update) left the pack permanently gone, its referencing
@@ -10,7 +10,7 @@ keys broken, and (because local_sha became None) it was never retried.
         self.uninstall_icon(icon_data)                # rmtree FIRST
         return self.download_repo(...)                # then the fallible fetch
 
-FIXED by the transactional-install redesign (gl#82): download_repo now
+FIXED by the transactional-install redesign: download_repo now
 stages, validates and VERSION-stamps the new tree before swapping it over
 the installed one, and the three pack installers no longer pre-delete
 (their uninstall_* calls are gone). This scenario is the regression pin:

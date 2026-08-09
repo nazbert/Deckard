@@ -1,5 +1,5 @@
 """
-Regression test for the scroll-label CPU fix (issues #115/#116).
+Regression test for the scroll-label CPU fix.
 
 Root cause: `_needs_key_ticks()` flipped the media loop from the idle
 throttle (2 FPS) to full 30 FPS whenever ANY label measured wider than its
@@ -7,9 +7,9 @@ key, and every tick then re-rendered every such key (full composite +
 draw.text with stroke), even when
 
   * rolling labels were DISABLED in the app settings (detection ignored the
-    setting entirely -- the #115 reporter's exact configuration),
+    setting entirely -- the reporter's exact configuration),
   * the measured overflow was a getbbox artifact ('\n' counted toward the
-    width -- #116), so the render path never actually scrolled, or
+    width), so the render path never actually scrolled, or
   * the scroll offset had not moved this tick (odd half-ticks, and the
     scroll_wait hold plateaus), so the composite was discarded by the hash
     de-dup after the cost was already paid.
@@ -125,7 +125,7 @@ def check_multiline_no_phantom_scroll() -> None:
 
         # Build a two-line label whose LINES fit but whose single-line
         # getbbox measurement (the old detector: '\n' counts toward the
-        # width) overflows -- the #116 phantom-scroll shape.
+        # width) overflows -- the phantom-scroll shape.
         from src.backend.DeckManagement.Subclasses.KeyLabel import KeyLabel
         probe = KeyLabel(controller_input=key, text="m", font_size=15)
         font = lm.get_composed_label("center").get_font()
@@ -138,7 +138,7 @@ def check_multiline_no_phantom_scroll() -> None:
         # refuses control characters (raqm_layout() fails on '\n'), while
         # BASIC still counts the newline glyph toward the width like the old
         # detector did -- and the harness must not depend on the host
-        # shaping stack (#184).
+        # shaping stack.
         basic_font = ImageFont.truetype(
             font.path, font.size, layout_engine=ImageFont.Layout.BASIC)
         _, _, single_line_w, _ = basic_font.getbbox(text)

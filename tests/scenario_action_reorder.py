@@ -1,6 +1,6 @@
 """
-Regression scenario for the action-reorder buttons (issue #111, upstream
-StreamController#577, 1.5.0-beta.14 regression).
+Regression scenario for the action-reorder buttons (an upstream
+1.5.0-beta.14 regression).
 
 Upstream dfcbd44a ("Chore: Respect adwaita accent color") turned
 AddActionButtonRow from an Adw.PreferencesRow subclass into a plain wrapper
@@ -60,7 +60,7 @@ from src.windows.mainWindow.elements.Sidebar.elements.ActionManager import (
 )
 
 # This scenario drives its checks at module top level (no main()); start the
-# watchdog here so a hang in the code under test fails fast (#69).
+# watchdog here so a hang in the code under test fails fast.
 fixtures.start_watchdog(60, label="scenario_action_reorder")
 
 FAILURES: list[str] = []

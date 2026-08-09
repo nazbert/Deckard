@@ -1,16 +1,16 @@
 """
-Detector selection for gl#195 (systemd-logind fallback).
+Detector selection for the systemd-logind fallback.
 
 LockScreenManager.setup() picks a DE-specific detector by matching the
-components of XDG_CURRENT_DESKTOP (issue #55: the value is a colon-separated
+components of XDG_CURRENT_DESKTOP (the value is a colon-separated
 list like "ubuntu:GNOME", so component matching, not whole-string equality).
-gl#195 appends an `else:` fallback -- the logind detector -- for
+The setup appends an `else:` fallback -- the logind detector -- for
 environments no DE branch matches (Niri, Sway, river, ...).
 
 Three selections, driven deterministically by calling setup() directly:
 
   1. XDG_CURRENT_DESKTOP=niri        -> LogindLockScreenDetector (new).
-  2. XDG_CURRENT_DESKTOP=ubuntu:GNOME -> GnomeLockScreenDetector (the #55
+  2. XDG_CURRENT_DESKTOP=ubuntu:GNOME -> GnomeLockScreenDetector (the
      component matching must survive the new else: branch).
   3. XDG_CURRENT_DESKTOP unset       -> LogindLockScreenDetector.
 

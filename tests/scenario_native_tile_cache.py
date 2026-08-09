@@ -1,5 +1,5 @@
 """
-Unit + integration scenario (gl#163): the frame-identity native tile cache.
+Unit + integration scenario: the frame-identity native tile cache.
 
 Background video playback used to pay, per frame and per key, a full RGBA
 tobytes()+hash plus (on an encode-memo miss) a fresh JPEG encode -- work that
@@ -233,7 +233,7 @@ def _settle(controller) -> None:
     load_background to a worker thread, and for a page with no background of
     its own that thread ends in `Background.set_video(None)`. A scenario that
     installs its own video before that lands has it evicted mid-build, and
-    the tile cache then never completes -- the exact shape #202 was reported
+    the tile cache then never completes -- the exact shape the flake was reported
     as, produced by CPU contention delaying that thread into the window.
     Every wait here is content-based, so a loaded runner is slower, not
     wrong."""
@@ -257,7 +257,7 @@ def _settle(controller) -> None:
     # and across batches, so the marker having RUN means everything queued
     # ahead of it has finished -- a real completion signal rather than a
     # sleep long enough to usually cover one (which is exactly the
-    # loaded-runner assumption #202 is about).
+    # loaded-runner assumption).
     ran = threading.Event()
     controller.media_player.add_task(ran.set)
     assert ran.wait(timeout=15), (
@@ -287,7 +287,7 @@ def _start_video(controller, path: str) -> "BackgroundVideo":
     # Playing straight through builds the tile cache; from then on frames
     # are picked by wall clock, which _show_frame drives deterministically.
     # Bounded by a deadline, not by a tick count: the old budget was sized
-    # for the decode count, so a starved runner read as a broken cache (#202).
+    # for the decode count, so a starved runner read as a broken cache.
     # A deadline alone would let the build get arbitrarily wasteful without
     # anyone noticing, so keep an efficiency bound too -- just a generous one,
     # since the count is what a starved runner cannot be judged on. A clean
@@ -343,7 +343,7 @@ def _show_frame(video, controller, index: int) -> None:
     Retried on a miss, on a budget: the rewind and the pick are two separate
     wall-clock reads, so a thread descheduled between them for longer than one
     frame period (67ms at this fixture's 15fps source) lands one frame late
-    (#202). The landing requirement stays exact, the retry only absorbs that
+    on a loaded runner. The landing requirement stays exact, the retry only absorbs that
     one deschedule, and the budget is what keeps 'retry until it lands' from
     standing in for 'lands where the timebase says'."""
     global _frame_retries
@@ -454,7 +454,7 @@ def check_background_swap_drops_stale_natives() -> None:
     try:
         # Before anything is read off the controller: load_all_inputs rebuilds
         # the inputs, and the page's own background load ends in
-        # set_video(None), which would evict the video installed below (#202).
+        # set_video(None), which would evict the video installed below.
         _settle(controller)
         keys = sorted(controller.inputs[Input.Key], key=lambda k: k.index)
         probe = keys[0]

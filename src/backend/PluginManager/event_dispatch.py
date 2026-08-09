@@ -26,9 +26,9 @@ observers to a background thread that keeps one loop alive across events.
 
 That thread used to be ONE app-wide worker, which made a blocking observer
 everybody's problem: the pulsectl-wedge precedent parked the single worker
-and every plugin's events stalled behind it, unbounded (issue #5). Dispatch
-is now split into lanes (issue #178). Each EventHolder and each
-plugin-settings Observer owns one; a lane is serviced by at most one thread
+and every plugin's events stalled behind it, unbounded. Dispatch is now
+split into lanes: each EventHolder and each plugin-settings Observer owns
+one; a lane is serviced by at most one thread
 of its own, spawned lazily on its first event and reaped again after
 _IDLE_REAP_S of idleness (closing its loop, so an idle holder costs neither a
 thread nor an epoll fd). A wedged observer therefore parks exactly one daemon
@@ -95,7 +95,7 @@ def _get_loop() -> asyncio.AbstractEventLoop:
         loop = asyncio.new_event_loop()
         # An observer's fire-and-forget create_task otherwise dies in
         # asyncio's default stderr handler when its exception is never
-        # retrieved (issue #80 §3.5). Imported lazily so this module stays
+        # retrieved. Imported lazily so this module stays
         # importable without src on sys.path ordering guarantees.
         from src.backend.log_hooks import asyncio_exception_handler
         loop.set_exception_handler(asyncio_exception_handler)
@@ -119,7 +119,7 @@ def _close_thread_loop() -> None:
         log.opt(exception=True).warning("failed to close an event dispatch lane's loop")
 
 
-# --- wedge watchdog (issue #5) ----------------------------------------------
+# --- wedge watchdog ---------------------------------------------------------
 # A wedged observer (real precedent: a pulsectl call blocking forever) no
 # longer stalls the app -- its lane contains it -- but its own event source
 # is dead until it returns, and its queue grows without bound meanwhile. The
@@ -195,7 +195,7 @@ def _monitor_loop() -> None:
             # (_monitor_started stays True for the process's life), so an
             # escaping exception used to end wedge reporting permanently and
             # near-silently -- and the watchdog is the only thing that makes
-            # a wedge attributable at all (issue #5). One bad tick must cost
+            # a wedge attributable at all. One bad tick must cost
             # one tick. Sources are real if rare: a lane whose _check_wedge
             # raises takes down reporting for every OTHER lane too, and on
             # Python < 3.14 WeakSet iteration can race a GC-driven removal
@@ -369,7 +369,7 @@ class Lane:
                     # A batch-level failure (loop creation, not the
                     # per-observer try/except below) used to vanish into the
                     # pool's discarded Future; a hand-rolled runner logs it
-                    # here instead, and keeps servicing the lane (issue #80).
+                    # here instead, and keeps servicing the lane.
                     log.opt(exception=True).error("event dispatch batch failed before observer dispatch")
         finally:
             self._retire()
@@ -401,8 +401,7 @@ class Lane:
             # _get_loop() (loop creation, or the lazy log_hooks import inside
             # it) must be INSIDE this try: it can raise, and the finally
             # below owns the backlog decrement for THIS batch -- a raise
-            # before the finally would leak the count permanently (issue #5
-            # review round 1).
+            # before the finally would leak the count permanently.
             loop = _get_loop()
             asyncio.set_event_loop(loop)
             for observer in observers:
@@ -421,7 +420,7 @@ class Lane:
                     where = f" in {label}" if label else ""
                     # opt(exception=True) attaches sys.exc_info() so the observer's
                     # full traceback lands in the log -- a bare one-liner here made
-                    # raising plugin callbacks invisible (issue #33).
+                    # raising plugin callbacks invisible.
                     log.opt(exception=True).error(f"Callback {name}{where} could not be called")
         finally:
             with _watch_lock:
@@ -474,9 +473,9 @@ def dispatch(observers: Iterable[Callable], args: tuple, kwargs: dict, label: st
     that's safe here).
 
     This is the lane for callers that do not own one. EventHolder and the
-    plugin-settings Observer each dispatch on a lane of their own (issue
-    #178), so a wedge there stays contained to that one event source;
-    everything queued here shares a lane and shares its fate. Plugins must
+    plugin-settings Observer each dispatch on a lane of their own, so a wedge
+    there stays contained to that one event source; everything queued here
+    shares a lane and shares its fate. Plugins must
     not block in observers either way -- the watchdog above names the culprit
     after 10s and warns when the backlog piles up.
     """

@@ -230,7 +230,7 @@ def create_global_objects():
     if os.getenv("WAYLAND_DISPLAY", False):
         gl.wayland = Wayland()
 
-    # Before LockScreenManager on purpose (issue #144): its __init__ starts
+    # Before LockScreenManager on purpose: its __init__ starts
     # setup() on a daemon thread immediately, so a lock arriving in the gap
     # would find gl.presence_monitor still None and be dropped.
     gl.presence_monitor = PresenceMonitor()
@@ -411,7 +411,7 @@ def quit_running():
         time.sleep(0.2)
 
 def hand_off_to_lock_owner(closing: bool = False):
-    """Called when single_instance.claim() lost the race (issue #155): another
+    """Called when single_instance.claim() lost the race: another
     launch is booting right now. Poll for it to finish; if it instead DIES
     mid-boot (releases the lock without ever owning the app name), take the
     lock over and continue booting -- RETURNING from this function means
@@ -722,7 +722,7 @@ def make_api_calls():
     
 @log.catch
 def main():
-    # Safety net first (issue #80): from here on, uncaught exceptions on the
+    # Safety net first: from here on, uncaught exceptions on the
     # main thread, GLib callbacks, plain threads and GC-time finalizers all
     # route through loguru. Until config_logger() below adds the file/ring
     # sinks these land on loguru's default stderr sink; afterwards the same
@@ -756,7 +756,7 @@ def main():
         # at the same moment (login autostart + session restore) both pass its
         # probe. The lock claim is the atomic tie-breaker, and it must happen
         # BEFORE reset_all_decks() so a losing launch never USB-resets decks
-        # the winner is initializing (issue #155, field incident 2026-07-16).
+        # the winner is initializing (field incident 2026-07-16).
         closing = gl.argparser.parse_args().close_running
         if not single_instance.claim(appinfo.APP_ID, wait_seconds=10.0 if closing else 0.0):
             hand_off_to_lock_owner(closing=closing)

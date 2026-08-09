@@ -42,7 +42,7 @@ class FlatpakPermissionRequestWindow(Gtk.ApplicationWindow):
 
         # Both optional so the generic request -- app.show_permissions(),
         # which knows no specific command or reason -- can construct the
-        # window at all; it used to raise TypeError (#190). build() feeds
+        # window at all; it used to raise TypeError. build() feeds
         # both straight into Gtk.Label, which rejects None, so the
         # description falls back to the same generic string the per-command
         # requests use when their caller passes none.

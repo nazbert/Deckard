@@ -1,5 +1,5 @@
 """
-Regression test (issue #155): the single-instance launch lock must be ATOMIC.
+Regression test: the single-instance launch lock must be ATOMIC.
 
 Field incident 2026-07-16: login autostart + KDE session restore launched two
 instances in the same second; both passed quit_running()'s check-then-continue

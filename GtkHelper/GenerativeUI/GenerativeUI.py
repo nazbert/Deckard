@@ -99,7 +99,7 @@ class GenerativeUI[T](ABC):
         # re-entrant access from recursing -- it sees _built and falls
         # through to reading self._widget, same as the eager-build era.
         #
-        # Known residual (issue #56, deliberate): between the flag flip here
+        # Known residual (deliberate): between the flag flip here
         # and the marshalled build landing on the main loop, a *different*
         # main-thread reader racing this worker sees _built=True with
         # self._widget still None and gets a transient None widget. Closing
@@ -277,7 +277,8 @@ class GenerativeUI[T](ABC):
             value (T): The value to set.
         """
         # Local annotation, not a cast: ActionCore.get_settings is declared
-        # `-> dir` (typo for dict) upstream of this file -- see #223.
+        # `-> dir` (typo for dict) upstream of this file, so its declared
+        # return type cannot be relied on here.
         settings: dict = self._action_core.get_settings()
 
         keys = self.resolve_var_name()

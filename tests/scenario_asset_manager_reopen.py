@@ -1,6 +1,6 @@
 """
 Regression test for "AssetManager window reuse leaks stale tab/drill-in and
-stale search filter on reopen" (gl#48).
+stale search filter on reopen".
 
 The AssetManager window is reused across opens (deliver_selection hides it,
 P4.2). Before the fix, show_for_path reset nothing: the custom-asset branch

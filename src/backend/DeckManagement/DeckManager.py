@@ -47,7 +47,7 @@ def close_all_controllers(controllers, join_timeout: float = 2.0) -> None:
     """The terminal close protocol (plan §2.4), extracted so the test harness's
     StubDeckManager can drive the SAME code the real DeckManager.close_all runs
     (previously the stub re-implemented it and no scenario exercised this
-    function, #69).
+    function).
 
     Submits the terminal ClearAndClose to every open controller first, THEN
     joins each media thread with a bound: the message drives the writer's own
@@ -84,7 +84,7 @@ def close_all_controllers(controllers, join_timeout: float = 2.0) -> None:
 
 
 class DeckManager:
-    # Backoff schedule for the startup re-enumeration (issue #106): ~60s
+    # Backoff schedule for the startup re-enumeration: ~60s
     # total window. Instance-overridable so the harness can shrink it.
     BOOT_RESCAN_DELAYS: tuple[float, ...] = (2.0, 3.0, 5.0, 10.0, 15.0, 25.0)
 
@@ -100,7 +100,7 @@ class DeckManager:
         # enumerations of the same freshly-arrived deck both pass the check
         # and register it twice.
         self._connect_decks_lock = threading.Lock()
-        # Startup re-enumeration (issue #106): armed by load_hardware_decks()
+        # Startup re-enumeration: armed by load_hardware_decks()
         # when the boot enumeration comes back empty (autostart racing USB
         # device init); stopped by deck arrival, exhausted backoff, or quit.
         self._boot_rescan_thread: threading.Thread | None = None
@@ -168,7 +168,7 @@ class DeckManager:
             # Autostart can race USB device init at boot: the deck isn't
             # enumerable yet, and the USB monitor only reports *future*
             # hotplug events -- without a re-scan the user must replug the
-            # deck and restart the app (issue #106). Only WARN when a
+            # deck and restart the app. Only WARN when a
             # hardware deck has been seen before (deck settings exist) --
             # on a machine that never had one this is normal, not alarming.
             message = "No decks enumerable at startup; starting bounded re-enumeration"
@@ -232,7 +232,7 @@ class DeckManager:
             # flakes its open (TransportError -1, the boot-storm failure)
             # would otherwise end the rescan with a success log while its
             # deck stays stranded -- with no future hotplug event, because
-            # the device is already present (#106 review round 1). Failed
+            # the device is already present. Failed
             # pickups simply leave the deck unloaded, so the next round's
             # connect_new_decks() retries it; the bounded schedule still
             # terminates if it never initializes.
@@ -263,7 +263,7 @@ class DeckManager:
         # startup. Shared by the startup path (load_hardware_deck) and the
         # hotplug/boot-rescan path (add_newly_connected_deck) -- the boot-storm
         # flake this retries is exactly as likely on a deck picked up mid-boot
-        # by the rescan as on one enumerated at startup (#106 review round 1).
+        # by the rescan as on one enumerated at startup.
         for attempt in range(1, attempts + 1):
             try:
                 if not deck.is_open():
@@ -414,8 +414,8 @@ class DeckManager:
     def add_newly_connected_deck(self, deck:StreamDeck, is_fake: bool = False):
         # Retrying init (not a bare DeckController construction): a deck
         # arriving mid-boot-storm via hotplug or the boot rescan hits the
-        # same flaky-open/serial-read window the startup path retries
-        # (#106 review round 1). On final failure this returns without
+        # same flaky-open/serial-read window the startup path retries.
+        # On final failure this returns without
         # registering, so a later rescan round (or replug) can try again.
         deck_controller = self._init_deck_controller_with_retry(deck)
         if deck_controller is None:

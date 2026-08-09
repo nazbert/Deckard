@@ -25,7 +25,7 @@ from gi.repository import GLib
 
 def _invoke_signal_callback(callback: Callable[..., Any], args: tuple[Any, ...],
                             kwargs: dict[str, Any]) -> bool:
-    """GLib.idle_add trampoline for trigger_signal (issue #56).
+    """GLib.idle_add trampoline for trigger_signal.
 
     Two GLib behaviors made the raw `GLib.idle_add(callback, *args,
     **kwargs)` form wrong for signal handlers: keyword arguments are
@@ -35,7 +35,7 @@ def _invoke_signal_callback(callback: Callable[..., Any], args: tuple[Any, ...],
     trampoline forwards both arg shapes intact and always returns False so
     the source fires exactly once, regardless of the handler's return
     value. A raising handler propagates into the main-loop dispatch, where
-    the central exception hooks (issue #80) log it; GLib removes the source
+    the central exception hooks log it; GLib removes the source
     in that case too.
     """
     callback(*args, **kwargs)

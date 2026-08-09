@@ -11,7 +11,7 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-Shared plumbing for the AssetManager's pack/asset chooser pages (#136).
+Shared plumbing for the AssetManager's pack/asset chooser pages.
 
 Icon packs, wallpaper packs and SD+ bar wallpaper packs each shipped a
 "pick a pack" page and a "pick an asset from that pack" page -- six classes
@@ -28,8 +28,8 @@ Two bases live here:
 Both build the same way: the DATA (pack discovery, disk I/O) is gathered on
 the build worker thread, and every widget is constructed and attached inside
 one ``run_on_main`` callback. GTK4 is main-thread-only; constructing these
-trees on the worker was the off-main-GTK crash class (#136, same class as
-#10). ``tests/scenario_asset_chooser_offmain.py`` is the tripwire.
+trees on the worker was the off-main-GTK crash class.
+``tests/scenario_asset_chooser_offmain.py`` is the tripwire.
 
 The search helpers at the top are deliberately free of GTK and of ``self`` so
 they can be pinned headless (``tests/scenario_asset_chooser_logic.py``).
@@ -115,7 +115,7 @@ class _ChooserBuildPage(ChooserPage):
     anything stalls the loop. Unhandled, `@log.catch` swallowed that raise
     and left the page permanently stuck: spinner spinning forever,
     build_finished never set, any deferred show_for_path stranded, no retry
-    and no message (#136 review M2).
+    and no message.
     """
 
     build_finished = False
@@ -214,13 +214,13 @@ class GenericPackChooserPage(_ChooserBuildPage):
         # so it is safe here -- and it MUST be here: at ~17 ms per store
         # thumbnail (over 100 ms for an oversized one) decoding the whole grid
         # inside the main-loop callback froze the window for hundreds of
-        # milliseconds to tens of seconds (#136 review M1).
+        # milliseconds to tens of seconds.
         packs = list(self.get_packs().values())
         thumbnails = [Preview.decode_pixbuf(self.get_pack_thumbnail_path(pack))
                       for pack in packs]
 
         try:
-            # Widgets are GTK, so they are built on the main loop (#136).
+            # Widgets are GTK, so they are built on the main loop.
             run_on_main(self._build_ui)
 
             # One batch per main-loop callback: constructing every preview in

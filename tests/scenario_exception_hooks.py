@@ -1,5 +1,5 @@
 """
-Scenario for issue #80 (plan §6, posted on the GitLab issue): the central
+Scenario for the central
 exception hooks in src/backend/log_hooks.py.
 
 Covers, in one subprocess-isolated process (process-global hooks are exactly
@@ -18,11 +18,11 @@ why run_all.py's per-scenario interpreter matters):
      the original traceback to sys.__stderr__ and the process survives;
   7. faulthandler redirection -- a SIGQUIT in a child process appends a
      boot-marked all-thread dump to <dir>/faulthandler.log;
-  8. SC_NO_ERROR_HOOKS (issue #92) -- in a flagged child process, install
+  8. SC_NO_ERROR_HOOKS -- in a flagged child process, install
      leaves the three interpreter hooks stock, redirect_faulthandler writes
      no file, and the redaction patcher still rides along (the flag is a
      hook switch, not a privacy switch);
-  9. per-site rate limiting (issue #91) -- a 100x storm from one site yields
+  9. per-site rate limiting -- a 100x storm from one site yields
      one record plus a suppressed-count summary on the next one; two
      distinct sites never mask each other; non-repeating failures are
      untouched (no throttling, no summary noise); the state dict stays
@@ -30,9 +30,9 @@ why run_all.py's per-scenario interpreter matters):
      (eviction by last hit, not by window start), a pending count whose entry
      is evicted is reported rather than discarded, and the TERMINAL shape of
      sys.excepthook bypasses suppression while its callback shape does not;
- 10. atexit flush (issue #91) -- a storm that stops still reports its last
+ 10. atexit flush -- a storm that stops still reports its last
      window's count, in a child process that exits after storming;
- 11. lock re-entrancy (issue #91) -- a raising __del__ collected INSIDE the
+ 11. lock re-entrancy -- a raising __del__ collected INSIDE the
      guarded region re-enters the guard on the same thread and must not
      deadlock, which is the only thing pinning the RLock.
 
@@ -198,7 +198,7 @@ def main() -> None:
         f"SIGQUIT must produce an all-thread dump, got: {dump[:200]!r}"
     )
 
-    # 8. SC_NO_ERROR_HOOKS=1 (issue #92): the flag is read at import, and the
+    # 8. SC_NO_ERROR_HOOKS=1: the flag is read at import, and the
     # hooks are process-global, so this has to be a child process.
     flagged_dir = os.path.join(fixtures.DATA_DIR, "logs_flagged")
     flagged_code = (
@@ -243,7 +243,7 @@ def main() -> None:
 
     # ...and ONLY "1" disables them. "false"/"off"/"0" is what an operator
     # writes to keep the safety net ON; a truthiness test would read those as
-    # "on" and silently drop the whole of #80 on that run.
+    # "on" and silently drop the whole safety net on that run.
     off_code = (
         "import sys\n"
         f"sys.path.insert(0, {REPO_ROOT!r})\n"
@@ -264,7 +264,7 @@ def main() -> None:
         )
         assert "hooks-on" in off.stdout
 
-    # 9. per-site rate limiting (issue #91). Every leg above fires each site
+    # 9. per-site rate limiting. Every leg above fires each site
     # exactly once, which is why they are unaffected by the guard.
     original_window = log_hooks.RATE_LIMIT_WINDOW_S
     log_hooks._rate_state.clear()

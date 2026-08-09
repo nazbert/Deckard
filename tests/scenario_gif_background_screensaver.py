@@ -1,5 +1,5 @@
 """
-Integration-tier scenario (issue #196, phase 2): a GIF screensaver
+Integration-tier scenario (phase 2): a GIF screensaver
 background exercises the same GifBackground branch as a page background.
 
 ScreenSaver.show()/set_media_path() reach into

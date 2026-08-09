@@ -27,7 +27,7 @@ STALE_TMP_MAX_AGE = 60 * 60
 
 # How many ``.corrupt*`` sidecars to keep per primary file. They exist for
 # post-mortem, not as a version history: a file that keeps getting corrupted
-# would otherwise fill the config dir forever (issue #152), and three
+# would otherwise fill the config dir forever, and three
 # generations is already more than anyone reads.
 CORRUPT_SIDECAR_KEEP = 3
 

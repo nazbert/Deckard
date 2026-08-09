@@ -1,5 +1,5 @@
 """
-Wiring scenario for issue #169: SIGTERM/SIGHUP must run App.on_quit's
+Wiring scenario: SIGTERM/SIGHUP must run App.on_quit's
 teardown instead of killing the process outright.
 
 Plugin backends are spawned with start_new_session=True, so they lead their
@@ -49,7 +49,7 @@ already covered by scenario_plugin_backend_teardown.py; the end-to-end
      plain signal.signal handler -- still routes TERM/HUP to the teardown.
      Forced explicitly, since this machine's GLib does have the source
      (see the INFO lines the run prints).
-  9. on_quit drains StoreCache's deferred index (issue #180) -- and does it
+  9. on_quit drains StoreCache's deferred index -- and does it
      only AFTER the force_quit watchdog is armed. This is the sole live
      drain in the real app: on_quit ends in os._exit(0), which skips the
      module's atexit hook, and the debounce timer is a daemon. It has to sit
@@ -341,7 +341,7 @@ def check_quit_tolerates_missing_main_win() -> None:
         raise _ReachedAppQuit()
 
     # No main_win: quit before on_activate. The window teardown is a real
-    # method now (App._destroy_main_window, #193), so bind the real one to
+    # method now (App._destroy_main_window), so bind the real one to
     # the stub rather than stubbing it out -- its missing-attribute branch is
     # exactly what this check exercises.
     stub = Obj(_quit_started=False)
@@ -394,8 +394,8 @@ def check_quit_drains_the_store_cache_index() -> None:
     """on_quit must flush the deferred store index, behind the watchdog.
 
     Drives the real on_quit unbound on a stub (the idiom the checks above
-    use) far enough to cover the #180 block, then cuts it short at the log-
-    sink loop with a sentinel. Two failure modes are pinned:
+    use) far enough to cover the store-cache drain, then cuts it short at the
+    log-sink loop with a sentinel. Two failure modes are pinned:
 
       * no flush at all -- the deferred read-clock renewals of the last store
         browse are lost on every quit, because os._exit(0) skips the atexit

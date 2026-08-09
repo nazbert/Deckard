@@ -53,7 +53,7 @@ if TYPE_CHECKING:
     from gi.repository import Adw
     # GenerativeUI imports Gtk at module scope; ActionCore is in the engine's
     # import closure (DeckController, Page), so it stays a type-only name here
-    # and is imported lazily for the one runtime isinstance below (#141).
+    # and is imported lazily for the one runtime isinstance below.
     from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
     from src.backend.PluginManager.PluginBase import PluginBase
     from src.backend.DeckManagement.DeckController import DeckController, ControllerKey
@@ -162,7 +162,7 @@ class ActionCore(rpyc.Service):
         Threading contract: this hook runs OFF the GTK main thread (page
         loads happen on worker/USB/store threads). Do not construct or touch
         raw GTK objects here -- that is the process-fatal off-main-GTK crash
-        class (issue #35). Use the GenerativeUI layer (which marshals itself
+        class. Use the GenerativeUI layer (which marshals itself
         to the main loop) or wrap unavoidable GTK work in
         GtkHelper.GtkHelper.run_on_main.
         """
@@ -173,7 +173,7 @@ class ActionCore(rpyc.Service):
         This method gets called when the app wants the action to redraw itself (image, labels, etc.).
         """
         # The compat call below re-runs the whole on_ready body, so it only
-        # fires once a ready has actually COMPLETED (#179). A caller reaching
+        # fires once a ready has actually COMPLETED. A caller reaching
         # here while the initial on_ready is still in flight used to run a
         # second on_ready body concurrently with it -- the duplicate-ready
         # class (plugins allocate, subscribe and spawn backend processes in
@@ -228,8 +228,8 @@ class ActionCore(rpyc.Service):
         # object RE-RESOLVED inside the lock: a concurrent page (re)load
         # replaces every state object (create_n_states), and writing to the
         # one resolved above would strand this media on a destroyed state --
-        # the key then sat blank until the action happened to repaint (issue
-        # #131). The image decode above deliberately stays outside the lock.
+        # the key then sat blank until the action happened to repaint.
+        # The image decode above deliberately stays outside the lock.
         with controller_input._states_lock:
             input_state = controller_input.states.get(self.state)
             if input_state is None:
@@ -303,7 +303,7 @@ class ActionCore(rpyc.Service):
         # Record this action as the owner of the media it just set, so
         # ControllerKey.load_from_input_dict can restore it across the
         # create_n_states state wipe iff this exact action object still
-        # drives the key (issue #131). Key states only -- dial states don't
+        # drives the key. Key states only -- dial states don't
         # carry the attribute and don't participate in the restore.
         if hasattr(input_state, "media_owner_action"):
             input_state.media_owner_action = self
@@ -496,7 +496,7 @@ class ActionCore(rpyc.Service):
 
     def get_own_key(self) -> "ControllerKey | None":
         # The old body read `deck_controller.keys` / `self.key_index`,
-        # neither of which has ever existed on these classes (issue #56).
+        # neither of which has ever existed on these classes.
         # Kept (rather than deleted) because it is upstream plugin-API
         # surface; resolve through the identifier like get_input() does.
         # Returns None for non-key actions.
@@ -716,7 +716,7 @@ class ActionCore(rpyc.Service):
         self.start_server()
         port = self.server.port
 
-        # Validates the paths (#56) and yields argv, not a shell string (#172).
+        # Validates the paths and yields argv, not a shell string.
         command = build_backend_launch_command(backend_path, venv_path, port, open_in_terminal)
 
         log.info(f"Launching backend: {command}")
@@ -809,7 +809,7 @@ class ActionCore(rpyc.Service):
         worker thread: closing an rpyc server/connection can block on an
         in-flight call that needs the main loop, which would deadlock the UI.
 
-        Queued-callback contract (issue #56): clean_up() does NOT flush or
+        Queued-callback contract: clean_up() does NOT flush or
         cancel work already queued elsewhere with a strong reference to this
         action -- an event callback (on_key_down/on_tick/...) submitted to
         the deck's action executor, or a GLib idle, dispatched just before

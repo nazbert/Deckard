@@ -1,13 +1,13 @@
 """
 Scenario: reload_similar_pages(identifier=None) must reload each sibling
-controller's OWN Page object, not the caller's (issue #55 -- Page.py passed
+controller's OWN Page object, not the caller's (Page.py passed
 `self` to the other controller's load_page, loading THIS controller's Page
 onto other decks: cross-deck page bleed).
 
 Also: get_pages_with_same_json must snapshot controller.active_page once. It
 is cleared to None from another thread while a controller (dis)connects, so
 re-reading the field per check raced a non-None guard against a None deref of
-.json_path -- the same class as update_input's guard (issue #55).
+.json_path -- the same class as update_input's guard.
 """
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
 

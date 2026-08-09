@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 # One save lock per page json path, shared across every Page object for that
 # path: each controller showing the same page holds its OWN Page instance, so
 # a per-object lock/semaphore can never order two controllers' saves of the
-# same file (issue #55). Grows one entry per distinct page path and never
+# same file. Grows one entry per distinct page path and never
 # prunes -- bounded by the user's page count (tens), so no eviction is needed.
 _save_locks: dict[str, threading.Lock] = {}
 _save_locks_guard = threading.Lock()
@@ -88,7 +88,7 @@ class Page:
         # runs outside _load_page_lock (deliberately -- it can block on a
         # run_on_main marshal), so two concurrent load_page(samePage) calls
         # could both read the flag as False and submit a second concurrent
-        # on_ready (issue #127).
+        # on_ready.
         self._ready_claim_lock = threading.Lock()
 
         self.load(load_from_file=True) #TODO: Later we want to limit the load of action objects to the available inputs
@@ -446,7 +446,7 @@ class Page:
                         # ActionCore objects -- `action.id` doesn't exist.
                         # `or ""` (not a .get default): an explicit
                         # `"id": null` in the json returns None past the
-                        # default (issue #56).
+                        # default.
                         if (action.get("id") or "").split("::")[0] == plugin_id
                     ]
                     for i in reversed(to_remove):
@@ -553,7 +553,7 @@ class Page:
         
         # NB: the loop variable must not be named `action_dict` -- it used to
         # shadow the parameter, turning the assignment below into a no-op
-        # self-assignment (issue #55).
+        # self-assignment.
         ident = action_object.input_ident
         for state in ident.get_states(self):
             actions = ident.get_actions(self, state)
@@ -607,10 +607,10 @@ class Page:
     @log.catch
     def initialize_actions(self):
         for action in self.get_all_actions():
-            # Atomic claim (issue #127): the bare check-then-set let two
+            # Atomic claim: the bare check-then-set let two
             # concurrent load_page(samePage) calls both see False and both
             # submit ready callbacks -- a second concurrent on_ready
-            # (duplicate backend processes, the class #34 closed for the
+            # (duplicate backend processes, the same class already closed for the
             # on_update path). Only the claim is under the lock; the loads
             # and the pool submit stay outside it.
             with self._ready_claim_lock:
@@ -670,7 +670,7 @@ class Page:
             # Snapshot active_page once: it is set to None from another thread
             # while a controller (dis)connects/closes, so re-reading the field
             # per check raced a non-None guard against a None deref of
-            # .json_path (same class as update_input's guard, issue #55).
+            # .json_path (same class as update_input's guard).
             active_page = controller.active_page
             if active_page is None:
                 continue
@@ -693,7 +693,7 @@ class Page:
             else:
                 # Each controller gets its OWN Page object -- passing `self`
                 # here loaded THIS controller's Page onto the others
-                # (cross-deck page bleed, issue #55).
+                # (cross-deck page bleed).
                 page.deck_controller.load_page(page)
 
     def get_action_comment(self, index: int, state: int, identifier: InputIdentifier) -> str:
@@ -1056,7 +1056,7 @@ class Page:
             # Only where THIS page is actually showing (the filter
             # update_input uses): without it, editing one page's FPS row
             # rebased the playing video timeline on another deck showing a
-            # different page (issue #14).
+            # different page.
             controller = getattr(input_state, "deck_controller", None)
             active_page = getattr(controller, "active_page", None)
             if active_page is None or active_page.json_path != self.json_path:

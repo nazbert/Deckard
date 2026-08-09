@@ -1,5 +1,5 @@
 """
-Coverage for the shared HTTP client (gl#168), exercised against a LOCAL
+Coverage for the shared HTTP client, exercised against a LOCAL
 http.server -- no internet, no GitHub.
 
 src/backend/http_client.py replaced N throwaway `requests.get()` calls with

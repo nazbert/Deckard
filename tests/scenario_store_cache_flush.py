@@ -1,5 +1,5 @@
 """
-Regression test for issue #180 -- StoreCache rewrote the WHOLE files.json
+Regression test -- StoreCache rewrote the WHOLE files.json
 index (json.dump of every entry, fsync'd, on the calling thread) on every
 cache READ, just to renew the entry's last-use clock. A warm store browse
 that opened N catalog files performed N full index dumps.
@@ -102,7 +102,7 @@ def _on_disk(cache: StoreCache) -> dict:
 
 def test_read_burst_writes_the_index_once() -> None:
     """(a) N reads => ZERO immediate index writes, then exactly one flush.
-    Before #180 this was N writes, all synchronous on the caller."""
+    Before the deferred index this was N writes, all synchronous on the caller."""
     cache = _new_cache()
     names = [f"Catalog{i}.json" for i in range(BURST)]
     _seed(cache, names)

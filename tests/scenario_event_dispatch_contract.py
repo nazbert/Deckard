@@ -1,9 +1,9 @@
 """
-Scenario (issue #66): the event-dispatch contract gaps not already pinned by
+Scenario: the event-dispatch contract gaps not already pinned by
 scenario_plugin_events.py / scenario_onready_ordering.py / scenario_dispatch_
 watchdog.py.
 
-Those three (from !13, !31, !39) already cover: a raising observer logging a
+Those three already cover: a raising observer logging a
 traceback and the batch continuing past it; the event-id-prepend contract
 (load-bearing for AudioControl); the wedged-observer starvation mode (B-05);
 and on_ready ordering / exactly-once. This file adds the two genuine

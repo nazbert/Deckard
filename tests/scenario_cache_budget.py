@@ -1,5 +1,5 @@
 """
-Unit scenario (gl#142): the process-wide image-cache budget.
+Unit scenario: the process-wide image-cache budget.
 
 The per-deck native-image caches are byte-capped individually, but nothing
 capped their SUM: total image-cache RAM scaled with deck count, and a cold

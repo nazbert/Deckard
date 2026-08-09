@@ -1,5 +1,5 @@
 """
-Atomic single-instance launch lock (issue #155).
+Atomic single-instance launch lock.
 
 main.py's quit_running() handles the visible case: a fully-booted instance
 owns the app bus name, so a new launch forwards "reopen" and exits. What it

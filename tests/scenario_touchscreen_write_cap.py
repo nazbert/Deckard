@@ -1,5 +1,5 @@
 """
-Regression test for issue #52 (item: uncapped touchscreen writes).
+Regression test for uncapped touchscreen writes.
 
 _video_write_hz used to gate ONLY background.video repaints. Dial-state
 videos and scrolling labels re-render the shared touchscreen from the

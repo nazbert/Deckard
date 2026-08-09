@@ -1,7 +1,7 @@
 """
-Scenario (issue #70 graduation, half 2 of 2): the no-blank contract.
+Scenario (half 2 of 2): the no-blank contract.
 
-Pins the FIXED wipe-without-restore bug (issue #131) as an always-on
+Pins the FIXED wipe-without-restore bug as an always-on
 regression net (formerly in EXPECTED_FAIL_UNTIL_M1 in run_all.py while the
 bug was open).
 
@@ -23,7 +23,7 @@ inherently timing-dependent. The per-trial blank rate on current code is ~0.93
 (P(no blank in TRIALS) ~= 0.07**TRIALS); the assertion fires on the first
 blank. Trials are bounded and each uses a wait_until seam (not a fixed sleep).
 
-The fix (issue #131): stash-and-restore gated on action identity in
+The fix: stash-and-restore gated on action identity in
 load_from_input_dict -- set_media stamps the painting action on the state
 (media_owner_action); the load detaches owned media before create_n_states
 and restores it iff that exact action object still drives the recreated
@@ -80,7 +80,7 @@ def main() -> None:
             if not painted:
                 blanks.append(i)
 
-        # The pinned assertion: with the #131 identity-gated stash-and-restore
+        # The pinned assertion: with the identity-gated stash-and-restore
         # in place, no trial may settle blank.
         assert not blanks, (
             f"the action-control key settled BLANK on {len(blanks)}/{TRIALS} "

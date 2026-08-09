@@ -1,6 +1,5 @@
 """
-Regression test for issue #54 (StoreBackend.get_remote_file /
-get_web_image):
+Regression test for StoreBackend.get_remote_file / get_web_image:
 
   1. get_remote_file never forwarded `data_type` to the StoreCache calls,
      so BINARY fetches (data_type="content", e.g. thumbnails) were keyed

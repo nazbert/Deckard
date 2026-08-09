@@ -1,5 +1,5 @@
 """
-Quiescence / presence signal (issue #144).
+Quiescence / presence signal.
 
 One process-wide object (`gl.presence_monitor`) that answers a single
 question for every deck's media loop: *is the user away?* When it says yes,
@@ -345,8 +345,8 @@ class LogindIdleDetector:
     """Feeds `PresenceMonitor.on_idle_hint_changed()` from logind's session
     `IdleHint`/`IdleSinceHint` properties.
 
-    Deliberately shaped like `LockScreenManager/Detectors/Logind.py` (issue
-    #195) -- same system-bus `Gio` connection, same `resolve_session_path()`
+    Deliberately shaped like `LockScreenManager/Detectors/Logind.py` -- same
+    system-bus `Gio` connection, same `resolve_session_path()`
     (`GetSession($XDG_SESSION_ID)` with a `GetSessionByPID` fallback), same
     `bus=` test seam, same inert-on-`GLib.Error` posture -- so the two can be
     deduplicated onto one shared resolver once both have landed.
@@ -433,7 +433,7 @@ class LogindIdleDetector:
             # answering "Caller does not belong to any known session" where a
             # numeric pid answers "PID <n> does not belong to any known
             # session"; it is not rejected as an invalid argument. Same shape
-            # the #195 logind lock detector wants, for the shared resolver the
+            # the logind lock detector wants, for the shared resolver the
             # two are meant to be deduplicated onto.
             method = "GetSessionByPID"
             args = GLib.Variant("(u)", (0,))

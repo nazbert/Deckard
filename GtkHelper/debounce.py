@@ -1,7 +1,7 @@
 """
 Trailing debounce for GTK-side handlers whose follow-up work is expensive.
 
-Motivating case (#78): the four Settings font rows each spawned their own
+Motivating case: the four Settings font rows each spawned their own
 ``reload-all-pages`` thread straight out of ``on_set``, so changing family,
 size and colour back to back ran up to three concurrent full page reloads
 (a colour-picker drag alone can fire several). One shared debouncer turns a
@@ -64,8 +64,8 @@ class TrailingDebouncer:
     The callback is DELAYED, NEVER ELIDED. Callers rely on "some change
     happened -> the callback definitely runs, exactly once"; there is
     deliberately no equality check, no dirty flag and no early return that
-    could swallow a trigger, because the callers' correctness (see the #78
-    note in ``FontPageGroup``) depends on the work always happening. A
+    could swallow a trigger, because the callers' correctness (see the note
+    in ``FontPageGroup``) depends on the work always happening. A
     future simplification may change *when* the callback fires; it must not
     make any trigger able to end with no fire at all.
     """

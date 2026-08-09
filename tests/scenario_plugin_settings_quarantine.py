@@ -1,10 +1,10 @@
 """
-Regression test for issue #152: corrupt-JSON quarantine on the PLUGIN file
+Regression test: corrupt-JSON quarantine on the PLUGIN file
 set (settings.json / manifest.json / about.json), plus the ``.corrupt``
 sidecar retention policy.
 
-Issue #32 gave pages and app/page settings quarantine-on-corrupt-read; the
-plugin files were explicitly deferred. Until #152 they fell back to ``{}``
+Pages and app/page settings already had quarantine-on-corrupt-read; the
+plugin files were explicitly deferred and fell back to ``{}``
 silently and left the bad file in place, so a corrupt plugin settings file
 was indistinguishable from "this plugin has no settings" -- and the next
 set_settings() overwrote the only surviving copy of the user's config.

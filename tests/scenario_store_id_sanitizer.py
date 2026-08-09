@@ -1,5 +1,5 @@
 """
-Regression test for gl#27 -- manifest-controlled asset ids reaching
+Regression test -- manifest-controlled asset ids reaching
 rmtree/install path joins, and shell=True install-script invocation.
 
 plugin_id/icon_id/wallpaper_id come from a REMOTE manifest.json. Before the
@@ -254,7 +254,7 @@ def test_clone_repo_rejects_injection_and_never_shells() -> None:
     # 3) A CLEAN branch reaches git only as an argv list (no shell). git is
     #    fully stubbed above (fake_subp_call), so this needs no real binary
     #    and asserts the exact argv shape. `git checkout` is the token we
-    #    care about (checkout, not switch, so tag refs work -- #197);
+    #    care about (checkout, not switch, so tag refs work);
     #    shutil.which("git") inside clone_repo is monkeypatched so the
     #    "git not installed" 404 branch can't fire on a git-less box.
     calls.clear()
@@ -271,7 +271,7 @@ def test_clone_repo_rejects_injection_and_never_shells() -> None:
     checkout_calls = [c for c in calls if len(c) >= 4 and c[3] == "checkout"]
     assert checkout_calls, f"expected an argv 'git checkout' call, got {calls}"
     argv = checkout_calls[0]
-    # Since gl#82 the clone is prepared in a staging dir under cache/ and
+    # The clone is prepared in a staging dir under cache/ and
     # swapped into local_path afterwards -- the -C target is the staging
     # tree. The property under test is unchanged: argv list, no shell.
     assert argv[:2] == ["git", "-C"] and argv[3] == "checkout", f"unexpected argv {argv!r}"

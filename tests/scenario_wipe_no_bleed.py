@@ -1,11 +1,11 @@
 """
-Scenario (issue #70 graduation, half 1 of 2): the no-bleed contract.
+Scenario (half 1 of 2): the no-bleed contract.
 
 Switching to a page whose key has NO action must CLEAR that slot -- the
 framework must not leave the previous page's action-owned image on a key that
 no action owns on the new page.
 
-This is the currently-CORRECT half of the wipe-restore behavior (issue #131):
+This is the currently-CORRECT half of the wipe-restore behavior:
 a cross-page load builds a *different* action object, so any future
 stash-and-restore fix (gated on action identity) will not restore into it ->
 no bleed. Committed as an always-on regression net so that fix can't regress
@@ -14,7 +14,7 @@ into bleeding the previous page's image.
 The source-page image is established via a DETERMINISTIC SEAM -- once the page
 load has settled (on_ready_finished), a direct set_media() on the now-stable
 state reliably paints the key. This avoids the racy on_ready-paint-vs-state-
-recreation timing (see scenario_wipe_restore.py / issue #131) so that the
+recreation timing (see scenario_wipe_restore.py) so that the
 no-bleed check is a real "image present -> must clear" transition and never
 vacuous (an image that was never established would make "no bleed" trivially
 true).

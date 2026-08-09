@@ -201,7 +201,7 @@ class WatchForActiveWindowChange(threading.Thread):
             # Catch per iteration (like the Hyprland integration's socket
             # listener): one failing poll or page-switch must not end this
             # thread -- an exception escaping to @log.catch would kill
-            # window-based page switching until app restart (#44).
+            # window-based page switching until app restart.
             try:
                 new_active_window = self.x11.get_active_window()
                 if new_active_window is None:

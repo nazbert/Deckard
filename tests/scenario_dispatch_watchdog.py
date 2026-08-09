@@ -1,11 +1,10 @@
 """
-Scenario: a wedged plugin observer must be loud and attributable
-(issue #5 / B-05).
+Scenario: a wedged plugin observer must be loud and attributable.
 
 The single-lane dispatcher means one blocking observer (pulsectl-wedge
 precedent) stalls plugin events APP-WIDE while the queue grows -- and it
 used to do so with zero diagnostics. The un-stalling itself is the
-per-holder-lanes refactor (#79); this covers the bug half: a >N-second
+per-holder-lanes refactor; this covers the bug half: a >N-second
 observer produces an error log naming the observer and the queued backlog,
 and a piled-up backlog warns on the submit side too.
 
@@ -118,7 +117,7 @@ def main() -> int:
     # loop -- _get_loop() (loop creation / lazy log_hooks import) sits inside
     # the try whose finally owns the decrement, so a raise there must not leak
     # the count. Red-checked: with _get_loop() outside the try, this leaks +1
-    # permanently (issue #5 review round 1).
+    # permanently.
     baseline = ed._backlog
     orig_get_loop = ed._get_loop
 

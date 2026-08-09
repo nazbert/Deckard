@@ -1,19 +1,19 @@
 """
-Scenario: three deck-lifecycle defects (issues #11, #12, #15).
+Scenario: three deck-lifecycle defects.
 
-  #11: on a background-video page, update_all_inputs skipped ALL key device
+  (a): on a background-video page, update_all_inputs skipped ALL key device
        writes (the per-frame video loop paints keys) -- but the video loop
        deliberately never repaints fully-opaque keys, so those never got
        their FIRST paint after a page switch: the device kept showing the
        previous page's content until a keypress. Opaque keys now get their
        initial update() (their tile hides the video; the write cannot
        disturb it).
-  #12: close() step 6 ran plugin teardown hooks unbounded on the DeckClose
+  (b): close() step 6 ran plugin teardown hooks unbounded on the DeckClose
        thread -- a wedged hook stranded steps 7-9 forever (unplug leak
        reintroduced) and _closing=True made retry a permanent no-op. Now a
        bounded join; on timeout the hook thread is abandoned and teardown
        completes.
-  #15: close() neither bumped _page_load_generation nor cancelled
+  (c): close() neither bumped _page_load_generation nor cancelled
        _bg_future, so an in-flight load_background could attach a fresh
        BackgroundVideo AFTER step 7's resource sweep -- leaked until process
        exit. close() now invalidates the generation and cancels the future.
@@ -37,7 +37,7 @@ def _expected_native_hash(controller, key) -> str:
     """The journal fingerprint (faulty_fake_deck._hash_bytes: sha1[:12]) the
     device SHOULD receive for `key`, computed by encoding its current
     composed image through the exact path ControllerKey.update() uses
-    (RGBA->RGB paste, rotate, encode_native_key). Lets the #11 check assert
+    (RGBA->RGB paste, rotate, encode_native_key). Lets the (a) check assert
     the opaque key's write carried the NEW page's opaque color, not the
     previous page's stale content."""
     image = key.get_current_image()
@@ -100,7 +100,7 @@ def check_opaque_initial_paint() -> int:
                   f"bg-video branch (would fight the video loop): "
                   f"{others_written}")
             return 1
-        # CONTENT, not just presence (#11 review r1): the write must carry the
+        # CONTENT, not just presence: the write must carry the
         # NEW opaque color's bytes, not the previous page's stale content. The
         # journal records _hash_bytes(native) at index 4.
         written_hash = opaque_writes[-1][4]
@@ -160,7 +160,7 @@ def check_close_gen_invalidation() -> int:
 
 
 def check_close_load_race() -> int:
-    """Residual #15 window (review r1): the gen-bump + future.cancel() in
+    """Residual (c) window: the gen-bump + future.cancel() in
     close() close the window for a load that has NOT yet reached its
     _page_is_current(gen) gate. They do NOT cover a load already PAST that
     gate, parked inside the seconds-long prebuild, when close()'s step-7 sweep

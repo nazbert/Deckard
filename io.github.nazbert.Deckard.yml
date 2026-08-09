@@ -113,7 +113,7 @@ modules:
     sources:
       # Track main: the build-commands reference the renamed files, which no
       # pre-rename tag carries. Redirect-safe URL (see the About-dialog note).
-      # The flatpak path is untested and finalised with issue #128.
+      # The flatpak path is untested; it is finalised in the release pipeline.
       - type: git
         url: https://github.com/nazbert/Deckard.git
         branch: main

@@ -1,5 +1,5 @@
 """
-Boot-enumeration rescan scenario (issue #106): if no deck is USB-enumerable
+Boot-enumeration rescan scenario: if no deck is USB-enumerable
 when the app starts (autostart racing device init at boot), DeckManager must
 re-enumerate with bounded backoff in the background and pick the deck up
 when it appears -- exactly once, even when the USB hotplug monitor races the

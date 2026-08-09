@@ -1,5 +1,5 @@
 """
-Regression scenario for the create_backup fixes (MR !11 review, Fix 3).
+Regression scenario for the create_backup fixes.
 
 Two defects in Migrator.create_backup (base class, so every migrator):
 

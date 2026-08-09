@@ -1,6 +1,6 @@
 """
 Scenario: an exception during a store install/uninstall/update must not wedge
-all store downloads for the session (issue #7 / B-07).
+all store downloads for the session.
 
 perform_download_threaded set currently_downloading=True, ran the operation,
 and reset the flag only on the success path -- @log.catch ate any exception,

@@ -1,5 +1,5 @@
 """
-The media loop's quiescence gate (issue #144), over a REAL MediaPlayerThread.
+The media loop's quiescence gate, over a REAL MediaPlayerThread.
 
 A background-video page is the worst case the gate exists for: it decodes,
 composites and writes every key at 30 FPS forever, whether or not anyone is

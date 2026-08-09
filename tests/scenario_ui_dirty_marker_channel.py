@@ -1,5 +1,5 @@
 """
-Scenario (#141, plan §3.2 "late-failure marker channel"): a frame that
+Scenario (the "late-failure marker channel"): a frame that
 push_input_image ACCEPTED but the UI later dropped must still be recorded in
 `controller.ui_image_changes_while_hidden`.
 
@@ -17,7 +17,7 @@ False through. Both drop sites route to `ui_adapter.mark_dirty` instead:
 
 Without the marker, `KeyGrid/ScreenBar.load_from_changes` has nothing to
 replay on remap and the preview stays stale until something else repaints it
--- the exact #158-class "the window only updates when re-opened" symptom.
+-- the exact "the window only updates when re-opened" symptom.
 
 Headless tier: no widget is constructed. The KeyButton half calls the REAL
 `_apply_pixbuf`/`_mark_dropped` against a stand-in `self`, which is what

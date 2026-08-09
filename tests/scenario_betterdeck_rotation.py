@@ -1,15 +1,14 @@
 """
-Scenario: BetterDeck rotation mapping and async callback setters
-(issues #17 and #18).
+Scenario: BetterDeck rotation mapping and async callback setters.
 
-  #17: reorder_physical_for_rotation applied the rotation map in the WRONG
+  (a): reorder_physical_for_rotation applied the rotation map in the WRONG
        direction (out[p] = orig[logical(p)] instead of
        out[logical(p)] = orig[p]) -- only self-inverse at 0/180, so
        key_states() was scrambled under 90/270 and ControllerKey.__init__
        read the wrong key's press state on rotated decks. Verified against
        get_physical_index as an independent oracle (a different formula)
        plus hand-computed literals.
-  #18: the three async callback setters called themselves instead of the
+  (b): the three async callback setters called themselves instead of the
        wrapped deck -> RecursionError for any plugin using them.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)

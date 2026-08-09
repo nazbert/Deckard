@@ -67,7 +67,7 @@ class Preview(Gtk.FlowBoxChild):
         self.picture.set_pixbuf(self.pixbuf)
         self.main_box.append(self.picture)
 
-        # Shown instead of the picture when the file can't be decoded (#112).
+        # Shown instead of the picture when the file can't be decoded.
         # Hidden by default; set_image toggles it so recycled cells recover.
         self.broken_icon = Gtk.Image(icon_name="image-missing-symbolic", pixel_size=48,
                                      halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER,
@@ -101,7 +101,7 @@ class Preview(Gtk.FlowBoxChild):
         # The None check must run BEFORE any str() coercion (str(None) is the
         # truthy "None"), and the decode must be guarded: a corrupt/unreadable
         # file raises GLib.Error and previously killed the (idle) callback,
-        # leaving the recycled cell showing a stale image (#112).
+        # leaving the recycled cell showing a stale image.
         if path is None:
             return None
 
@@ -125,7 +125,7 @@ class Preview(Gtk.FlowBoxChild):
 
     def set_pixbuf(self, pixbuf: GdkPixbuf.Pixbuf | None) -> None:
         """Shows an already-decoded pixbuf. None means the decode failed, so
-        the broken-image icon shows instead (#112)."""
+        the broken-image icon shows instead."""
         if pixbuf is None:
             self.show_broken_image()
             return

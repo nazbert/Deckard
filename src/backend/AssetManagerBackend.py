@@ -66,7 +66,7 @@ class AssetManagerBackend(list):
             hash = sha256(asset_path)
         except OSError as e:
             # Unreadable file (e.g. permissions): fail this one asset with a
-            # warning instead of killing the import worker thread (#112).
+            # warning instead of killing the import worker thread.
             # Callers already handle a None id.
             log.opt(exception=True).warning(f"Could not read asset {asset_path}: {e}")
             return None
@@ -77,7 +77,7 @@ class AssetManagerBackend(list):
             log.warning(f"Tried to add already existing asset. Ignoring. File: {asset_path}")
             return existing["id"]
 
-        # Refuse undecodable files at import time (#197), BEFORE the copy --
+        # Refuse undecodable files at import time, BEFORE the copy --
         # the user is right there to see the dialog and retry. This gate is
         # import-only: assets already in the library are never auto-deleted
         # for failing to decode (transient-failure policy, see
@@ -89,7 +89,7 @@ class AssetManagerBackend(list):
             log.warning(f"Refusing to import undecodable asset {asset_path}")
             return None
 
-        # Copy the asset into the internal folder -- ALWAYS (#112 rev1). The
+        # Copy the asset into the internal folder -- ALWAYS. The
         # old `if not file_in_dir(basename, DATA_PATH/cache)` skip was a
         # non-recursive top-level name match that nothing legitimately hits
         # (url downloads land in cache/downloads/), but a basename collision
@@ -136,9 +136,9 @@ class AssetManagerBackend(list):
         return asset["id"]
 
     def _decode_for_import(self, path: str) -> Image.Image | None:
-        # Decodability gate for add() (#197): the decoded image on success,
+        # Decodability gate for add(): the decoded image on success,
         # None if the file cannot be decoded. Keyed off the sc_broken marker,
-        # not try/except: our generate_thumbnail never raises (#112) -- it
+        # not try/except: our generate_thumbnail never raises -- it
         # returns the tagged placeholder on any decode failure, so an
         # exception-based check would be a silent always-True.
         thumbnail = gl.media_manager.generate_thumbnail(path)
@@ -157,15 +157,15 @@ class AssetManagerBackend(list):
         # Create missing directories
         os.makedirs(os.path.join(gl.DATA_PATH, "Assets", "AssetManager", "thumbnails"), exist_ok=True)
 
-        # Create thumbnail. Guarded (#112): this runs on the import worker
+        # Create thumbnail. Guarded: this runs on the import worker
         # thread (add) AND at app startup (fill_missing_thumbnails) -- one
         # corrupt video/svg must not kill either. On failure return None
-        # (#112 rev1): Preview renders the broken marker for a None thumbnail,
+        # Preview renders the broken marker for a None thumbnail,
         # and fill_missing_thumbnails retries None entries on every boot, so
         # a TRANSIENT failure (file mid-download, network mount hiccup) heals
         # itself instead of wedging the asset until delete+re-import.
         # `image`: add() passes its gate decode through so an import decodes
-        # the file once, not twice (#197).
+        # the file once, not twice.
         try:
             thumbnail = image if image is not None else gl.media_manager.generate_thumbnail(asset_path)
             if thumbnail.info.get("sc_broken"):
@@ -189,7 +189,7 @@ class AssetManagerBackend(list):
         if gl.page_manager is not None:
             gl.page_manager.remove_asset_from_all_pages(internal_path)
 
-        # Guarded (#112 rev1): deleting a broken asset whose file already
+        # Guarded: deleting a broken asset whose file already
         # vanished must still remove the entry, not raise out of the UI.
         try:
             if internal_path is not None and os.path.exists(internal_path):
@@ -282,7 +282,7 @@ class AssetManagerBackend(list):
             for asset in self:
                 # A previously failed run can leave thumbnail as null in the
                 # json -- os.path.exists(None) would TypeError and take app
-                # startup down with it (#112), so null-check first.
+                # startup down with it, so null-check first.
                 if asset.get("thumbnail") is not None:
                     if os.path.exists(asset["thumbnail"]):
                         continue
@@ -290,7 +290,7 @@ class AssetManagerBackend(list):
                 # Create thumbnail -- per-asset guard so one poison entry
                 # cannot block the rest of the batch (or startup). On failure
                 # the thumbnail stays None (NOT some existing path): the
-                # exists-check above must retry it on the next boot (#112 rev1).
+                # exists-check above must retry it on the next boot.
                 try:
                     thumbnail_path = self.save_thumbnail(asset["internal-path"], asset["sha256"])
                 except Exception as e:
@@ -310,7 +310,7 @@ class AssetManagerBackend(list):
     def remove_invalid_data(self):
         ## Remove assets that have been deleted internally.
         # Iterate over a copy -- self.remove() during iteration skips the
-        # element after each removal. Null-safe internal-path (#112 rev1):
+        # element after each removal. Null-safe internal-path:
         # os.path.exists(None) is a TypeError that would kill app startup
         # right after the fill_missing_data guard.
         for asset in list(self):
@@ -352,11 +352,11 @@ class AssetManagerBackend(list):
                 # None, like every other refusal here: the callers test the
                 # result for a usable media path, and the old -1 sentinel
                 # passed KeyGrid's `is None` check and was written into the
-                # key's config (#191).
+                # key's config.
                 return None
 
             os.makedirs(os.path.join(gl.DATA_PATH, "cache", "downloads"), exist_ok=True)
-            # Download file from url. Since #168 download_file RAISES on a
+            # Download file from url. download_file RAISES on a
             # network failure or an HTTP error status instead of writing the
             # error page into the asset cache -- catch it here, or the
             # import worker thread dies on an ordinary bad link and the user
@@ -389,8 +389,8 @@ class AssetManagerBackend(list):
             return
         asset_id = gl.asset_manager_backend.add(asset_path=path)
         if asset_id is None:
-            # add() refuses undecodable files (#197) and fails soft on
-            # unreadable/uncopyable ones (#112) -- without a dialog the
+            # add() refuses undecodable files and fails soft on
+            # unreadable/uncopyable ones -- without a dialog the
             # drop/import silently does nothing.
             self._alert_on_main(
                 window,

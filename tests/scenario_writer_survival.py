@@ -1,5 +1,5 @@
 """
-Scenario for issue #1 (B-01) — first leg of #61: the sole-writer media
+Scenario: the sole-writer media
 thread must survive render-path exceptions.
 
 Before the fix, run() had no guard around the loop body (the commented-out

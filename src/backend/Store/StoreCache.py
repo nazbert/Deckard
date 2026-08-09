@@ -19,7 +19,7 @@ _live_caches: "weakref.WeakSet[StoreCache]" = weakref.WeakSet()
 
 @atexit.register
 def _flush_live_caches() -> None:
-    """Last-chance drain of every live cache's deferred index (issue #180).
+    """Last-chance drain of every live cache's deferred index.
 
     Covers plain interpreter exits: CLI runs, the test harness, an uncaught
     exception. The GTK app quits through os._exit(0) (src/app.py on_quit),
@@ -137,16 +137,16 @@ class StoreCache:
     staleness on "date" would be circular: serving the stale copy would keep
     renewing it.
 
-    Index persistence is split by what losing a write would cost (issue
-    #180); the two halves are NOT interchangeable:
+    Index persistence is split by what losing a write would cost; the two
+    halves are NOT interchangeable:
 
       * CONTENT commits stay SYNCHRONOUS. _stamp_committed (called only
         after a blob's os.replace has landed) and remove_old_cache_files
         (eviction) write files.json immediately. A lost "path"/"fetched"
         stamp orphans the blob forever: remove_old_cache_files only ever
         walks index entries, so a file with no entry is never aged out and
-        never found again. This is the crash-safety result of gl#73/#25 and
-        must not be deferred.
+        never found again. This is a crash-safety requirement and must not
+        be deferred.
 
       * READ-CLOCK renewals are DEFERRED. The read path and the first
         sighting of a cache string only renew "date" in memory and mark the
@@ -440,7 +440,7 @@ class StoreCache:
 
         # Read: renew only the last-use clock; "fetched" (content age) is
         # untouched by reads. Deferred behind the debounce -- this used to
-        # rewrite all of files.json on every cache HIT (issue #180).
+        # rewrite all of files.json on every cache HIT.
         with self.write_lock:
             entry = self.files.get(cache_string, {})
             entry["path"] = cache_path

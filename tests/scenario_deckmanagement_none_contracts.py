@@ -1,6 +1,6 @@
 """
 Regression scenario for four DeckManagement contract bugs surfaced while
-driving the subsystem to zero mypy errors (#225). Each one is a case where a
+driving the subsystem to zero mypy errors. Each one is a case where a
 declaration claimed a value could never be absent (or claimed the wrong
 shape) and the code around it disagreed -- so the type checker had been
 silently skipping the branch that actually ran.

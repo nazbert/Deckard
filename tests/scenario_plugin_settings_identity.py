@@ -1,5 +1,5 @@
 """
-Regression test for the settings-identity half of issue #102 ("config not
+Regression test for the settings-identity half of "config not
 fully applied on restart" -- the custom-repo-plugins leg): plugin settings
 must be keyed by the MANIFEST id (the identity used by registration and the
 store), not by the folder name under PLUGIN_DIR.

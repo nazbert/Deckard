@@ -1,6 +1,6 @@
 """
 Unit-tier scenario for the FIFO transport lock
-(issue #164, src/backend/DeckManagement/fair_lock.py).
+(src/backend/DeckManagement/fair_lock.py).
 
 FairLock replaces the stock threading.Lock the Stream Deck transport uses as
 its per-device mutex. The stock lock is unfair: a writer that releases and
@@ -101,7 +101,7 @@ class _TicketDrawProbe:
     drops that mutex twice per cycle can keep a would-be waiter out of the
     queue for milliseconds before it ever draws a ticket. Acquisitions in
     that window are not overtakes of a queued waiter -- nothing was queued
-    yet -- but a before-acquire() sample counts them, which is how #186's
+    yet -- but a before-acquire() sample counts them, which is how a spurious
     "overtook the waiter 11 times" was reported on a lock that had not
     reordered anything (reproduced: 11 pre-queue acquisitions, 0 real
     overtakes). Sampling at the draw makes the bound exact instead of a

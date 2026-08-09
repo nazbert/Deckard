@@ -1,5 +1,5 @@
 """
-Scenario: on_ready ordering guarantees (issue #34).
+Scenario: on_ready ordering guarantees.
 
 Three defects, all against the REAL dispatch code (no replicas):
 

@@ -1,5 +1,5 @@
 """
-Regression test for "action list empty -- cannot add actions" (#118): the
+Regression test for "action list empty -- cannot add actions": the
 plugin discovery/load path must survive broken plugins, and every failure
 must be RECORDED (PluginManager.load_errors) instead of silently dropping
 the plugin. Pins, without hardware or GTK widgets:
@@ -120,7 +120,7 @@ def seed_plugins() -> None:
     # A dotted directory name (typical timestamped backup) is structurally
     # unimportable as `plugins.<name>.main` -- it must be skipped without an
     # import attempt, without a traceback, and without inflating the
-    # failed-to-load count (#133). Seeded as a full copy of a working plugin,
+    # failed-to-load count. Seeded as a full copy of a working plugin,
     # exactly like a real backup dir.
     write_plugin("com_test_good.bak.20260101-000000",
                  GOOD_MAIN.format(class_name="BackupPlugin"),
@@ -164,7 +164,7 @@ def main() -> None:
     assert "stray-file.txt" not in pm.load_errors, (
         "a stray file in PLUGIN_DIR is not a plugin failure"
     )
-    # --- #133: dotted backup dirs are skipped, not failed. ---
+    # --- dotted backup dirs are skipped, not failed. ---
     assert "com_test_good.bak.20260101-000000" not in pm.load_errors, (
         "a dotted (unimportable) directory must not land in load_errors: "
         f"{pm.load_errors}"
@@ -297,7 +297,7 @@ def main() -> None:
         "errors for still-broken plugins must survive a reload"
     )
 
-    # --- #102 (version-gate leg): a hot install that lands version-disabled
+    # --- Version-gate leg: a hot install that lands version-disabled
     # must notify IMMEDIATELY. install_plugin's reload runs the register()
     # gate in the install session (the gate is session-symmetric), but the
     # disable used to be log-only there -- the first user-visible feedback
@@ -340,9 +340,9 @@ def main() -> None:
     finally:
         gl.app = None
 
-    # --- #82 (deregister leg): remove_plugin_from_list must handle a plugin
+    # --- Deregister leg: remove_plugin_from_list must handle a plugin
     # that lives ONLY in disabled_plugins. get_plugin_by_id defaults to
-    # include_disabled=True, so uninstall_plugin -- and since #82 the
+    # include_disabled=True, so uninstall_plugin -- and the
     # post-download update deregister inside install_plugin -- hands it
     # version-gated plugins too; the old bare `del PluginBase.plugins[...]`
     # raised KeyError there, aborting the deregister before the sys.modules

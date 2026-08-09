@@ -1,8 +1,7 @@
 """
-Scenario: the default on_update no longer re-enters on_ready (issue #179,
-item 1).
+Scenario: the default on_update no longer re-enters on_ready.
 
-#84's lifecycle split landed on_ready_finished and gated tick/update
+The lifecycle split landed on_ready_finished and gated tick/update
 DISPATCH on it (ControllerInputState.own_actions_{tick,update}), but the
 hole stayed open inside ActionCore itself: the default on_update ran
 `self.on_ready()` unconditionally, so any caller reaching on_update while
@@ -117,7 +116,7 @@ def make_action(cls, controller, page, ident):
 
 def start_gated_action(controller, cls):
     """Schedules the ready callbacks and returns the action parked inside
-    on_ready (on_ready_called set, on_ready_finished not) -- #179's window."""
+    on_ready (on_ready_called set, on_ready_finished not) -- the window."""
     page = controller.active_page
     ident = Input.Key("0x0")
     action = make_action(cls, controller, page, ident)
@@ -229,7 +228,7 @@ def check_overriding_action_untouched() -> int:
 
 
 def _prefix_on_update(self):
-    """ActionCore.on_update as it stood before #179."""
+    """ActionCore.on_update as it stood before the fix."""
     self.on_ready()
 
 

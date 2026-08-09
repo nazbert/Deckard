@@ -14,7 +14,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 ---
 
-Log redaction (issue #105, upstream #439): scrub PII from every log record
+Log redaction: scrub PII from every log record
 before any sink sees it, so users can share logs.log without leaking their
 username, home directory layout, or credentials embedded in URLs, query
 params, Authorization headers or settings/header dicts.
@@ -30,7 +30,7 @@ be repeated per sink.
 
 The traceback subtlety: a patcher cannot scrub `{exception}` -- sinks format
 the raw (type, value, tb) tuple themselves at emit time, and traceback frame
-paths are the main leak (issue #80's central exception hooks route full
+paths are the main leak (the central exception hooks route full
 tracebacks into logs.log). So for records carrying an exception,
 redact_record() formats the traceback itself (stdlib, chained), scrubs it,
 folds it into the message, and clears record["exception"] so no sink can
@@ -153,7 +153,7 @@ def _compile_rules() -> list[tuple]:
     #
     # Two rules rather than one with an optional scheme group, because the
     # scheme has to be OPTIONAL for the raw-value form but must not be
-    # optional-with-backtracking (#162). As a single pattern, re-scrubbing
+    # optional-with-backtracking. As a single pattern, re-scrubbing
     # "Authorization: Basic ***" could not match the value class against
     # "***", backtracked to not taking the scheme group, and then consumed
     # the word "Basic" itself as the value -- "Authorization: *** ***", so
@@ -270,7 +270,7 @@ def scrub(text: str) -> str:
 
 def redact_record(record) -> None:
     """loguru patcher: scrub the message and, if an exception is attached
-    (opt(exception=...), @log.catch, the issue-#80 hooks), replace it with a
+    (opt(exception=...), @log.catch, the central exception hooks), replace it with a
     scrubbed stdlib-formatted traceback folded into the message. Clearing
     record["exception"] FIRST guarantees no sink formats the raw frames even
     if traceback formatting itself fails. Must never raise: a patcher

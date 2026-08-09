@@ -1,18 +1,18 @@
 """
-Unit-tier scenario for the plugin event/callback layer (issues #33, #37,
-#36): the pieces between an EventHolder/InputEvent firing and a plugin
+Unit-tier scenario for the plugin event/callback layer: the pieces
+between an EventHolder/InputEvent firing and a plugin
 callback actually running are deck-independent, so this exercises them
 directly -- no FakeDeck, no controller.
 
 Covers:
-  (a) #33 -- a raising observer (sync AND `async def`) dispatched through
+  (a) a raising observer (sync AND `async def`) dispatched through
       event_dispatch produces a logged ERROR that carries the exception
       type, message and a traceback, not just the bare one-liner.
-  (b) #37 -- InputBases (KeyAction/DialAction/TouchScreenAction) default
+  (b) InputBases (KeyAction/DialAction/TouchScreenAction) default
       event assigners survive real delivery: _raw_event_callback forwards
       one positional data arg and the documented no-arg on_* handlers
       (including subclass overrides) run instead of TypeError-ing.
-  (c) #36 -- the cross-plugin event APIs work: connect_to_event_directly
+  (c) the cross-plugin event APIs work: connect_to_event_directly
       attaches to the TARGET plugin's holder (and the callback really
       receives a trigger_event), suffix-based connect_to_event no longer
       KeyErrors on None, disconnect_from_event accepts the same
@@ -57,7 +57,7 @@ class _LogCapture:
 
 
 # ===================================================================== #
-# (a) #33 -- dispatch logs the observer's traceback
+# (a) dispatch logs the observer's traceback
 # ===================================================================== #
 
 def check_raising_sync_observer_logs_traceback():
@@ -83,7 +83,7 @@ def check_raising_sync_observer_logs_traceback():
 
 def check_raising_async_observer_logs_traceback():
     # Every real EventHolder observer in the plugin ecosystem is an
-    # `async def` -- this is the branch that mattered most for #33.
+    # `async def` -- this is the branch that mattered most.
     async def exploding_coroutine_observer(*args, **kwargs):
         raise ValueError("async-boom-marker")
 
@@ -120,7 +120,7 @@ def check_raising_observer_does_not_stop_batch():
 
 
 # ===================================================================== #
-# (b) #37 -- InputBases event delivery reaches the no-arg handlers
+# (b) InputBases event delivery reaches the no-arg handlers
 # ===================================================================== #
 
 _ACTION_KWARGS = dict(
@@ -220,7 +220,7 @@ def check_base_handlers_are_callable_noops():
 
 
 # ===================================================================== #
-# (c) #36 -- cross-plugin connect/disconnect target the right plugin
+# (c) cross-plugin connect/disconnect target the right plugin
 # ===================================================================== #
 
 PROVIDER_ID = "com_test_provider"

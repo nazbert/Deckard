@@ -1,6 +1,5 @@
 """
-Screensaver media must LOOP when the config has no explicit `loop` key
-(issue #204).
+Screensaver media must LOOP when the config has no explicit `loop` key.
 
 `load_screensaver` used to apply `config.get("loop", False)` while every
 media-layer default (ScreenSaver.loop, Background.set_from_path /
@@ -8,7 +7,7 @@ prebuild_from_path, BackgroundVideo/GifBackground) says True, so any
 screensaver config written before the loop toggle existed -- or by a
 programmatic writer that omitted the key -- played exactly one pass and
 then held its last frame on the device for the whole idle window. Field
-evidence: the #196 hardware run captured one 1.2s pass followed by
+evidence: a hardware run captured one 1.2s pass followed by
 hash-skip-only frozen ticks.
 
 Covers:

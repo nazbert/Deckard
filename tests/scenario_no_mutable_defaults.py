@@ -1,5 +1,5 @@
 """
-Regression test for mutable default arguments (gl#167).
+Regression test for mutable default arguments.
 
 A `def f(x=[])` / `def f(x={})` default is evaluated once, at function
 definition time, and then shared by every call that omits the argument.
@@ -22,9 +22,9 @@ Two checks:
      identity to field-equality AND make instances unhashable -- a silent
      break for plugins that put Media in a set/dict or compare with `==`).
 
-SUPERSEDED-BY: ruff rule B006 (flake8-bugbear) once the lint tooling of
-gl#171 lands -- at that point this scenario's AST scan is redundant with
-the linter and can be dropped, keeping only the Media behavioral check.
+SUPERSEDED-BY: ruff rule B006 (flake8-bugbear), now enabled in
+pyproject.toml -- this scenario's AST scan is redundant with the linter
+and can be dropped, keeping only the Media behavioral check.
 """
 import ast
 import os

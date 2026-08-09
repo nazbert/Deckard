@@ -1,6 +1,6 @@
 """
 Regression test for "disabling autostart can asynchronously re-install a
-broken flatpak-style autostart entry" (gl#42).
+broken flatpak-style autostart entry".
 
 The state machine under test (autostart.py):
 

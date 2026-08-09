@@ -1,5 +1,5 @@
 """
-Settings "Data path" Open button opens via Gio, not a subprocess (gl#197).
+Settings "Data path" Open button opens via Gio, not a subprocess.
 
 The old handler ran a BLOCKING subprocess.check_output(["xdg-open", ...])
 on the GTK main loop (frozen UI until the file manager exited on some

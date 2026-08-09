@@ -53,7 +53,7 @@ class AssetManager:
             # register(), and a plugin that never registers (version-gated,
             # incomplete manifest) has no other reader at all -- so without
             # quarantine here a corrupt settings file could survive every
-            # load and still be destroyed by the next save (#152).
+            # load and still be destroyed by the next save.
             self._quarantine(e)
             return {}
         except OSError as e:

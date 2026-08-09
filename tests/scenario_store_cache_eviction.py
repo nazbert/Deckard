@@ -1,5 +1,5 @@
 """
-Regression test for issue #54 (StoreCache.remove_old_cache_files) -- the
+Regression test for StoreCache.remove_old_cache_files -- the
 startup eviction pass had three holes:
 
   1. A legacy index entry with no "date" field removed the file, popped the

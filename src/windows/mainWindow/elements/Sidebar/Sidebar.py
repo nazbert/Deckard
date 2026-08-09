@@ -522,7 +522,7 @@ class KeyEditorKeyBox(Gtk.Box):
         self.image_editor.load_for_identifier(key.coords, state)
         self.label_editor.load_for_identifier(key, state)
         # ActionManager only exposes load_for_identifier (load_for_coords is
-        # ActionGroup's), so this raised AttributeError as written (#227).
+        # ActionGroup's), so this raised AttributeError as written.
         self.action_editor.load_for_identifier(key, state)
         self.background_editor.load_for_identifier(key, state)
 

@@ -1,4 +1,4 @@
-# Deckard CI — flatpak bundle releases (issue #128; design in
+# Deckard CI — flatpak bundle releases (design in
 # docs/ci-flatpak-releases-plan.md).
 #
 # Shape (same skeleton as the other nb-labs repos):
@@ -24,7 +24,7 @@
 # under /proc, and the kernel's locked-mounts rule rejects a procfs mount in a
 # userns unless proc is fully visible — capabilities, seccomp and apparmor
 # settings don't reach this (the gnome image runs as uid 1000, so cap_add is
-# moot; verified empirically on the runner host, issue #128). build:flatpak
+# moot; verified empirically on the runner host). build:flatpak
 # therefore MUST run on the dedicated privileged runner (tag `flatpak`,
 # run_untagged=false — privilege is scoped to jobs that ask for it), the same
 # arrangement GNOME/flathub use for their builders. rofiles-fuse stays
@@ -51,7 +51,7 @@ variables:
 # Syntax-level gate only: compileall byte-compiles every python file without
 # importing it (imports need GTK4/PyGObject, which no slim CI image has). The
 # scenario harness (tests/run_all.py) stays a local tool for now — running it
-# in CI is follow-up work tracked on #128, not part of this pipeline.
+# in CI is follow-up work, not part of this pipeline.
 test:compile:
   stage: test
   image: python:3.13-slim   # 3.13 = the runtime python req2flatpak targets
@@ -74,7 +74,7 @@ lint:ruff:
     - ruff --version
     - ruff check .
 
-lint:types:                # blocking type-check gate (lane added by #171 pt. 3, driven to zero and flipped by #220)
+lint:types:                # blocking type-check gate: the tree is at zero mypy errors and must stay there
   stage: test
   image: python:3.13-slim
   interruptible: true

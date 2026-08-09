@@ -43,7 +43,7 @@ class PluginRecommendations(Gtk.Box):
         self.group.set_sort_func(self.sort_func)
         self.clamp.set_child(self.group)
 
-        # Error state for a failed store fetch (issue #118): without it the
+        # Error state for a failed store fetch: without it the
         # fetch failure killed the loader thread and left the spinner up
         # forever -- the user paged past, installed nothing, and landed in
         # the main window with an empty Add-Action list.
@@ -88,13 +88,13 @@ class PluginRecommendations(Gtk.Box):
 
         # Only the data fetch belongs on this thread. Building PluginRows
         # (Adw.ActionRow + CheckButton) and group.add() ran here too -- the
-        # process-fatal off-main-GTK construction class (issue #10), racing
+        # process-fatal off-main-GTK construction class, racing
         # the carousel on every first launch.
         #
         # The fetch returns a NoConnectionError SENTINEL when every store is
         # unreachable (offline, GitHub rate limit); iterating it raised
-        # TypeError, killing this thread with the spinner still up (issue
-        # #118's fresh-install mode). Exceptions get the same error state.
+        # TypeError, killing this thread with the spinner still up on a
+        # fresh install. Exceptions get the same error state.
         try:
             plugins = gl.store_backend.get_all_plugins()
         except Exception as e:

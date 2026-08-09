@@ -1,5 +1,5 @@
 """
-Integration scenario for issue #40: PluginBase backend teardown must not
+Integration scenario: PluginBase backend teardown must not
 block the calling thread, and on_disconnect must null every backend
 reference.
 

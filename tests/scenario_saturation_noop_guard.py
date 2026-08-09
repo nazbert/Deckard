@@ -1,5 +1,5 @@
 """
-Unit-tier scenario for issue #51: opening deck settings with saturation !=
+Unit-tier scenario: opening deck settings with saturation !=
 1.0 must not trigger a page reload.
 
 The settings pane's Saturation row (src/windows/mainWindow/elements/

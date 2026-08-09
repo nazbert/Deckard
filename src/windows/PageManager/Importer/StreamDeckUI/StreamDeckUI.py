@@ -88,7 +88,7 @@ class StreamDeckUIImporter:
         for deck in self.export.get("state", {}):
             ## Deck preferences -- merge into whatever deck settings already
             ## exist; replacing the file wholesale erased every unrelated
-            ## section (rotation, key layout, ...) on import (issue #55).
+            ## section (rotation, key layout, ...) on import.
             preferences_path = os.path.join(gl.DATA_PATH, "settings", "decks", f"{deck}.json")
             preferences = {}
             try:
@@ -145,7 +145,7 @@ class StreamDeckUIImporter:
                             "color": hex_to_rgba255(font_color_hex),
                             # Hyphenated: the keys Page/LabelManager read.
                             # The old underscore spellings were dead keys
-                            # the loader never looked at (issue #55).
+                            # the loader never looked at.
                             "font-size": None,
                             "font-family": font_family_from_path(state_data.get("font"))
                         }
@@ -166,8 +166,8 @@ class StreamDeckUIImporter:
                                     page["keys"][coords]["states"][page_state]["media"]["path"] = asset["internal-path"]
                                 else:
                                     # add() refuses corrupt/unreadable icons
-                                    # (#197/#112) -- skip the icon, keep the
-                                    # rest of the import.
+                                    # -- skip the icon, keep the rest of the
+                                    # import.
                                     log.warning(f"Could not import icon {export_icon}, skipping")
                             else:
                                 log.warning(f"Icon {export_icon} not found, skipping")

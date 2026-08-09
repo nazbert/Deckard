@@ -1,5 +1,5 @@
 """
-Regression test for issue #52 (item: malformed env vars abort deck init).
+Regression test: malformed env vars used to abort deck init.
 
 MediaPlayerThread.__init__ reads DECKARD_VIDEO_WRITE_HZ and
 DECKARD_WRITE_YIELD_MS from the environment. A malformed value

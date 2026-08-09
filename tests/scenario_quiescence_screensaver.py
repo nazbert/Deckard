@@ -1,6 +1,6 @@
 """
-The quiescence gate must never touch the deck screensaver (issue #144, item
-d), and must repaint the page it restores.
+The quiescence gate must never touch the deck screensaver, and must
+repaint the page it restores.
 
 The physical deck is visible even when the monitor is locked, so while the
 screensaver owns the deck its animation IS the intended visible content --

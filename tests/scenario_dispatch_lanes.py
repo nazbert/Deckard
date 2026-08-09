@@ -1,5 +1,5 @@
 """
-Scenario: a wedged observer starves only its own holder's lane (issue #178).
+Scenario: a wedged observer starves only its own holder's lane.
 
 scenario_dispatch_watchdog.py covers the diagnostics half of the same defect
 (B-05): a blocking observer used to stall plugin events APP-WIDE, and the

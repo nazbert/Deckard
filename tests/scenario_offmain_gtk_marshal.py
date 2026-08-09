@@ -1,5 +1,5 @@
 """
-Integration scenario for issue #35: the framework-owned GTK construction
+Integration scenario: the framework-owned GTK construction
 that runs during plugin registration must land on the main thread even when
 registration happens on a worker -- the store-install path runs the plugin's
 whole __init__ on the installer thread (StoreBackend.install_plugin ->

@@ -1,5 +1,5 @@
 """
-Scenario: single-slot task races must not lose frames (issue #8 / B-08).
+Scenario: single-slot task races must not lose frames.
 
 Four shapes against the REAL MediaPlayerThread methods:
 
@@ -16,11 +16,11 @@ Four shapes against the REAL MediaPlayerThread methods:
      image task whose submit_seq contractually survives the Clear. Same
      hook trick on the image_tasks read via a wrapping dict.
 
-  3. Write-cap putback half: the !27 rate-cap re-queues an over-budget
+  3. Write-cap putback half: the rate cap re-queues an over-budget
      touchscreen frame into the single slot iff it is still None -- but the
      None-check-then-set ran UNLOCKED. A producer assigning a NEWER frame
      between the check and the set had it clobbered by the older deferred
-     frame. This is the site most entangled with the merged !27 write-cap:
+     frame. This is the site most entangled with the write cap:
      the test also asserts the rate-limit itself is preserved (the deferred
      frame is NOT written to the device -- no write-flood). The hook fires on
      the putback's own `touchscreen_task is None` read (the 2nd read of the
@@ -209,11 +209,11 @@ def check_clear_half() -> int:
 
 
 def check_writecap_putback() -> int:
-    """The !27 write-cap defers an over-budget touchscreen frame back into the
+    """The write cap defers an over-budget touchscreen frame back into the
     single slot iff it's still None. The None-check-then-set must be atomic:
     a producer assigning a NEWER frame in between must win, and the older
     deferred frame must NOT be written to the device (the rate-limit is
-    preserved -- no write-flood, which is the whole point of !27)."""
+    preserved -- no write-flood, which is the whole point)."""
     from src.backend.DeckManagement.InputIdentifier import Input
 
     controller, media_player, _ = fixtures.make_stub_controller(
@@ -274,7 +274,7 @@ def check_writecap_putback() -> int:
               "window was lost (clobbered by the older deferred frame)")
         return 1
 
-    # !27 interaction: the over-budget OLD frame must have been DEFERRED, not
+    # Write-cap interaction: the over-budget OLD frame must have been DEFERRED, not
     # written -- the rate-limit is preserved, no write-flood.
     ts_writes = controller.deck.ops_by_name("set_touchscreen_image")
     if ts_writes:

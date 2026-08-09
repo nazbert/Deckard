@@ -1,8 +1,8 @@
 """
-Corrupt files are refused at asset import time (gl#197).
+Corrupt files are refused at asset import time.
 
 Upstream gates add() on an exception-based is_decodable; our
-generate_thumbnail never raises (#112 -- it returns a placeholder tagged
+generate_thumbnail never raises (it returns a placeholder tagged
 `sc_broken` on any decode failure), so a straight port would be a silent
 always-True. The adapted gate (_decode_for_import) must key off the
 sc_broken marker, run BEFORE the copy (no partial import), and surface as
@@ -107,7 +107,7 @@ def check_valid_still_adds(backend: AssetManagerBackend) -> None:
 
 
 def check_decode_for_import_keys_off_sc_broken(backend: AssetManagerBackend) -> None:
-    """The required adaptation (#112): the gate must read the sc_broken
+    """The required adaptation: the gate must read the sc_broken
     marker, not rely on exceptions -- generate_thumbnail never raises."""
     real_generate = gl.media_manager.generate_thumbnail
     try:
@@ -140,7 +140,7 @@ def make_test_video(path: str, n_frames: int = 8, size=(48, 32), fps: int = 10) 
 
 
 def check_video_add_decodes_once(backend: AssetManagerBackend) -> None:
-    """#197 cost contract: the gate's decode IS the thumbnail decode -- a
+    """Cost contract: the gate's decode IS the thumbnail decode -- a
     video add must run generate_thumbnail exactly once, not once for the
     gate and again inside save_thumbnail."""
     video = os.path.join(WORK_DIR, "decode_once.mp4")

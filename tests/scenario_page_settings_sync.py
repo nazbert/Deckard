@@ -1,6 +1,6 @@
 """
-Regression test for "auto-switch settings don't persist" (issue #113, also
-the write-clobber half of #104).
+Regression test for "auto-switch settings don't persist" (the
+write-clobber half).
 
 PageManagerBackend.set_page_settings wrote the page file but only refreshed
 the in-memory dict of pages ACTIVE on a controller. A cached-but-not-active
@@ -12,7 +12,7 @@ erased the just-saved settings section (auto-change, screensaver, brightness
 and background overrides) from disk: auto page switching worked right after
 configuring it, then the settings vanished and the Page Editor showed
 defaults on reopen. Deck disable/enable rebuilt the page cache, which is why
-it looked like the only way to "apply" a regex edit (#104).
+it looked like the only way to "apply" a regex edit.
 
 Deterministic repro: cache a page on a controller WITHOUT making it active,
 write auto-change settings through the same path the Page Editor uses, then

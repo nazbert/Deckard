@@ -1,5 +1,5 @@
 """
-Pins the app-settings DEFAULTS table (gl#174).
+Pins the app-settings DEFAULTS table.
 
 Every default used to be inlined at its call site, so the same key could --
 and did -- carry different defaults in different modules. SettingsManager
@@ -73,7 +73,7 @@ EXPECTED_FONT_DEFAULTS = {
     "font-weight": 400,
     "font-style": "normal",
     "font-color": (255, 255, 255, 255),
-    "outline-color": (0, 0, 0, 255),  # opaque since the #203 scale fix (review on !103)
+    "outline-color": (0, 0, 0, 255),  # opaque since the alpha scale fix
     "outline-width": 2,
 }
 

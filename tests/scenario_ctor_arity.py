@@ -1,6 +1,6 @@
 """
 Regression test for constructor calls that cannot bind their class's own
-`__init__` signature (gl#190).
+`__init__` signature.
 
 `src/app.py`'s `show_permissions()` built
 `FlatpakPermissionRequestWindow(application=..., main_window=...)` while the
@@ -20,10 +20,10 @@ Two checks:
      and classes whose `__init__` takes `*args` are skipped -- as are
      classes with NO explicit `__init__` (dataclasses and pure subclasses
      inherit theirs, so ~a third of the tree is invisible to this scan;
-     review on !103 measured 133/405) -- their
+     measured at 133/405) -- their
      binding is not decidable here.
 
-  2. The specific #190 shape: `FlatpakPermissionRequestWindow` must stay
+  2. The specific shape that regressed: `FlatpakPermissionRequestWindow` must stay
      constructible from `application` + `main_window` alone, because
      `app.show_permissions()` (the generic, command-less request) has
      nothing else to pass.

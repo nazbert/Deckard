@@ -637,7 +637,7 @@ class ScreensaverGroup(PageEditorGroup):
 
         self.enable_screensaver_toggle.set_active(screensaver_settings.get("enable", False))
         self.delay_spin.set_value(screensaver_settings.get("time-delay", 5))
-        self.loop_toggle.set_active(screensaver_settings.get("loop", True))  # #204
+        self.loop_toggle.set_active(screensaver_settings.get("loop", True))  # default: loop on
         self.fps_spin.set_value(screensaver_settings.get("fps", 30))
         self.brightness_scale.set_value(screensaver_settings.get("brightness", 75))
 

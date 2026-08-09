@@ -1,5 +1,5 @@
 """
-Regression test (#141 review): every `Page.set_label_*` styling setter must
+Regression test: every `Page.set_label_*` styling setter must
 reach the UI port and still repaint the input afterwards.
 
 The engine->UI port refactor deleted `LabelManager.update_label_editor`, but
@@ -22,14 +22,14 @@ What this pins, end-to-end on a real headless DeckController:
 Delete `LabelManager.update_label_editor` again and this fails on the first
 setter.
 
-Second regression, #208: `set_label_font_family` wrote the family to
+Second regression: `set_label_font_family` wrote the family to
 `page_labels[pos].font_family`, a field `KeyLabel` does not have -- on a
 plain dataclass that silently grows a stray attribute instead of raising,
 and the intended `font_name` keeps its old value. The setter's own
 controller was covered by the second (`get_label_manager`) block, which
 writes `font_name` correctly, so the drop only showed on the OTHER
-controllers the first block exists for. NOTE the honest scope (review on
-!103): `get_controller_inputs()` iterates EVERY controller with no page
+controllers the first block exists for. NOTE the honest scope:
+`get_controller_inputs()` iterates EVERY controller with no page
 filter -- the two controllers in the check below do not share a Page
 object, and the write reaching deck B regardless of which page it shows is
 the (pre-existing, all-8-setters) unscoped-broadcast behavior tracked by
@@ -69,7 +69,7 @@ class RecordingPort(ui_port.UIPort):
 
 
 def check_font_family_reaches_every_controller(page, identifier, state) -> None:
-    """#208: the family must land on every controller showing the page, and
+    """The family must land on every controller showing the page, and
     must survive a state switch."""
     second = fixtures.make_headless_controller(serial="label-setters-2")
     try:

@@ -1,5 +1,5 @@
 """
-Regression test for issue #54 (check_required_version off-by-one):
+Regression test for the check_required_version off-by-one:
 
 The store's minimum-app-version gate existed as four near-identical copies
 (StorePage, PluginPage, StorePreview, PluginPreview), every one comparing

@@ -110,7 +110,7 @@ def _fd_count() -> int:
 
 def _image_cache_fields() -> tuple[int, int, int, int, int]:
     """(evictable image-cache kB, cumulative evictions, cumulative evicted kB,
-    video-reader kB, GIF-frame kB) from the image-cache budget (#142).
+    video-reader kB, GIF-frame kB) from the image-cache budget.
 
     This is the attribution half of that work and the reason it is default-on:
     the ceiling can only be tuned against the field once the CSV says how much

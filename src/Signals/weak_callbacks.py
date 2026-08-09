@@ -62,7 +62,7 @@ class _WeakMethodEntry(weakref.WeakMethod):
     """A WeakMethod that remembers a printable description of the method it
     wrapped. Once the owner dies the WeakMethod resolves to None and can no
     longer say what it used to point at -- so the description has to be
-    captured at add() time for snapshot()'s prune log (issue #38) to name
+    captured at add() time for snapshot()'s prune log to name
     what was silently dropped. WeakMethod uses __slots__; this subclass
     deliberately doesn't, so `description` can live in a normal instance
     __dict__.
@@ -127,7 +127,7 @@ class CallbackRegistry:
                 # weak-referenceable (a __slots__ class without __weakref__).
                 # Fall back to strong storage -- the pre-D2 plain list held
                 # these fine, and failing the connect over a storage
-                # optimization is worse than pinning the owner (issue #56).
+                # optimization is worse than pinning the owner.
                 log.debug(
                     f"CallbackRegistry: owner of {cb!r} is not weak-referenceable "
                     f"(__slots__ without __weakref__); storing a strong reference"
@@ -153,7 +153,7 @@ class CallbackRegistry:
 
     def snapshot(self) -> list[Callable]:
         """Return a list of currently-live callables, pruning dead entries
-        as a side effect. Each pruned entry is logged at DEBUG (issue #38):
+        as a side effect. Each pruned entry is logged at DEBUG:
         weak-by-default storage means a bound method of an otherwise
         unreferenced owner silently loses its subscription at the next gc
         pass -- deliberate (D2), but without a trace it's undiagnosable when

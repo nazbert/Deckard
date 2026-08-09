@@ -1,6 +1,6 @@
 """
 A refused asset import must never hand its caller something that looks like
-a media path (gl#191).
+a media path.
 
 `AssetManagerBackend.add_custom_media_set_by_ui` answered a url that points
 at no supported media with `-1`, while every other refusal in the same

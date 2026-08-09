@@ -1,6 +1,6 @@
 """
-Regression tests for issue #52 (items: unguarded active_page derefs +
-_screensaver_pending_page retention).
+Regression tests for unguarded active_page derefs and
+_screensaver_pending_page retention.
 
 active_page can go None (close() step 8, load_page(None)) or be swapped
 (a racing switch) at any moment on threads other than the one reading

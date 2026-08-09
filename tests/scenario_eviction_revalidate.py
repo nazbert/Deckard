@@ -1,5 +1,5 @@
 """
-Scenario: page-cache eviction must not gut a live page (issue #4 / B-04).
+Scenario: page-cache eviction must not gut a live page.
 
 clear_old_cached_pages snapshotted evictable pages under _pages_lock, then
 ran clear_action_objects() + pop OUTSIDE it, with three windows:
@@ -15,7 +15,7 @@ ran clear_action_objects() + pop OUTSIDE it, with three windows:
   3. Gut-then-pop meant a concurrent get_page() could still be handed the
      gutted object before the pop. Post-fix the pop is INSIDE the lock and
      BEFORE the teardown, so a get_page() during the teardown gap mints a
-     fresh Page (via #28's single-flight builder) instead of the corpse.
+     fresh Page (via the single-flight builder) instead of the corpse.
 
 Post-fix: per-item re-validation under _pages_lock (skip if replaced,
 re-marked, active anywhere, or screensaver-pending) and pop-before-teardown.
@@ -120,7 +120,7 @@ def main() -> int:
     # a FRESH Page, not the gutted corpse (window 3, deterministic) ---
     # The pop happens INSIDE the lock BEFORE clear_action_objects(), so while
     # the corpse is being torn down (outside the lock) the cache slot is
-    # already empty -- a concurrent get_page() must mint a new Page via #28's
+    # already empty -- a concurrent get_page() must mint a new Page via the
     # single-flight builder rather than hand back the object being gutted.
     # Made deterministic by having the victim's teardown itself perform that
     # get_page() and capture what it receives.

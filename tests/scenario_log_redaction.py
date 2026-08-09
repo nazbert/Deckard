@@ -1,7 +1,7 @@
 """
-Scenario for issue #105 (upstream #439): src/backend/log_redaction.py.
+Scenario for src/backend/log_redaction.py.
 
-The regression: the issue-#80 central exception hooks route full tracebacks
+The regression: the central exception hooks route full tracebacks
 into logs.log, so frame paths (/home/<user>/...), usernames and credentialed
 URLs reach disk unredacted. The fix is a core-level loguru patcher
 (install_log_redaction()) that scrubs every record -- message AND folded
@@ -30,7 +30,7 @@ Covers:
      `File "~/...scenario_log_redaction.py"` frame, source line, exception
      type/message -- and no diagnose variable dump leaks values;
   5. idempotence -- of the double hook install (same patcher), and of
-     scrub() itself over the whole corpus (#162: re-scrubbing an auth
+     scrub() itself over the whole corpus (re-scrubbing an auth
      header used to eat the scheme word, "Basic ***" -> "*** ***").
 
 Run in isolation (run_all.py gives each scenario its own interpreter):
@@ -118,7 +118,7 @@ def check_scrub_unit() -> None:
         "'basic' is prose vocabulary -- only redact it in header context"
     )
 
-    # #162: the no-scheme branch must never consume a bare scheme word as
+    # The no-scheme branch must never consume a bare scheme word as
     # the value. A credential that merely STARTS with those letters is not
     # a bare scheme word and must still be redacted.
     assert scrub("Authorization: basicauthvalue123") == "Authorization: ***"
@@ -127,7 +127,7 @@ def check_scrub_unit() -> None:
 
 
 def check_scrub_idempotent() -> None:
-    """scrub(scrub(x)) == scrub(x) over the whole corpus (#162).
+    """scrub(scrub(x)) == scrub(x) over the whole corpus.
 
     The auth-header rule used to break this: re-scrubbing
     "Authorization: Basic ***" could not match the value class against
@@ -135,7 +135,7 @@ def check_scrub_idempotent() -> None:
     word "Basic" itself as the value -- "Authorization: *** ***" (same for
     Bearer/Digest/Token; it converged only on pass 3). Cosmetic in
     isolation, but any pipeline that scrubs twice -- the boot scrub
-    re-running over an already-scrubbed file (#159), a line passing both
+    re-running over an already-scrubbed file, a line passing both
     the loguru patcher and a later scrub -- mangled every header it had
     already redacted, so the module could only claim idempotence for
     faulthandler content rather than in general.
@@ -222,7 +222,7 @@ def main() -> None:
     logger.info(f"mounted /run/media/{USER}/stick")
     logger.info("HA settings: {'host': 'ha.local', 'access_token': 'eyJlongtoken'}")
 
-    # An uncaught thread exception through the REAL issue-#80 hook: message,
+    # An uncaught thread exception through the REAL hook: message,
     # frame paths and a diagnose-visible local all carry PII.
     def boom() -> None:
         key_path = f"{HOME}/.ssh/id_rsa"  # local: would leak via diagnose=True

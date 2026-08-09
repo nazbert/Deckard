@@ -1,5 +1,5 @@
 """
-Integration-tier scenario (issue #196, phase 1a): plugin-set GIFs must route
+Integration-tier scenario (phase 1a): plugin-set GIFs must route
 to KeyGIF.
 
 ActionCore.set_media used to send every video -- GIFs included -- down the
@@ -21,7 +21,7 @@ scenario pins the set_media parity fix:
       never raised into plugin code for bad media before the KeyGIF route
       existed;
   (d) the same corrupt GIF as PAGE media (ControllerKey.load_from_input_dict)
-      also fails soft (issue #199): that route never got (c)'s try/except, so
+      also fails soft: that route never got (c)'s try/except, so
       the raise escaped mid-load and took the rest of the key's state load
       with it -- layout, page background color and the final set_state()
       repaint all skipped. Pins the fallback video AND that the load ran to
@@ -111,7 +111,7 @@ def _make_repainting_action_class():
     """A LatchAction variant that repaints until its media slot actually
     holds a video, then stops. The plain latch paints exactly once -- but
     the load-time state wipe (create_n_states) restores action-owned media
-    on KEY states only (the #131 stash-restore; dial states don't carry
+    on KEY states only (the stash-restore; dial states don't carry
     media_owner_action), so a dial's single paint can be wiped and never
     re-established. Converging (instead of always-painting) keeps the
     composite probe below race-free: once both slots are populated, ticks
@@ -208,7 +208,7 @@ def main() -> None:
         )
 
         # (d) the same corrupt GIF as PAGE media: loading the page must not
-        # leave the key half-loaded. Before the #199 fix KeyGIF's raise
+        # leave the key half-loaded. Before the fix KeyGIF's raise
         # escaped load_from_input_dict's media branch, so the state's page
         # layout, its background color and the closing set_state() repaint
         # were all skipped (the exception died in the load pool's future).

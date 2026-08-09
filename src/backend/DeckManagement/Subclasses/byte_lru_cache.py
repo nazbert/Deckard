@@ -14,7 +14,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 ---
 
-The byte-capped LRU shared by both native-image caches (gl#142).
+The byte-capped LRU shared by both native-image caches.
 
 `EncodedImageCache` (pixel-hash keys + doorkeeper) and `NativeTileCache`
 (frame-identity keys + kill switch) were the same OrderedDict-as-LRU with the

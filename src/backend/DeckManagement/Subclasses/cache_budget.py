@@ -14,7 +14,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 ---
 
-Process-wide budget for the native-image caches (gl#142).
+Process-wide budget for the native-image caches.
 
 Each deck's `encode_memo` and `native_tile_cache` is byte-capped on its own,
 but nothing capped their SUM: total image-cache RAM scaled with deck count,

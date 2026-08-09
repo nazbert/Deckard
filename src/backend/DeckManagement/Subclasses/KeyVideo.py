@@ -51,7 +51,7 @@ class InputVideo(SingleKeyAsset):
         )
         # Serializes close() against an in-flight get_next_frame(): close can
         # be called from load/teardown threads while a render tick is between
-        # its video_cache reads (issue #19). get_next_frame holds this for
+        # its video_cache reads. get_next_frame holds this for
         # its whole body, so close() waits for the in-flight frame and no
         # frame can start against a released reader (a post-release
         # get_frame() could even resurrect a capture via
@@ -153,7 +153,7 @@ class InputVideo(SingleKeyAsset):
         shared tile-cache registry; idempotent (a second call finds
         video_cache already None). Serialized against get_next_frame via
         _close_lock: waits for an in-flight frame, and every later call
-        sees video_cache is None (issue #19)."""
+        sees video_cache is None."""
         with self._close_lock:
             if self.video_cache is not None:
                 mp4_tile_cache.release(self.video_cache)

@@ -328,7 +328,7 @@ class OnboardingScreen5(Gtk.Box):
         GLib.idle_add(self.onboarding_window.loading_box.set_spinning, True)
 
         # get_selected_plugins reads CheckButton state -- a GTK call, so it
-        # must run on the main loop, not this install worker (issue #10).
+        # must run on the main loop, not this install worker.
         plugins = run_on_main(self.onboarding_window.recommendations.get_selected_plugins)
 
         GLib.idle_add(self.onboarding_window.loading_box.progress_bar.set_visible, len(plugins) > 0)
@@ -355,7 +355,7 @@ class OnboardingScreen5(Gtk.Box):
         if failed:
             # The progress-bar text above dies with the closing window; the
             # user otherwise lands in the main window with no plugins and no
-            # explanation (issue #118). Reported on the surviving main
+            # explanation. Reported on the surviving main
             # window, which the idle_add(show) above has already queued --
             # gl.notify's own idle runs after it, so the window is up by the
             # time this is delivered.

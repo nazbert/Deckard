@@ -1,10 +1,10 @@
 """
-Persistence round-trip for gl#64: edit a NON-active page's settings, ACTIVATE
+Persistence round-trip: edit a NON-active page's settings, ACTIVATE
 that page, then save -- the edit must survive.
 
 scenario_page_settings_sync.py already pins the "edit a cached non-active page
--> save it (still non-active) -> settings survive" leg (issue #113/#104). The
-audit's #64 ask names a distinct sequence the sync scenario does NOT walk: the
+-> save it (still non-active) -> settings survive" leg. This scenario
+names a distinct sequence that one does NOT walk: the
 page is *promoted to active* between the settings edit and the save. If
 set_page_settings failed to refresh the cached Page object (the pre-f386da73
 behavior, which only refreshed pages already active), activation adopts the

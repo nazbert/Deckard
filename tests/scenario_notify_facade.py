@@ -1,5 +1,5 @@
 """
-Pins the gl.notify facade (#183) and the send_notification threading fix
+Pins the gl.notify facade and the send_notification threading fix
 that sits under it.
 
 Before the facade, every caller that wanted to tell the user something
@@ -232,7 +232,7 @@ class _FlipOnAppend(list):
 
 
 def check_drain_race_exactly_once(notify) -> None:
-    """The append-vs-drain TOCTOU (#183 review): gl.app flips between the
+    """The append-vs-drain TOCTOU: gl.app flips between the
     facade's None-check and its append. Whichever side ends up owning the
     task, the report must be delivered exactly once -- the pre-fix facade
     stranded it in the list forever (silent loss of boot-time reports)."""

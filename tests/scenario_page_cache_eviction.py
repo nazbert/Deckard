@@ -1,6 +1,6 @@
 """
 Scenario: page-cache eviction BUDGET arithmetic and the active_page=None
-budget-distortion strand (issue #60 / B-04, audit table row 5).
+budget-distortion strand.
 
 The evict-vs-activate interleave, screensaver-pending survival, the
 gut-then-pop window and the ready_to_clear re-point/strand all have
@@ -15,7 +15,7 @@ the plain arithmetic of clear_old_cached_pages:
     cached pages counted toward `total` (:227) but skipped from the
     evictable list (:236), so it inflates `excess` for OTHER controllers --
     over-evicting live controllers while its own pages are never reclaimed
-    (tracked fix: issue #81, pin-count page-cache ownership; leg 4 is its
+    (the tracked fix is a pin-count page-cache ownership redesign; leg 4 is its
     tripwire).
 
 Unit tier: lightweight stub controllers + the REAL PageManagerBackend over
@@ -200,8 +200,8 @@ def leg_set_pages_to_cache_shrink() -> int:
 # evictable list (:236). So they inflate `excess` -- over-evicting a LIVE
 # controller -- while never being reclaimed themselves.
 #
-# The tracked fix is issue #81 (pin-count page-cache ownership redesign);
-# this leg asserts CURRENT behavior and is a deliberate tripwire: when #81
+# The tracked fix is a pin-count page-cache ownership redesign;
+# this leg asserts CURRENT behavior and is a deliberate tripwire: when that
 # (or any change to the total/:236 contract) lands, it fails loudly so the
 # leg gets rewritten to the new contract instead of silently passing.
 # ---------------------------------------------------------------------------

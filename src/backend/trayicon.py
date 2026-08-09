@@ -368,7 +368,7 @@ class StatusNotifierItemService(DBusService):
         # rest of the app's lifetime whenever the StatusNotifierWatcher
         # restarts (e.g. plasmashell/waybar crash) or appears late (GNOME's
         # AppIndicator support loading after us): a fresh watcher instance
-        # knows nothing about previously registered items (#47). Watch the
+        # knows nothing about previously registered items. Watch the
         # well-known name instead and (re-)announce the item every time the
         # name gains an owner.
         if self._watcher_watch_id is None:

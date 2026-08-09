@@ -14,7 +14,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 ---
 
-Shared HTTP client (issue #168): one process-wide requests.Session behind a
+Shared HTTP client: one process-wide requests.Session behind a
 retrying adapter, used by every outbound fetch (store catalog, install
 archives, asset URL imports, the About dialog's contributor list).
 

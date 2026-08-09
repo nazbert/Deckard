@@ -70,7 +70,7 @@ class ActionHolder:
         
         if icon is None:
             # ActionHolders are built in plugin __init__, which runs on a
-            # store worker thread on the install path (issue #35). GTK4 is
+            # store worker thread on the install path. GTK4 is
             # main-thread-only -- off-main widget construction is the
             # segfault/abort class -- so the default icon is marshalled onto
             # the main loop. Inline (zero-cost) on the normal startup path,
