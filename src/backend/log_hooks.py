@@ -115,12 +115,13 @@ _fault_file = None
 # 3-day-rotated logs.log and into the About-dialog ring -- the safety net's
 # first big catch would DoS the log it reports to.
 #
-# One record per site per window; repeats within the window are counted and
-# reported as a summary riding on the NEXT record from that same site.
-# Deliberately per-SITE, never global: a storm on one signal handler must
-# never mask a different, one-shot failure somewhere else. A storm that
-# simply stops leaves its trailing count unreported rather than flushed by a
-# timer -- these hooks own no thread and must not grow one.
+# One record per site per window; further failures within the window are
+# counted and reported as a summary riding on the NEXT record from that same
+# site. Deliberately per-SITE, never global: a storm on one signal handler
+# must never mask a different, one-shot failure somewhere else. A count that
+# will never get a next record -- its entry evicted by the prune -- is
+# flushed at that moment instead (_emit_pending), never dropped: the guard
+# may make a flood quiet, never invisible.
 RATE_LIMIT_WINDOW_S = 5.0  # module-level so scenarios can shrink the window
 _RATE_LIMIT_MAX_KEYS = 256
 # _log_exc runs on whatever thread failed: any worker (threading.excepthook),
@@ -132,7 +133,10 @@ _RATE_LIMIT_MAX_KEYS = 256
 # -- a plain Lock would self-deadlock inside the crash handler. The lock is
 # never held across the loguru call.
 _rate_lock = threading.RLock()
-_rate_state: dict[tuple, list] = {}  # site key -> [window start, suppressed]
+# site key -> [window start, suppressed, last hit]. The window start is
+# refreshed only when a record is ALLOWED; the last hit on every occurrence.
+# Eviction needs the second one -- see _prune_locked.
+_rate_state: dict[tuple, list] = {}
 
 
 def _exc_site(exc_type, exc_value, exc_tb) -> tuple[tuple, str]:
@@ -165,40 +169,83 @@ def _label_for_key(key: tuple) -> str:
     return f"{where[0]}:{where[1]} [{type_name}]"
 
 
-def _prune_locked(now: float) -> None:
-    """Cap the dict; called with _rate_lock held, only once it is oversized.
-    A BROAD storm (many distinct sites) must not turn the guard itself into
-    an unbounded leak. Expired windows go first -- dropping their pending
-    counts unreported is the right trade, those sites stopped firing so
-    nothing is waiting on their summary -- and if that is not enough, the
-    oldest half goes too, which bounds the dict unconditionally. Items are
-    list()ed up front so a GC-time re-entrant hook mutating the dict cannot
-    turn a prune into a 'changed size during iteration' RuntimeError."""
+def _emit_pending(key: tuple, count: int, reason: str) -> None:
+    """Report a pending count that will never get a next record to ride on.
+    Same never-raise contract as _log_exc: loguru first, __stderr__ second,
+    swallow last. Carries the "Uncaught exception" prefix on purpose -- an
+    incident reader greps for that string, and these counts are part of the
+    same story."""
+    message = (
+        f"Uncaught exception [rate-limit]: {count} further failures at "
+        f"{_label_for_key(key)} since the last record ({reason})"
+    )
+    try:
+        _LOG.warning(message)
+    except Exception:
+        try:
+            print(message, file=sys.__stderr__)
+        except Exception:
+            pass
+
+
+def _prune_locked(now: float) -> list[tuple[tuple, int]]:
+    """Cap the dict; called with _rate_lock held, only once it is oversized --
+    a BROAD storm (many distinct sites) must not turn the guard itself into an
+    unbounded leak. Returns the pending counts of everything it dropped, for
+    the caller to report once the lock is released: an evicted count has no
+    next record to ride on, and silently discarding it would let the guard
+    turn a flood into silence.
+
+    Eviction is by LAST HIT, never by window start. entry[0] is refreshed only
+    when a record is allowed, so a site that is storming right now looks OLD by
+    that measure while a one-shot newcomer looks fresh -- sorting on it evicted
+    exactly the sites the guard exists to contain, and past the cap every hot
+    site was re-admitted (and re-logged) on its next hit, collapsing the flood
+    protection to nothing. Idle sites go first, then the least-recently-hit
+    half, which bounds the dict unconditionally. Items are list()ed up front so
+    a GC-time re-entrant hook mutating the dict cannot turn a prune into a
+    'changed size during iteration' RuntimeError."""
+    dropped: list[tuple[tuple, int]] = []
+
+    def evict(key: tuple) -> None:
+        entry = _rate_state.pop(key, None)
+        if entry is not None and entry[1]:
+            dropped.append((key, entry[1]))
+
     for key, entry in list(_rate_state.items()):
-        if now - entry[0] >= RATE_LIMIT_WINDOW_S:
-            _rate_state.pop(key, None)
+        if now - entry[2] >= RATE_LIMIT_WINDOW_S:
+            evict(key)
     if len(_rate_state) > _RATE_LIMIT_MAX_KEYS:
-        oldest = sorted(list(_rate_state.items()), key=lambda kv: kv[1][0])
-        for key, _entry in oldest[: len(oldest) // 2]:
-            _rate_state.pop(key, None)
+        by_last_hit = sorted(list(_rate_state.items()), key=lambda kv: kv[1][2])
+        for key, _entry in by_last_hit[: len(by_last_hit) // 2]:
+            evict(key)
+    return dropped
 
 
 def _rate_limit(key: tuple) -> tuple[bool, int]:
-    """(suppress this occurrence?, repeats suppressed since the last record).
+    """(suppress this occurrence?, failures suppressed since the last record).
 
     The first hit of a site is always logged immediately -- throttling must
-    never delay the record that says the failure exists; only its repeats."""
+    never delay the record that says the failure exists; only what follows."""
     now = time.monotonic()
+    dropped: list[tuple[tuple, int]] = []
     with _rate_lock:
         entry = _rate_state.get(key)
         if entry is not None and now - entry[0] < RATE_LIMIT_WINDOW_S:
             entry[1] += 1
-            return True, 0
-        suppressed = entry[1] if entry is not None else 0
-        _rate_state[key] = [now, 0]
-        if len(_rate_state) > _RATE_LIMIT_MAX_KEYS:
-            _prune_locked(now)
-        return False, suppressed
+            entry[2] = now
+            suppress, suppressed = True, 0
+        else:
+            suppress = False
+            suppressed = entry[1] if entry is not None else 0
+            _rate_state[key] = [now, 0, now]
+            if len(_rate_state) > _RATE_LIMIT_MAX_KEYS:
+                dropped = _prune_locked(now)
+    # Outside the lock: reporting is I/O, and a sink must never be able to
+    # stall every other thread's hook.
+    for dropped_key, count in dropped:
+        _emit_pending(dropped_key, count, "rate-limit state pruned")
+    return suppress, suppressed
 
 
 def _announce_disabled() -> None:

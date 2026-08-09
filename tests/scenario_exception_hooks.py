@@ -26,7 +26,9 @@ why run_all.py's per-scenario interpreter matters):
      one record plus a suppressed-count summary on the next one; two
      distinct sites never mask each other; non-repeating failures are
      untouched (no throttling, no summary noise); the state dict stays
-     bounded under a broad storm.
+     bounded under a broad storm, suppression SURVIVES past that bound
+     (eviction by last hit, not by window start), and a pending count whose
+     entry is evicted is reported rather than discarded.
 
 Out of harness scope (manual QA): the real PyGObject-callback -> excepthook
 path under a live GTK loop, and the config_logger()/main() ordering.
@@ -368,6 +370,51 @@ def main() -> None:
         assert len(log_hooks._rate_state) <= log_hooks._RATE_LIMIT_MAX_KEYS, (
             f"rate-limit state must stay bounded, got {len(log_hooks._rate_state)} keys"
         )
+
+        # 9e. ...and SUPPRESSION must survive past the cap, which the bound in
+        # 9d does not pin. 100 hot sites storming while 300 one-shot sites
+        # push the dict over the cap: evicting by window start (refreshed only
+        # on an allowed record) makes the hot sites look oldest and re-admits
+        # every one of them on its next hit, collapsing the guard to ~0%
+        # protection exactly when it matters. Eviction by LAST HIT keeps them.
+        log_hooks._rate_state.clear()
+        records.clear()
+        hot = [("HotError", (f"/fake/hot_{i}.py", i)) for i in range(100)]
+        cold = [("ColdError", (f"/fake/cold_{i}.py", i)) for i in range(800)]
+        hot_allowed = cold_allowed = 0
+        cold_iter = iter(cold)
+        for _round in range(40):
+            for key in hot:
+                if not log_hooks._rate_limit(key)[0]:
+                    hot_allowed += 1
+            for _ in range(len(cold) // 40):
+                if not log_hooks._rate_limit(next(cold_iter))[0]:
+                    cold_allowed += 1
+        assert cold_allowed == len(cold), "every distinct one-shot site must log"
+        assert hot_allowed <= len(hot) * 1.1, (
+            f"a hot site must log about once, not once per eviction: "
+            f"{hot_allowed} records for {len(hot)} sites x 40 hits "
+            f"({len(hot) * 40} occurrences)"
+        )
+
+        # 9f. an evicted entry's pending count is REPORTED, not discarded --
+        # the guard may make a flood quiet, never invisible.
+        log_hooks._rate_state.clear()
+        records.clear()
+        quiet = ("QuietError", ("/fake/quiet_site.py", 7))
+        for _ in range(6):
+            log_hooks._rate_limit(quiet)  # 1 allowed + 5 suppressed
+        log_hooks.RATE_LIMIT_WINDOW_S = 0.01
+        time.sleep(0.02)  # the quiet site is now idle, and first out
+        for i in range(log_hooks._RATE_LIMIT_MAX_KEYS + 2):
+            log_hooks._rate_limit(("FloodError", (f"/fake/flood_{i}.py", i)))
+        assert quiet not in log_hooks._rate_state, (
+            "an idle site must be evicted before an active one"
+        )
+        assert "5 further failures at /fake/quiet_site.py:7" in joined(), (
+            f"an evicted pending count must be reported, got: {joined()[-400:]!r}"
+        )
+        log_hooks.RATE_LIMIT_WINDOW_S = original_window
     finally:
         log_hooks.RATE_LIMIT_WINDOW_S = original_window
         log_hooks._rate_state.clear()
