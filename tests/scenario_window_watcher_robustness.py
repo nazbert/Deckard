@@ -248,11 +248,64 @@ def check_x11_watcher_survives() -> None:
         watcher.join(timeout=3.0)
 
 
+def check_gnome_install_extension_uuid() -> None:
+    """#185: the GNOME integration asked for its shell extension with the
+    uuid wrapped in a LIST -- unmarshallable against InstallRemoteExtension's
+    "(s)" signature (it would raise the moment anything called it), and never
+    equal to any entry of get_installed_extensions() either, so the
+    already-installed short-circuit could not fire. Dormant when fixed (no
+    call sites; onboarding drives gl.gnome_extensions directly), which is
+    exactly why it needs a guard: the next caller to wire it up must not
+    inherit a method that cannot work.
+
+    `self` is untouched by the method, so no D-Bus proxy is built here."""
+    import types
+
+    from src.backend.WindowGrabber.Integrations.Gnome import Gnome
+
+    class RecordingExtensions:
+        def __init__(self, installed):
+            self.installed = installed
+            self.requested = []
+
+        def get_installed_extensions(self):
+            return list(self.installed)
+
+        def request_installation(self, uuid):
+            self.requested.append(uuid)
+            return True
+
+    real = getattr(gl, "gnome_extensions", None)
+    try:
+        gl.gnome_extensions = RecordingExtensions([])
+        Gnome.install_extension(types.SimpleNamespace())
+        requested = gl.gnome_extensions.requested
+        assert len(requested) == 1, f"expected one install request, got {requested}"
+        uuid = requested[0]
+        assert isinstance(uuid, str), (
+            f"the extension uuid must be the string the D-Bus \"(s)\" "
+            f"signature takes, got {type(uuid).__name__}: {uuid!r}"
+        )
+
+        # Already installed: the same value must match what the shell lists.
+        gl.gnome_extensions = RecordingExtensions([uuid])
+        Gnome.install_extension(types.SimpleNamespace())
+        assert gl.gnome_extensions.requested == [], (
+            "an already-installed extension must not be requested again -- "
+            f"the short-circuit compares {uuid!r} against the shell's list"
+        )
+    finally:
+        gl.gnome_extensions = real
+
+    print("ok: the GNOME integration installs its extension by uuid string")
+
+
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_window_watcher_robustness")
     check_pageless_deck_routing()
     check_pageless_guard_is_a_clean_noop()
     check_x11_watcher_survives()
+    check_gnome_install_extension_uuid()
     print("PASS: scenario_window_watcher_robustness")
 
 

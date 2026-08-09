@@ -38,12 +38,18 @@ class Gnome(Integration):
             self.connect_dbus()
 
     def install_extension(self) -> None:
-        uuid = ["streamcontroller@core447.com"]
+        # A bare uuid string, like the live onboarding path
+        # (OnboardingWindow.on_install_button_click) and like the
+        # InstallRemoteExtension "(s)" signature GnomeExtensions marshals it
+        # into. Wrapped in a list it could never match get_installed_
+        # extensions' uuids either, so the "already installed" short-circuit
+        # was dead too (#185).
+        uuid = "streamcontroller@core447.com"
         installed_extensions = gl.gnome_extensions.get_installed_extensions()
 
         if uuid in installed_extensions:
             return
-        
+
         gl.gnome_extensions.request_installation(uuid)
 
 
