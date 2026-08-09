@@ -20,11 +20,11 @@ class LogindLockScreenDetector(LockScreenDetector):
     They are lock *requests*, though: a locker that never round-trips logind
     is missed, which is why the DE detectors stay first in the chain."""
 
-    def __init__(self, lock_screen_manager: "LockScreenManager", bus=None):
+    def __init__(self, lock_screen_manager: "LockScreenManager", bus: Gio.DBusConnection | None = None):
         super().__init__(lock_screen_manager)
         self.setup_dbus(bus)
 
-    def setup_dbus(self, bus=None):
+    def setup_dbus(self, bus: Gio.DBusConnection | None = None) -> None:
         if gl.IS_MAC:
             return
         try:
@@ -55,6 +55,14 @@ class LogindLockScreenDetector(LockScreenDetector):
             log.error(f"Failed to connect to logind: {e}")
 
     def resolve_session_path(self) -> str:
+        bus = self.bus
+        if bus is None:
+            # Unreachable in practice: setup_dbus assigns self.bus immediately
+            # before calling this. Raised as GLib.Error so setup_dbus's
+            # "failed to connect to logind" branch handles it, which is what
+            # an unusable connection means.
+            raise GLib.Error("logind D-Bus connection unavailable")
+
         session_id = os.getenv("XDG_SESSION_ID")
         if session_id:
             method = "GetSession"
@@ -63,7 +71,7 @@ class LogindLockScreenDetector(LockScreenDetector):
             method = "GetSessionByPID"
             args = GLib.Variant("(u)", (os.getpid(),))
 
-        reply = self.bus.call_sync(
+        reply = bus.call_sync(
             "org.freedesktop.login1",
             "/org/freedesktop/login1",
             "org.freedesktop.login1.Manager",

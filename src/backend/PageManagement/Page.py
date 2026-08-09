@@ -21,9 +21,6 @@ import time
 # Import globals first to get IS_MAC
 import globals as gl
 
-if not gl.IS_MAC:
-    from evdev import InputEvent
-
 from loguru import logger as log
 from copy import copy
 import shutil
@@ -34,13 +31,13 @@ from src.backend.atomic_json import atomic_write_json
 import globals as gl
 
 from src.backend.PluginManager.ActionCore import ActionCore
-from src.backend.DeckManagement.InputIdentifier import Input, InputIdentifier
+from src.backend.DeckManagement.InputIdentifier import Input, InputEvent, InputIdentifier
 # Import typing
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
-    from src.backend.DeckManagement.DeckController import LabelManager
+    from src.backend.DeckManagement.DeckController import ControllerInput, LabelManager
     from src.backend.PluginManager.ActionHolder import ActionHolder
-    from src.backend.DeckManagement.DeckController import ControllerKeyState
+    from src.backend.DeckManagement.DeckController import ControllerInputState
 
 
 # One save lock per page json path, shared across every Page object for that
@@ -104,7 +101,11 @@ class Page:
         Updates the dict without any updates on the action objects.
         Do NOT use if you made changes to the action objects
         """
-        self.dict = gl.page_manager.get_page_data(self.json_path)
+        page_manager = gl.page_manager
+        if page_manager is None:
+            # Only before create_global_objects(); nothing to load from.
+            return
+        self.dict = page_manager.get_page_data(self.json_path)
     
     def load(self, load_from_file: bool = False):
         start = time.time()
@@ -214,19 +215,28 @@ class Page:
 
     def get_new_action_object(self, loaded_action_objects: dict, action_id: str, state: int, i: int, input_ident):
         
-        action_holder = gl.plugin_manager.get_action_holder_from_id(action_id)
+        plugin_manager = gl.plugin_manager
+        if plugin_manager is None:
+            # Only before create_global_objects(): no holder can be resolved.
+            return NoActionHolderFound(id=action_id, identifier=input_ident, state=state)
+
+        action_holder = plugin_manager.get_action_holder_from_id(action_id)
 
         ## No action holder found
         if action_holder is None:
-            plugin_id = gl.plugin_manager.get_plugin_id_from_action_id(action_id)
-            if gl.plugin_manager.get_is_plugin_out_of_date(plugin_id):
+            plugin_id = plugin_manager.get_plugin_id_from_action_id(action_id)
+            if plugin_manager.get_is_plugin_out_of_date(plugin_id):
                 return ActionOutdated(id=action_id, identifier=input_ident, state=state)
             return NoActionHolderFound(id=action_id, identifier=input_ident, state=state)
 
         ## Keep old object if it exists
         old_action = loaded_action_objects.get(input_ident.input_type, {}).get(input_ident.json_identifier, {}).get(state, {}).get(i)
         if old_action is not None:
-            if isinstance(old_action, action_holder.action_core):
+            # action_core holds the action CLASS; ActionHolder annotates that
+            # attribute as an instance (root cause owned by the PluginManager
+            # MR), so bind it locally before using it as a class.
+            action_core_class: Any = action_holder.action_core
+            if isinstance(old_action, action_core_class):
                 return old_action #FIXME: gets never used
             
         ## Create new action object            
@@ -318,8 +328,8 @@ class Page:
     def move_actions(self, type: str, from_key: str, to_key: str):
         from_actions = self.action_objects.get(type, {}).get(from_key, {})
 
-        for action in from_actions.values():
-            action: "ActionCore" = action
+        for raw_action in from_actions.values():
+            action: "ActionCore" = raw_action
             if type == "keys":
                 action.key_index = self.deck_controller.coords_to_index(to_key.split("x"))
             action.identifier = to_key
@@ -344,7 +354,7 @@ class Page:
 
 
     @log.catch
-    def add_action_object_from_holder(self, action_holder: "ActionHolder", input_ident: "InputIdentifier", state: str, i: int):
+    def add_action_object_from_holder(self, action_holder: "ActionHolder", input_ident: "InputIdentifier", state: int, i: int):
         action_object = action_holder.init_and_get_action(deck_controller=self.deck_controller, page=self, input_ident=input_ident, state=state)
         if action_object is None:
             return
@@ -354,7 +364,11 @@ class Page:
         self.action_objects[input_ident.input_type][input_ident.json_identifier][int(state)][i] = action_object
 
     def remove_plugin_action_objects(self, plugin_id: str) -> bool:
-        plugin_obj = gl.plugin_manager.get_plugin_by_id(plugin_id)
+        plugin_manager = gl.plugin_manager
+        if plugin_manager is None:
+            return False
+
+        plugin_obj = plugin_manager.get_plugin_by_id(plugin_id)
         if plugin_obj is None:
             return False
 
@@ -381,6 +395,10 @@ class Page:
     
     def update_inputs_with_actions_from_plugin(self, plugin_id: str):
         # plugin_obj = gl.plugin_manager.get_plugin_by_id(plugin_id)
+        plugin_manager = gl.plugin_manager
+        if plugin_manager is None:
+            return
+
         for input_type in list(self.action_objects.keys()):
             for json_identifier in list(self.action_objects[input_type].keys()):
                 for state in list(self.action_objects[input_type][json_identifier].keys()):
@@ -388,7 +406,7 @@ class Page:
                         action_core = self.action_objects[input_type][json_identifier][state][index]
                         action_id = action_core.action_id
 
-                        if gl.plugin_manager.get_plugin_id_from_action_id(action_id) == plugin_id:
+                        if plugin_manager.get_plugin_id_from_action_id(action_id) == plugin_id:
                             identifier = Input.FromTypeIdentifier(input_type, json_identifier)
 
                             c_input = self.deck_controller.get_input(identifier)
@@ -497,6 +515,8 @@ class Page:
         return actions
     
     def get_action(self, identifier: InputIdentifier = None, state: int = None, index: int = None):
+        if identifier is None:
+            return None
         return self.action_objects.get(identifier.input_type, {}).get(identifier.json_identifier, {}).get(state, {}).get(index)
     
     def get_action_dict(self, action_object = None, identifier: InputIdentifier = None, state: int = None, index: int = None):
@@ -566,7 +586,7 @@ class Page:
         return assignments
     
     
-    def set_action_event_assigment(self, event_assigner: EventAssigner | None, input_event: "InputEvent | None", action_object: ActionCore = None, identifier: InputIdentifier = None, state: int = None, index: int = None):
+    def set_action_event_assigment(self, event_assigner: EventAssigner | None, input_event: InputEvent | None, action_object: ActionCore = None, identifier: InputIdentifier = None, state: int = None, index: int = None):
         action_dict = self.get_action_dict(action_object, identifier, state, index)
         action_dict.setdefault("event-assignments", {})
         action_dict["event-assignments"][str(input_event)] = event_assigner.id if event_assigner else None
@@ -644,12 +664,9 @@ class Page:
                     state_dict.clear()
             self.action_objects[input_type] = {}
 
-    def get_name(self):
-        return os.path.splitext(os.path.basename(self.json_path))[0]
-    
     def get_pages_with_same_json(self, get_self: bool = False) -> list:
         pages: list[Page]= []
-        for controller in gl.deck_manager.deck_controller:
+        for controller in (gl.deck_manager.deck_controller if gl.deck_manager is not None else []):
             # Snapshot active_page once: it is set to None from another thread
             # while a controller (dis)connects/closes, so re-reading the field
             # per check raced a non-None guard against a None deref of
@@ -707,7 +724,7 @@ class Page:
     def _get_dict_value(self, keys: list[str]):
         value = self.dict
         for i, key in enumerate(keys):
-            fallback = {}
+            fallback: dict | None = {}
             if i == len(keys) - 1:
                 fallback = None
 
@@ -727,13 +744,14 @@ class Page:
                 d = d.setdefault(key, {})
 
         self.save()
-        gl.page_manager.update_dict_of_pages_with_path(self.json_path)
+        if gl.page_manager is not None:
+            gl.page_manager.update_dict_of_pages_with_path(self.json_path)
 
     def update_key_image(self, coords: str | tuple[int, int], state: int) -> None:
         #TODO: Move to DeckController
         #TODO: Make input specific
         coords = self.get_tuple_coords(coords)
-        for controller in gl.deck_manager.deck_controller:
+        for controller in (gl.deck_manager.deck_controller if gl.deck_manager is not None else []):
             # active_page is None while a controller is (dis)connecting or
             # closing -- skip it instead of AttributeError-ing.
             active_page = controller.active_page
@@ -749,7 +767,7 @@ class Page:
                 key.update()
 
     def update_input(self, identifier: InputIdentifier, state: int, wake: bool = True) -> None:
-        for controller in gl.deck_manager.deck_controller:
+        for controller in (gl.deck_manager.deck_controller if gl.deck_manager is not None else []):
             if wake:
                 if controller.screen_saver.showing:
                     controller.screen_saver.hide()
@@ -769,15 +787,18 @@ class Page:
     def get_controller_inputs(self, identifier: InputIdentifier) -> list["ControllerInput"]:
         inputs: list["ControllerInput"] = []
 
-        for controller in gl.deck_manager.deck_controller:
+        for controller in (gl.deck_manager.deck_controller if gl.deck_manager is not None else []):
             for c_input in controller.get_inputs(identifier):
                 if c_input.identifier == identifier:
                     inputs.append(c_input)
 
         return inputs
 
-    def get_controller_input_states(self, identifier: InputIdentifier, state: int) -> list["ControllerKeyState"]:
-        matching_states: list["ControllerKeyState"] = []
+    # ControllerInputState, not ControllerKeyState: `states` is declared as the
+    # base on ControllerInput, and every use below (label/layout manager) is a
+    # base-class member.
+    def get_controller_input_states(self, identifier: InputIdentifier, state: int) -> list["ControllerInputState"]:
+        matching_states: list["ControllerInputState"] = []
 
         for controller_input in self.get_controller_inputs(identifier):
             for input_state in controller_input.states.values():
@@ -793,20 +814,21 @@ class Page:
     
     def get_tuple_coords(self, coords: str | tuple[int, int]) -> tuple[int, int]:
         if isinstance(coords, str):
-            return tuple(map(int, coords.split("x")))
+            x, y = coords.split("x")
+            return int(x), int(y)
         return coords
     
     # Get/set methods
 
-    def get_label_manager(self, identifier: InputIdentifier, state: int) -> "LabelManager":
+    def get_label_manager(self, identifier: InputIdentifier, state: int) -> "LabelManager | None":
         c_input = self.deck_controller.get_input(identifier)
         if c_input is None:
-            return
-        state = c_input.states.get(state)
-        if state is None:
-            return
-        
-        return state.label_manager
+            return None
+        input_state = c_input.states.get(state)
+        if input_state is None:
+            return None
+
+        return input_state.label_manager
         
 
     def get_label_text(self, identifier: InputIdentifier, state: int, label_position: str) -> str:
@@ -982,10 +1004,10 @@ class Page:
         if update:
             self.update_input(identifier, state)
 
-    def get_media_valign(self, identifier: InputIdentifier, state: int) -> str:
+    def get_media_valign(self, identifier: InputIdentifier, state: int) -> float:
         return self._get_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "media", "valign"])
 
-    def set_media_valign(self, identifier: InputIdentifier, state: int, valign: str, update: bool = True) -> None:
+    def set_media_valign(self, identifier: InputIdentifier, state: int, valign: float, update: bool = True) -> None:
         for key_state in self.get_controller_input_states(identifier, state):
             key_state.layout_manager.page_layout.valign = valign
 
@@ -994,10 +1016,10 @@ class Page:
         if update:
             self.update_input(identifier, state)
 
-    def get_media_halign(self, identifier: InputIdentifier, state: int) -> str:
+    def get_media_halign(self, identifier: InputIdentifier, state: int) -> float:
         return self._get_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "media", "halign"])
 
-    def set_media_halign(self, identifier: InputIdentifier, state: int, halign: str, update: bool = True) -> None:
+    def set_media_halign(self, identifier: InputIdentifier, state: int, halign: float, update: bool = True) -> None:
         for key_state in self.get_controller_input_states(identifier, state):
             key_state.layout_manager.page_layout.halign = halign
 
@@ -1011,7 +1033,7 @@ class Page:
 
     def set_media_path(self, identifier: InputIdentifier, state: int, path: str, update: bool = True) -> None:
         for key_state in self.get_controller_input_states(identifier, state):
-            key_state.layout_manager.page_layout.path = path
+            key_state.layout_manager.page_layout.path = path  # type: ignore[attr-defined]  # cross-MR: ImageLayout (Subclasses/KeyLayout.py) declares no `path` field; nothing reads this write (owner: MR 5)
 
         self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "media", "path"], path)
 

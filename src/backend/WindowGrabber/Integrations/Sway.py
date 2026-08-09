@@ -55,13 +55,15 @@ class Sway(Integration):
     def get_all_windows(self) -> list[Window]:
         return [self._parse_window(client) for client in self._get_windows()]
 
-    def get_active_window(self) -> Window:
+    def get_active_window(self) -> Window | None:
         window_list = self._get_windows()
 
         for client in window_list:
             if not client["focused"]:
                 continue
             return self._parse_window(client)
+
+        return None
 
     def _walk_tree(self, node, windows: list[dict[str, Any]]):
         if "window_properties" in node or "app_id" in node:
@@ -75,7 +77,7 @@ class Sway(Integration):
                self._walk_tree(child, windows)
 
     def _get_windows(self) -> list[dict[str, Any]]:
-        windows = []
+        windows: list[dict[str, Any]] = []
         try:
             # Run the swaymsg command and capture the output
             output = subprocess.check_output([*self.command_prefix, "swaymsg", "-t", "get_tree"], text=True, cwd="/").strip()

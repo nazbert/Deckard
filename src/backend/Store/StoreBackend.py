@@ -18,7 +18,9 @@ import sys
 import zipfile
 import requests
 import json
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any, TypeGuard
 from PIL import Image
 from io import BytesIO
 from loguru import logger as log
@@ -81,7 +83,7 @@ class StoreBackend:
     ASSET_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
     @classmethod
-    def is_safe_asset_id(cls, asset_id) -> bool:
+    def is_safe_asset_id(cls, asset_id) -> TypeGuard[str]:
         """Whether a manifest-supplied id is safe to use as a single path
         component. Reject (don't normalize): an id that fails this check is
         a hostile or broken manifest, and quietly repairing it would install
@@ -102,11 +104,11 @@ class StoreBackend:
     SAFE_REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
 
     @classmethod
-    def is_safe_commit_sha(cls, commit_sha) -> bool:
+    def is_safe_commit_sha(cls, commit_sha) -> TypeGuard[str]:
         return isinstance(commit_sha, str) and bool(cls.COMMIT_SHA_PATTERN.fullmatch(commit_sha))
 
     @classmethod
-    def is_safe_ref_name(cls, ref_name) -> bool:
+    def is_safe_ref_name(cls, ref_name) -> TypeGuard[str]:
         """Whether a remote-catalog branch/ref name is safe to pass to git.
         Rejects shell metachars, whitespace, newlines, and leading '-' so a
         catalog `branch: "main; rm -rf ~"` can neither inject a shell nor be
@@ -218,7 +220,7 @@ class StoreBackend:
         self.official_store_branch_cache = v
         return v
 
-    def request_from_url(self, url: str) -> requests.Response:
+    def request_from_url(self, url: str) -> "requests.Response | NoConnectionError":
         # Callers run on worker threads (the prepare pool, UI install
         # threads). Connection AND body read stay inside the limiter, which
         # is what keeps a catalog load from presenting as a scrape burst --
@@ -375,7 +377,7 @@ class StoreBackend:
             return None
         return commits[0].get("sha")
     
-    def get_official_authors(self) -> list:
+    def get_official_authors(self) -> "list | NoConnectionError":
         authors_json = self.get_remote_file(self.STORE_REPO_URL, "OfficialAuthors.json", self.STORE_BRANCH, force_refetch=True)
         if isinstance(authors_json, NoConnectionError):
             return authors_json
@@ -395,7 +397,7 @@ class StoreBackend:
             log.error(e)
             return None, n_stores_with_errors
 
-    def process_store_data(self, filename: str, process_func: callable, get_custom_func: callable, data_class, include_images=True):
+    def process_store_data(self, filename: str, process_func: Callable[..., Any], get_custom_func: Callable[..., Any] | None, data_class, include_images=True):
         n_stores_with_errors = 0
         data_list = []
 
@@ -444,13 +446,13 @@ class StoreBackend:
     def get_all_sd_plus_bar_wallpapers(self) -> int:
         return self.process_store_data(self.SDPLUSWALLPAPERS_FILE, self.prepare_sd_plus_bar_wallpaper, None, SDPlusBarWallpaperData)
     
-    def get_manifest(self, url:str, commit:str) -> dict:
+    def get_manifest(self, url:str, commit:str) -> "dict | NoConnectionError | None":
         # url = self.build_url(url, "manifest.json", commit)
         manifest = self.get_remote_file(url, "manifest.json", commit)
         if isinstance(manifest, NoConnectionError):
             return manifest
         if manifest is None:
-            return
+            return None
         return json.loads(manifest)
 
     def get_attribution(self, url:str, commit:str) -> dict:
@@ -468,7 +470,7 @@ class StoreBackend:
 
         # Check if suitable version is available
         compatible = True
-        commit: str = None
+        commit: str | None = None
         if "commits" in plugin:
             version = self.get_newest_compatible_version(plugin["commits"])
             if version is None:
@@ -496,14 +498,13 @@ class StoreBackend:
             log.error(f"manifest failed to load for repository {url}")
             return
 
-        image = None
-        thumbnail_path = manifest.get("thumbnail")
+        image: "Image.Image | None" = None
+        thumbnail_path: Any = manifest.get("thumbnail")
         if include_image:
-            image = self.get_web_image(url, thumbnail_path, commit or branch)
-            if isinstance(image, NoConnectionError):
-                # A missing/rate-limited thumbnail must not drop the plugin --
-                # list it without an image.
-                image = None
+            fetched = self.get_web_image(url, thumbnail_path, commit or branch)
+            # A missing/rate-limited thumbnail must not drop the plugin --
+            # list it without an image.
+            image = None if isinstance(fetched, NoConnectionError) else fetched
         
         attribution = self.get_attribution(url, commit or branch)
         if isinstance(attribution, NoConnectionError):
@@ -517,9 +518,18 @@ class StoreBackend:
         translated_description = gl.lm.get_custom_translation(manifest.get("descriptions", {}))
         translated_short_description = gl.lm.get_custom_translation(manifest.get("short-descriptions", {}))
 
+        # JSON-derived values: the manifest/attribution documents are untyped,
+        # and each "missing -> None" below feeds a StoreData field that is
+        # declared non-Optional in src/windows/Store/StoreData.py. Bound
+        # through Any locals rather than restating a type they do not have.
+        descriptions: Any = manifest.get("descriptions") or None
+        short_descriptions: Any = manifest.get("short-descriptions") or None
+        tags: Any = manifest.get("tags") or None
+        license_descriptions: Any = attribution.get("licence-descriptions", attribution.get("descriptions")) or None
+
         return PluginData(
-            descriptions=manifest.get("descriptions") or None,
-            short_descriptions=manifest.get("short-descriptions") or None,
+            descriptions=descriptions,
+            short_descriptions=short_descriptions,
             description=translated_description or manifest.get("description"),
             short_description=translated_short_description or manifest.get("short-description"),
 
@@ -532,7 +542,7 @@ class StoreBackend:
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
             repository_name=self.get_repo_name(url),
-            tags=manifest.get("tags") or None,
+            tags=tags,
 
             thumbnail=thumbnail_path or None,
             image=image or None,
@@ -540,7 +550,7 @@ class StoreBackend:
             copyright=attribution.get("copyright") or None,
             original_url=attribution.get("original-url") or None,
             license=attribution.get("licence") or None,
-            license_descriptions=attribution.get("licence-descriptions", attribution.get("descriptions")) or None,
+            license_descriptions=license_descriptions,
 
             plugin_name=manifest.get("name") or None,
             plugin_version=manifest.get("version") or None,
@@ -569,7 +579,7 @@ class StoreBackend:
         except Exception as e:
             raise RuntimeError(f"Unable to retrieve git commit hash: {e}")
     
-    def get_local_sha_for_id(self, base_dir: str, asset_id) -> str:
+    def get_local_sha_for_id(self, base_dir: str, asset_id) -> str | None:
         """get_local_sha guarded by the asset-id whitelist: an unsafe or
         missing manifest id never probes the filesystem and simply reads as
         'not installed' (None)."""
@@ -617,17 +627,19 @@ class StoreBackend:
         manifest = self.get_manifest(url, commit)
         if isinstance(manifest, NoConnectionError):
             return manifest
+        if not manifest:
+            log.error(f"manifest failed to load for repository {url}")
+            return None
         attribution = self.get_attribution(url, commit)
         if isinstance(attribution, NoConnectionError):
             return attribution
         attribution = attribution.get("generic", {}) #TODO: Choose correct attribution
 
-        thumbnail_path = manifest.get("thumbnail")
-        image = self.get_web_image(url, thumbnail_path, commit)
-        if isinstance(image, NoConnectionError):
-            # A missing/rate-limited thumbnail must not drop the pack from
-            # the catalog -- list it without an image, like prepare_plugin.
-            image = None
+        thumbnail_path: Any = manifest.get("thumbnail")
+        fetched = self.get_web_image(url, thumbnail_path, commit)
+        # A missing/rate-limited thumbnail must not drop the pack from
+        # the catalog -- list it without an image, like prepare_plugin.
+        image: "Image.Image | None" = None if isinstance(fetched, NoConnectionError) else fetched
 
         author = self.get_user_name(url)
 
@@ -638,13 +650,22 @@ class StoreBackend:
         translated_description = gl.lm.get_custom_translation(manifest.get("descriptions", {}))
         translated_short_description = gl.lm.get_custom_translation(manifest.get("short-descriptions", {}))
 
+        # JSON-derived values: the manifest/attribution documents are untyped,
+        # and each "missing -> None" below feeds a StoreData field that is
+        # declared non-Optional in src/windows/Store/StoreData.py. Bound
+        # through Any locals rather than restating a type they do not have.
+        descriptions: Any = manifest.get("descriptions") or None
+        short_descriptions: Any = manifest.get("short-descriptions") or None
+        tags: Any = manifest.get("tags") or None
+        license_descriptions: Any = attribution.get("licence-descriptions", attribution.get("descriptions")) or None
+
         return IconData(
             description=translated_description or manifest.get("description"),
             short_description=translated_short_description or manifest.get("short-description"),
 
             github=url or None,
-            descriptions=manifest.get("descriptions") or None,
-            short_descriptions=manifest.get("short-descriptions") or None,
+            descriptions=descriptions,
+            short_descriptions=short_descriptions,
             author=author or None,  # Formerly: user_name
             official=author in self.official_authors or False,
             commit_sha=commit,
@@ -652,7 +673,7 @@ class StoreBackend:
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
             repository_name=self.get_repo_name(url),
-            tags=manifest.get("tags") or None,
+            tags=tags,
 
             thumbnail=thumbnail_path or None,
             image=image or None,
@@ -660,7 +681,7 @@ class StoreBackend:
             copyright=attribution.get("copyright") or None,
             original_url=attribution.get("original-url") or None,
             license=attribution.get("licence") or None,
-            license_descriptions=attribution.get("licence-descriptions", attribution.get("descriptions")) or None,
+            license_descriptions=license_descriptions,
 
             icon_name=manifest.get("name") or None,
             icon_version=manifest.get("version") or None,
@@ -692,14 +713,16 @@ class StoreBackend:
         manifest = self.get_manifest(url, commit)
         if isinstance(manifest, NoConnectionError):
             return manifest
+        if not manifest:
+            log.error(f"manifest failed to load for repository {url}")
+            return None
 
-        thumbnail_path = manifest.get("thumbnail")
-        image = self.get_web_image(url, thumbnail_path, commit)
-        if isinstance(image, NoConnectionError):
-            # A missing/rate-limited thumbnail must not drop the wallpaper
-            # from the catalog -- list it without an image, like
-            # prepare_plugin.
-            image = None
+        thumbnail_path: Any = manifest.get("thumbnail")
+        fetched = self.get_web_image(url, thumbnail_path, commit)
+        # A missing/rate-limited thumbnail must not drop the wallpaper
+        # from the catalog -- list it without an image, like
+        # prepare_plugin.
+        image: "Image.Image | None" = None if isinstance(fetched, NoConnectionError) else fetched
         attribution = self.get_attribution(url, commit)
         if isinstance(attribution, NoConnectionError):
             return attribution
@@ -710,13 +733,22 @@ class StoreBackend:
         translated_description = gl.lm.get_custom_translation(manifest.get("descriptions", {}))
         translated_short_description = gl.lm.get_custom_translation(manifest.get("short-descriptions", {}))
 
+        # JSON-derived values: the manifest/attribution documents are untyped,
+        # and each "missing -> None" below feeds a StoreData field that is
+        # declared non-Optional in src/windows/Store/StoreData.py. Bound
+        # through Any locals rather than restating a type they do not have.
+        descriptions: Any = manifest.get("descriptions") or None
+        short_descriptions: Any = manifest.get("short-descriptions") or None
+        tags: Any = manifest.get("tags") or None
+        license_descriptions: Any = attribution.get("licence-descriptions", attribution.get("descriptions")) or None
+
         return WallpaperData(
             description=translated_description or manifest.get("description"),
             short_description=translated_short_description or manifest.get("short-description"),
 
             github=url or None,
-            descriptions=manifest.get("descriptions") or None,
-            short_descriptions=manifest.get("short-descriptions") or None,
+            descriptions=descriptions,
+            short_descriptions=short_descriptions,
             author=author or None,  # Formerly: user_name
             official=author in self.official_authors or False,
             commit_sha=commit,
@@ -724,7 +756,7 @@ class StoreBackend:
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
             repository_name=self.get_repo_name(url),
-            tags=manifest.get("tags") or None,
+            tags=tags,
 
             thumbnail=thumbnail_path or None,
             image=image or None,
@@ -732,7 +764,7 @@ class StoreBackend:
             copyright=attribution.get("copyright") or None,
             original_url=attribution.get("original-url") or None,
             license=attribution.get("licence") or None,
-            license_descriptions=attribution.get("licence-descriptions", attribution.get("descriptions")) or None,
+            license_descriptions=license_descriptions,
 
             wallpaper_name=manifest.get("name") or None,
             wallpaper_version=manifest.get("version") or None,
@@ -762,14 +794,16 @@ class StoreBackend:
         manifest = self.get_manifest(url, commit)
         if isinstance(manifest, NoConnectionError):
             return manifest
-        
-        thumbnail_path = manifest.get("thumbnail")
-        image = self.get_web_image(url, thumbnail_path, commit)
-        if isinstance(image, NoConnectionError):
-            # A missing/rate-limited thumbnail must not drop the SD+ bar
-            # wallpaper from the catalog -- list it without an image, like
-            # prepare_plugin.
-            image = None
+        if not manifest:
+            log.error(f"manifest failed to load for repository {url}")
+            return None
+
+        thumbnail_path: Any = manifest.get("thumbnail")
+        fetched = self.get_web_image(url, thumbnail_path, commit)
+        # A missing/rate-limited thumbnail must not drop the SD+ bar
+        # wallpaper from the catalog -- list it without an image, like
+        # prepare_plugin.
+        image: "Image.Image | None" = None if isinstance(fetched, NoConnectionError) else fetched
         attribution = self.get_attribution(url, commit)
         if isinstance(attribution, NoConnectionError):
             return attribution
@@ -780,13 +814,22 @@ class StoreBackend:
         translated_description = gl.lm.get_custom_translation(manifest.get("descriptions", {}))
         translated_short_description = gl.lm.get_custom_translation(manifest.get("short-descriptions", {}))
 
+        # JSON-derived values: the manifest/attribution documents are untyped,
+        # and each "missing -> None" below feeds a StoreData field that is
+        # declared non-Optional in src/windows/Store/StoreData.py. Bound
+        # through Any locals rather than restating a type they do not have.
+        descriptions: Any = manifest.get("descriptions") or None
+        short_descriptions: Any = manifest.get("short-descriptions") or None
+        tags: Any = manifest.get("tags") or None
+        license_descriptions: Any = attribution.get("licence-descriptions", attribution.get("descriptions")) or None
+
         return SDPlusBarWallpaperData(
             description=translated_description or manifest.get("description"),
             short_description=translated_short_description or manifest.get("short-description"),
 
             github=url or None,
-            descriptions=manifest.get("descriptions") or None,
-            short_descriptions=manifest.get("short-descriptions") or None,
+            descriptions=descriptions,
+            short_descriptions=short_descriptions,
             author=author or None,  # Formerly: user_name
             official=author in self.official_authors or False,
             commit_sha=commit,
@@ -794,7 +837,7 @@ class StoreBackend:
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
             repository_name=self.get_repo_name(url),
-            tags=manifest.get("tags") or None,
+            tags=tags,
 
             thumbnail=thumbnail_path or None,
             image=image or None,
@@ -802,7 +845,7 @@ class StoreBackend:
             copyright=attribution.get("copyright") or None,
             original_url=attribution.get("original-url") or None,
             license=attribution.get("licence") or None,
-            license_descriptions=attribution.get("licence-descriptions", attribution.get("descriptions")) or None,
+            license_descriptions=license_descriptions,
 
             name=manifest.get("name") or None,
             version=manifest.get("version") or None,
@@ -812,21 +855,21 @@ class StoreBackend:
             verified=verified
         )
 
-    def get_web_image(self, url: str, path: str, branch: str = "main") -> Image:
+    def get_web_image(self, url: str, path: str, branch: str = "main") -> "Image.Image | NoConnectionError | None":
         # `except Exception` so a pool worker still honours SystemExit and
         # KeyboardInterrupt.
         try:
             result = self.get_remote_file(url, path, branch, data_type="content")
         except Exception as e:
             log.error(f"Failed to fetch image {path} from {url}: {e}")
-            return
+            return None
         if isinstance(result, NoConnectionError):
             return result
         try:
             return Image.open(BytesIO(result))
         except Exception as e:
             log.warning(f"Could not decode image {path} from {url}: {e}")
-            return
+            return None
     
     def get_stargazers(self, repo_url: str) -> int:
         "Deactivated for now because of rate limits"
@@ -836,16 +879,16 @@ class StoreBackend:
         splitted =  repo_url.split("/")
         return splitted[splitted.index("github.com")+1]
     
-    def get_repo_name(self, repo_url:str) -> str:
+    def get_repo_name(self, repo_url:str) -> str | None:
         github_split = repo_url.split("github")
         if len(github_split) < 2:
-            return
+            return None
         split = github_split[1].split("/")
         if len(split) < 3:
-            return
+            return None
         return split[2]
     
-    def get_newest_compatible_version(self, available_versions: list[str]) -> str:
+    def get_newest_compatible_version(self, available_versions: list[str]) -> str | None:
         if gl.exact_app_version_check:
             if gl.app_version in available_versions:
                 return gl.app_version
@@ -873,7 +916,7 @@ class StoreBackend:
     def subp_call(self, args):
         return subprocess.call(args)
 
-    def get_main_folder_of_zip(self, zip_path: str) -> str:
+    def get_main_folder_of_zip(self, zip_path: str) -> str | int:
         extracted_folder_name = None
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_contents = zip_ref.namelist()
@@ -931,7 +974,7 @@ class StoreBackend:
             except OSError:
                 pass
 
-    def _staged_tree_id_matches(self, staging_tree: str, expected_id: str) -> bool:
+    def _staged_tree_id_matches(self, staging_tree: str, expected_id: str | None) -> bool:
         """Single choke point for the staged-manifest identity check: when
         the caller knows which asset id it is installing (the id also names
         the install dir), the downloaded tree's manifest must agree -- a
@@ -1000,7 +1043,11 @@ class StoreBackend:
 
 
         username = self.get_user_name(repo_url)
-        projectname = self.get_repo_name(repo_url).lower()
+        repo_name = self.get_repo_name(repo_url)
+        if repo_name is None:
+            log.error(f"Could not derive a repository name from {repo_url!r}")
+            return 404
+        projectname = repo_name.lower()
         sha = commit_sha
         if commit_sha is None and branch_name is not None:
             # Used to write the version
@@ -1012,6 +1059,13 @@ class StoreBackend:
                 # that 404s later with a misleading log.
                 log.error(f"Could not resolve branch {branch_name!r} of {repo_url}")
                 return 404
+        if sha is None:
+            # Neither a commit sha nor a branch was given: there is nothing to
+            # download (this used to build a ".../None.zip" url and stamp
+            # VERSION with None).
+            log.error(f"Refusing to download {repo_url}: no commit sha and no branch")
+            return 404
+
         zip_url = f"https://github.com/{username}/{projectname}/archive/{sha}.zip"
 
         zip_path = os.path.join(gl.DATA_PATH, "cache", f"{projectname}-{sha}.zip")
@@ -1032,6 +1086,9 @@ class StoreBackend:
             # case-sensitive, so it may not match projectname) BEFORE unpacking,
             # so the finally-cleanup also covers a mid-extraction failure.
             extracted_folder_name = self.get_main_folder_of_zip(zip_path)
+            if not isinstance(extracted_folder_name, str):
+                # 400 from the helper: no single root folder in the archive.
+                raise ValueError("could not determine the archive's root folder")
             # Defense-in-depth: refuse a traversal/absolute member before we
             # let shutil.unpack_archive write anything to disk.
             if self.zip_has_unsafe_members(zip_path):
@@ -1156,8 +1213,12 @@ class StoreBackend:
                 return 400
 
             ## Write version
+            version_stamp = commit_sha or branch_name
+            if version_stamp is None:
+                log.error(f"Refusing to stamp VERSION for {repo_url}: no commit sha and no branch")
+                return 400
             with open(os.path.join(staging, "VERSION"), "w") as f:
-                f.write(commit_sha or branch_name)
+                f.write(version_stamp)
 
             self._swap_into_place(staging, local_path)
         except Exception as e:
@@ -1170,16 +1231,21 @@ class StoreBackend:
 
     def install_plugin(self, plugin_data:PluginData, auto_update: bool = False):
         url = plugin_data.github
+        plugin_id = plugin_data.plugin_id
 
-        if not self.is_safe_asset_id(plugin_data.plugin_id):
+        if not self.is_safe_asset_id(plugin_id):
             # The id names the install dir (which download_repo swap-replaces)
             # -- a traversal id like "../../.." must never reach that join.
-            log.error(f"Refusing to install plugin with unsafe id {plugin_data.plugin_id!r} from {url}")
+            log.error(f"Refusing to install plugin with unsafe id {plugin_id!r} from {url}")
             return 400
 
-        local_path = os.path.join(gl.PLUGIN_DIR, plugin_data.plugin_id)
+        if url is None:
+            log.error(f"Refusing to install plugin {plugin_id!r}: no repository url")
+            return 400
 
-        response = self.download_repo(repo_url=url, directory=local_path, commit_sha=plugin_data.commit_sha, branch_name=plugin_data.branch, expected_id=plugin_data.plugin_id)
+        local_path = os.path.join(gl.PLUGIN_DIR, plugin_id)
+
+        response = self.download_repo(repo_url=url, directory=local_path, commit_sha=plugin_data.commit_sha, branch_name=plugin_data.branch, expected_id=plugin_id)
 
         # Bail before running install scripts or reloading plugins over a
         # missing or partial tree.
@@ -1194,11 +1260,12 @@ class StoreBackend:
         # download means a failed update leaves the old version on disk AND
         # registered -- the old deregister-first flow needed a recovery
         # reload to undo its own damage.
-        if gl.plugin_manager.get_plugin_by_id(plugin_data.plugin_id) is not None:
+        plugin_manager = gl.plugin_manager
+        if plugin_manager is not None and plugin_manager.get_plugin_by_id(plugin_id) is not None:
             try:
-                self.uninstall_plugin(plugin_data.plugin_id, remove_from_pages=False, remove_files=False)
+                self.uninstall_plugin(plugin_id, remove_from_pages=False, remove_files=False)
             except Exception as e:
-                log.error(f"Deregistering the old version of {plugin_data.plugin_id} failed: {e}")
+                log.error(f"Deregistering the old version of {plugin_id} failed: {e}")
 
         # Run install script if present. Make sure to use python binary used to run this process to not break venv dependency installations.
         # List form without a shell: an f-string command both broke on spaces
@@ -1211,10 +1278,11 @@ class StoreBackend:
             subprocess.run([sys.executable, "-m", "pip", "install", "-r", os.path.join(local_path, "requirements.txt")], start_new_session=True)
 
         # Update plugin manager
-        gl.plugin_manager.load_plugins()
-        gl.plugin_manager.init_plugins()
-        gl.plugin_manager.generate_action_index()
-        plugins = gl.plugin_manager.get_plugins()
+        if plugin_manager is not None:
+            plugin_manager.load_plugins()
+            plugin_manager.init_plugins()
+            plugin_manager.generate_action_index()
+            plugins = plugin_manager.get_plugins()
 
         # A version-gated plugin "installs" fine (files on disk, True
         # returned, store button flips to installed) but lands in
@@ -1222,14 +1290,14 @@ class StoreBackend:
         # used to be the NEXT launch's disabled-plugins toast: in the install
         # session it silently never appeared, reading later as "my config
         # reset after restart" (the custom-repo half of #102). Say so now.
-        self.notify_if_installed_disabled(plugin_data.plugin_id)
+        self.notify_if_installed_disabled(plugin_id)
 
         # Update ui
-        if recursive_hasattr(gl, "app.main_win.sidebar.action_chooser"):
+        if gl.app is not None and recursive_hasattr(gl, "app.main_win.sidebar.action_chooser"):
             GLib.idle_add(gl.app.main_win.sidebar.action_chooser.plugin_group.update)
 
         ## Update page
-        for controller in gl.deck_manager.deck_controller:
+        for controller in (gl.deck_manager.deck_controller if gl.deck_manager is not None else []):
             ## Checks required to prevent errors after auto-update
             if hasattr(controller, "active_page"):
                 if controller.active_page is not None:
@@ -1240,7 +1308,7 @@ class StoreBackend:
         # Notify plugin actions
         gl.signal_manager.trigger_signal(Signals.PluginInstall, plugin_data.plugin_id)
 
-        log.success(f"Plugin {plugin_data.plugin_id} installed successfully under: {local_path} with sha: {plugin_data.commit_sha}")
+        log.success(f"Plugin {plugin_id} installed successfully under: {local_path} with sha: {plugin_data.commit_sha}")
         return True
 
     @staticmethod
@@ -1269,7 +1337,7 @@ class StoreBackend:
         gl.notify.info(body, title="Plugin disabled")
         return True
 
-    def uninstall_plugin(self, plugin_id:str, remove_from_pages:bool = False, remove_files:bool = True) -> bool:
+    def uninstall_plugin(self, plugin_id:str, remove_from_pages:bool = False, remove_files:bool = True) -> None:
         ## 1. Remove all action objects in every cached page of every
         ## controller -- not just each controller's currently active page.
         ## A page that was previously visited and is still sitting in the
@@ -1278,16 +1346,19 @@ class StoreBackend:
         ## gl.page_manager.pages directly raced load_page /
         ## discard_controller / clear_old_cached_pages mutating the dict
         ## from other threads.
-        for page in gl.page_manager.all_cached_pages():
+        for page in (gl.page_manager.all_cached_pages() if gl.page_manager is not None else []):
             page.remove_plugin_action_objects(plugin_id=plugin_id)
             if remove_from_pages:
                 page.remove_plugin_actions_from_json(plugin_id=plugin_id)
 
         ## 2. Inform plugin base
-        plugins = gl.plugin_manager.get_plugins()
-        plugin = gl.plugin_manager.get_plugin_by_id(plugin_id)
+        plugin_manager = gl.plugin_manager
+        if plugin_manager is None:
+            return None
+        plugins = plugin_manager.get_plugins()
+        plugin = plugin_manager.get_plugin_by_id(plugin_id)
         if plugin is None:
-            return
+            return None
         # Capture the actual import folder now, before on_uninstall()/rmtree
         # below can remove the directory or rewrite plugin.PATH through the
         # symlink-resolution branch -- the sys.modules purge below needs the
@@ -1307,15 +1378,16 @@ class StoreBackend:
 
         ## 4. Delete plugin base object
         # plugin_obj = gl.plugin_manager.get_plugin_by_id(plugin_id)
-        gl.plugin_manager.remove_plugin_from_list(plugin)
+        plugin_manager.remove_plugin_from_list(plugin)
 
-        gl.plugin_manager.generate_action_index()
+        plugin_manager.generate_action_index()
 
 
         del plugin
 
-        GLib.idle_add(gl.app.main_win.sidebar.action_chooser.plugin_group.update)
-        GLib.idle_add(gl.app.main_win.sidebar.page_selector.update)
+        if gl.app is not None:
+            GLib.idle_add(gl.app.main_win.sidebar.action_chooser.plugin_group.update)
+            GLib.idle_add(gl.app.main_win.sidebar.page_selector.update)
 
 
         base_module = f"plugins.{plugin_folder}"
@@ -1327,7 +1399,7 @@ class StoreBackend:
             # controller.active_page.update_inputs_with_actions_from_plugin(plugin_id)
 
         ## Update page
-        for controller in gl.deck_manager.deck_controller:
+        for controller in (gl.deck_manager.deck_controller if gl.deck_manager is not None else []):
             ## Checks required to prevent errors after auto-update
             if hasattr(controller, "active_page"):
                 if controller.active_page is not None:
@@ -1347,11 +1419,16 @@ class StoreBackend:
 
         icon_path = os.path.join(gl.DATA_PATH, "icons", icon_data.icon_id)
 
+        github = icon_data.github
+        if github is None:
+            log.error(f"Refusing to install icon pack {icon_data.icon_id!r}: no repository url")
+            return 400
+
         # No pre-delete (B-06): download_repo stages and validates the new
         # pack and only replaces the installed one at swap time -- the old
         # uninstall-first flow permanently lost the pack when the download
         # failed mid-update.
-        return self.download_repo(repo_url=icon_data.github, directory=icon_path, commit_sha=icon_data.commit_sha, expected_id=icon_data.icon_id)
+        return self.download_repo(repo_url=github, directory=icon_path, commit_sha=icon_data.commit_sha, expected_id=icon_data.icon_id)
 
     def uninstall_icon(self, icon_data:IconData):
         folder_name = icon_data.icon_id
@@ -1368,8 +1445,13 @@ class StoreBackend:
 
         wallpaper_path = os.path.join(gl.DATA_PATH, "wallpapers", wallpaper_data.wallpaper_id)
 
+        github = wallpaper_data.github
+        if github is None:
+            log.error(f"Refusing to install wallpaper {wallpaper_data.wallpaper_id!r}: no repository url")
+            return 400
+
         # No pre-delete (B-06) -- see install_icon.
-        return self.download_repo(repo_url=wallpaper_data.github, directory=wallpaper_path, commit_sha=wallpaper_data.commit_sha, expected_id=wallpaper_data.wallpaper_id)
+        return self.download_repo(repo_url=github, directory=wallpaper_path, commit_sha=wallpaper_data.commit_sha, expected_id=wallpaper_data.wallpaper_id)
 
     def uninstall_wallpaper(self, wallpaper_data:WallpaperData):
         folder_name = wallpaper_data.wallpaper_id
@@ -1386,8 +1468,13 @@ class StoreBackend:
 
         wallpaper_path = os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", sd_plus_bar_wallpaper_data.id)
 
+        github = sd_plus_bar_wallpaper_data.github
+        if github is None:
+            log.error(f"Refusing to install SD+ bar wallpaper {sd_plus_bar_wallpaper_data.id!r}: no repository url")
+            return 400
+
         # No pre-delete (B-06) -- see install_icon.
-        return self.download_repo(repo_url=sd_plus_bar_wallpaper_data.github, directory=wallpaper_path, commit_sha=sd_plus_bar_wallpaper_data.commit_sha, expected_id=sd_plus_bar_wallpaper_data.id)
+        return self.download_repo(repo_url=github, directory=wallpaper_path, commit_sha=sd_plus_bar_wallpaper_data.commit_sha, expected_id=sd_plus_bar_wallpaper_data.id)
 
     def uninstall_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper_data:SDPlusBarWallpaperData):
         folder_name = sd_plus_bar_wallpaper_data.id
@@ -1439,7 +1526,7 @@ class StoreBackend:
 
         return plugins_to_update
     
-    def update_all_plugins(self) -> int:
+    def update_all_plugins(self) -> "int | NoConnectionError":
         """
         Returns number of SUCCESSFULLY updated plugins
         """
@@ -1488,7 +1575,7 @@ class StoreBackend:
 
         return icons_to_update
     
-    def update_all_icons(self) -> int:
+    def update_all_icons(self) -> "int | NoConnectionError":
         """
         Returns number of SUCCESSFULLY updated icons
         """
@@ -1534,7 +1621,7 @@ class StoreBackend:
 
         return wallpapers_to_update
 
-    def update_all_wallpapers(self) -> int:
+    def update_all_wallpapers(self) -> "int | NoConnectionError":
         """
         Returns number of SUCCESSFULLY updated wallpapers
         """
@@ -1580,7 +1667,7 @@ class StoreBackend:
 
         return wallpapers_to_update
 
-    def update_all_sd_plus_bar_wallpapers(self) -> int:
+    def update_all_sd_plus_bar_wallpapers(self) -> "int | NoConnectionError":
         """
         Returns number of SUCCESSFULLY updated SD+ bar wallpapers
         """
@@ -1597,7 +1684,7 @@ class StoreBackend:
 
         return n_updated
 
-    def update_everything(self) -> int:
+    def update_everything(self) -> "int | NoConnectionError":
         """
         Returns number of SUCCESSFULLY updated assets, or NoConnectionError
         """
@@ -1611,7 +1698,8 @@ class StoreBackend:
         # Every leg must be checked -- a NoConnectionError leaking into the
         # sum below used to raise TypeError (and n_wallpapers wasn't checked
         # at all).
-        if any(isinstance(n, NoConnectionError) for n in (n_plugins, n_icons, n_wallpapers, n_sd_plus)):
+        if (isinstance(n_plugins, NoConnectionError) or isinstance(n_icons, NoConnectionError)
+                or isinstance(n_wallpapers, NoConnectionError) or isinstance(n_sd_plus, NoConnectionError)):
             return NoConnectionError()
 
         return n_plugins + n_icons + n_wallpapers + n_sd_plus
