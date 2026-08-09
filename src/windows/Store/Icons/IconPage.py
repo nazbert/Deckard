@@ -91,9 +91,13 @@ class IconPreview(StorePreview):
         else:
             self.set_install_state(2)
 
-        description = gl.lm.get_custom_translation(self.icon_data.short_descriptions)
+        # An absent block is None, and get_custom_translation answers "" for
+        # None (but None for {}), so keep that branch explicit.
+        short_descriptions = self.icon_data.short_descriptions
+        descriptions = self.icon_data.descriptions
+        description = gl.lm.get_custom_translation(short_descriptions) if short_descriptions is not None else ""
         if description in ["", "N/A", None]:
-            description = gl.lm.get_custom_translation(self.icon_data.descriptions)
+            description = gl.lm.get_custom_translation(descriptions) if descriptions is not None else ""
 
         description = self.icon_data.short_description
         if description in ["", "N/A", None]:

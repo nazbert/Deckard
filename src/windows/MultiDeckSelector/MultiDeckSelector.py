@@ -21,9 +21,12 @@ from gi.repository import Gtk, Adw
 # Import globals
 import globals as gl
 
+from collections.abc import Callable
+from typing import Any
+
 class MultiDeckSelector(Gtk.ApplicationWindow):
     def __init__(self, application: Gtk.Application, source_window: Gtk.ApplicationWindow,
-                 selected_deck_serials: list[str] = None, callback: callable = None):
+                 selected_deck_serials: list[str] = None, callback: Callable[[str, bool], Any] | None = None):
         super().__init__(application=application,
                          title=gl.lm.get("multi-deck-selector.title"),
                          transient_for=source_window,
@@ -88,7 +91,7 @@ class MultiDeckSelector(Gtk.ApplicationWindow):
                 row.set_active(False)
 
         n_not_connected = 0
-        connected = gl.deck_manager.get_connected_serials()
+        connected = gl.deck_manager.get_connected_serials() if gl.deck_manager is not None else []
         for serial in serials:
             if serial not in connected:
                 n_not_connected += 1

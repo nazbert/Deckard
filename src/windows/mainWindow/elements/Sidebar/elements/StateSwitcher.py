@@ -19,13 +19,18 @@ from src.backend.DeckManagement.DeckController import ControllerInput
 from src.backend.DeckManagement.InputIdentifier import InputIdentifier
 import globals as gl
 
+from collections.abc import Callable
+from typing import Any
+
 class StateSwitcher(Gtk.ScrolledWindow):
     def __init__(self, type, **kwargs):
         super().__init__(**kwargs)
         self.type = type
 
-        self.switch_callbacks: list[callable] = []
-        self.add_new_callbacks: list[callable] = []
+        # Switch callbacks take no arguments; add-new callbacks get the
+        # index of the state that was just appended.
+        self.switch_callbacks: list[Callable[[], Any]] = []
+        self.add_new_callbacks: list[Callable[[int], Any]] = []
 
         self.build()
 
@@ -111,10 +116,10 @@ class StateSwitcher(Gtk.ScrolledWindow):
         except TypeError:
             pass
 
-    def add_switch_callback(self, callback: callable):
+    def add_switch_callback(self, callback: Callable[[], Any]):
         self.switch_callbacks.append(callback)
 
-    def add_add_new_callback(self, callback: callable):
+    def add_add_new_callback(self, callback: Callable[[int], Any]):
         self.add_new_callbacks.append(callback)
 
     def on_state_switch(self, *args):
@@ -123,7 +128,12 @@ class StateSwitcher(Gtk.ScrolledWindow):
                 callback()
 
     def load_for_identifier(self, identifier: InputIdentifier, state: int):
-        c_input = gl.app.main_win.get_active_controller().get_input(identifier)
+        if gl.app is None:
+            return
+        controller = gl.app.main_win.get_active_controller()
+        if controller is None:
+            return
+        c_input = controller.get_input(identifier)
 
         self.load_for_input(c_input, state)
 

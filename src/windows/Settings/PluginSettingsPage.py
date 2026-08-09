@@ -17,15 +17,19 @@ from gi.repository import Gtk, Adw, GLib
 from GtkHelper.ConfirmationDialog import ConfirmationDialog
 from GtkHelper.GtkHelper import BetterPreferencesGroup
 from src.backend.PluginManager.PluginBase import PluginBase
-from src.windows.Settings import Settings
 
 import globals as gl
 from .PluginSettingsWindow.PluginSettingsWindow import PluginSettingsWindow
 from .PluginAbout import PluginAboutFactory
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    # Runtime import would cycle: Settings.py imports this module.
+    from src.windows.Settings.Settings import Settings
+
 
 class PluginSettingsPage(Adw.PreferencesPage):
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: "Settings"):
         super().__init__()
         self.settings = settings
         self.set_title("Plugins")
@@ -60,7 +64,8 @@ class PluginExpander(Adw.ActionRow):
     def __init__(self, settings_group: PluginSettingsGroup, plugin_base: PluginBase):
         self.settings_group = settings_group
         self.plugin_base = plugin_base
-        super().__init__(title=plugin_base.plugin_name, subtitle=plugin_base.plugin_id)
+        # A manifest without a name/id must not hand Adw.ActionRow a None.
+        super().__init__(title=plugin_base.plugin_name or "", subtitle=plugin_base.plugin_id or "")
 
         self.suffix_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.add_suffix(self.suffix_box)

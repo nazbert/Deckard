@@ -27,7 +27,7 @@ from gi.repository import Gtk, Adw
 import globals as gl
 
 # Import own modules
-from src.backend.DeckManagement.DeckController import KeyLabel
+from src.backend.DeckManagement.Subclasses.KeyLayout import ImageLayout
 from GtkHelper.GtkHelper import RevertButton
 
 
@@ -122,6 +122,8 @@ class SizeRow(Adw.PreferencesRow):
         self.active_identifier = identifier
         self.active_state = state
 
+        if gl.app is None:
+            return
         controller = gl.app.main_win.get_active_controller()
         if controller is None:
             return
@@ -134,9 +136,11 @@ class SizeRow(Adw.PreferencesRow):
 
         self.connect_signals()
 
-    def update_values(self, composed_label: KeyLabel = None):
+    def update_values(self, composed_label: ImageLayout | None = None):
         self.disconnect_signals()
         if composed_label is None:
+            if gl.app is None:
+                return
             visible_child = gl.app.main_win.leftArea.deck_stack.get_visible_child()
             if visible_child is None:
                 return
@@ -146,7 +150,11 @@ class SizeRow(Adw.PreferencesRow):
             controller_input = controller.get_input(self.active_identifier)
             composed_label = controller_input.get_active_state().layout_manager.get_composed_layout()
 
-        self.size_spinner.button.set_value(composed_label.size*100)
+        # ImageLayout.size is optional (#225): unset means the spinner
+        # keeps whatever it is showing.
+        size = composed_label.size
+        if size is not None:
+            self.size_spinner.button.set_value(size*100)
 
         self.connect_signals()
 
@@ -203,7 +211,11 @@ class AlignmentRow(Adw.PreferencesRow):
         self.active_state = state
         self.disconnect_signals()
 
+        if gl.app is None:
+            return
         controller = gl.app.main_win.get_active_controller()
+        if controller is None:
+            return
 
         controller_input = controller.get_input(identifier)
         use_page_properties = controller_input.get_active_state().layout_manager.get_use_page_layout_properties()
@@ -212,9 +224,11 @@ class AlignmentRow(Adw.PreferencesRow):
         self.connect_signals()
         self.update_values()
 
-    def update_values(self, composed_label: KeyLabel = None):
+    def update_values(self, composed_label: ImageLayout | None = None):
         self.disconnect_signals()
         if composed_label is None:
+            if gl.app is None:
+                return
             controller = gl.app.main_win.get_active_controller()
             if controller is None:
                 return

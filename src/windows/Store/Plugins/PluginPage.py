@@ -119,7 +119,13 @@ class PluginPreview(StorePreview):
         install actually succeeded. Success is `result is True` -- failure
         returns (404/400 ints, NoConnectionError) used to be discarded and
         the button flipped to 'installed' anyway."""
-        result = self.store.backend.install_plugin(plugin_data=self.plugin_data)
+        backend = self.store.backend
+        if backend is None:
+            log.error("Store backend unavailable; cannot install "
+                      f"{self.plugin_data.plugin_id}")
+            self.notify_install_failure()
+            return False
+        result = backend.install_plugin(plugin_data=self.plugin_data)
         if result is not True:
             log.error(f"Failed to install plugin {self.plugin_data.plugin_id}: {result!r}")
             self.notify_install_failure()
@@ -156,7 +162,11 @@ class PluginPreview(StorePreview):
         self.plugin_page.info_page.set_license(self.plugin_data.license)
         self.plugin_page.info_page.set_copyright(self.plugin_data.copyright)
         self.plugin_page.info_page.set_original_url(self.plugin_data.original_url)
-        self.plugin_page.info_page.set_license_description(gl.lm.get_custom_translation(self.plugin_data.license_descriptions))
+        # An absent block is None, and get_custom_translation answers "" for
+        # None (but None for {}), so keep that branch explicit.
+        license_descriptions = self.plugin_data.license_descriptions
+        self.plugin_page.info_page.set_license_description(
+            gl.lm.get_custom_translation(license_descriptions) if license_descriptions is not None else "")
 
     # check_required_version is inherited from StorePreview -- one shared
     # implementation (StoreData.is_min_app_version_satisfied), no copies.

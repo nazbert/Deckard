@@ -23,6 +23,11 @@ from gi.repository import Gtk, Adw
 # Import globals
 import globals as gl
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    # Runtime import would cycle: DeckSettingsPage imports this module.
+    from src.windows.mainWindow.elements.DeckSettings.DeckSettingsPage import DeckSettingsPage
+
 # Import own modules
 
 class FakeDeckGroup(Adw.PreferencesGroup):
@@ -36,7 +41,7 @@ class FakeDeckGroup(Adw.PreferencesGroup):
         self.add(self.layout)
 
 class Layout(Adw.PreferencesRow):
-    def __init__(self, settings_page: "PageSettings", **kwargs):
+    def __init__(self, settings_page: "DeckSettingsPage", **kwargs):
         super().__init__()
         self.settings_page = settings_page
         self.build()

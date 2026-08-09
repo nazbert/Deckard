@@ -22,7 +22,8 @@ from gi.repository import Gtk
 # Import Python modules
 
 # Import typing
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.windows.mainWindow.mainWindow import MainWindow
 
@@ -39,7 +40,7 @@ from src.windows.AssetManager.SDPlusBarWallpaperPacks.Stack import SDPlusBarWall
 
 class AssetManager(Gtk.ApplicationWindow):
     def __init__(self, main_window: "MainWindow", *args, **kwargs):
-        super().__init__(
+        super().__init__(  # type: ignore[misc]  # gi stub: the stub models GObject properties as positional-or-keyword params, so *args reads as a second binding for them; at runtime GObject.__init__ takes properties by keyword only
             title="Asset Manager",
             default_width=1050,
             default_height=750,
@@ -49,9 +50,9 @@ class AssetManager(Gtk.ApplicationWindow):
         self.main_window = main_window
 
         # Callback func
-        self.callback_func = None
-        self.callback_args = []
-        self.callback_kwargs = {}
+        self.callback_func: Callable[..., Any] | None = None
+        self.callback_args: tuple[Any, ...] = ()
+        self.callback_kwargs: dict[str, Any] = {}
 
         self.build()
 

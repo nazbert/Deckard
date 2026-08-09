@@ -18,6 +18,9 @@ import os
 import threading
 import gi
 
+from collections.abc import Callable
+from typing import Any
+
 from src.windows.PageManager.Importer.StreamDeckUI.StreamDeckUI import StreamDeckUIImporter
 from src.windows.PageManager.Importer.StreamController.StreamController import StreamControllerImporter
 
@@ -53,7 +56,7 @@ class Importer(Adw.ApplicationWindow):
         GLib.idle_add(self.progess_bar.set_fraction, 0)
         GLib.timeout_add(3000, self.close)
 
-    def import_pages(self, path: str, app: str, on_finished: callable = None) -> None:
+    def import_pages(self, path: str, app: str, on_finished: Callable[[], Any] | None = None) -> None:
         self.progess_bar.set_text("Importing...")
         self.progess_bar.set_fraction(0)
 
@@ -67,7 +70,7 @@ class Importer(Adw.ApplicationWindow):
         
 
     @log.catch
-    def import_from_streamdeck_ui(self, path: str, on_finished: callable) -> None:
+    def import_from_streamdeck_ui(self, path: str, on_finished: Callable[[], Any] | None) -> None:
         if not os.path.exists(path):
             self.show_error("File not found")
             return
@@ -90,7 +93,7 @@ class Importer(Adw.ApplicationWindow):
         GLib.timeout_add(1500, self.close)
 
     @log.catch
-    def import_from_streamcontroller(self, path: str, on_finished: callable) -> None:
+    def import_from_streamcontroller(self, path: str, on_finished: Callable[[], Any] | None) -> None:
         if not os.path.exists(path):
             self.show_error("File not found")
             return

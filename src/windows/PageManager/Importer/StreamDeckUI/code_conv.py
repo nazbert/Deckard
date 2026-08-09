@@ -1,6 +1,8 @@
 # Import globals first to get IS_MAC
 import globals as gl
 
+from typing import cast
+
 if not gl.IS_MAC:
     from evdev import ecodes as e
 
@@ -206,32 +208,46 @@ if not gl.IS_MAC:
     _SUPPORTED_KEY_CONSTANTS = [value for name, value in vars(e).items() if name.startswith('KEY_') and name not in _BAD_ECODES]
     # fmt: on
 
-def parse_keys_as_keycodes(keys: str) -> list[list[str]]:
+def parse_keys_as_keycodes(keys: str) -> list[list[int]]:
     stripped = keys.strip().replace(" ", "").lower()
     if not stripped:
         return []
     # split by , for sections
     sections = stripped.split(",")
-    parsed_keys = []
+    parsed_keys: list[list[int]] = []
     for section in sections:
         # split by + for individual keys
-        individual = section.split("+")
+        names = section.split("+")
         # filter empty strings
-        individual = list(filter(None, individual))
+        names = list(filter(None, names))
+        # Each pass below rewrites names into keycodes, so the list is mixed
+        # str/int until the all-int check at the bottom.
         # replace any string with e.KEY_<string>
-        individual = [getattr(e, f"KEY_{key.upper()}", key) for key in individual]
+        individual: list[int | str] = [getattr(e, f"KEY_{key.upper()}", key) for key in names]
         # check if delay
-        individual = [(int(key.replace("delay", "")) + _DELAY_KEYSYM) if isinstance(key, str) and key.startswith("delay") else key for key in individual]  # type: ignore # fmt: skip
+        # StreamDeck-UI encodes inter-key pauses as "delay<ms>" tokens. The
+        # keysym base they were meant to be offset from (_DELAY_KEYSYM) was
+        # never defined in this module, so hitting one raised NameError --
+        # masked by a bare `# type: ignore` on this line, and swallowed by
+        # the importer's `except Exception`, which dropped the whole hotkey
+        # with a confusing message. Deckard's Hotkey action has no delay
+        # representation to map these onto, so reject them explicitly rather
+        # than inventing an encoding (#227).
+        for key in individual:
+            if isinstance(key, str) and key.startswith("delay"):
+                raise ValueError(f"Delays are not supported in imported hotkeys: {key!r}")
+        # Every remapping pass below is keyed by name, so entries already
+        # resolved to an int keycode are passed through untouched.
         # replace special keys
-        individual = [_SPECIAL_KEYS.get(key, key) for key in individual]
+        individual = [_SPECIAL_KEYS.get(key, key) if isinstance(key, str) else key for key in individual]
         # replace old numpad keys
-        individual = [_OLD_NUMPAD_KEYS.get(key, key) for key in individual]
+        individual = [_OLD_NUMPAD_KEYS.get(key, key) if isinstance(key, str) else key for key in individual]
         # replace old media keys
-        individual = [_OLD_PYNPUT_KEYS.get(key, key) for key in individual]
+        individual = [_OLD_PYNPUT_KEYS.get(key, key) if isinstance(key, str) else key for key in individual]
         # replace modifier keys
-        individual = [_MODIFIER_KEYS.get(key, key) for key in individual]
+        individual = [_MODIFIER_KEYS.get(key, key) if isinstance(key, str) else key for key in individual]
         # replace key names with key codes
-        individual = [_KEY_MAPPING.get(key, key) for key in individual]
+        individual = [_KEY_MAPPING.get(key, key) if isinstance(key, str) else key for key in individual]
 
         # if any value is not an int, raise an error
         if not all(isinstance(key, int) for key in individual):
@@ -239,6 +255,7 @@ def parse_keys_as_keycodes(keys: str) -> list[list[str]]:
             raise ValueError(f"Invalid keys: {invalid_keys}")
 
         if len(individual) > 0:
-            parsed_keys.append(individual)
+            # The check above proved every entry is an int.
+            parsed_keys.append(cast(list[int], individual))
 
     return parsed_keys

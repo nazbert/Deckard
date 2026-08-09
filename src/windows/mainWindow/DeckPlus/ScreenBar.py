@@ -33,7 +33,8 @@ import globals as gl
 
 from gi.repository import Gtk, GLib, Gio
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.windows.mainWindow.elements.PageSettingsPage import PageSettingsPage
 
@@ -77,8 +78,9 @@ class ScreenBar(Gtk.Frame):
         self.min_drag_distance = 20
         self.long_press_treshold = 0.5
 
-        self.drag_start_xy: tuple[int, int] = None
-        self.drag_start_time: float = None
+        # Both None outside a drag -- reset on every press (see on_drag_*).
+        self.drag_start_xy: tuple[int, int] | None = None
+        self.drag_start_time: float | None = None
 
         ## Actions
         self.action_group = Gio.SimpleActionGroup()
@@ -92,7 +94,7 @@ class ScreenBar(Gtk.Frame):
         self.shortcut_controller = Gtk.ShortcutController()
         self.add_controller(self.shortcut_controller)
 
-        remove_shortcut_action = Gtk.CallbackAction.new(self.on_remove)
+        remove_shortcut_action = Gtk.CallbackAction.new(self.on_remove)  # type: ignore[arg-type]  # gi stub: GtkShortcutFunc is typed Callable[..., bool]; PyGObject coerces a None return to False, which is this handler's existing behaviour
 
         self.remove_shortcut = Gtk.Shortcut.new(Gtk.ShortcutTrigger.parse_string("Delete"), remove_shortcut_action)
         self.shortcut_controller.add_shortcut(self.remove_shortcut)
@@ -204,6 +206,8 @@ class ScreenBar(Gtk.Frame):
             self.page_settings_page.deck_config.active_widget = None
 
     def on_remove(self, *args) -> None:
+        if gl.app is None:
+            return
         controller = gl.app.main_win.get_active_controller()
         if controller is None:
             return
@@ -236,14 +240,15 @@ class ScreenBarImage(Gtk.Picture):
         
         self.screenbar = screenbar
 
-        self.on_map_tasks: list[callable] = []
+        self.on_map_tasks: list[Callable[[], Any]] = []
         self.connect("map", self.on_map)
 
         # next() on a count is atomic; a read-modify-write on latest_task_id
         # would hand two frames the same id now that producers are threads,
         # letting a stale one pass the check in set_pixbuf_and_del.
         self.task_ids = itertools.count()
-        self.latest_task_id: int = None
+        # None until the first frame is queued.
+        self.latest_task_id: int | None = None
 
     def on_map(self, *args):
         for task in self.on_map_tasks:
@@ -271,7 +276,7 @@ class ScreenBarImage(Gtk.Picture):
         thumbnail.close()
         del thumbnail
 
-        if not recursive_hasattr(gl, "app.main_win.sidebar"):
+        if gl.app is None or not recursive_hasattr(gl, "app.main_win.sidebar"):
             return
 
 

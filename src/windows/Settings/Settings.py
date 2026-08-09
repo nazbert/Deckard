@@ -447,7 +447,10 @@ class FontPageGroup(Adw.PreferencesGroup):
         self.reload_debouncer.trigger()
 
     def _reload_all_pages(self) -> None:
-        threading.Thread(target=gl.page_manager.reload_all_pages, daemon=True, name="reload-all-pages").start()
+        page_manager = gl.page_manager
+        if page_manager is None:
+            return
+        threading.Thread(target=page_manager.reload_all_pages, daemon=True, name="reload-all-pages").start()
 
 
 class FontRow(Adw.ActionRow):
@@ -660,8 +663,6 @@ class CustomContentEntry(Adw.PreferencesRow):
 
         self.content_group = content_group
         self.i = i
-        self.url = url
-        self.branch = branch
 
         self.main_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5, margin_start=5, margin_end=5)
         self.set_child(self.main_box)

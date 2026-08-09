@@ -140,6 +140,8 @@ class Sidebar(Adw.NavigationPage):
             # self.error_page.set_reload_args([coords])
             self.show_error()
             return
+        if gl.app is None:
+            return
         # Verify is page is loaded on current controller
         visible_child = gl.app.main_win.leftArea.deck_stack.get_visible_child()
         if visible_child is None:
@@ -296,6 +298,8 @@ class KeyEditor(Gtk.Box):
     def load_for_identifier(self, identifier: InputIdentifier, state: int):
         self.sidebar.active_identifier = identifier
 
+        if gl.app is None:
+            return
         controller = gl.app.main_win.get_active_controller()
         if controller is None:
             return
@@ -361,6 +365,8 @@ class AdwPageRow(Adw.PreferencesRow):
 
         self.pages_group = pages_group
         self.page_path = page_path
+        # The label/entry show the page's file name; an unbound row shows none.
+        page_name = os.path.splitext(os.path.basename(page_path))[0] if page_path else ""
 
         # self.toggle_button = Gtk.ToggleButton(hexpand=True, vexpand=True, css_classes=["no-rounded-corners", "flat"])
         # self.toggle_button.connect("toggled", self.on_toggled)
@@ -371,11 +377,11 @@ class AdwPageRow(Adw.PreferencesRow):
         self.set_child(self.main_box)
         # self.toggle_button.set_child(self.main_box)
 
-        self.label = Gtk.Label(xalign=0, label=os.path.splitext(os.path.basename(page_path))[0], hexpand=False,
+        self.label = Gtk.Label(xalign=0, label=page_name, hexpand=False,
                                visible=True, margin_start=2)
         self.main_box.append(self.label)
 
-        self.entry = Gtk.Entry(text=os.path.splitext(os.path.basename(page_path))[0], hexpand=False, xalign=0,
+        self.entry = Gtk.Entry(text=page_name, hexpand=False, xalign=0,
                                css_classes=["flat", "no-border", "no-outline"], has_frame=False,
                                visible=False)
         self.main_box.append(self.entry)
@@ -515,7 +521,9 @@ class KeyEditorKeyBox(Gtk.Box):
         self.icon_selector.load_for_identifier(key, state)
         self.image_editor.load_for_identifier(key.coords, state)
         self.label_editor.load_for_identifier(key, state)
-        self.action_editor.load_for_coords(key.coords, state)
+        # ActionManager only exposes load_for_identifier (load_for_coords is
+        # ActionGroup's), so this raised AttributeError as written (#227).
+        self.action_editor.load_for_identifier(key, state)
         self.background_editor.load_for_identifier(key, state)
 
 class TestStack(Gtk.Stack):

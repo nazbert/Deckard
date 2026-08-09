@@ -87,6 +87,8 @@ class PageSelector(Adw.NavigationPage):
     def load_pages(self) -> None:
         self.page_rows.clear()
         self.list_box.remove_all()
+        if gl.page_manager is None:
+            return
         pages = gl.page_manager.get_pages()
         for page_path in pages:
             self.add_row_by_path(page_path)
@@ -117,7 +119,7 @@ class PageSelector(Adw.NavigationPage):
         self.page_rows.append(page_row)
         self.list_box.append(page_row)
 
-    def sort_func(self, item1, item2) -> bool:
+    def sort_func(self, item1, item2) -> int:
         """
         -1 if child1 should come before child2
         1 if child1 should come after child2
@@ -182,6 +184,8 @@ class AddNewButton(Gtk.Button):
         self.connect("clicked", self.on_clicked)
 
     def on_clicked(self, button: Gtk.Button) -> None:
+        if gl.page_manager is None:
+            return
         dial = EntryDialog(parent_window=self.page_manager,
                            dialog_title=gl.lm.get("page-manager.page-selector.add-dialog.title"),
                            placeholder=gl.lm.get("page-manager.page-selector.add-dialog.placeholder"),

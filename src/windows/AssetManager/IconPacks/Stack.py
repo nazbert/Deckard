@@ -29,7 +29,8 @@ from src.windows.AssetManager.IconPacks.Icons.IconChooser import IconChooserPage
 import globals as gl
 
 # Import typing
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.windows.AssetManager.AssetManager import AssetManager
 
@@ -38,7 +39,7 @@ class IconPackChooserStack(Gtk.Stack):
         super().__init__(*args, **kwargs)
         self.asset_manager = asset_manager
 
-        self.on_loads_finished_tasks: list[callable] = []
+        self.on_loads_finished_tasks: list[Callable[[], Any]] = []
         # Serializes the two build_finished flags with the deferred-task
         # queue -- see on_load_finished / show_for_path. The pack chooser and
         # the icon chooser each build on their OWN worker thread and both call

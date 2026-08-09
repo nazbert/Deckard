@@ -24,7 +24,7 @@ from gi.repository import Gtk
 # Import own modules
 # Import typing
 
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.windows.AssetManager.WallpaperPacks.PackChooser import WallpaperPackChooser
     from src.windows.AssetManager.WallpaperPacks.Preview import WallpaperPackPreview
@@ -36,8 +36,8 @@ class WallpaperPackFlowBox(Gtk.Box):
         self.set_hexpand(True)
 
         self.callback_func = None
-        self.callback_args = ()
-        self.callback_kwargs = {}
+        self.callback_args: tuple[Any, ...] = ()
+        self.callback_kwargs: dict[str, Any] = {}
 
         self.icon_chhoser:"WallpaperPackChooser" = wallpaper_chooser
 

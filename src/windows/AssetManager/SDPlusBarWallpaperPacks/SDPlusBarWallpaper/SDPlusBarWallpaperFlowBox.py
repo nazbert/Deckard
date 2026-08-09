@@ -22,19 +22,19 @@ gi.require_version("Adw", "1")
 from src.windows.AssetManager.DynamicFlowBox import DynamicFlowBox
 
 # Import typing
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.windows.AssetManager.SDPlusBarWallpaperPacks.SDPlusBarWallpaper.SDPlusBarWallpaperChooser import SDPlusBarWallpaperChooserPage
 
 class SDPlusBarWallpaperFlowBox(DynamicFlowBox):
     def __init__(self, base_class, wallpaper_chooser: "SDPlusBarWallpaperChooserPage", *args, **kwargs):
-        super().__init__(base_class=base_class, *args, **kwargs)
+        super().__init__(base_class, *args, **kwargs)
         self.CHILDREN_PER_PAGE = 150
         self.set_hexpand(True)
 
         self.callback_func = None
-        self.callback_args = ()
-        self.callback_kwargs = {}
+        self.callback_args: tuple[Any, ...] = ()
+        self.callback_kwargs: dict[str, Any] = {}
 
         self.wallpaper_chooser = wallpaper_chooser
 

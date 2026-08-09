@@ -19,8 +19,11 @@ from gi.repository import Adw
 
 import globals as gl
 
+from collections.abc import Callable
+from typing import Any
+
 class ResponsibleNotesDialog(Adw.MessageDialog):
-    def __init__(self, parent, callback: callable = None):
+    def __init__(self, parent, callback: Callable[..., Any] | None = None):
         self.callback = callback
 
         super().__init__(

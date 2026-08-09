@@ -82,8 +82,9 @@ class BackgroundExpanderRow(Adw.ExpanderRow):
     def __init__(self, label_group):
         super().__init__(title=gl.lm.get("background-editor.header"), subtitle=gl.lm.get("background-editor-expander.subtitle"))
         self.label_group = label_group
-        self.active_identifier: InputIdentifier = None
-        self.active_state = None
+        # Unset until load_for_identifier binds a row to an input.
+        self.active_identifier: InputIdentifier | None = None
+        self.active_state: int | None = None
         self.build()
 
     def build(self):
@@ -120,7 +121,9 @@ class BackgroundExpanderRow(Adw.ExpanderRow):
         # media loop stays a page-dict/plugin concern for now).
         show_loop = False
         show_fps = False
-        active_page = gl.app.main_win.get_active_page()
+        active_page = gl.app.main_win.get_active_page() if gl.app is not None else None
+        if active_page is None:
+            return False
         if isinstance(self.active_identifier, Input.Touchscreen):
             path = active_page.get_background_image(identifier=self.active_identifier, state=self.active_state)
             show_loop = show_fps = bool(path and is_video(path))
@@ -140,8 +143,9 @@ class ColorRow(Adw.PreferencesRow):
         super().__init__(**kwargs)
         self.sidebar = sidebar
         self.expander = expander
-        self.active_identifier: InputIdentifier = None
-        self.active_state = None
+        # Unset until load_for_identifier binds a row to an input.
+        self.active_identifier: InputIdentifier | None = None
+        self.active_state: int | None = None
         self.build()
 
     def build(self):
@@ -200,6 +204,8 @@ class ColorRow(Adw.PreferencesRow):
     def load_for_identifier(self, identifier: InputIdentifier, state: int):
         self.disconnect_signals()
 
+        if gl.app is None:
+            return
         self.active_identifier = identifier
         self.active_state = state
 
@@ -269,8 +275,9 @@ class VideoLoopRow(Adw.PreferencesRow):
         super().__init__(**kwargs)
         self.sidebar = sidebar
         self.expander = expander
-        self.active_identifier: InputIdentifier = None
-        self.active_state = None
+        # Unset until load_for_identifier binds a row to an input.
+        self.active_identifier: InputIdentifier | None = None
+        self.active_state: int | None = None
         self.build()
 
     def build(self):
@@ -304,7 +311,11 @@ class VideoLoopRow(Adw.PreferencesRow):
         self.disconnect_signals()
         self.active_identifier = identifier
         self.active_state = state
+        if gl.app is None:
+            return
         active_page = gl.app.main_win.get_active_page()
+        if active_page is None:
+            return
         self.switch.set_active(active_page.get_background_loop(identifier=identifier, state=state))
         self.connect_signals()
 
@@ -314,8 +325,9 @@ class VideoFpsRow(Adw.PreferencesRow):
         super().__init__(**kwargs)
         self.sidebar = sidebar
         self.expander = expander
-        self.active_identifier: InputIdentifier = None
-        self.active_state = None
+        # Unset until load_for_identifier binds a row to an input.
+        self.active_identifier: InputIdentifier | None = None
+        self.active_state: int | None = None
         self.build()
 
     def build(self):
@@ -362,7 +374,11 @@ class VideoFpsRow(Adw.PreferencesRow):
         self.disconnect_signals()
         self.active_identifier = identifier
         self.active_state = state
+        if gl.app is None:
+            return
         active_page = gl.app.main_win.get_active_page()
+        if active_page is None:
+            return
         if self._uses_media_fps():
             self.spinner.set_value(active_page.get_media_fps(identifier=identifier, state=state))
         else:
@@ -375,8 +391,9 @@ class ImageRow(Adw.PreferencesRow):
         super().__init__(**kwargs)
         self.sidebar = sidebar
         self.expander = expander
-        self.active_identifier: InputIdentifier = None
-        self.active_state = None
+        # Unset until load_for_identifier binds a row to an input.
+        self.active_identifier: InputIdentifier | None = None
+        self.active_state: int | None = None
         self.build()
 
     def build(self):
@@ -419,9 +436,11 @@ class ImageRow(Adw.PreferencesRow):
         gl.app.let_user_select_asset(default_path=current_path, callback_func=self.set_background_image)
 
     def set_background_image(self, file_path: str) -> None:
-        if not file_path:
+        if not file_path or gl.app is None:
             return
         active_page = gl.app.main_win.get_active_page()
+        if active_page is None:
+            return
         active_page.set_background_image(identifier=self.active_identifier, state=self.active_state, path=file_path, update=True)
         # May run off-main (the custom-assets chooser delivers selections on a
         # callback thread) -- widget mutations must be marshalled onto the GTK
@@ -458,7 +477,11 @@ class ImageRow(Adw.PreferencesRow):
         self.active_identifier = identifier
         self.active_state = state
 
+        if gl.app is None:
+            return
         active_page = gl.app.main_win.get_active_page()
+        if active_page is None:
+            return
         image_path = active_page.get_background_image(identifier=identifier, state=state)
         self.clear_button.set_visible(image_path is not None)
         self.update_preview(image_path)

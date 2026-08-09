@@ -31,7 +31,8 @@ from src.backend.atomic_json import atomic_write_json
 from loguru import logger as log 
 from src.windows.PageManager.Importer.Importer import Importer
 # Import typing
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.windows.PageManager.elements.PageEditor import PageEditor
 
@@ -44,7 +45,9 @@ class MenuButton(Gtk.MenuButton):
         self.pageEditor = pageEditor
         self.set_icon_name("open-menu-symbolic")
 
-        self.selected_file: str = None
+        # The Gio.File the import dialog handed back; held only between
+        # import_page_callback and import_page_name_selected_callback.
+        self.selected_file: Gio.File | None = None
 
         self.init_actions()
         self.set_page_specific_actions_enabled(False)
@@ -206,7 +209,7 @@ class MenuButton(Gtk.MenuButton):
         
 
 class ChooseImportFileDialog(Gtk.FileDialog):
-    def __init__(self, menu_button: MenuButton, callback: callable = None):
+    def __init__(self, menu_button: MenuButton, callback: Callable[[Any], Any] | None = None):
         super().__init__(title=gl.lm.get("asset-chooser.custom.browse-files.dialog.title"),
                          accept_label=gl.lm.get("asset-chooser.custom.browse-files.dialog.select-button"))
         self.menu_button = menu_button
@@ -220,10 +223,11 @@ class ChooseImportFileDialog(Gtk.FileDialog):
             log.error(err)
             return
         
-        self.original_callback(selected_file)
+        if self.original_callback is not None:
+            self.original_callback(selected_file)
 
 class ChooseExportFileDialog(Gtk.FileDialog):
-    def __init__(self, menu_button: MenuButton, callback: callable = None, initial_name: str = None):
+    def __init__(self, menu_button: MenuButton, callback: Callable[[Any], Any] | None = None, initial_name: str = None):
         super().__init__(title=gl.lm.get("asset-chooser.custom.browse-files.dialog.title"),
                          accept_label=gl.lm.get("asset-chooser.custom.browse-files.dialog.select-button"),
                          initial_name=initial_name)
@@ -238,4 +242,5 @@ class ChooseExportFileDialog(Gtk.FileDialog):
             log.error(err)
             return
         
-        self.original_callback(selected_file)
+        if self.original_callback is not None:
+            self.original_callback(selected_file)
