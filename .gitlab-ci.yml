@@ -81,7 +81,12 @@ lint:types:                # blocking type-check gate (lane added by #171 pt. 3,
   needs: []
   script:
     # quoted: the ' #' inside the regex would otherwise start a YAML comment
-    - "pip install --quiet $(grep -oE '^(mypy|PyGObject-stubs|types-setuptools)==[^ #]+' requirements-dev.txt) typing_extensions"
+    - "pip install --quiet $(grep -oE '^(mypy|types-setuptools)==[^ #]+' requirements-dev.txt) typing_extensions"
+    # --no-deps: PyGObject-stubs >= 2.13 hard-depends on PyGObject, whose
+    # pycairo chain needs a C toolchain this slim image lacks. The stubs are
+    # type-time-only (mypy reads the .pyi files, never imports the package),
+    # so their runtime deps are dead weight here.
+    - "pip install --quiet --no-deps $(grep -oE '^PyGObject-stubs==[^ #]+' requirements-dev.txt)"
     - mypy
 
 # Advisory nudge: an MR should either add a bullet under ## [Unreleased] in
