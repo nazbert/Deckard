@@ -1,12 +1,36 @@
+import atexit
 import json
 import os
 import tempfile
 import threading
 import time
+import weakref
 from loguru import logger as log
 
 import globals as gl
 from src.backend.atomic_json import atomic_write_json
+
+
+# Every live StoreCache, weakly held so the exit hook below can drain
+# deferred index writes without keeping instances alive (production has one,
+# the test harness builds several per process).
+_live_caches: "weakref.WeakSet[StoreCache]" = weakref.WeakSet()
+
+
+@atexit.register
+def _flush_live_caches() -> None:
+    """Last-chance drain of every live cache's deferred index (issue #180).
+
+    Covers plain interpreter exits: CLI runs, the test harness, an uncaught
+    exception. The GTK app quits through os._exit(0) (src/app.py on_quit),
+    which bypasses atexit entirely -- on_quit therefore calls
+    StoreCache.flush_index() explicitly before it gets there.
+    """
+    for cache in list(_live_caches):
+        try:
+            cache.flush_index()
+        except Exception as e:
+            log.warning(f"Could not flush the store cache index at exit: {e}")
 
 
 class _AtomicCacheWriter:
@@ -104,13 +128,46 @@ class _AtomicCacheWriter:
 
 
 class StoreCache:
-    # Entries carry two clocks: "date" is LAST USE (refreshed on every open,
-    # drives remove_old_cache_files eviction of unused entries) and "fetched"
-    # is CONTENT AGE (stamped only after a write has fully committed, drives
-    # the stale-fallback bound in StoreBackend.get_remote_file). Bounding
-    # staleness on "date" would be circular: serving the stale copy would
-    # keep renewing it.
+    """files.json index + on-disk blobs for downloaded store files.
+
+    Entries carry two clocks: "date" is LAST USE (refreshed on every open,
+    drives remove_old_cache_files eviction of unused entries) and "fetched"
+    is CONTENT AGE (stamped only after a write has fully committed, drives
+    the stale-fallback bound in StoreBackend.get_remote_file). Bounding
+    staleness on "date" would be circular: serving the stale copy would keep
+    renewing it.
+
+    Index persistence is split by what losing a write would cost (issue
+    #180); the two halves are NOT interchangeable:
+
+      * CONTENT commits stay SYNCHRONOUS. _stamp_committed (called only
+        after a blob's os.replace has landed) and remove_old_cache_files
+        (eviction) write files.json immediately. A lost "path"/"fetched"
+        stamp orphans the blob forever: remove_old_cache_files only ever
+        walks index entries, so a file with no entry is never aged out and
+        never found again. This is the crash-safety result of gl#73/#25 and
+        must not be deferred.
+
+      * READ-CLOCK renewals are DEFERRED. The read path and the first
+        sighting of a cache string only renew "date" in memory and mark the
+        index dirty; a single daemon timer flushes the whole index
+        FLUSH_DEBOUNCE_S later (armed on the first dirty mark, no-op while
+        one is already pending). A warm store browse used to rewrite the
+        entire files.json -- json.dump of every entry, fsync'd -- once per
+        catalog file opened; it now costs one write per burst. A hard kill
+        inside the window loses at most that much renewal, making an entry
+        look FLUSH_DEBOUNCE_S older against a DAYS_TO_KEEP (3 day) eviction
+        bound, and the next read renews it again.
+
+    Entry mutations and the index write both happen under write_lock, so the
+    flush's files.copy() can never run against a half-applied mutation.
+    """
+
     DAYS_TO_KEEP = 3
+
+    # Trailing debounce for the deferred read-clock writes. Overridable per
+    # instance (the harness shortens it rather than sleeping seconds).
+    FLUSH_DEBOUNCE_S = 2.0
 
     def __init__(self):
         self.CACHE_PATH = os.path.join(gl.DATA_PATH, "Store" , "cache")
@@ -136,6 +193,12 @@ class StoreCache:
         self._file_locks: dict[str, threading.Lock] = {}
         self._file_locks_guard = threading.Lock()
 
+        # Deferred read-clock index state; both fields are guarded by
+        # write_lock. Set up before the first set_files() call below.
+        self._index_dirty = False
+        self._flush_timer: threading.Timer | None = None
+        _live_caches.add(self)
+
         self.files = self.get_files()
         self.remove_old_cache_files()
 
@@ -153,8 +216,54 @@ class StoreCache:
             return {}
 
     def set_files(self, files: dict):
+        """Persist the index NOW -- the synchronous half of the split
+        documented on the class (content commits + eviction)."""
         with self.write_lock:
-            atomic_write_json(self.files_json, files.copy())
+            self._write_index_locked(files)
+
+    def _write_index_locked(self, files: dict = None) -> None:
+        """Dump the index to disk. Caller must hold write_lock.
+
+        Writing the live index also satisfies whatever the pending timer was
+        going to flush, so the dirty flag clears and the armed timer becomes
+        a no-op (it is not cancelled: a Timer cancel from an arbitrary
+        caller thread buys nothing over a no-op wake-up in <=
+        FLUSH_DEBOUNCE_S). A caller that passes some OTHER dict -- only the
+        harness does -- has not persisted the live index, so the flag
+        stands."""
+        if files is None:
+            files = self.files
+        if files is self.files:
+            self._index_dirty = False
+        atomic_write_json(self.files_json, files.copy())
+
+    def _mark_index_dirty_locked(self) -> None:
+        """Note a deferred read-clock change and arm the trailing flush.
+        Caller must hold write_lock (which the flush also takes, so the
+        snapshot it writes can never catch a half-applied mutation)."""
+        self._index_dirty = True
+        if self._flush_timer is not None:
+            return  # a flush is already pending; it will pick this up
+        timer = threading.Timer(self.FLUSH_DEBOUNCE_S, self.flush_index)
+        timer.name = "store-cache-index-flush"
+        timer.daemon = True
+        self._flush_timer = timer
+        timer.start()
+
+    def flush_index(self) -> None:
+        """Write out any deferred read-clock renewals now.
+
+        Called by the debounce timer, by the app's quit path, and by the
+        module's atexit hook. A no-op when nothing is dirty, so calling it
+        defensively costs nothing."""
+        with self.write_lock:
+            timer, self._flush_timer = self._flush_timer, None
+            if self._index_dirty:
+                self._write_index_locked()
+        if timer is not None:
+            # No-op when this IS the timer that just fired; cancels the
+            # pending wake-up when an explicit flush beat it to the write.
+            timer.cancel()
 
     def remove_old_cache_files(self):
         now = time.time()
@@ -235,11 +344,16 @@ class StoreCache:
 
         else:
             path = os.path.join(self.files_dir, cache_string)
-            self.files[cache_string] = {
-                "path": path,
-                "date": time.time()
-            }
-            self.set_files(self.files)
+            # First sighting of this cache string: records only where the
+            # blob WOULD live plus the last-use clock -- there is no content
+            # yet, and the write that creates it stamps the index
+            # synchronously (_stamp_committed). Deferred; see the class doc.
+            with self.write_lock:
+                self.files[cache_string] = {
+                    "path": path,
+                    "date": time.time()
+                }
+                self._mark_index_dirty_locked()
             return path
 
     def is_cached(self, url: str, path: str, branch: str = "main", data_type: str = "text") -> bool:
@@ -259,12 +373,16 @@ class StoreCache:
     def _stamp_committed(self, cache_string: str, cache_path: str) -> None:
         """Index update for a fully committed write -- called by the atomic
         writer AFTER os.replace has landed the content, never before."""
-        entry = self.files.get(cache_string, {})
-        entry["path"] = cache_path
-        entry["date"] = time.time()     # last use (eviction clock)
-        entry["fetched"] = time.time()  # content age (staleness clock)
-        self.files[cache_string] = entry
-        self.set_files(self.files)
+        with self.write_lock:
+            entry = self.files.get(cache_string, {})
+            entry["path"] = cache_path
+            entry["date"] = time.time()     # last use (eviction clock)
+            entry["fetched"] = time.time()  # content age (staleness clock)
+            self.files[cache_string] = entry
+            # Synchronous, and under the same lock acquisition as the
+            # mutation: losing this record orphans the blob that just
+            # landed (class doc). Never route it through the debounce.
+            self._write_index_locked()
 
     def open_cache_file(self, url: str, path: str, branch: str = "main", data_type: str = "text", mode: str = "r"):
         cache_path = self.get_cache_path(url, path, branch, data_type)
@@ -290,12 +408,14 @@ class StoreCache:
                 raise
 
         # Read: renew only the last-use clock; "fetched" (content age) is
-        # untouched by reads.
-        entry = self.files.get(cache_string, {})
-        entry["path"] = cache_path
-        entry["date"] = time.time()
-        self.files[cache_string] = entry
-        self.set_files(self.files)
+        # untouched by reads. Deferred behind the debounce -- this used to
+        # rewrite all of files.json on every cache HIT (issue #180).
+        with self.write_lock:
+            entry = self.files.get(cache_string, {})
+            entry["path"] = cache_path
+            entry["date"] = time.time()
+            self.files[cache_string] = entry
+            self._mark_index_dirty_locked()
 
         return open(cache_path, mode)
 
