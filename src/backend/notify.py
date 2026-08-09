@@ -66,14 +66,17 @@ class Notify:
         GLib.idle_add(self._deliver, is_error, text, title)
 
     def _deliver(self, is_error: bool, text: str, title: str | None) -> bool:
-        # Main thread only.
-        main_win = getattr(gl.app, "main_win", None)
+        # Main thread only. Bound once: _dispatch only schedules us once gl.app
+        # is up, but the idle callback runs later and the desktop-notification
+        # branch below would dereference it a second time.
+        app = gl.app
+        main_win = getattr(app, "main_win", None)
         if main_win is not None and main_win.is_visible():
             if is_error:
                 main_win.show_error_toast(text)
             else:
                 main_win.show_info_toast(text)
-        else:
+        elif app is not None:
             icon = "dialog-error-symbolic" if is_error else "dialog-information-symbolic"
-            gl.app.send_notification(icon, title or appinfo.APP_NAME, text)
+            app.send_notification(icon, title or appinfo.APP_NAME, text)
         return GLib.SOURCE_REMOVE
