@@ -1,6 +1,6 @@
 # AUR / PKGBUILD packaging plan — Deckard
 
-Status: **planning** (2026-07-14). Secondary distribution format; flatpak (issue #128)
+Status: **planning** (2026-07-14). Secondary distribution format; flatpak
 stays the broad cross-distro primary. Decision record on why AUR (and why not AppImage
 or a full deb+rpm suite): #128 note_2142.
 

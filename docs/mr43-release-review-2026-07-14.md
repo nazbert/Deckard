@@ -1,4 +1,4 @@
-# MR !43 review — initial release + GitHub mirror
+# Initial-release MR review — release pipeline + GitHub mirror
 
 Combined MR "v0.1.0: native packaging + flatpak CI release pipeline" (targets `main`,
 18 files / 13 commits). Reviewed against the two concerns: does the **initial v0.1.0
@@ -6,9 +6,9 @@ release** fire correctly, and is it **mirrored to GitHub** as expected.
 
 ## TL;DR
 
-- **GitLab release path: sound and proven.** The combined branch pipeline (#555) is
+- **GitLab release path: sound and proven.** The combined branch pipeline is
   fully green — `build:flatpak` (4m36s), `test:compile`, `changelog-check` — so the
-  flatpak builds with all of !65's changes. Merging cuts `v0.1.0` and publishes the
+  flatpak builds with all of the version-bump branch's changes. Merging cuts `v0.1.0` and publishes the
   bundle. **One correction to earlier guidance: merge with NO `bump:*` label** (below).
 - **GitHub mirror: will NOT happen as-is.** `GH_TOKEN` is missing → `release:github`
   fails outright. Two more provisioning steps are also pending. The plan doc already
@@ -40,7 +40,7 @@ v0.1.0 onward, the bump-label flow owns versioning.
   protected vars.
 - **VERSION↔About end-to-end:** the tag commit has `VERSION=0.1.0`, the flatpak copies
   it into `/app/bin/Deckard/VERSION`, so `gl.deckard_version` → the About dialog shows
-  "0.1.0" in the released flatpak too. !65's changes don't affect flatpak runtime
+  "0.1.0" in the released flatpak too. The version-bump changes don't affect flatpak runtime
   (`is_flatpak()` keeps the old data path; the XDG migration no-ops under flatpak).
 
 ## 2. GitHub mirror — 3 provisioning steps pending (the plan says so too)
@@ -79,7 +79,7 @@ logic is correct — but its prerequisites are not in place:
   release exists would fail (unlike `release:github`, which reconciles). Fine for a
   first release; a retry wart.
 - **`test:compile` references `permissons.py`, which doesn't exist** (typo, no such
-  top-level module). `compileall` silently skips it (#555 passed), so it's harmless —
+  top-level module). `compileall` silently skips it (the branch pipeline passed), so it's harmless —
   but it means a real top-level permissions module would go unchecked. Drop the token
   (and note the file list omits `appinfo.py`, `cli_args.py`, `rebrand_migration.py`).
 - **No push mirror + direct tag push** means the fork gets a `v0.1.0` tag pointing 13

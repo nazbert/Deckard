@@ -33,14 +33,14 @@ All are read once at startup, so they are set on the launch, never mid-run.
 |---|---|
 | `SC_MEM_TELEMETRY=1` | write `<DataPath>/logs/mem_telemetry.csv` -- everything above depends on it |
 | `SC_MALLOC_TRIM=0` | turn OFF the default-on idle `malloc_trim` (with `SC_MEM_TELEMETRY` unset too, the sampler thread never starts) |
-| `DECKARD_IMAGE_CACHE_MB=<n>` | image-cache ceiling (#142); `0` disables global eviction |
+| `DECKARD_IMAGE_CACHE_MB=<n>` | image-cache ceiling; `0` disables global eviction |
 | `DECKARD_MEDIA_PROFILE=1` | media-loop fps/stage accounting |
 | `SC_STRONG_CALLBACKS=1` | store event callbacks strong instead of weak -- for bisecting a dropped-observer regression against `src/Signals/weak_callbacks.py` |
-| `SC_NO_ERROR_HOOKS=1` | **turn the issue-#80 exception hooks off** (`sys`/`threading`/`unraisable` hooks, the asyncio handler and the `logs/faulthandler.log` redirection), restoring pre-#80 behavior for an A/B of a suspected hook-induced anomaly. Strictly `1`; anything else leaves them installed. A flagged run says so in `logs.log` at startup. Log redaction is NOT disabled by it. |
+| `SC_NO_ERROR_HOOKS=1` | **turn the central exception hooks off** (`sys`/`threading`/`unraisable` hooks, the asyncio handler and the `logs/faulthandler.log` redirection), restoring pre-hooks behavior for an A/B of a suspected hook-induced anomaly. Strictly `1`; anything else leaves them installed. A flagged run says so in `logs.log` at startup. Log redaction is NOT disabled by it. |
 
 ### Reading a soak log with the rate limiter in it
 
-Uncaught exceptions are rate-limited **per failing site** (issue #91): one
+Uncaught exceptions are rate-limited **per failing site**: one
 record per (exception type, `file:line`) per 5 s, and everything else that
 site produced is reported as a count -- `N further failures at <site> since
 the last record` -- riding on its next record, on its eviction from the
@@ -83,7 +83,7 @@ each:
 - **Right-click x50** (key grid and dial context menus): each leaks one
   `PopoverMenu` today (bug 4 in the design doc's appendix, fixed in Phase
   1) -- Phase 0's read here is a baseline, not a pass/fail gate.
-- **Image-cache ceiling leg (#142)**, 2 h minimum, on a page with a looping
+- **Image-cache ceiling leg**, 2 h minimum, on a page with a looping
   background video and `soak_driver.py --cycles 200` cycling pages
   underneath it. The leg has TWO valid regimes, chosen by where the ceiling
   sits relative to the deck's *active working set* -- measured at **~72 MB**
@@ -108,7 +108,7 @@ each:
   the whole design premise is that the writer never stalls for the budget.
   Then repeat once at the default ceiling to confirm it does not bind on a
   normal rig (`img_cache_evictions` stays 0). Field reference (2026-08-08
-  overnight, MR !94): 381 k evictions/2 h at ~53/s in the churn regime with
+  overnight, during the cache-budget soak): 381 k evictions/2 h at ~53/s in the churn regime with
   the bound never exceeded and fps 32.3->32.2.
 - **2+ hour idle** with the deck showing a page with looping bg video: this
   is the number that matters for Phase 0 -- with `MALLOC_ARENA_MAX=2` and
@@ -126,7 +126,7 @@ grep -v '^#' logs/mem_telemetry.csv     # the sampled rows, markers stripped
 
 ### Image-cache columns
 
-The last five CSV columns come from the image-cache budget (#142) and are
+The last five CSV columns come from the image-cache budget and are
 what make its ceiling tunable against a real soak rather than a guess:
 
 | column | meaning |
