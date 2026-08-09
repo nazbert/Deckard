@@ -51,6 +51,7 @@ from loguru import logger as log
 # Import own modules
 from GtkHelper.GtkHelper import run_on_main
 from src.windows.AssetManager.ChooserPage import ChooserPage
+from src.windows.AssetManager.Preview import Preview
 
 # Import typing
 from typing import TYPE_CHECKING
@@ -119,6 +120,12 @@ class GenericPackChooserPage(ChooserPage):
     PACK_PREVIEW_CLASS: type = None
     # Name of the stack child holding this type's asset chooser.
     LEAF_CHILD_NAME: str = None
+    # Pack previews constructed per main-loop callback.
+    PACK_APPEND_BATCH: int = 10
+
+    # Bound by _build_ui on the main loop; readers must tolerate None (a
+    # marshal that timed out never binds it -- see _handle_build_failure).
+    pack_flow = None
 
     def __init__(self, stack, asset_manager: "AssetManager"):
         super().__init__()
@@ -133,18 +140,33 @@ class GenericPackChooserPage(ChooserPage):
     def build(self):
         self.build_finished = False
 
-        # Pack discovery hits the disk: worker-thread work.
+        # Worker-thread work: pack discovery hits the disk, and so does the
+        # thumbnail decode. A GdkPixbuf decode is file I/O, not GTK widgetry,
+        # so it is safe here -- and it MUST be here: at ~17 ms per store
+        # thumbnail (over 100 ms for an oversized one) decoding the whole grid
+        # inside the main-loop callback froze the window for hundreds of
+        # milliseconds to tens of seconds (#136 review M1).
         packs = list(self.get_packs().values())
+        thumbnails = [Preview.decode_pixbuf(self.get_pack_thumbnail_path(pack))
+                      for pack in packs]
 
         # Widgets are GTK, so they are built on the main loop (#136).
-        run_on_main(self._build_ui, packs)
+        run_on_main(self._build_ui)
+
+        # One batch per main-loop callback: constructing every preview in a
+        # single callback would hand the loop back only after the last one,
+        # so a big pack set would still stutter even with the decode gone.
+        for start in range(0, len(packs), self.PACK_APPEND_BATCH):
+            stop = start + self.PACK_APPEND_BATCH
+            run_on_main(self._append_packs, list(zip(packs[start:stop],
+                                                     thumbnails[start:stop])))
 
         self.set_loading(False)
 
         self.build_finished = True
         self.on_build_finished()
 
-    def _build_ui(self, packs: list) -> None:
+    def _build_ui(self) -> None:
         """Runs on the main loop only."""
         self.type_box.set_visible(False)
 
@@ -154,10 +176,16 @@ class GenericPackChooserPage(ChooserPage):
 
         self.pack_flow.flow_box.connect("child-activated", self.on_child_activated)
 
+    def _append_packs(self, batch: list) -> None:
+        """Runs on the main loop only: one batch of (pack, pixbuf) pairs."""
         flow_box = self.pack_flow.flow_box
-        for pack in packs:
-            preview = self.PACK_PREVIEW_CLASS(self, pack)
+        for pack, pixbuf in batch:
+            preview = self.PACK_PREVIEW_CLASS(self, pack, pixbuf=pixbuf)
             flow_box.append(preview)
+
+    def get_pack_thumbnail_path(self, pack):
+        """Where the pack's thumbnail lives. Called on the build worker."""
+        return pack.get_thumbnail_path()
 
     def on_child_activated(self, flow_box, child):
         # Load the pack's assets, drill into the asset chooser, offer the way back.

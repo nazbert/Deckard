@@ -22,8 +22,15 @@ from gi.repository import Gtk, GdkPixbuf, GLib, Pango
 # Import python modules
 from loguru import logger as log
 
+# Distinguishes "the caller handed us a pixbuf" (even a None one, meaning its
+# decode failed and the broken-image icon is what should show) from "the caller
+# said nothing about an image".
+_PIXBUF_UNSET = object()
+
+
 class Preview(Gtk.FlowBoxChild):
-    def __init__(self, image_path: str = None, text:str = None, can_be_deleted: bool = False):
+    def __init__(self, image_path: str = None, text:str = None, can_be_deleted: bool = False,
+                 pixbuf=_PIXBUF_UNSET):
         super().__init__()
         self.set_css_classes(["asset-preview"])
         self.set_margin_start(5)
@@ -36,7 +43,11 @@ class Preview(Gtk.FlowBoxChild):
 
         self._build()
 
-        if image_path is not None:
+        if pixbuf is not _PIXBUF_UNSET:
+            # Already decoded by the caller -- off the main thread, for the
+            # pack grids (see GenericPackChooserPage.build).
+            self.set_pixbuf(pixbuf)
+        elif image_path is not None:
             self.set_image(image_path)
         if text is not None:
             self.set_text(text)
@@ -73,29 +84,47 @@ class Preview(Gtk.FlowBoxChild):
         self.remove_button.connect("clicked", self.on_click_remove)
         self.overlay.add_overlay(self.remove_button)
 
-    def set_image(self, path:str):
+    @staticmethod
+    def decode_pixbuf(path: str) -> GdkPixbuf.Pixbuf:
+        """Decodes `path` at preview size, or returns None if it can't be
+        decoded (missing, corrupt, unreadable).
+
+        Deliberately touches no widget: a GdkPixbuf decode is file I/O, not
+        GTK widgetry, so it is safe OFF the main thread -- and it is slow
+        enough (~17 ms for a store thumbnail, ~110 ms for an oversized one)
+        that running it inside a main-loop callback freezes the window for
+        the whole pack grid at once. The pack choosers therefore decode on
+        their build worker and hand the result to set_pixbuf.
+        """
         # The None check must run BEFORE any str() coercion (str(None) is the
         # truthy "None"), and the decode must be guarded: a corrupt/unreadable
         # file raises GLib.Error and previously killed the (idle) callback,
         # leaving the recycled cell showing a stale image (#112).
         if path is None:
-            self.show_broken_image()
-            return
+            return None
 
         try:
-            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path),
-                                                             width=250,
-                                                             height=180,
-                                                             preserve_aspect_ratio=True)
+            return GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path),
+                                                           width=250,
+                                                           height=180,
+                                                           preserve_aspect_ratio=True)
         except GLib.Error as e:
             # Expected for a corrupt/unreadable file -- the message says why.
             log.warning(f"Could not load asset preview for {path}: {e}")
-            self.show_broken_image()
-            return
+            return None
         except Exception as e:
             # Unexpected (programming error, not a poison file): keep the
             # traceback so it stays distinguishable in the logs.
             log.opt(exception=True).warning(f"Unexpected error loading asset preview for {path}: {e}")
+            return None
+
+    def set_image(self, path:str):
+        self.set_pixbuf(self.decode_pixbuf(path))
+
+    def set_pixbuf(self, pixbuf: GdkPixbuf.Pixbuf) -> None:
+        """Shows an already-decoded pixbuf. None means the decode failed, so
+        the broken-image icon shows instead (#112)."""
+        if pixbuf is None:
             self.show_broken_image()
             return
 
