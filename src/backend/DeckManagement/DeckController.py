@@ -77,6 +77,35 @@ from src.backend.PluginManager.ActionCore import ActionCore
 if TYPE_CHECKING:
     from src.backend.DeckManagement.DeckManager import DeckManager
 
+    class ComposedKeyLabel(KeyLabel):
+        """A KeyLabel that has been through LabelManager.inject_defaults():
+        every field is populated, so the render path can read them without a
+        None check at each use.
+
+        Declared under TYPE_CHECKING only -- it adds no class at runtime, and
+        inject_defaults() keeps returning the very object it filled in. This
+        exists so "composed" is a type the checker can carry from the one
+        place the invariant is established to the eight places that rely on
+        it, instead of eight narrowings that would each have to re-assert it.
+        """
+        text: str
+        font_size: int
+        font_name: str
+        font_weight: int
+        style: str
+        color: list[int]
+        outline_width: int
+        outline_color: list[int]
+        alignment: str
+
+    class ComposedImageLayout(ImageLayout):
+        """An ImageLayout after LayoutManager.inject_defaults(). Same contract
+        and same TYPE_CHECKING-only rationale as ComposedKeyLabel."""
+        valign: float
+        halign: float
+        fill_mode: str
+        size: float
+
 # Import globals
 import globals as gl
 
@@ -4319,7 +4348,7 @@ class LabelManager:
         self._bbox_cache: dict[str, tuple] = {}
         # (epoch, {position -> KeyLabel}): the merged page+action+defaults
         # labels. See get_composed_labels() for the invalidation contract.
-        self._composed_labels_cache: tuple[int, dict[str, "KeyLabel"]] | None = None
+        self._composed_labels_cache: tuple[int, dict[str, "ComposedKeyLabel"]] | None = None
 
         self.init_labels()
         # Rolling-label animation state per position: the current scroll
@@ -4335,8 +4364,8 @@ class LabelManager:
 
     def init_labels(self):
         for position in ["top", "center", "bottom"]:
-            self.page_labels[position] = KeyLabel(self.controller_input)  # type: ignore[arg-type]  # root cause: KeyLabel.controller_input: "ControllerKey" (Subclasses/KeyLabel.py, MR 5)
-            self.action_labels[position] = KeyLabel(self.controller_input)  # type: ignore[arg-type]  # root cause: KeyLabel.controller_input: "ControllerKey" (Subclasses/KeyLabel.py, MR 5)
+            self.page_labels[position] = KeyLabel(self.controller_input)
+            self.action_labels[position] = KeyLabel(self.controller_input)
  
     def _bump_label_epoch(self) -> None:
         """Retire the latch-style label memos: move the epoch, then drop
@@ -4464,10 +4493,10 @@ class LabelManager:
             "alignment": self.page_labels[position].alignment is not None,
         }
 
-    def get_composed_label(self, position: str) -> "KeyLabel":
+    def get_composed_label(self, position: str) -> "ComposedKeyLabel":
         use_page_label_properties = self.get_use_page_label_properties(position)
         
-        label = copy(self.action_labels.get(position)) or KeyLabel(self.controller_input)  # type: ignore[arg-type]  # root cause: KeyLabel.controller_input: "ControllerKey" (Subclasses/KeyLabel.py, MR 5)
+        label = copy(self.action_labels.get(position)) or KeyLabel(self.controller_input)
 
         # Set to page values
         page_label = self.page_labels.get(position)
@@ -4494,7 +4523,7 @@ class LabelManager:
         injected = self.inject_defaults(label)
         return self.fix_invalid(injected)
     
-    def get_composed_labels(self) -> dict[str, "KeyLabel"]:
+    def get_composed_labels(self) -> dict[str, "ComposedKeyLabel"]:
         """The merged page+action+defaults labels for all three positions,
         memoized.
 
@@ -4543,11 +4572,18 @@ class LabelManager:
         return labels
 
     
-    def inject_defaults(self, label: "KeyLabel"):
+    def inject_defaults(self, label: "KeyLabel") -> "ComposedKeyLabel":
+        """Fills every unset field from the app-wide font defaults, in place.
+
+        Returns the SAME object, retyped: after this runs there is no field
+        left for a reader to None-check (see ComposedKeyLabel)."""
         if label.text is None:
             label.text = ""
         if label.color is None:
-            label.color = gl.settings_manager.font_defaults.get("font-color") or (255, 255, 255, 255)
+            # List, not tuple: the field is declared list[int] and the
+            # settings path yields a JSON list, so a tuple fallback made the
+            # attribute's runtime type depend on which branch filled it.
+            label.color = gl.settings_manager.font_defaults.get("font-color") or [255, 255, 255, 255]
         if label.font_name is None:
             label.font_name = gl.settings_manager.font_defaults.get("font-family") or gl.fallback_font
         if label.font_size is None:
@@ -4559,13 +4595,13 @@ class LabelManager:
         if label.outline_width is None:
             label.outline_width = round(gl.settings_manager.font_defaults.get("outline-width") or 2)
         if label.outline_color is None:
-            label.outline_color = gl.settings_manager.font_defaults.get("outline-color") or (0, 0, 0, 255)
+            label.outline_color = gl.settings_manager.font_defaults.get("outline-color") or [0, 0, 0, 255]
         if label.alignment is None:
             label.alignment = gl.settings_manager.font_defaults.get("alignment") or "center"
 
-        return label
+        return cast("ComposedKeyLabel", label)
     
-    def fix_invalid(self, label: "KeyLabel"):
+    def fix_invalid(self, label: "ComposedKeyLabel") -> "ComposedKeyLabel":
         if not isinstance(label.text, str):
             label.text = str(label.text)
 
@@ -4592,7 +4628,7 @@ class LabelManager:
         self._has_visible_labels_cache = (epoch, visible)
         return visible
 
-    def _measure_text(self, position: str, label: "KeyLabel") -> tuple[int, int]:
+    def _measure_text(self, position: str, label: "ComposedKeyLabel") -> tuple[int, int]:
         """(w, h) of the composed label's rendered text block, cached per
         position. Both scroll detection and the render path measure through
         here, so they can never disagree about whether a label overflows."""
@@ -4745,7 +4781,7 @@ class LabelManager:
     _MAX_LABEL_MASK_BYTES = 512 * 1024
     _MAX_LABEL_OPS = 512
 
-    def _label_ops_budget_ok(self, label: "KeyLabel", w: int, h: int) -> bool:
+    def _label_ops_budget_ok(self, label: "ComposedKeyLabel", w: int, h: int) -> bool:
         """Whether recording this label's blits is worth the retention and
         the media-thread stall, decided from measurements the caller already
         has (no rasterization).
@@ -4765,7 +4801,7 @@ class LabelManager:
                            * (int(h) + lines * 2 * stroke))
         return estimated_bytes <= self._MAX_LABEL_MASK_BYTES
 
-    def _composite_scroll_strip(self, image: Image.Image, position: str, label: "KeyLabel",
+    def _composite_scroll_strip(self, image: Image.Image, position: str, label: "ComposedKeyLabel",
                                 w: int, h: int, x_position: float, y_position: float) -> None:
         """Draws a scrolling label by compositing a window of its precomposed
         text strip at this tick's offset. The strip is rasterized once per
@@ -4850,7 +4886,7 @@ class LabelManager:
             image.paste(window, (px + crop_left, py + crop_top), window)
 
     def _draw_static_label(self, image: Image.Image, draw: ImageDraw.ImageDraw,
-                           position: str, label: "KeyLabel", w: int, h: int,
+                           position: str, label: "ComposedKeyLabel", w: int, h: int,
                            x_position: float, y_position: float, anchor: str) -> None:
         """Draws a non-scrolling label by replaying its cached glyph blits.
 
@@ -4940,7 +4976,7 @@ class LabelManager:
         for coord, mask, ink in ops:
             core.draw_bitmap(coord, mask, ink)
 
-    def _record_label_blits(self, image: Image.Image, label: "KeyLabel", font,
+    def _record_label_blits(self, image: Image.Image, label: "ComposedKeyLabel", font,
                             xy: tuple, anchor: str) -> tuple | None:
         """Runs draw.text() against a throwaway target whose draw core only
         RECORDS the mask blits, and returns them (None = not recordable, draw
@@ -5108,7 +5144,7 @@ class LayoutManager:
             "size": self.page_layout.size is not None
         }
     
-    def get_composed_layout(self) -> ImageLayout:
+    def get_composed_layout(self) -> "ComposedImageLayout":
         use_page_layout_properties = self.get_use_page_layout_properties()
         
         layout = copy(self.action_layout) or ImageLayout()
@@ -5126,7 +5162,9 @@ class LayoutManager:
 
         return self.inject_defaults(layout)
     
-    def inject_defaults(self, layout: ImageLayout):
+    def inject_defaults(self, layout: ImageLayout) -> "ComposedImageLayout":
+        """Fills every unset field, in place; returns the same object retyped
+        (see ComposedImageLayout)."""
         if layout.valign is None:
             layout.valign = 0
         if layout.halign is None:
@@ -5139,7 +5177,7 @@ class LayoutManager:
         if layout.size is None:
             layout.size = 1
 
-        return layout
+        return cast("ComposedImageLayout", layout)
     
     def set_page_layout(self, layout: ImageLayout, update: bool = True):
         self.page_layout = layout
@@ -6792,7 +6830,7 @@ class ControllerDial(ControllerInput["ControllerDialState"]):
             ## Load labels
             for label in state_dict.get("labels", []):
                 key_label = KeyLabel(
-                    controller_input=self,  # type: ignore[arg-type]  # root cause: KeyLabel.controller_input: "ControllerKey" (Subclasses/KeyLabel.py, MR 5)
+                    controller_input=self,
                     text=state_dict["labels"][label].get("text"),
                     font_size=state_dict["labels"][label].get("font-size"),
                     font_name=state_dict["labels"][label].get("font-family"),
