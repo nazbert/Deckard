@@ -72,7 +72,7 @@ def unix_signal_add(priority, signum, callback) -> bool:
     if add is None:
         try:
             gi.require_version("GLibUnix", "2.0")
-            from gi.repository import GLibUnix
+            from gi.repository import GLibUnix  # type: ignore[attr-defined]  # gi stub: PyGObject-stubs ships no GLibUnix-2.0; presence is a runtime property of the host GLib, which is exactly what this try/except probes
             add = GLibUnix.signal_add
         except (ImportError, ValueError, AttributeError):
             return False
@@ -623,7 +623,7 @@ class App(Adw.Application):
             GLib.idle_add(gl.app.unmark_busy)
             GLib.idle_add(gl.app.main_win.set_cursor_from_name, "default")
 
-    def send_notification(self,
+    def send_notification(self,  # type: ignore[override]  # deliberate: shadows Gio.Application.send_notification with the app's own (icon, title, body) form; the base signature is still reached via the `parent_send` binding below
                           icon_name: str,
                           title: str,
                           body: str,

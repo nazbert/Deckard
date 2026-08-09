@@ -25,8 +25,8 @@ class LocaleManager:
         self.language = "en_US"
         self.FALLBACK_LOCALE = "en_US"
 
-        self.available_locales = []
-        self.locale_data = {}
+        self.available_locales: list[str] = []
+        self.locale_data: dict[str, dict[str, str]] = {}
 
         self.load_csv()
 
@@ -46,7 +46,7 @@ class LocaleManager:
                 translations = [value.replace('\\n', '\n') for value in row[1:]]
                 self.locale_data[row[0]] = dict(zip(self.available_locales, translations))
 
-    def set_language(self, language: str) -> str:
+    def set_language(self, language: str) -> None:
         self.language = language
 
     def set_fallback_language(self, language: str) -> None:

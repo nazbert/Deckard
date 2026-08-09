@@ -14,6 +14,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
 import threading
+from collections.abc import Callable
+from typing import Any, Literal, overload
 
 from src.Signals.Signals import AppQuit, Signal
 from src.Signals.weak_callbacks import CallbackRegistry
@@ -21,7 +23,8 @@ from src.Signals.weak_callbacks import CallbackRegistry
 from gi.repository import GLib
 
 
-def _invoke_signal_callback(callback: callable, args: tuple, kwargs: dict) -> bool:
+def _invoke_signal_callback(callback: Callable[..., Any], args: tuple[Any, ...],
+                            kwargs: dict[str, Any]) -> bool:
     """GLib.idle_add trampoline for trigger_signal (issue #56).
 
     Two GLib behaviors made the raw `GLib.idle_add(callback, *args,
@@ -48,13 +51,21 @@ class SignalManager:
         # could be mutating them, unlocked). A CallbackRegistry is iterable
         # and supports `list(...)`, so `connected_signals[signal]` stays a
         # drop-in for code that read it directly.
-        self.connected_signals: dict = {}
+        self.connected_signals: dict[type[Signal], CallbackRegistry] = {}
         # Guards creation of a new per-signal CallbackRegistry; the
         # registries themselves have their own internal lock for add/
         # remove/snapshot.
         self._registries_lock = threading.Lock()
 
-    def _get_registry(self, signal: Signal, create: bool) -> CallbackRegistry | None:
+    # create=True always returns a registry (it makes one on miss); only the
+    # create=False lookup can come back empty. Two overloads so connect_signal
+    # doesn't have to guard a branch that cannot happen.
+    @overload
+    def _get_registry(self, signal: type[Signal], create: Literal[True]) -> CallbackRegistry: ...
+    @overload
+    def _get_registry(self, signal: type[Signal], create: bool) -> CallbackRegistry | None: ...
+
+    def _get_registry(self, signal: type[Signal], create: bool) -> CallbackRegistry | None:
         registry = self.connected_signals.get(signal)
         if registry is not None or not create:
             return registry
@@ -65,7 +76,7 @@ class SignalManager:
                 self.connected_signals[signal] = registry
             return registry
 
-    def connect_signal(self, signal: Signal, callback: callable) -> None:
+    def connect_signal(self, signal: type[Signal], callback: Callable[..., Any]) -> None:
         # Verify signal
         if not issubclass(signal, Signal):
             raise TypeError("signal_name must be of type Signal")
@@ -76,7 +87,7 @@ class SignalManager:
 
         self._get_registry(signal, create=True).add(callback)
 
-    def disconnect_signal(self, signal: Signal, callback: callable) -> None:
+    def disconnect_signal(self, signal: type[Signal], callback: Callable[..., Any]) -> None:
         # Verify signal
         if not issubclass(signal, Signal):
             raise TypeError("signal_name must be of type Signal")
@@ -85,7 +96,7 @@ class SignalManager:
         if registry is not None:
             registry.remove(callback)
 
-    def trigger_signal(self, signal: Signal, *args, **kwargs) -> None:
+    def trigger_signal(self, signal: type[Signal], *args: Any, **kwargs: Any) -> None:
         # Verify signal
         if not issubclass(signal, Signal):
             raise TypeError("signal must be of type Signal")

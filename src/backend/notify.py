@@ -33,17 +33,17 @@ import globals as gl
 
 
 class Notify:
-    def info(self, text: str, title: str = None) -> None:
+    def info(self, text: str, title: str | None = None) -> None:
         """Non-urgent feedback. Toast while the window is up, desktop
         notification otherwise. Safe to call from any thread."""
         self._dispatch(False, text, title)
 
-    def error(self, text: str, title: str = None) -> None:
+    def error(self, text: str, title: str | None = None) -> None:
         """Something the user asked for did not happen. Same routing as
         info(), with the error presentation. Safe to call from any thread."""
         self._dispatch(True, text, title)
 
-    def _dispatch(self, is_error: bool, text: str, title: str) -> None:
+    def _dispatch(self, is_error: bool, text: str, title: str | None) -> None:
         if gl.app is None:
             # Drained on the main thread by App.on_activate once the window
             # is up; re-entering _dispatch then takes the branch below.
@@ -65,7 +65,7 @@ class Notify:
                 return
         GLib.idle_add(self._deliver, is_error, text, title)
 
-    def _deliver(self, is_error: bool, text: str, title: str) -> bool:
+    def _deliver(self, is_error: bool, text: str, title: str | None) -> bool:
         # Main thread only.
         main_win = getattr(gl.app, "main_win", None)
         if main_win is not None and main_win.is_visible():

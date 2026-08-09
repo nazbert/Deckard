@@ -1,6 +1,8 @@
 # Inspired by code of deltragon/SafeEyes repo.
 # Link: https://github.com/deltragon/SafeEyes/blob/f25f554585c79a11621e3a505cc6ce5af08a3d58/safeeyes/plugins/trayicon/plugin.py
 
+from typing import Any
+
 from gi.repository import Gio, GLib
 
 from loguru import logger as log
@@ -151,8 +153,10 @@ class DBusMenuService(DBusService):
 
     revision = 0
 
-    items = []
-    idToItems = {}
+    # Menu items are plain dicts ('id', 'label', 'enabled', 'children', ...);
+    # idToItems is the flattened id -> item index built by getItemsFlat().
+    items: list[dict[str, Any]] = []
+    idToItems: dict[int, dict[str, Any]] = {}
 
     def __init__(self, session_bus, items, path=DBusPath):
         super().__init__(
@@ -334,7 +338,7 @@ class StatusNotifierItemService(DBusService):
     Status = 'Active'
     IconName = 'alienarena'
     IconThemePath = ''
-    ToolTip = ('', [], 'Safe Eyes', '')
+    ToolTip: tuple[str, list[Any], str, str] = ('', [], 'Safe Eyes', '')  # DBus (sa(iiay)ss); the icon array is always empty
     XAyatanaLabel = ""
     ItemIsMenu = True
     Menu = None

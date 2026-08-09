@@ -1,6 +1,7 @@
 import json
 import os
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 import sys
 import threading
 
@@ -53,7 +54,7 @@ if not os.path.exists(DATA_PATH):
 PLUGIN_DIR = os.path.join(DATA_PATH, "plugins")
 # Used for nix packaging
 if os.getenv("PLUGIN_DIR") is not None:
-    PLUGIN_DIR = os.getenv("PLUGIN_DIR")
+    PLUGIN_DIR = os.environ["PLUGIN_DIR"]
     top_level_folder = os.path.dirname(PLUGIN_DIR)
     sys.path.append(top_level_folder)
 
@@ -88,42 +89,52 @@ if TYPE_CHECKING:
     from src.backend.PermissionManagement.FlatpakPermissionManager import FlatpakPermissionManager
     from src.windows.PageManager.PageManager import PageManager
     from src.backend.LockScreenManager.LockScreenManager import LockScreenManager
+    from src.backend.PresenceMonitor.PresenceMonitor import PresenceMonitor
     from src.tray import TrayIcon
     from src.backend.Logger import Logger
 
 
 top_level_dir:str = os.path.dirname(__file__)
-lm:"LocaleManager" = None
-media_manager:"MediaManager" = None #MediaManager
-asset_manager_backend:"AssetManagerBackend" = None #AssetManager
-asset_manager: "AssetManager" = None
-page_manager_window: "PageManager" = None # Only if opened
-page_manager:"PageManagerBackend" = None #PageManager #TODO: Rename to page_manager_backend in 2.0.0
-gnome_extensions:"GnomeExtensions" = None
-settings_manager:"SettingsManager" = None #SettingsManager
-app:"App" = None #App
-deck_manager:"DeckManager" = None #DeckManager
-plugin_manager:"PluginManager" = None #PluginManager
+# The singletons below are all published by main.create_global_objects() before
+# any of them is read, so their declared types are the concrete classes rather
+# than `X | None`: widening them would push a union-attr error into every one of
+# the hundreds of post-boot use sites for a None that only exists during import.
+# The per-line ignore is what that costs. The genuinely-optional slots
+# (asset_manager, page_manager_window, store, presence_monitor, pyro_daemon) are
+# annotated `| None` instead -- their use sites already None-check them.
+lm:"LocaleManager" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
+media_manager:"MediaManager" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
+asset_manager_backend:"AssetManagerBackend" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
+asset_manager: "AssetManager | None" = None # Only while the window is open
+page_manager_window: "PageManager | None" = None # Only if opened
+page_manager:"PageManagerBackend" = None  # type: ignore[assignment]  # late-init: main.create_global_objects #TODO: Rename to page_manager_backend in 2.0.0
+gnome_extensions:"GnomeExtensions" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
+settings_manager:"SettingsManager" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
+app:"App" = None  # type: ignore[assignment]  # late-init: main.create_global_objects / App.on_activate
+deck_manager:"DeckManager" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
+plugin_manager:"PluginManager" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
 video_extensions = ["mp4", "mov", "MP4", "MOV", "mkv", "MKV", "webm", "WEBM", "gif", "GIF"]
 image_extensions = ["png", "jpg", "jpeg"]
 svg_extensions = ["svg", "SVG"]
-icon_pack_manager: "IconPackManager" = None
-wallpaper_pack_manager: "WallpaperPackManager" = None
-sd_plus_bar_wallpaper_pack_manager: "SDPlusBarWallpaperPackManager" = None
-store_backend: "StoreBackend" = None
-notify: "Notify" = None  # thread-safe UI notification facade; see src/backend/notify.py
-pyro_daemon: "Pyro5.api.Daemon" = None  # never actually set/read (P3.2 grep); Pyro5 stays TYPE_CHECKING-only
-signal_manager: "SignalManager" = None
-window_grabber: "WindowGrabber" = None
-lock_screen_detector: "LockScreenManager" = None
-presence_monitor: "PresenceMonitor" = None  # quiescence signal; see src/backend/PresenceMonitor
-store: "Store" = None # Only if opened
-flatpak_permission_manager: "FlatpakPermissionManager" = None
+icon_pack_manager: "IconPackManager" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
+wallpaper_pack_manager: "WallpaperPackManager" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
+sd_plus_bar_wallpaper_pack_manager: "SDPlusBarWallpaperPackManager" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
+store_backend: "StoreBackend" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
+notify: "Notify" = None  # type: ignore[assignment]  # late-init: main.create_global_objects; see src/backend/notify.py
+pyro_daemon: "Pyro5.api.Daemon | None" = None  # never actually set/read (P3.2 grep); Pyro5 stays TYPE_CHECKING-only
+signal_manager: "SignalManager" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
+window_grabber: "WindowGrabber" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
+lock_screen_detector: "LockScreenManager" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
+presence_monitor: "PresenceMonitor | None" = None  # quiescence signal; see src/backend/PresenceMonitor
+store: "Store | None" = None # Only if opened
+flatpak_permission_manager: "FlatpakPermissionManager" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
 threads_running: bool = True
-app_loading_finished_tasks: callable = []
+# Zero-arg deliveries queued before gl.app exists; App.on_activate drains them
+# on the main thread. Return values are ignored (see src/backend/notify.py).
+app_loading_finished_tasks: list[Callable[[], Any]] = []
 api_page_requests: dict[str, str] = {} # Stores api page requests made my --change-page
 api_state_requests: dict[str, dict] = {} # Stores api state change requests made by --change-state
-tray_icon: "TrayIcon" = None
+tray_icon: "TrayIcon" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
 showed_donate_window: bool = False
 screen_locked: bool = False
 loggers: dict[str, "Logger"] = {}

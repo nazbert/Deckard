@@ -80,7 +80,10 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime
+from types import TracebackType
+from typing import Any
 
 from loguru import logger as _LOG
 
@@ -99,7 +102,9 @@ _HOOKS_DISABLED = os.environ.get("SC_NO_ERROR_HOOKS") == "1"
 _announced_disabled = False
 
 _installed = False
-_prev_sys_hook = None
+# Same shape as sys.excepthook, which is what install() stores here.
+_ExceptHook = Callable[[type[BaseException], BaseException, TracebackType | None], Any]
+_prev_sys_hook: _ExceptHook = None  # type: ignore[assignment]  # late-init: install(); only read from _sys_hook, which install() wires up
 # faulthandler stores the raw fd, not the file object: this module-level
 # reference must keep the file alive for the life of the process, or a
 # fatal-signal dump would write into a recycled fd.
