@@ -1282,7 +1282,6 @@ class StoreBackend:
             plugin_manager.load_plugins()
             plugin_manager.init_plugins()
             plugin_manager.generate_action_index()
-            plugins = plugin_manager.get_plugins()
 
         # A version-gated plugin "installs" fine (files on disk, True
         # returned, store button flips to installed) but lands in

@@ -204,7 +204,7 @@ class AssetManagerBackend(list):
     def copy_asset(self, asset_path: str) -> str:
         file_name = os.path.basename(asset_path)
         dst_path = None
-        if not file_in_dir(file_name, os.path.join(gl.DATA_PATH, "Assets", "AssetManager", "Assets")):  # type: ignore[func-returns-value]  # cross-MR: HelperMethods.file_in_dir is annotated -> None but returns bool (owner: MR 5)
+        if not file_in_dir(file_name, os.path.join(gl.DATA_PATH, "Assets", "AssetManager", "Assets")):
             dst_path = os.path.join(gl.DATA_PATH, "Assets", "AssetManager", "Assets", file_name)
         else:
             log.warning(f"File with same name already exists but sha256 does not match, renaming: {asset_path}")
@@ -330,7 +330,10 @@ class AssetManagerBackend(list):
             dial.show(window)
         GLib.idle_add(show)
 
-    def add_custom_media_set_by_ui(self, url: str, path: str):
+    # Both are genuinely optional: a drop supplies either a local path or a
+    # remote url (the first branch is literally `if path is None and url is not
+    # None`), and the callers pass Gtk's Gdk.FileList accessors straight through.
+    def add_custom_media_set_by_ui(self, url: str | None, path: str | None):
         window = gl.app.main_win if gl.app is not None else None
         if gl.store is not None:
             window = gl.store

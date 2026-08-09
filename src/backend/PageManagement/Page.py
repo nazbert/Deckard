@@ -928,7 +928,11 @@ class Page:
         if update:
             self.update_input(identifier, state)
 
-    def set_label_outline_width(self, identifier: InputIdentifier, state: int, label_position: str, outline_width: list[int], update: bool = True) -> None:
+    # outline_width is a scalar stroke width (None = "inherit the font default"),
+    # not a colour tuple -- the list[int] here was copy-pasted from the sibling
+    # outline_color setter. KeyLabel.outline_width is int | None; the only
+    # callers (LabelEditor's spin button and its reset button) pass int and None.
+    def set_label_outline_width(self, identifier: InputIdentifier, state: int, label_position: str, outline_width: int | None, update: bool = True) -> None:
         for key_state in self.get_controller_input_states(identifier, state):
             key_state.label_manager.page_labels[label_position].outline_width = outline_width
             key_state.label_manager.invalidate_scroll_caches()

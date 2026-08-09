@@ -43,11 +43,8 @@ class BackgroundVideoCache(Mp4FrameCache):
         # incompatible with plain ones and live in their own directory.
         self.extend_touchscreen = extend_touchscreen and self.deck_controller.deck.is_touch()
         # The annotation follows the real value -- a (width, height) pair.
-        # DeckController.get_touchscreen_image_size is declared `-> tuple[int]`,
-        # which is what the ignore is for; drop it once that declaration is
-        # corrected (#224 owns it).
         self.strip_size: tuple[int, int] | None = (
-            self.deck_controller.get_touchscreen_image_size()  # type: ignore[assignment]  # upstream decl: DeckController.get_touchscreen_image_size -> tuple[int] for a pair (#224)
+            self.deck_controller.get_touchscreen_image_size()
             if self.extend_touchscreen else None)
         self.entries_per_frame = self.key_count + (1 if self.extend_touchscreen else 0)
 

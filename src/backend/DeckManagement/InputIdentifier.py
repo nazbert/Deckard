@@ -69,7 +69,10 @@ class InputIdentifier:
         input_dict = page.dict.setdefault(self.input_type, {}).setdefault(self.json_identifier, {})
         return input_dict.setdefault("states", {}).setdefault(str(state), {})
 
-    def get_controller_input(self, controller: "DeckController") -> "ControllerInput":
+    # DeckController.get_input answers None when this identifier is not among
+    # the controller's inputs (wrong deck model, stale identifier), so the
+    # optional is honest rather than a lie the callers have to unlearn.
+    def get_controller_input(self, controller: "DeckController") -> "ControllerInput | None":
         return controller.get_input(self)
     
     def __eq__(self, o):

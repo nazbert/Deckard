@@ -306,7 +306,9 @@ class PageManagerBackend:
 
         return None
 
-    def set_default_page(self, deck_serial_number: str, path: str):
+    # path=None is the documented "clear this deck's default page" value --
+    # get_all_default_page_serial_numbers skips falsy entries by design.
+    def set_default_page(self, deck_serial_number: str, path: str | None):
         page_settings = self.settings_manager.load_settings_from_file(self.PAGE_SETTINGS_PATH)
         page_settings.setdefault("default-pages", {})
         page_settings["default-pages"][deck_serial_number] = path
@@ -389,7 +391,7 @@ class PageManagerBackend:
             # controller then simply stays on its current page on dismiss.
             pending = getattr(controller, "_screensaver_pending_page", None)
             if pending is not None and pending.json_path == page_path:
-                controller._screensaver_pending_page = None  # type: ignore[assignment]  # cross-MR: DeckController._screensaver_pending_page is declared Page but is genuinely optional (owner: MR 4)
+                controller._screensaver_pending_page = None
                 with self._pages_lock:
                     controller_pages = self.pages.get(controller, {})
                     entry = controller_pages.pop(page_path, None)
@@ -539,7 +541,13 @@ class PageManagerBackend:
     @staticmethod
     def reload_all_pages() -> None:
         for controller in (gl.deck_manager.deck_controller if gl.deck_manager is not None else []):
-            controller.load_page(controller.active_page, allow_reload=True)
+            active_page = controller.active_page
+            if active_page is None:
+                # Deck present but no page loaded yet (boot, or a page load that
+                # failed) -- nothing to reload.
+                log.warning(f"Deck {controller.serial_number()} has no active page; skipping reload")
+                continue
+            controller.load_page(active_page, allow_reload=True)
 
     def update_dict_of_pages_with_path(self, path: str) -> None:
         # Re-reading from disk can't lose unsaved in-memory edits: every

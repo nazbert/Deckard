@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 import threading
 from typing import TYPE_CHECKING
 
+from loguru import logger as log
+
 if TYPE_CHECKING:
     from src.backend.DeckManagement.DeckController import ControllerInputState
 
@@ -66,29 +68,50 @@ class ActionPermissionManager:
         self.reload_pages(reload_pages, reload_self)
 
     ## Input dict
+    # deck_controller.active_page is genuinely optional (no page loaded yet, or a
+    # page load that failed). Every accessor below binds it once and bails on
+    # None: reads degrade to the empty dict the ".get(..., default)" callers
+    # already handle, writes are dropped -- there is nothing to persist them to.
     def get_input_dict(self) -> dict:
-        return self.input_identifier.get_dict(self.deck_controller.active_page.dict)
-    
+        active_page = self.deck_controller.active_page
+        if active_page is None:
+            log.warning(f"No active page on deck {self.deck_controller.serial_number()}; returning empty input dict")
+            return {}
+        return self.input_identifier.get_dict(active_page.dict)
+
     def set_input_dict(self, new_input_dict: dict):
+        active_page = self.deck_controller.active_page
+        if active_page is None:
+            log.warning(f"No active page on deck {self.deck_controller.serial_number()}; dropping input dict write")
+            return
         new_input_dict = new_input_dict.copy() # In case it's a reference to the original
         input_dict = self.get_input_dict()
         input_dict.clear()
         input_dict.update(new_input_dict)
-        self.deck_controller.active_page.save()
+        active_page.save()
 
     ## State dict
     def get_state_dict(self) -> dict:
         return self.get_input_dict().get("states", {}).get(str(self.controller_input_state.state), {})
 
     def set_state_dict(self, new_state_dict: dict):
+        active_page = self.deck_controller.active_page
+        if active_page is None:
+            log.warning(f"No active page on deck {self.deck_controller.serial_number()}; dropping state dict write")
+            return
         new_state_dict = new_state_dict.copy() # In case it's a reference to the original
         state_dict = self.get_state_dict()
         state_dict.clear()
         state_dict.update(new_state_dict)
-        self.deck_controller.active_page.save()
+        active_page.save()
 
     ## Helper
 
     def reload_pages(self, reload_pages: bool = True, reload_self: bool = True) -> None:
-        if reload_pages:
-            threading.Thread(target=self.deck_controller.active_page.reload_similar_pages, kwargs={"identifier":self.input_identifier, "reload_self":reload_self}).start()
+        if not reload_pages:
+            return
+        active_page = self.deck_controller.active_page
+        if active_page is None:
+            log.warning(f"No active page on deck {self.deck_controller.serial_number()}; skipping similar-page reload")
+            return
+        threading.Thread(target=active_page.reload_similar_pages, kwargs={"identifier":self.input_identifier, "reload_self":reload_self}).start()

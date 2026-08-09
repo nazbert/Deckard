@@ -1190,7 +1190,9 @@ class DeckController:
         # Open the deck - why store it as self.deck? So that self.get_alive() returns True in get_deck_settings
         # (the raw handle answers is_open() the same way the BetterDeck wrapper
         # installed a few lines below does).
-        self.deck: BetterDeck = deck  # type: ignore[assignment]  # raw StreamDeck handle, rewrapped as BetterDeck a few lines below
+        # Assigned the raw StreamDeck handle here; rewrapped as BetterDeck a few
+        # lines below.
+        self.deck: BetterDeck = deck
         # Order the transport mutex FIFO before open() starts the reader
         # thread -- see _install_fair_transport_lock for why the ordering of
         # these two lines is load-bearing.
