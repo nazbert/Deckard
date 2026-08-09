@@ -69,7 +69,7 @@ class Migrator:
                 # this early: atomic_json is stdlib-only by design precisely so
                 # the migrators (which run before SettingsManager exists) can
                 # use it, and this module already imports from it.
-                for pruned in prune_corrupt_sidecars(self.SETTINGS_DIR):
+                for pruned in prune_corrupt_sidecars(self.SETTINGS_DIR, protect=dest):
                     log.info(f"Pruned old quarantined copy {pruned}")
             else:
                 log.error(

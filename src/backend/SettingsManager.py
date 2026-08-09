@@ -405,7 +405,7 @@ class SettingsManager:
                 # sidecar -- never a startup-wide sweep (#152). Covers pages
                 # and deck/app settings alike: PageManagerBackend routes its
                 # corrupt-read handling through this loader.
-                for pruned in prune_corrupt_sidecars(file_path):
+                for pruned in prune_corrupt_sidecars(file_path, protect=dest):
                     log.info(f"Pruned old quarantined copy {pruned}")
             else:
                 log.error(

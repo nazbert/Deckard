@@ -38,6 +38,10 @@ Pins, all against the real load path (no GTK, no hardware):
 7. OSError IS NOT CORRUPTION -- an unreadable (EACCES) settings file keeps
    the old behavior: {} returned, file left exactly where it is, no sidecar.
    Quarantining there would move a perfectly healthy file out of the way.
+8. THE FRESH SIDECAR IS NEVER PRUNED BY ITS OWN RETENTION CALL -- a corrupt
+   primary with an OLD mtime (backup restore, settings-dir rename) hands that
+   mtime to the sidecar os.replace creates, which made the prune delete the
+   forensic copy the loader had just logged as "preserved at".
 """
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 
@@ -186,6 +190,43 @@ def check_retention(path: str, corrupting_read, label: str) -> None:
     print(f"PASS(4): .corrupt sidecars are retention-bounded, oldest pruned -- {label}")
 
 
+def check_fresh_sidecar_survives_prune(plugin) -> None:
+    """os.replace carries the PRIMARY's mtime onto the new sidecar, so a
+    corrupt file that is OLD on disk (mtime-preserving restore, the settings
+    dir os.rename in _resolve_settings_path) produces a brand-new forensic
+    copy that looks older than every sidecar already there. Un-protected, the
+    prune deleted it one line after the loader logged "preserved at"."""
+    path = plugin.settings_path
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    # Three sidecars with recent mtimes: the retention budget is already full.
+    for n in range(1, 4):
+        corrupt(path, f"existing{n}")
+        assert plugin.get_settings() == {}
+        time.sleep(0.01)
+    assert len(sidecars(path)) == 3, "precondition: retention budget full"
+
+    # The fourth corruption is OLD on disk -- e.g. restored from a backup that
+    # preserved timestamps.
+    corrupt(path, "old-but-fresh-copy")
+    old = time.time() - 365 * 24 * 3600
+    os.utime(path, (old, old))
+
+    assert plugin.get_settings() == {}
+    names = sidecars(path)
+    assert len(names) == 3, f"retention still bounded, got {names}"
+    survived = {read(os.path.join(os.path.dirname(path), n)) for n in names}
+    markers = sorted(s.split('"marker": "')[1].split('"')[0] for s in survived)
+    assert "old-but-fresh-copy" in markers, (
+        "the sidecar the loader had just created was pruned by its own retention "
+        f"call -- the forensic copy 'preserved at ...' no longer exists; kept {markers}"
+    )
+    assert markers == ["existing2", "existing3", "old-but-fresh-copy"], (
+        f"the next-oldest sidecar should go instead of the fresh one, kept {markers}"
+    )
+    print("PASS(8): the sidecar just created is never pruned by its own retention call")
+
+
 def check_oserror_is_not_corruption(plugin) -> None:
     path = plugin.settings_path
     plugin.set_settings({"marker": "healthy"})
@@ -286,6 +327,7 @@ def main() -> None:
     write_plugin("com_test_q_settings", "QSettingsPlugin", manifest_json("com_test_q_settings"))
     write_plugin("com_test_q_retention", "QRetentionPlugin", manifest_json("com_test_q_retention"))
     write_plugin("com_test_q_oserror", "QOsErrorPlugin", manifest_json("com_test_q_oserror"))
+    write_plugin("com_test_q_prune", "QPrunePlugin", manifest_json("com_test_q_prune"))
     # Corrupt manifest vs. no manifest at all -- the two must be indistinguishable.
     corrupt_dir = write_plugin("com_test_q_manifest_corrupt", "QCorruptManifestPlugin",
                                '{"name": "x", "id": ')
@@ -304,6 +346,7 @@ def main() -> None:
     check_about_degrades_to_empty(settings_plugin)
 
     check_oserror_is_not_corruption(PluginBase.plugins["com_test_q_oserror"]["object"])
+    check_fresh_sidecar_survives_prune(PluginBase.plugins["com_test_q_prune"]["object"])
 
     # Retention, once per wired quarantine call site.
     retention_plugin = PluginBase.plugins["com_test_q_retention"]["object"]

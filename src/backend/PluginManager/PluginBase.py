@@ -66,8 +66,10 @@ def _quarantine_corrupt_json(file_path: str, context: str, error: Exception) -> 
     if moved:
         log.error(f"{context} {file_path} contains invalid JSON: {error} -- preserved at {dest}")
         # Bounded retention, scoped to this one file and only on the path that
-        # just added a sidecar -- no startup-wide sweep (#152).
-        for pruned in prune_corrupt_sidecars(file_path):
+        # just added a sidecar -- no startup-wide sweep (#152). The copy just
+        # made is protected: it inherits the corrupt primary's mtime, which
+        # can be older than every sidecar already on disk.
+        for pruned in prune_corrupt_sidecars(file_path, protect=dest):
             log.info(f"Pruned old quarantined copy {pruned}")
     else:
         # Either the rename genuinely failed (read-only fs, permissions) or a
