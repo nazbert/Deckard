@@ -19,7 +19,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
 # Import own modules
-from src.windows.AssetManager.Preview import Preview
+from src.windows.AssetManager.Preview import _PIXBUF_UNSET, Preview
 from src.backend.IconPackManagement.IconPack import IconPack
 
 # Import typing
@@ -28,10 +28,14 @@ if TYPE_CHECKING:
     from src.windows.AssetManager.WallpaperPacks.PackChooser import WallpaperPackChooser
 
 class WallpaperPackPreview(Preview):
-    def __init__(self, wallpaper_pack_chooser: "WallpaperPackChooser", pack: IconPack):
+    def __init__(self, wallpaper_pack_chooser: "WallpaperPackChooser", pack: IconPack, pixbuf=_PIXBUF_UNSET):
+        # `pixbuf` arrives already decoded from the chooser's build
+        # worker; only fall back to decoding here (on whatever thread
+        # constructs us) when nobody supplied one.
         super().__init__(
-            image_path=pack.get_thumbnail_path(),
-            text=pack.name
+            image_path=pack.get_thumbnail_path() if pixbuf is _PIXBUF_UNSET else None,
+            text=pack.name,
+            pixbuf=pixbuf
         )
         self.pack = pack
         self.wallpaper_pack_chooser = wallpaper_pack_chooser

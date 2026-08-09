@@ -13,18 +13,15 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import gtk modules
-import threading
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk
 
 # Import python modules
-from loguru import logger as log
 
 # Import own modules
-from src.windows.AssetManager.ChooserPage import ChooserPage
+from src.windows.AssetManager.GenericAssetChooser import GenericPackChooserPage
 from src.windows.AssetManager.SDPlusBarWallpaperPacks.FlowBox import SDPlusBarWallpaperPackFlowBox
 from src.windows.AssetManager.SDPlusBarWallpaperPacks.Preview import SDPlusBarWallpaperPackPreview
 
@@ -34,41 +31,16 @@ import globals as gl
 # Import typing
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from src.windows.AssetManager.AssetManager import AssetManager
+    from src.windows.AssetManager.SDPlusBarWallpaperPacks.SDPlusBarWallpaper.SDPlusBarWallpaperChooser import SDPlusBarWallpaperChooserPage
 
 
-class SDPlusBarWallpaperPackChooser(ChooserPage):
-    def __init__(self, asset_manager: "AssetManager"):
-        super().__init__()
-        self.asset_manager = asset_manager
+class SDPlusBarWallpaperPackChooser(GenericPackChooserPage):
+    PACK_FLOW_BOX_CLASS = SDPlusBarWallpaperPackFlowBox
+    PACK_PREVIEW_CLASS = SDPlusBarWallpaperPackPreview
+    LEAF_CHILD_NAME = "wallpaper-chooser"
 
-        threading.Thread(target=self.build).start()
-        
-    @log.catch
-    def build(self):
-        self.type_box.set_visible(False)
+    def get_packs(self) -> dict:
+        return gl.sd_plus_bar_wallpaper_pack_manager.get_wallpaper_packs()
 
-        self.wallpaper_pack_chooser = SDPlusBarWallpaperPackFlowBox(self, orientation=Gtk.Orientation.HORIZONTAL, hexpand=True)
-        self.scrolled_box.prepend(self.wallpaper_pack_chooser)
-
-        self.wallpaper_pack_chooser.flow_box.connect("child-activated", self.on_child_activated)
-
-        self.load()
-
-        self.set_loading(False)
-
-    def load(self):
-        flow_box = self.wallpaper_pack_chooser.flow_box
-
-        for name, pack in gl.sd_plus_bar_wallpaper_pack_manager.get_wallpaper_packs().items():
-            preview = SDPlusBarWallpaperPackPreview(self, pack)
-            flow_box.append(preview)
-
-    def on_child_activated(self, flow_box, child):
-        # Load wallpapers
-        self.asset_manager.asset_chooser.sd_plus_bar_wallpaper_pack_chooser.wallpaper_chooser.load_for_pack(child.pack)
-        # Switch to wallpaper chooser
-        self.asset_manager.asset_chooser.sd_plus_bar_wallpaper_pack_chooser.set_visible_child_name("wallpaper-chooser")
-        # Show back button
-        self.asset_manager.back_button.set_visible(True)
-
+    def get_leaf_chooser(self) -> "SDPlusBarWallpaperChooserPage":
+        return self.stack.wallpaper_chooser

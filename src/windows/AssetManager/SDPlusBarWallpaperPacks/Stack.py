@@ -39,10 +39,10 @@ class SDPlusBarWallpaperPackChooserStack(Gtk.Stack):
         self.build()
 
     def build(self):
-        self.pack_chooser = SDPlusBarWallpaperPackChooser(self.asset_manager)
+        self.pack_chooser = SDPlusBarWallpaperPackChooser(self, self.asset_manager)
         self.add_titled(self.pack_chooser, "pack-chooser", "Chooser")
 
-        self.wallpaper_chooser = SDPlusBarWallpaperChooserPage(self.asset_manager)
+        self.wallpaper_chooser = SDPlusBarWallpaperChooserPage(self, self.asset_manager)
         self.add_titled(self.wallpaper_chooser, "wallpaper-chooser", "SD+ Bar Wallpaper Chooser")
 
     def show_for_path(self, path):
@@ -52,7 +52,7 @@ class SDPlusBarWallpaperPackChooserStack(Gtk.Stack):
             for wallpaper in wallpapers:
                 if wallpaper.path == path:
                     self.wallpaper_chooser.load_for_pack(pack)
-                    self.wallpaper_chooser.select_wallpaper(path=path)
+                    self.wallpaper_chooser.select_asset(path=path)
                     self.set_visible_child(self.wallpaper_chooser)
                     self.asset_manager.asset_chooser.set_visible_child_name("sd-plus-bar-wallpaper-packs")
                     self.asset_manager.back_button.set_visible(True)

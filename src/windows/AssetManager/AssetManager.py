@@ -118,6 +118,13 @@ class AssetManager(Gtk.ApplicationWindow):
             chooser.sd_plus_bar_wallpaper_pack_chooser.wallpaper_chooser,
         )
         for page in pages:
+            # A page whose build failed (the main loop did not service its
+            # marshal in time) shows an error instead of a grid; reopening the
+            # window is the retry. No-op for a healthy page.
+            retry_build = getattr(page, "retry_build", None)
+            if callable(retry_build):
+                retry_build()
+
             search_entry = getattr(page, "search_entry", None)
             if search_entry is None:
                 continue

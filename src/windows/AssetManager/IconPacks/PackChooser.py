@@ -13,71 +13,40 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import gtk modules
-import threading
 import gi
 
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk
 
 # Import python modules
 
 # Import own modules
-from src.windows.AssetManager.ChooserPage import ChooserPage
+from src.windows.AssetManager.GenericAssetChooser import GenericPackChooserPage
 from src.windows.AssetManager.IconPacks.FlowBox import IconPackFlowBox
 from src.windows.AssetManager.IconPacks.Preview import IconPackPreview
 
 # Import globals
 import globals as gl
 
-from loguru import logger as log
-
 # Import typing
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from src.windows.AssetManager.AssetManager import AssetManager
-    from src.windows.AssetManager.IconPacks.Stack import IconPackChooserStack
+    from src.windows.AssetManager.IconPacks.Icons.IconChooser import IconChooserPage
 
 
-class IconPackChooser(ChooserPage):
-    def __init__(self, stack: "IconPackChooserStack", asset_manager: "AssetManager"):
-        super().__init__()
-        self.asset_manager = asset_manager
-        self.stack = stack
+class IconPackChooser(GenericPackChooserPage):
+    PACK_FLOW_BOX_CLASS = IconPackFlowBox
+    PACK_PREVIEW_CLASS = IconPackPreview
+    LEAF_CHILD_NAME = "icon-chooser"
 
-        self.build_finished = False
+    def get_packs(self) -> dict:
+        return gl.icon_pack_manager.get_icon_packs()
 
-        threading.Thread(target=self.build).start()
-        
-    @log.catch
-    def build(self):
-        self.build_finished = False
-        self.type_box.set_visible(False)
+    def get_leaf_chooser(self) -> "IconChooserPage":
+        return self.stack.icon_chooser
 
-        self.icon_pack_chooser = IconPackFlowBox(self, orientation=Gtk.Orientation.HORIZONTAL, hexpand=True)
-        self.scrolled_box.prepend(self.icon_pack_chooser)
-
-        self.icon_pack_chooser.flow_box.connect("child-activated", self.on_child_activated)
-
-        self.load()
-
-        self.set_loading(False)
-
-        self.build_finished = True
+    def on_build_finished(self) -> None:
+        # The icon stack gates deferred show_for_path tasks on BOTH its
+        # pages' build_finished flags.
         self.stack.on_load_finished()
-
-    def load(self):
-        flow_box = self.icon_pack_chooser.flow_box
-
-        for name, pack in gl.icon_pack_manager.get_icon_packs().items():
-            preview = IconPackPreview(self, pack)
-            flow_box.append(preview)
-
-    def on_child_activated(self, flow_box, child):
-        # Load icons
-        self.asset_manager.asset_chooser.icon_pack_chooser.icon_chooser.load_for_pack(child.pack)
-        # Switch to icon chooser
-        self.asset_manager.asset_chooser.icon_pack_chooser.set_visible_child_name("icon-chooser")
-        # Show back button
-        self.asset_manager.back_button.set_visible(True)
