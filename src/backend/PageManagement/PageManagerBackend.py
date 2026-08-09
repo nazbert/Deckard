@@ -18,8 +18,7 @@ import os
 import shutil
 import threading
 import zipfile
-from signal import Signals
-from typing import Union
+from typing import TypedDict
 
 from loguru import logger as log
 
@@ -35,6 +34,12 @@ from src.backend.atomic_json import atomic_write_json
 import globals as gl
 
 
+class PageEntry(TypedDict):
+    """One cached page slot: the Page object plus its LRU stamp."""
+    page: "Page"
+    page_number: int
+
+
 class PageManagerBackend:
     def __init__(self, settings_manager):
         self.settings_manager = settings_manager
@@ -46,7 +51,7 @@ class PageManagerBackend:
         # that deck's own media/tick thread (design doc M5). An RLock so the
         # methods below can call each other without deadlocking.
         self._pages_lock = threading.RLock()
-        self.pages: dict["DeckController", dict[str, dict[str, Union["Page", int]]]] = {}
+        self.pages: dict["DeckController", dict[str, PageEntry]] = {}
         # In-flight cache-miss constructions, keyed (controller, path) and
         # guarded by _pages_lock: a second caller for the same page waits on
         # the first construction instead of building a twin Page whose
@@ -73,7 +78,7 @@ class PageManagerBackend:
         self.PAGE_PATH = os.path.join(gl.DATA_PATH, "pages")
         self.PAGE_SETTINGS_PATH = os.path.join(gl.DATA_PATH, "settings", "pages.json")
 
-    def load_page(self, path: str, deck_controller: "DeckController") -> Page:
+    def load_page(self, path: str, deck_controller: "DeckController") -> Page | None:
         """
         This loads the page into the page dict and increases the current page number.
         :param path: The path to the page
@@ -91,15 +96,15 @@ class PageManagerBackend:
 
         return page
 
-    def get_page(self, path: str, deck_controller: "DeckController") -> Page:
+    def get_page(self, path: str, deck_controller: "DeckController") -> Page | None:
         in_flight_key = (deck_controller, path)
 
         while True:
             with self._pages_lock:
-                page = self.pages.get(deck_controller, {}).get(path, {})
-                if page:
-                    page["page_number"] = self.page_number
-                    page_object = page["page"]
+                entry = self.pages.get(deck_controller, {}).get(path)
+                if entry is not None:
+                    entry["page_number"] = self.page_number
+                    page_object: Page | None = entry["page"]
                     self.page_number += 1
                     return page_object
 
@@ -285,7 +290,7 @@ class PageManagerBackend:
         whole screensaver duration and invisible to the snapshot guards --
         evicting it made ScreenSaver.hide() load a page whose every action
         was dead; issue #4 window 1)."""
-        for controller in gl.deck_manager.deck_controller:
+        for controller in (gl.deck_manager.deck_controller if gl.deck_manager is not None else []):
             if controller.active_page is page_obj:
                 return True
             if getattr(controller, "_screensaver_pending_page", None) is page_obj:
@@ -344,7 +349,7 @@ class PageManagerBackend:
         default_pages = page_settings.get("default-pages", {})
 
         # Update Path in Objects
-        for controller in gl.deck_manager.deck_controller:
+        for controller in (gl.deck_manager.deck_controller if gl.deck_manager is not None else []):
             if controller.active_page is None:
                 continue
 
@@ -374,7 +379,7 @@ class PageManagerBackend:
         default_pages = settings.get("default-pages", {})
 
         # Iterate over all deck controllers to handle any that are using the page to be removed
-        for controller in gl.deck_manager.deck_controller:
+        for controller in (gl.deck_manager.deck_controller if gl.deck_manager is not None else []):
             # A page change requested while the screensaver owns the deck is
             # stashed as _screensaver_pending_page (load_page's screensaver
             # guard) -- invisible to the active_page checks below. If THAT
@@ -384,7 +389,7 @@ class PageManagerBackend:
             # controller then simply stays on its current page on dismiss.
             pending = getattr(controller, "_screensaver_pending_page", None)
             if pending is not None and pending.json_path == page_path:
-                controller._screensaver_pending_page = None
+                controller._screensaver_pending_page = None  # type: ignore[assignment]  # cross-MR: DeckController._screensaver_pending_page is declared Page but is genuinely optional (owner: MR 4)
                 with self._pages_lock:
                     controller_pages = self.pages.get(controller, {})
                     entry = controller_pages.pop(page_path, None)
@@ -503,7 +508,7 @@ class PageManagerBackend:
         # unlocked membership-check/lookup pair here raced it into a
         # KeyError. Lookups only -- no plugin hooks run under the lock.
         with self._pages_lock:
-            for controller in gl.deck_manager.deck_controller:
+            for controller in (gl.deck_manager.deck_controller if gl.deck_manager is not None else []):
                 # Check active_page
                 page = controller.active_page
                 if page is not None and page.json_path == path:
@@ -533,7 +538,7 @@ class PageManagerBackend:
 
     @staticmethod
     def reload_all_pages() -> None:
-        for controller in gl.deck_manager.deck_controller:
+        for controller in (gl.deck_manager.deck_controller if gl.deck_manager is not None else []):
             controller.load_page(controller.active_page, allow_reload=True)
 
     def update_dict_of_pages_with_path(self, path: str) -> None:
@@ -649,7 +654,7 @@ class PageManagerBackend:
                     if page.deck_controller.active_page == page:
                         page.deck_controller.load_page(page, allow_reload=True)
 
-    def find_matching_page_path(self, name: str) -> str:
+    def find_matching_page_path(self, name: str) -> str | None:
         if not name:
             return None
 

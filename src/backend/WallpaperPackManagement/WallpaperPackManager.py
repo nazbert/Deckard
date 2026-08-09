@@ -15,6 +15,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 # Import Python modules
 import os
+from typing import Any
 from loguru import logger as log
 
 # Import globals
@@ -24,11 +25,11 @@ import globals as gl
 from src.backend.WallpaperPackManagement.WallpaperPack import WallpaperPack
 
 class WallpaperPackManager:
-    def __init__(self):
-        self.packs = {}
+    def __init__(self) -> None:
+        self.packs: dict[str, WallpaperPack] = {}
 
-    def get_wallpaper_packs(self) -> dir:
-        packs = {}
+    def get_wallpaper_packs(self) -> dict[str, WallpaperPack]:
+        packs: dict[str, WallpaperPack] = {}
         os.makedirs(os.path.join(gl.DATA_PATH, "wallpapers"), exist_ok=True)
         for pack in os.listdir(os.path.join(gl.DATA_PATH, "wallpapers")):
             if pack.startswith("."):
@@ -42,19 +43,23 @@ class WallpaperPackManager:
                 log.warning(f"Wallpaper pack {pack} is not valid.")
         return packs
 
-    def get_pack_wallpapers(self, wallpaper_pack: dict):
+    def get_pack_wallpapers(self, wallpaper_pack: dict[str, Any]) -> dict[str, Any]:
         path = wallpaper_pack.get("path")
+        if path is None:
+            return {}
         wallpaper_path = os.path.join(path, "wallpapers")
 
-        wallpapers = {}
+        attribution: dict[str, Any] = wallpaper_pack.get("attribution") or {}
+
+        wallpapers: dict[str, Any] = {}
         if os.path.exists(wallpaper_path):
             for wallpaper in os.listdir(wallpaper_path):
                 wallpapers.setdefault(wallpaper, {})
-                wallpapers[wallpaper] =  self.get_wallpaper_attribution(wallpaper_pack.get("attribution"), wallpaper)
+                wallpapers[wallpaper] =  self.get_wallpaper_attribution(attribution, wallpaper)
 
         return wallpapers
-    
-    def get_wallpaper_attribution(self, attribution:dict, wallpaper_name: str) -> dict:
+
+    def get_wallpaper_attribution(self, attribution: dict[str, Any], wallpaper_name: str) -> dict[str, Any] | None:
         if wallpaper_name in attribution:
             # Use specific
             return attribution[wallpaper_name]

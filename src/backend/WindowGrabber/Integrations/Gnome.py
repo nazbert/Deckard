@@ -33,7 +33,7 @@ class Gnome(Integration):
     def __init__(self, window_grabber: "WindowGrabber"):
         super().__init__(window_grabber=window_grabber)
 
-        self.proxy = None
+        self.proxy: Gio.DBusProxy | None = None
         if not gl.IS_MAC:
             self.connect_dbus()
 
@@ -88,8 +88,8 @@ class Gnome(Integration):
 
 
     def on_window_changed(self, answer: str) -> None:
-        answer = json.loads(answer)
-        window = Window(answer.get("wm_class"), answer.get("title"))
+        parsed = json.loads(answer)
+        window = Window(parsed.get("wm_class"), parsed.get("title"))
         self.window_grabber.on_active_window_changed(window=window)
         
     def get_all_windows(self) -> list[Window]:
@@ -115,7 +115,7 @@ class Gnome(Integration):
 
         return windows
     
-    def get_active_window (self) -> Window:
+    def get_active_window (self) -> Window | None:
         if not self.get_is_connected():
             return None
         try:
@@ -128,7 +128,14 @@ class Gnome(Integration):
         return Window(wm_class, title)
 
     def call(self, method_name: str) -> str:
-        return self.proxy.call_sync(method_name, None, Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
+        proxy = self.proxy
+        if proxy is None:
+            # Only reachable if the proxy vanished between the caller's
+            # get_is_connected() and here. Raised as a GLib.Error because that
+            # is what both callers already treat as "the call failed"; an
+            # AttributeError on None would escape their except clause.
+            raise GLib.Error("no D-Bus proxy for the GNOME extension")
+        return proxy.call_sync(method_name, None, Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
 
     def get_is_connected(self) -> bool:
         # Live owner check, not just "a proxy was built once": GDBusProxy

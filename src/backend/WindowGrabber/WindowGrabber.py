@@ -32,21 +32,21 @@ class WindowGrabber:
     def __init__(self):
         self.SUPPORTED_ENVS = ["hyprland", "gnome", "sway", "sway:wlroots", "sway:wlroots:swayfx", "x11", "kde"]
 
-        self.integration: Integration = None
+        self.integration: Integration | None = None
         self.init_integration()
 
     @log.catch
-    def get_active_environment(self) -> str:
+    def get_active_environment(self) -> str | None:
         desktop = os.getenv("XDG_CURRENT_DESKTOP")
         if desktop is None:
-            return
+            return None
         return desktop.lower()
 
     @log.catch
-    def get_active_server(self) -> str:
+    def get_active_server(self) -> str | None:
         env = os.getenv("XDG_SESSION_TYPE")
         if env is None:
-            return
+            return None
         return env.lower()
 
     @log.catch
@@ -63,7 +63,7 @@ class WindowGrabber:
             self.integration = Hyprland(self)
         elif self.environment == "gnome":
             self.integration = Gnome(self)
-        elif "sway" in self.environment:
+        elif self.environment is not None and "sway" in self.environment:
             self.integration = Sway(self)
         elif self.server == "x11":
             self.integration = X11(self)
@@ -90,21 +90,26 @@ class WindowGrabber:
 
         return matching_windows
 
-    def get_is_window_matching(self, window: Window, class_regex: str, title_regex: str) -> bool:
-        if None in (window.wm_class, window.title, class_regex, title_regex):
+    def get_is_window_matching(self, window: Window, class_regex: str | None, title_regex: str | None) -> bool:
+        wm_class = window.wm_class
+        title = window.title
+        if wm_class is None or title is None or class_regex is None or title_regex is None:
             return False
         try:
-            class_match = re.search(class_regex, window.wm_class, re.IGNORECASE)
-            title_match = re.search(title_regex, window.title, re.IGNORECASE)
+            class_match = re.search(class_regex, wm_class, re.IGNORECASE)
+            title_match = re.search(title_regex, title, re.IGNORECASE)
         except re.error:
             return False
-        return class_match and title_match
+        return bool(class_match and title_match)
 
     def on_active_window_changed(self, window: Window) -> None:
         # log.info(f"Active window changed to: {window}")
 
         # Notify DBus API of the foreground window change
         notify_foreground_window_changed(window.title, window.wm_class)
+
+        if gl.deck_manager is None:
+            return
 
         for deck_controller in gl.deck_manager.deck_controller:
             # A closed/disabled deck must only be skipped -- this used to
@@ -130,6 +135,10 @@ class WindowGrabber:
         """Applies the auto-change page rules to a single deck for the given
         foreground window. May raise if the deck is torn down mid-call; the
         caller isolates that per deck."""
+        page_manager = gl.page_manager
+        if page_manager is None:
+            return
+
         if deck_controller.active_page is None:
             # A deck that is still starting up or being hotplugged has no
             # page yet (#44): there is nothing to compare against or restore,
@@ -137,8 +146,8 @@ class WindowGrabber:
             return
 
         found_page = False
-        for page_path in gl.page_manager.get_pages():
-            info = gl.page_manager.get_auto_change_settings(page_path)
+        for page_path in page_manager.get_pages():
+            info = page_manager.get_auto_change_settings(page_path)
             wm_regex = info.get("wm-class")
             title_regex = info.get("title")
             enabled = info.get("enable", False)
@@ -152,7 +161,7 @@ class WindowGrabber:
 
                 if deck_controller.active_page.json_path != page_path:
                     log.debug(f"Auto changing page: {page_path} on deck {deck_controller.deck.get_serial_number()}")
-                    page = gl.page_manager.get_page(page_path, deck_controller)
+                    page = page_manager.get_page(page_path, deck_controller)
                     if not deck_controller.page_auto_loaded:
                         deck_controller.last_manual_loaded_page_path = deck_controller.active_page.json_path
                     deck_controller.load_page(page)
@@ -165,11 +174,11 @@ class WindowGrabber:
                 return
 
             if deck_controller.page_auto_loaded:
-                active_page_change_info = gl.page_manager.get_auto_change_settings(deck_controller.active_page.json_path)
+                active_page_change_info = page_manager.get_auto_change_settings(deck_controller.active_page.json_path)
                 if active_page_change_info.get("stay-on-page", True):
                     return
                 deck_controller.page_auto_loaded = False
                 if deck_controller.last_manual_loaded_page_path is None:
                     return
-                page = gl.page_manager.get_page(deck_controller.last_manual_loaded_page_path, deck_controller)
+                page = page_manager.get_page(deck_controller.last_manual_loaded_page_path, deck_controller)
                 deck_controller.load_page(page, allow_reload=False)

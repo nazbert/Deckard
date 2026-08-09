@@ -48,10 +48,10 @@ class LockScreenManager:
             self.detector = LogindLockScreenDetector(self)
 
     @log.catch
-    def get_active_environment(self) -> str:
+    def get_active_environment(self) -> str | None:
         desktop = os.getenv("XDG_CURRENT_DESKTOP")
         if desktop is None:
-            return
+            return None
         return desktop.lower()
 
     def get_active_environment_components(self) -> list[str]:

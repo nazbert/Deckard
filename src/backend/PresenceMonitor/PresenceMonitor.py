@@ -49,6 +49,7 @@ this module.
 import os
 import threading
 import time
+from typing import Any
 
 from loguru import logger as log
 
@@ -120,14 +121,14 @@ class PresenceMonitor:
         self._idle_hint: bool = False
         # Wall clock (time.time() domain, same as logind's IdleSinceHint,
         # which is CLOCK_REALTIME microseconds).
-        self._idle_since: float = None
+        self._idle_since: float | None = None
         # 0.0 == "no deck input observed yet". Deliberately NOT time.time():
         # process start is not deck activity, and seeding it with `now` would
         # postpone the first gate by the full residual delay after every
         # restart -- including a restart into a session that logind already
         # reports as hours idle.
         self._last_deck_activity: float = 0.0
-        self._deadline: "timer_wheel.TimerHandle" = None
+        self._deadline: "timer_wheel.TimerHandle | None" = None
 
         # The logind detector is built ON DEMAND, only for the mode that
         # reads it: in the default pause mode it would open a system-bus
@@ -142,7 +143,7 @@ class PresenceMonitor:
         # test seam; both are captured here for the deferred build. Built
         # before the seeding evaluation below so an already-idle session is
         # reflected in the very first verdict.
-        self.idle_detector: "LogindIdleDetector" = None
+        self.idle_detector: "LogindIdleDetector | None" = None
         self._idle_detector_enabled: bool = bool(idle_detector)
         self._idle_detector_bus = bus
         self._detector_lock = threading.Lock()
@@ -358,9 +359,9 @@ class LogindIdleDetector:
 
     def __init__(self, monitor: PresenceMonitor, bus=None):
         self.monitor = monitor
-        self.bus = None
-        self.session_path: str = None
-        self._subscription_id: int = None
+        self.bus: Gio.DBusConnection | None = None
+        self.session_path: str | None = None
+        self._subscription_id: int | None = None
         if bus is not None:
             # An injected bus is an in-process double: there is no I/O to get
             # stuck on, so wire up inline and keep scenarios deterministic.
@@ -411,6 +412,14 @@ class LogindIdleDetector:
             )
 
     def resolve_session_path(self) -> str:
+        bus = self.bus
+        if bus is None:
+            # Unreachable in practice: setup_dbus assigns self.bus immediately
+            # before calling this. Raised as GLib.Error so setup_dbus's
+            # "unavailable, stay inert" branch handles it, which is what an
+            # unusable connection means.
+            raise GLib.Error("logind system bus unavailable")
+
         session_id = os.getenv("XDG_SESSION_ID")
         if session_id:
             method = "GetSession"
@@ -429,7 +438,7 @@ class LogindIdleDetector:
             method = "GetSessionByPID"
             args = GLib.Variant("(u)", (0,))
 
-        reply = self.bus.call_sync(
+        reply = bus.call_sync(
             LOGIND_BUS_NAME,
             LOGIND_MANAGER_PATH,
             LOGIND_MANAGER_IFACE,
@@ -442,10 +451,18 @@ class LogindIdleDetector:
         )
         return reply.unpack()[0]
 
-    def read_property(self, name: str):
-        reply = self.bus.call_sync(
+    def read_property(self, name: str) -> Any:
+        bus = self.bus
+        session_path = self.session_path
+        if bus is None or session_path is None:
+            # setup_dbus never completed (or never ran): there is nothing to
+            # read from. GLib.Error is the "logind unavailable" channel both
+            # callers already handle.
+            raise GLib.Error("logind session properties unavailable")
+
+        reply = bus.call_sync(
             LOGIND_BUS_NAME,
-            self.session_path,
+            session_path,
             PROPERTIES_IFACE,
             "Get",
             GLib.Variant("(ss)", (LOGIND_SESSION_IFACE, name)),

@@ -352,13 +352,13 @@ class StoreCache:
 
         return splitted[splitted.index(domain)+1]
 
-    def get_repo_name(self, repo_url:str) -> str:
+    def get_repo_name(self, repo_url:str) -> str | None:
         github_split = repo_url.split("github")
         if len(github_split) < 2:
-            return
+            return None
         split = github_split[1].split("/")
         if len(split) < 3:
-            return
+            return None
         return split[2]
 
     def generate_cache_string(self, url: str, path: str, branch: str = "main", data_type: str = "text") -> str:
@@ -450,7 +450,7 @@ class StoreCache:
 
         return open(cache_path, mode)
 
-    def get_fetched_date(self, url: str, path: str, branch: str = "main", data_type: str = "text") -> float:
+    def get_fetched_date(self, url: str, path: str, branch: str = "main", data_type: str = "text") -> float | None:
         """When the cached content was last WRITTEN; None if unknown.
         Entries predating the "fetched" field fall back to the cache file's
         mtime (reads never touch it; os.replace carries the temp file's

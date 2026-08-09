@@ -27,5 +27,5 @@ class Integration:
     def get_all_windows(self) -> list[Window]:
         return []
     
-    def get_active_window(self) -> Window:
+    def get_active_window(self) -> Window | None:
         return None

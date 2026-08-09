@@ -23,6 +23,7 @@ import json
 import os
 import shutil
 import uuid
+from typing import Any
 from loguru import logger as log
 from PIL import Image
 
@@ -55,10 +56,10 @@ class AssetManagerBackend(list):
     def save_json(self):
         atomic_write_json(self.JSON_PATH, list(self))
 
-    def add(self, asset_path: str, licence_name: str = None, licence_url: str = None, author: str = None) -> str:
+    def add(self, asset_path: str, licence_name: str = None, licence_url: str = None, author: str = None) -> str | None:
         if not os.path.exists(asset_path):
             log.warning(f"File {asset_path} not found.")
-            return
+            return None
         
         
         try:
@@ -70,12 +71,11 @@ class AssetManagerBackend(list):
             log.opt(exception=True).warning(f"Could not read asset {asset_path}: {e}")
             return None
 
-        if self.has_by_sha256(hash):
+        existing = self.get_by_sha256(hash)
+        if existing is not None:
             #TODO: It is possible that the some image has the same sha but not the name because it got renamed
             log.warning(f"Tried to add already existing asset. Ignoring. File: {asset_path}")
-            id = self.get_by_sha256(hash)["id"]
-            asset = self.get_by_id(id)
-            return id
+            return existing["id"]
 
         # Refuse undecodable files at import time (#197), BEFORE the copy --
         # the user is right there to see the dialog and retry. This gate is
@@ -114,7 +114,7 @@ class AssetManagerBackend(list):
             thumbnail_path = self.save_thumbnail(asset_path, hash, image=decoded)
 
 
-        asset = {
+        asset: dict[str, Any] = {
             "name": os.path.splitext(os.path.basename(asset_path))[0],
             "original-path": asset_path,
             "internal-path": internal_path,
@@ -186,7 +186,8 @@ class AssetManagerBackend(list):
         
         internal_path = asset["internal-path"]
 
-        gl.page_manager.remove_asset_from_all_pages(internal_path)
+        if gl.page_manager is not None:
+            gl.page_manager.remove_asset_from_all_pages(internal_path)
 
         # Guarded (#112 rev1): deleting a broken asset whose file already
         # vanished must still remove the entry, not raise out of the UI.
@@ -203,7 +204,7 @@ class AssetManagerBackend(list):
     def copy_asset(self, asset_path: str) -> str:
         file_name = os.path.basename(asset_path)
         dst_path = None
-        if not file_in_dir(file_name, os.path.join(gl.DATA_PATH, "Assets", "AssetManager", "Assets")):
+        if not file_in_dir(file_name, os.path.join(gl.DATA_PATH, "Assets", "AssetManager", "Assets")):  # type: ignore[func-returns-value]  # cross-MR: HelperMethods.file_in_dir is annotated -> None but returns bool (owner: MR 5)
             dst_path = os.path.join(gl.DATA_PATH, "Assets", "AssetManager", "Assets", file_name)
         else:
             log.warning(f"File with same name already exists but sha256 does not match, renaming: {asset_path}")
@@ -246,26 +247,30 @@ class AssetManagerBackend(list):
     def has_by_internal_path(self, internal_path: str) -> bool:
         return self.get_by_internal_path(internal_path) is not None
 
-    def get_by_name(self, name: str) -> dict:
+    def get_by_name(self, name: str) -> dict | None:
         for asset in self:
             if asset["name"] == name:
                 return asset
-            
-    def get_by_sha256(self, sha256: str) -> dict:
+        return None
+
+    def get_by_sha256(self, sha256: str) -> dict | None:
         for asset in self:
             if asset["sha256"] == sha256:
                 return asset
-            
-    def get_by_id(self, id: str) -> dict:
+        return None
+
+    def get_by_id(self, id: str) -> dict | None:
         for asset in self:
             if asset["id"] == id:
                 return asset
-            
-    def get_by_internal_path(self, internal_path: str) -> dict:
+        return None
+
+    def get_by_internal_path(self, internal_path: str) -> dict | None:
         for asset in self:
             if asset["internal-path"] == internal_path:
                 return asset
-            
+        return None
+
     def get_all(self) -> list:
         return self
     
@@ -326,7 +331,7 @@ class AssetManagerBackend(list):
         GLib.idle_add(show)
 
     def add_custom_media_set_by_ui(self, url: str, path: str):
-        window = gl.app.main_win
+        window = gl.app.main_win if gl.app is not None else None
         if gl.store is not None:
             window = gl.store
 
@@ -392,6 +397,10 @@ class AssetManagerBackend(list):
             return
 
         asset = self.get_by_id(asset_id)
+        if asset is None:
+            # Unreachable: add() returned this id a few lines above.
+            return None
+
         # Add to asset chooser ui if opened
         if gl.asset_manager is not None:
             gl.asset_manager.asset_chooser.custom_asset_chooser.add_asset(asset)

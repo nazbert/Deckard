@@ -12,7 +12,8 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.backend.LockScreenManager.LockScreenManager import LockScreenManager
 
@@ -26,9 +27,10 @@ from loguru import logger as log
 class LockScreenDetector:
     def __init__(self, lock_screen_manager: "LockScreenManager"):
         self.lock_screen_manager: "LockScreenManager" = lock_screen_manager
-        self.bus = None
+        # Stays None on macOS and whenever the bus connection fails below.
+        self.bus: Gio.DBusConnection | None = None
 
-    def subscribe_to_screen_saver(self, bus_name: str | None, object_path: str, interface: str, callback) -> None:
+    def subscribe_to_screen_saver(self, bus_name: str | None, object_path: str, interface: str, callback: Callable[..., Any]) -> None:
         """Listen for the ScreenSaver ActiveChanged signal on the session bus.
 
         bus_name is the sender to match; the DE detectors pass None (any

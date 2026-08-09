@@ -51,7 +51,7 @@ class KDE(Integration):
             self.start_active_window_change_thread()
 
     @log.catch
-    def _run_command(self, command: list[str]) -> Optional[Popen]:
+    def _run_command(self, command: list[str]) -> Optional[Popen[bytes]]:
         if self.flatpak:
             command.insert(0, "flatpak-spawn")
             command.insert(1, "--host")
@@ -59,11 +59,15 @@ class KDE(Integration):
             return Popen(command, stdout=PIPE, cwd="/")
         except Exception as e:
             log.error(f"An error occurred while running {command}: {e}")
+            return None
 
     @log.catch
     def get_is_kdotool_installed(self) -> bool:
         try:
-            out = self._run_command(["kdotool", "--version"]).communicate()[0].decode("utf-8")
+            kdotool = self._run_command(["kdotool", "--version"])
+            if kdotool is None:
+                return False
+            out = kdotool.communicate()[0].decode("utf-8")
             return out not in ("", None)
         except Exception as e:
             log.error(f"An error occurred while running kdotool: {e}")
@@ -103,20 +107,21 @@ class KDE(Integration):
         try:
             kdotool = self._run_command(["kdotool", "getactivewindow"])
             if kdotool is None:
-                return
+                return None
             stdout, _ = kdotool.communicate()
             window_id = stdout.decode().strip()
             if len(window_id) == 0:
-                return
+                return None
             return window_id
         except CalledProcessError as e:
             log.error(f"An error occurred while running kdotool: {e}")
+            return None
 
     @log.catch
-    def get_active_window(self) -> Window:
+    def get_active_window(self) -> Optional[Window]:
         window_id = self.get_active_window_id()
         if window_id is None:
-            return
+            return None
         return self.get_window(window_id)
 
     @log.catch
@@ -124,7 +129,7 @@ class KDE(Integration):
         title = self.get_title(window_id)
         class_name = self.get_class(window_id)
         if title is None or class_name is None:
-            return
+            return None
         return Window(class_name, title)
 
     @log.catch
@@ -132,26 +137,28 @@ class KDE(Integration):
         try:
             kdotool = self._run_command(["kdotool", "getwindowname", window_id])
             if kdotool is None:
-                return
+                return None
             title = kdotool.communicate()[0].decode().strip()
             if title is None or len(title) < 2:
-                return
+                return None
             return title
         except CalledProcessError as e:
             log.error(f"An error occurred while running kdotool: {e}")
+            return None
 
     @log.catch
     def get_class(self, window_id: str) -> Optional[str]:
         try:
             kdotool = self._run_command(["kdotool", "getwindowclassname", window_id])
             if kdotool is None:
-                return
+                return None
             window_class = kdotool.communicate()[0].decode().strip()
             if window_class is None or len(window_class) < 4:
-                return
+                return None
             return window_class
         except CalledProcessError as e:
             log.error(f"An error occurred while running kdotool: {e}")
+            return None
 
 
 class WatchForActiveWindowChange(threading.Thread):

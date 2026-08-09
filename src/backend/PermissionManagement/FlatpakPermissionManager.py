@@ -25,6 +25,7 @@ if not gl.IS_MAC:
 
 import subprocess
 import shlex
+from typing import Any
 from loguru import logger as log
 
 import appinfo
@@ -51,7 +52,7 @@ class FlatpakPermissionManager:
             command = "flatpak-spawn --host " + command
         return command
     
-    def get_flatpak_permissions(self) -> dict:
+    def get_flatpak_permissions(self) -> dict[str, Any]:
         command = self.add_spawn_prefix_if_needed(f"flatpak info --show-permissions {self.app_id}")
         # Execute the command, capturing stdout and stderr
         process = subprocess.Popen(shlex.split(command), stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd="/")
@@ -65,7 +66,9 @@ class FlatpakPermissionManager:
         # Decode the stdout to get the permissions output as a string
         permissions_output = stdout.decode()
         # Initialize an empty dictionary to hold the parsed permissions
-        permissions_dict = {}
+        # Two shapes by section: the context section maps to a dict, the bus
+        # policy sections to a list.
+        permissions_dict: dict[str, Any] = {}
         
         # Split the output into sections based on double newline characters
         sections = permissions_output.split('\n\n')
@@ -132,9 +135,10 @@ class FlatpakPermissionManager:
         command = self.get_dbus_permission_add_command(name, bus)
         window = None
         # Checks are required because the request might come before the mainwin has been created
-        if hasattr(gl.app, "main_win"):
-            if gl.app.main_win is not None:
-                window = gl.app.main_win
+        app = gl.app
+        if app is not None and hasattr(app, "main_win"):
+            if app.main_win is not None:
+                window = app.main_win
 
         if hasattr(gl, "store"):
             if gl.store is not None:

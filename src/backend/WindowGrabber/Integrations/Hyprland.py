@@ -98,7 +98,7 @@ class Hyprland(Integration):
 
         return windows
 
-    def get_active_window(self) -> Window:
+    def get_active_window(self) -> Window | None:
         try:
             # Run the hyprctl command and capture the output
             output = subprocess.check_output([*self.command_prefix, "hyprctl", "activewindow", "-j"], text=True, cwd="/").strip()

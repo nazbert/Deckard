@@ -109,8 +109,8 @@ class SDPlusBarWallpaperPack:
             icons = self.load_content(folder.path)
             self.pack_structure[folder.name] = icons
 
-    def load_content(self, folder_path: str):
-        content: list = []
+    def load_content(self, folder_path: str | os.PathLike[str]) -> list[SDPlusBarWallpaper]:
+        content: list[SDPlusBarWallpaper] = []
 
         for entry in os.scandir(folder_path):
             if os.path.isdir(entry.path):
