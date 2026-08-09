@@ -273,9 +273,21 @@ def _start_video(controller, path: str) -> "BackgroundVideo":
     # are picked by wall clock, which _show_frame drives deterministically.
     # Bounded by a deadline, not by a tick count: the old budget was sized
     # for the decode count, so a starved runner read as a broken cache (#202).
+    # A deadline alone would let the build get arbitrarily wasteful without
+    # anyone noticing, so keep an efficiency bound too -- just a generous one,
+    # since the count is what a starved runner cannot be judged on. A clean
+    # build takes exactly n_frames ticks (measured: 6); 10x catches the
+    # 100x-class regression (a re-seek or a re-decode per tick) and nothing
+    # a slow machine can produce.
+    max_ticks = video.n_frames * 10
     deadline = time.monotonic() + 30.0
     ticks = 0
     while not video.is_cache_complete():
+        assert ticks <= max_ticks, (
+            f"the tile cache build took {ticks} ticks for {video.n_frames} frames "
+            f"(budget {max_ticks}); a clean build spends one tick per frame, so "
+            f"this is re-seeking or re-decoding rather than progressing"
+        )
         assert controller.background.video is video, (
             "fixture sanity: the background was replaced mid-build -- a page-load "
             "background thread landed inside the window (see _settle)"
@@ -294,31 +306,53 @@ def _start_video(controller, path: str) -> "BackgroundVideo":
     return video
 
 
+# Retry budget for _show_frame, deliberately tiny. A clean run needs ZERO
+# retries (measured: 0 across the 14 calls this scenario makes), and the cause
+# the retry exists to absorb -- one deschedule longer than a frame period --
+# costs exactly one. Anything beyond that is not scheduler noise, it is the
+# landing ceasing to be a deterministic function of the timebase, and an
+# unbounded retry would hide precisely that: retry until it lands and every
+# downstream contract assert goes green again on a background that is no
+# longer frame-accurate.
+_MAX_ATTEMPTS_PER_CALL = 3
+_MAX_TOTAL_RETRIES = 3
+_frame_retries = 0
+
+
 def _show_frame(video, controller, index: int) -> None:
     """Advances the background to a SPECIFIC frame. get_next_tiles() picks
     by wall clock once the cache is complete, so the timebase is rewound to
     place `index` at now; _last_frame_tick is cleared so the resume-gap
     clamp (which shifts the timebase after a >1s stall) can't move it.
 
-    Retried on a miss: the rewind and the pick are two separate wall-clock
-    reads, so a thread descheduled between them for longer than one frame
-    period (67ms at this fixture's 15fps source) lands one frame late (#202).
-    That is a property of the runner, not of the code under test -- so the
-    landing requirement stays exact and only the attempt is repeated."""
+    Retried on a miss, on a budget: the rewind and the pick are two separate
+    wall-clock reads, so a thread descheduled between them for longer than one
+    frame period (67ms at this fixture's 15fps source) lands one frame late
+    (#202). The landing requirement stays exact, the retry only absorbs that
+    one deschedule, and the budget is what keeps 'retry until it lands' from
+    standing in for 'lands where the timebase says'."""
+    global _frame_retries
     playback_fps = float(video.get_source_fps() or video.fps or 30)
-    deadline = time.monotonic() + 15.0
-    attempts = 0
-    while True:
-        attempts += 1
+    for attempt in range(1, _MAX_ATTEMPTS_PER_CALL + 1):
+        if attempt > 1:
+            _frame_retries += 1
+            assert _frame_retries <= _MAX_TOTAL_RETRIES, (
+                f"_show_frame has now spent {_frame_retries} retries across this "
+                f"scenario (budget {_MAX_TOTAL_RETRIES}, clean runs need 0): the "
+                f"frame the background lands on is no longer a deterministic "
+                f"function of the timebase, and retrying until it lands would "
+                f"leave every contract assert below green on a background that "
+                f"is not frame-accurate"
+            )
         video._last_frame_tick = None
         video._play_start = time.time() - index / playback_fps
         controller.background.update_tiles()
         if video.active_frame == index:
             return
-        assert time.monotonic() < deadline, (
-            f"fixture sanity: wanted frame {index}, background advanced to "
-            f"{video.active_frame} on every one of {attempts} attempts"
-        )
+    raise AssertionError(
+        f"fixture sanity: wanted frame {index}, background advanced to "
+        f"{video.active_frame} on all {_MAX_ATTEMPTS_PER_CALL} attempts"
+    )
 
 
 def check_second_loop_is_encode_free() -> None:
