@@ -29,7 +29,9 @@ Covers:
   4. debuggability floor: the traceback survives redaction identifiable --
      `File "~/...scenario_log_redaction.py"` frame, source line, exception
      type/message -- and no diagnose variable dump leaks values;
-  5. idempotence -- double hook install keeps the same patcher.
+  5. idempotence -- of the double hook install (same patcher), and of
+     scrub() itself over the whole corpus (#162: re-scrubbing an auth
+     header used to eat the scheme word, "Basic ***" -> "*** ***").
 
 Run in isolation (run_all.py gives each scenario its own interpreter):
 logger.configure(patcher=...) and the exception hooks are process-global.
@@ -104,6 +106,10 @@ def check_scrub_unit() -> None:
     assert scrub("Authorization: Basic dXNlcjpwYXNz") == "Authorization: Basic ***"
     assert scrub('"Authorization": "Bearer eyJhbGciOi"') == '"Authorization": "Bearer ***"'
     assert scrub("Authorization: Bearer eyJhbGciOi.payload") == "Authorization: Bearer ***"
+    assert scrub("Proxy-Authorization: Digest sometokenvalue") == "Proxy-Authorization: Digest ***"
+    assert scrub("Authorization: rawtokenvalue") == "Authorization: ***", (
+        "the schemeless header form must still redact its raw value"
+    )
     assert scrub("auth hdr BEARER SECRETTOKEN123") == "auth hdr BEARER ***", (
         "fast-path bearer probe must be case-folded (round 1)"
     )
@@ -111,6 +117,73 @@ def check_scrub_unit() -> None:
     assert scrub(prose_basic) == prose_basic, (
         "'basic' is prose vocabulary -- only redact it in header context"
     )
+
+    # #162: the no-scheme branch must never consume a bare scheme word as
+    # the value. A credential that merely STARTS with those letters is not
+    # a bare scheme word and must still be redacted.
+    assert scrub("Authorization: basicauthvalue123") == "Authorization: ***"
+    assert scrub("Authorization: tokenvalue99") == "Authorization: ***"
+    assert scrub("Authorization: bearertoken.abc") == "Authorization: ***"
+
+
+def check_scrub_idempotent() -> None:
+    """scrub(scrub(x)) == scrub(x) over the whole corpus (#162).
+
+    The auth-header rule used to break this: re-scrubbing
+    "Authorization: Basic ***" could not match the value class against
+    "***", backtracked out of the optional scheme group, and consumed the
+    word "Basic" itself as the value -- "Authorization: *** ***" (same for
+    Bearer/Digest/Token; it converged only on pass 3). Cosmetic in
+    isolation, but any pipeline that scrubs twice -- the boot scrub
+    re-running over an already-scrubbed file (#159), a line passing both
+    the loguru patcher and a later scrub -- mangled every header it had
+    already redacted, so the module could only claim idempotence for
+    faulthandler content rather than in general.
+    """
+    corpus = [
+        # Auth headers: every scheme, both delimiters, quoted and bare.
+        "Authorization: Basic dXNlcjpwYXNz",
+        "Authorization: Bearer eyJhbGciOi.payload",
+        "authorization: Token abc123def",
+        "Proxy-Authorization: Digest sometokenvalue",
+        '{"Authorization": "Bearer eyJhbGciOi.abc"}',
+        "Authorization: rawtokenvalue",
+        "Authorization: basicauthvalue123",
+        "Authorization: Digest username=x, nonce=abcdef",
+        "Authorization: Basic dXNlcjpwYXNz\nProxy-Authorization: Bearer secretvalue",
+        "auth hdr BEARER SECRETTOKEN123",
+        # The rest of the corpus, for a real property test rather than an
+        # auth-header-only one.
+        f"{HOME}/dev/Deckard/src/app.py",
+        f'File "{HOME}/.config/x.json", line 3',
+        HOME,
+        f"/run/media/{USER}/stick",
+        f"ssh {USER}@build-host: refused",
+        "https://alice:hunter2@example.com/a/b?x=1",
+        "https://alice@example.com/a",
+        "GET /repo?access_token=abc123&x=1",
+        "retry with token = tok-9",
+        "https://h/p?key=sekrit&b=2",
+        "{'access_token': 'eyJabc.def'}",
+        '{"api_key": "sk-12345"}',
+        "headers token: abc.def",
+        # Must-not-touch vocabulary: idempotent trivially, but a rule that
+        # starts eating these would show up here too.
+        "painting key=3 gen=7",
+        "{'key': 3, 'gen': 7}",
+        "covers the basic setup steps",
+        "plain message, nothing sensitive",
+        "",
+    ]
+    for text in corpus:
+        once = scrub(text)
+        assert scrub(once) == once, (
+            f"scrub() is not idempotent for {text!r}: "
+            f"pass 1 -> {once!r}, pass 2 -> {scrub(once)!r}"
+        )
+        # Already-redacted markers must survive a re-scrub verbatim: the
+        # count can only be what pass 1 produced, never grow.
+        assert once.count("***") == scrub(once).count("***")
 
     # Fast path returns unchanged text untouched.
     assert scrub("plain message, nothing sensitive") == "plain message, nothing sensitive"
@@ -120,6 +193,7 @@ def check_scrub_unit() -> None:
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_log_redaction")
     check_scrub_unit()
+    check_scrub_idempotent()
 
     # THE REAL BOOT WIRING, and nothing else: main() only ever calls
     # install_exception_hooks(); redaction must ride along. Deliberately NOT

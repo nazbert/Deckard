@@ -1,5 +1,6 @@
 """
-Custom plugins pinned to a TAG must install (gl#197).
+clone_repo must never install a tree it did not actually move onto
+(gl#197 for pinned refs, gl#200 for pinned commit shas).
 
 clone_repo used `git switch <ref>` to move the staged clone onto the
 configured ref. `switch` refuses tags (and any other detachable ref)
@@ -15,9 +16,15 @@ scenarios. The harness runs with --devel (fixtures.py), so download_repo
 dispatches straight into clone_repo -- the exact path a custom-plugin
 prepare/install takes on a devel setup.
 
+The commit-sha branch (`git reset --hard <sha>`) had the identical hole
+until #200: a catalog sha that is unreachable (upstream force-push, GC'd
+commit) left staging on the default tip, which then passed the tree
+validation and was VERSION-stamped with the sha it is not.
+
 Assertions are on the CONTENT of the installed tree, not just the return
-code -- with the old `switch` the install still "succeeded" (200), just
-with the wrong tree, so only content catches the bug.
+code -- with the old `switch`/unchecked `reset` the install still
+"succeeded" (200), just with the wrong tree, so only content catches the
+bug.
 """
 import os
 import subprocess
@@ -76,6 +83,12 @@ def make_fixture_repo() -> None:
     _write("flag.txt", "feature content")
     _git("commit", "-am", "feature work")
     _git("checkout", "main")
+
+
+def _rev(ref: str) -> str:
+    out = subprocess.run(["git", "-C", FIXTURE_REPO, "rev-parse", ref],
+                         check=True, capture_output=True, text=True)
+    return out.stdout.strip()
 
 
 def _flag(dest: str) -> str:
@@ -149,6 +162,49 @@ def test_nonexistent_ref_fails_install(sb: StoreBackend) -> None:
     print("PASS: a nonexistent pinned ref fails the install cleanly")
 
 
+def test_commit_sha_installs_that_commit(sb: StoreBackend) -> None:
+    # Regression guard for the #200 rc check: a REACHABLE catalog sha must
+    # still install, and must install that commit's tree rather than the
+    # default tip it was cloned at.
+    dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_ShaPlugin")
+    sha = _rev("v1")
+
+    result = sb.clone_repo(repo_url=FIXTURE_REPO, local_path=dest, commit_sha=sha)
+
+    assert result == 200, f"install pinned to a reachable sha must succeed, got {result!r}"
+    assert _flag(dest) == "tagged content", (
+        f"installed tree is not the pinned commit: {_flag(dest)!r}"
+    )
+    with open(os.path.join(dest, "VERSION")) as f:
+        assert f.read() == sha
+    print("PASS: a plugin pinned to a reachable commit sha installs that commit")
+
+
+def test_unreachable_commit_sha_fails_install(sb: StoreBackend) -> None:
+    # #200: a well-formed but unreachable catalog sha (upstream force-push,
+    # GC'd commit) passed is_safe_commit_sha, so it reached `git reset
+    # --hard`. With that rc ignored the reset failed, staging stayed on the
+    # default-branch tip, and THAT tree was validated, stamped with the
+    # unreachable sha and installed as a success.
+    dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_GoneShaPlugin")
+    gone_sha = "deadbeef" * 5  # 40 lowercase hex, not an object in the repo
+
+    result = sb.clone_repo(repo_url=FIXTURE_REPO, local_path=dest, commit_sha=gone_sha)
+
+    assert result != 200, (
+        "an unreachable pinned commit sha must fail the install, not "
+        "silently ship the default-branch tip"
+    )
+    assert not os.path.exists(dest), (
+        "a failed install must not create the destination dir (and must "
+        "never leave a tree stamped with a sha it is not)"
+    )
+    assert _staging_leftovers() == [], (
+        f"staging litter left in cache: {_staging_leftovers()}"
+    )
+    print("PASS: an unreachable pinned commit sha fails the install cleanly")
+
+
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_store_custom_ref_tag")
     _isolate_git_config()
@@ -159,6 +215,8 @@ def main() -> None:
     test_tag_ref_installs_tagged_tree(sb)
     test_branch_ref_still_installs_branch_tip(sb)
     test_nonexistent_ref_fails_install(sb)
+    test_commit_sha_installs_that_commit(sb)
+    test_unreachable_commit_sha_fails_install(sb)
     print("PASS: scenario_store_custom_ref_tag")
 
 

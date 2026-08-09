@@ -1846,7 +1846,16 @@ class DeckController:
         self.screen_saver.set_media_path(config.get("media-path"))
         self.screen_saver.set_enable(config.get("enable", False))
         self.screen_saver.set_time(config.get("time-delay", 5))
-        self.screen_saver.set_loop(config.get("loop", False))
+        # loop defaults ON (issue #204): a screensaver video/GIF whose config
+        # predates the loop toggle used to play exactly one pass and then hold
+        # its last frame on-device for the whole idle window -- a frozen deck,
+        # never what "screensaver" means. True is also what every media-layer
+        # default already is (ScreenSaver.loop, Background.set_from_path/
+        # prebuild_from_path, BackgroundVideo/GifBackground). The settings
+        # UI's read defaults match this, so the toggle never shows OFF while
+        # the media actually loops. The page background keeps loop=False by
+        # default -- a one-shot page-entry flourish is a real use there.
+        self.screen_saver.set_loop(config.get("loop", True))
         self.screen_saver.set_fps(config.get("fps", 30))
         self.screen_saver.set_brightness(config.get("brightness", 30))
 

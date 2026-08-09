@@ -150,11 +150,34 @@ def _compile_rules() -> list[tuple]:
     # Must run BEFORE the generic rules so the scheme word survives intact
     # ("Basic" alone is common prose -- it is only matched in this header
     # context, never standalone).
+    #
+    # Two rules rather than one with an optional scheme group, because the
+    # scheme has to be OPTIONAL for the raw-value form but must not be
+    # optional-with-backtracking (#162). As a single pattern, re-scrubbing
+    # "Authorization: Basic ***" could not match the value class against
+    # "***", backtracked to not taking the scheme group, and then consumed
+    # the word "Basic" itself as the value -- "Authorization: *** ***", so
+    # scrub() was not idempotent and any pipeline that scrubs twice (the
+    # boot scrub over an already-scrubbed file, a line passing the loguru
+    # patcher and a later scrub) mangled its headers. Split, the no-scheme
+    # rule can carry a guard the with-scheme rule must not have.
+    _AUTH_HEADER = r"(?i)\b((?:proxy-)?authorization[\"']?[ \t]*[:=][ \t]*[\"']?"
+    _AUTH_SCHEME = r"(?:basic|bearer|digest|token)"
+    _AUTH_VALUE = r"[a-z0-9._~+/=-]{4,}"
+
+    # With a scheme word: the scheme is kept, the credential after it goes.
+    rules.append((
+        re.compile(_AUTH_HEADER + _AUTH_SCHEME + r"[ \t]+)" + _AUTH_VALUE),
+        r"\1***",
+    ))
+    # Without one: the value must not BE a bare scheme word. "Bare" means
+    # not followed by more value characters, so real credentials that merely
+    # start with those letters ("tokenvalue", "basicauth123") still redact.
     rules.append((
         re.compile(
-            r"(?i)\b((?:proxy-)?authorization[\"']?[ \t]*[:=][ \t]*[\"']?"
-            r"(?:(?:basic|bearer|digest|token)[ \t]+)?)"
-            r"[a-z0-9._~+/=-]{4,}"
+            _AUTH_HEADER + r")"
+            + r"(?!" + _AUTH_SCHEME + r"(?![a-z0-9._~+/=-]))"
+            + _AUTH_VALUE
         ),
         r"\1***",
     ))

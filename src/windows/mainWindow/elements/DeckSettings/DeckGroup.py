@@ -371,7 +371,11 @@ class Screensaver(Adw.PreferencesRow):
         original_values.setdefault("screensaver", {})
         enable = original_values["screensaver"].setdefault("enable", False)
         path = original_values["screensaver"].setdefault("media-path", None)
-        loop = original_values["screensaver"].setdefault("loop", False)
+        # True, matching load_screensaver's default (#204) -- this setdefault
+        # PERSISTS what it returns, so a False here would silently pin the
+        # deck's screensaver to one-shot the first time the settings page is
+        # opened, undoing the runtime default without the user touching it.
+        loop = original_values["screensaver"].setdefault("loop", True)
         fps = original_values["screensaver"].setdefault("fps", 30)
         time = original_values["screensaver"].setdefault("time-delay", 5)
         brightness = original_values["screensaver"].setdefault("brightness", 30)
