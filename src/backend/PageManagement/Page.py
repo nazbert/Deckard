@@ -265,14 +265,14 @@ class Page:
                         if action_holder is None:
                             plugin_id = gl.plugin_manager.get_plugin_id_from_action_id(action["id"])
                             if gl.plugin_manager.get_is_plugin_out_of_date(plugin_id):
-                                input_action_objects[state][i] = ActionOutdated(id=action["id"])
+                                input_action_objects[state][i] = ActionOutdated(id=action["id"], identifier=input_ident, state=state)
                             else:
-                                input_action_objects[state][i] = NoActionHolderFound(id=action["id"])
+                                input_action_objects[state][i] = NoActionHolderFound(id=action["id"], identifier=input_ident, state=state)
                             continue
                         action_class = action_holder.action_core
                         
                         if action_class is None:
-                            input_action_objects[state][i] = NoActionHolderFound(id=action["id"])
+                            input_action_objects[state][i] = NoActionHolderFound(id=action["id"], identifier=input_ident, state=state)
                             continue
 
                         old_action_object = input_ident.get_dict(loaded_action_objects)
