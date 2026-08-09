@@ -1,5 +1,5 @@
 """
-Regression test for "data-path setting persisted on every keystroke" (gl#46).
+Regression test for "data-path setting persisted on every keystroke".
 
 DataPathGroup used to write static settings on notify::text -- every character
 typed. An abandoned half-typed edit (or a crash mid-edit) then became the

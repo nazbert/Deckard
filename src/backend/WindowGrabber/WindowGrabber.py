@@ -114,7 +114,7 @@ class WindowGrabber:
         for deck_controller in gl.deck_manager.deck_controller:
             # A closed/disabled deck must only be skipped -- this used to
             # `return`, aborting auto page switching for every remaining
-            # deck as soon as one disabled deck's page regex matched (#104).
+            # deck as soon as one disabled deck's page regex matched.
             if deck_controller is None or not deck_controller.deck.is_open():
                 continue
 
@@ -141,7 +141,7 @@ class WindowGrabber:
 
         if deck_controller.active_page is None:
             # A deck that is still starting up or being hotplugged has no
-            # page yet (#44): there is nothing to compare against or restore,
+            # page yet: there is nothing to compare against or restore,
             # so skip it instead of dereferencing active_page.json_path.
             return
 

@@ -72,7 +72,7 @@ class Migrator:
                     f"Could not read {self.SETTINGS_DIR} ({e}) -- preserved at "
                     f"{dest}, treating all migrations as pending"
                 )
-                # Bounded retention for this one file's sidecars (#152). Safe
+                # Bounded retention for this one file's sidecars. Safe
                 # this early: atomic_json is stdlib-only by design precisely so
                 # the migrators (which run before SettingsManager exists) can
                 # use it, and this module already imports from it.

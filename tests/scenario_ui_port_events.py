@@ -1,7 +1,7 @@
 """
-Scenario (issue #141 step (a)): the engine->UI port contract.
+Scenario: the engine->UI port contract.
 
-Before #141 there was no way to observe what the engine wanted to tell a UI
+Before the port there was no way to observe what the engine wanted to tell a UI
 without building a GTK widget tree -- the only headless-visible trace was the
 dirty-marker dict, i.e. the "nothing was shown" path. With the port, a test
 can attach a RECORDING implementation and assert the positive direction:

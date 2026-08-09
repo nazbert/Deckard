@@ -62,7 +62,7 @@ class FaultyFakeDeck(FakeDeck):
 
         self._write_latency: float = 0.0
 
-        # ---- Lifecycle state (issue #59) --------------------------------- #
+        # ---- Lifecycle state --------------------------------------------- #
         # The stock FakeDeck's is_open()/connected() are hard-wired True, so a
         # post-close write silently succeeds and an unplug is inexpressible.
         # Model it explicitly:
@@ -128,7 +128,7 @@ class FaultyFakeDeck(FakeDeck):
                     raise TransportError(f"FaultyFakeDeck: injected failure for {op}")
 
     # ---------------------------------------------------------------- #
-    # Lifecycle (issue #59): closed/unplugged states
+    # Lifecycle: closed/unplugged states
     # ---------------------------------------------------------------- #
     def set_strict_lifecycle(self, strict: bool) -> None:
         """When True (the default), writes made after close()/simulate_unplug()

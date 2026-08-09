@@ -1,5 +1,5 @@
 """
-PresenceMonitor: the quiescence rule and its wake fan-out (issue #144).
+PresenceMonitor: the quiescence rule and its wake fan-out.
 
 The monitor is the only thing that can turn `DeckController.animations_gated()`
 true, so everything the media loop's gate depends on is pinned here:

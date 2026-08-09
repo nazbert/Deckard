@@ -1,5 +1,5 @@
 """
-Integration scenario for issue #39: run_on_main's timeout path must CANCEL
+Integration scenario: run_on_main's timeout path must CANCEL
 the queued GLib idle source, not abandon it.
 
 Pre-fix, a worker that timed out waiting for a stalled main loop raised and
@@ -40,7 +40,7 @@ import src.backend.main_loop as main_loop
 from src.backend.main_loop import run_on_main
 
 # Shrink the marshalling bound so provoking a timeout is fast. Read at call
-# time by run_on_main. The knob's home is main_loop (#141): GtkHelper only
+# time by run_on_main. The knob's home is main_loop: GtkHelper only
 # re-exports the functions, so patching a copy there would be a dead write.
 main_loop.RUN_ON_MAIN_TIMEOUT_S = 0.4
 

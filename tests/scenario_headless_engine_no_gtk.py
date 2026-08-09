@@ -1,5 +1,5 @@
 """
-Scenario (issue #141 step (c)): the render engine's import closure must be
+Scenario: the render engine's import closure must be
 WIDGET-FREE.
 
 A real DeckController -- page loads (background AND action pages, so
@@ -12,7 +12,7 @@ explicit import its module-level closure would go unproven.
 
 Scope honesty: this proves the `make_headless_controller` ENGINE closure only.
 The running app with plugins still loads Gtk/Adw at module scope
-(PluginBase.py, ActionHolder.py -- deliberately untouched by #141), so what
+(PluginBase.py, ActionHolder.py -- deliberately untouched), so what
 this pins is the seam and headless testability, NOT an RSS reduction; that
 lands with the daemon/client split.
 
@@ -59,7 +59,7 @@ ALLOWED_GI_RESIDUE = frozenset({
     "gi.repository.Gio",
     "gi.repository.Xdp",
     # PyGObject >= 3.56 splits the Unix-only portions of GLib/Gio into their
-    # own namespaces and loads them transitively with Gio (#229). Still no
+    # own namespaces and loads them transitively with Gio. Still no
     # widget stack — same argument as GLib/Gio themselves.
     "gi.repository.GLibUnix",
     "gi.repository.GioUnix",
@@ -97,7 +97,7 @@ from src.backend.DeckManagement.InputIdentifier import Input  # noqa: E402
 
 # The harness runs a StubDeckManager (the real one starts a USBMonitor and an
 # Xdp portal probe), so the real module would otherwise never be imported at
-# all and its closure -- which #141 also cleaned of gl.app.main_win reads --
+# all and its closure -- also cleaned of gl.app.main_win reads --
 # would go unproven. Importing the module alone starts nothing.
 import src.backend.DeckManagement.DeckManager  # noqa: E402,F401
 

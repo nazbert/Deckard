@@ -1,5 +1,5 @@
 """
-The GTK side of the engine->UI port (#141): `GtkUIAdapter` implements
+The GTK side of the engine->UI port: `GtkUIAdapter` implements
 `src.backend.ui_port.UIPort` against the real widget tree.
 
 Everything the engine used to do itself -- resolving a controller's
@@ -35,7 +35,7 @@ TOUCHSCREEN_UI_FLUSH_MS = 100
 
 
 def mark_dirty(controller, identifier) -> None:
-    """Late-failure channel for an ACCEPTED-then-dropped frame (#141).
+    """Late-failure channel for an ACCEPTED-then-dropped frame.
 
     `push_input_image` answers True as soon as a frame is handed to the
     throttle or to a widget's idle -- but the window can unmap (or a rebuild
@@ -65,7 +65,7 @@ class _TouchscreenThrottle:
 class GtkUIAdapter(ui_port.UIPort):
     def __init__(self):
         # controller -> DeckStackChild, maintained by DeckStack.add_page /
-        # remove_page. Binding is by OBJECT IDENTITY at add time (issue #156):
+        # remove_page. Binding is by OBJECT IDENTITY at add time:
         # no serial/name matching anywhere, and no ListModel scan from the
         # media thread.
         self._children: dict = {}
@@ -76,7 +76,7 @@ class GtkUIAdapter(ui_port.UIPort):
         self._window_mapped: bool = False
         self._ts_lock = threading.Lock()
         self._ts_state: dict = {}
-        # controller -> bool; the page-sync coalescer (issue #157).
+        # controller -> bool; the page-sync coalescer.
         self._page_sync_queued: dict = {}
 
     # ---------------------------------------------------------------- setup
@@ -141,7 +141,7 @@ class GtkUIAdapter(ui_port.UIPort):
     def rescan_children(self) -> None:
         """(Re-)bind every controller whose DeckStackChild is already in the
         stack. Makes binding independent of adapter-install ordering and heals
-        a rebuilt window (issue #158)."""
+        a rebuilt window."""
         window = self._window
         if not recursive_hasattr(window, "leftArea.deck_stack"):
             return
@@ -198,8 +198,8 @@ class GtkUIAdapter(ui_port.UIPort):
                 if grid is None:
                     return False
                 x, y = identifier.coords
-                # set_image converts on THIS thread and idles only the paint
-                # (#181). The lookup races a grid rebuild and the button grid
+                # set_image converts on THIS thread and idles only the paint.
+                # The lookup races a grid rebuild and the button grid
                 # can be smaller than these coords mid-rebuild -- contained by
                 # the except below.
                 grid.buttons[x][y].set_image(image)

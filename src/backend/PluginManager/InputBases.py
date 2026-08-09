@@ -10,7 +10,7 @@ from src.backend.PluginManager.ActionCore import ActionCore
 # override points and take no argument, so every registration adapts the
 # arity with a data-dropping lambda -- same pattern as ActionBase. The
 # lambdas also dispatch dynamically through self, so subclass overrides of
-# the no-arg handlers keep working unchanged (issue #37).
+# the no-arg handlers keep working unchanged.
 
 class InputAction(ABC):
     pass

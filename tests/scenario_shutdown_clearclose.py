@@ -72,7 +72,7 @@ def main() -> None:
     # close_all() above, so delete() must NOT incur a fresh 2s stop wait -- it
     # returns fast (~ms). 1.5s stays cleanly below the 2s stop timeout (so it
     # still catches "it took a full fresh stop wait") while giving a loaded CI
-    # runner 50% more headroom than the original 1.0s (#69 flake hardening).
+    # runner 50% more headroom than the original 1.0s (flake hardening).
     assert delete_elapsed < 1.5, f"delete() took too long after shutdown: {delete_elapsed:.2f}s"
 
     if controller in gl.deck_manager.deck_controller:

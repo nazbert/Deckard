@@ -1,5 +1,5 @@
 """
-Regression test for gl#23 (asset-catalog leg) -- the compatibility gate that
+Regression test (asset-catalog leg) -- the compatibility gate that
 kept startup auto-update from replacing a working PLUGIN with an incompatible
 build must also cover the icon / wallpaper / SD+ bar catalogs, exercised
 WITHOUT network.

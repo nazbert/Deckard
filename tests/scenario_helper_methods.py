@@ -1,5 +1,5 @@
 """
-Unit-tier scenario for HelperMethods regressions (issue #53 items 5 and 6):
+Unit-tier scenario for HelperMethods regressions:
 
   (a) get_sys_args_without_param must not pop past the end of argv when the
       matched parameter is the last element, and must return a NEW list --
@@ -9,7 +9,7 @@ Unit-tier scenario for HelperMethods regressions (issue #53 items 5 and 6):
       to call .append on its argument -- crashing on tuples -- and mutate
       the caller's list when given one).
   (c) color_values_to_gdk must scale the alpha into the 0-1 CSS range
-      (gl#203): the whole app speaks 0-255 on all four channels, so passing
+      -- the whole app speaks 0-255 on all four channels, so passing
       the raw alpha through clamped everything from 1 upwards to fully
       opaque.
 """
@@ -67,7 +67,7 @@ def check_color_values_to_gdk() -> None:
 
 
 def check_alpha_round_trip() -> None:
-    """#203: alpha is 0-255 on the way in, like the other three channels --
+    """Alpha is 0-255 on the way in, like the other three channels --
     but CSS rgba() wants it in 0-1, so it has to be scaled. Feeding the raw
     0-255 value into the CSS string clamped every alpha >= 1 to fully
     opaque: only 0 and 255 survived the round trip, and a semi-transparent
@@ -90,8 +90,8 @@ def check_alpha_round_trip() -> None:
         HelperMethods.color_values_to_gdk((10, 20, 30))) == (10, 20, 30, 255)
 
     # The built-in outline-colour default must survive the fixed scale: the
-    # old (0,0,0,1) only looked opaque because the pre-#203 clamp rounded
-    # any alpha >= 1 up (review on !103) -- the default and the conversion
+    # old (0,0,0,1) only looked opaque because the earlier clamp rounded
+    # any alpha >= 1 up -- the default and the conversion
     # are a pair, so pin them together.
     from src.backend.SettingsManager import FONT_DEFAULTS
     default_outline = FONT_DEFAULTS["outline-color"]

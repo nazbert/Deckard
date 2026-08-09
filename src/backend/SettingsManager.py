@@ -61,7 +61,7 @@ DEFAULTS: dict[str, dict] = {
     "performance": {
         "n-cached-pages": 3,
         "cache-videos": True,
-        # Quiescence gating (issue #144). "screensaver" is today's behavior
+        # Quiescence gating. "screensaver" is today's behavior
         # exactly (the deck screensaver's own transition already releases the
         # underlying page's media, so nothing extra engages); "system-idle"
         # also pauses deck animations while the session is idle or locked.
@@ -90,9 +90,9 @@ FONT_DEFAULTS: dict = {
     "font-weight": 400,
     "font-style": "normal",
     "font-color": (255, 255, 255, 255),
-    # 255, not 1: this feeds color_values_to_gdk (0-255 on all four channels
-    # since #203) and the render fallback is (0,0,0,255) -- the old value 1
-    # only looked opaque because the pre-#203 clamp rounded any alpha >=1 up.
+    # 255, not 1: this feeds color_values_to_gdk (0-255 on all four channels)
+    # and the render fallback is (0,0,0,255) -- the old value 1 only looked
+    # opaque because an earlier clamp rounded any alpha >=1 up.
     "outline-color": (0, 0, 0, 255),
     "outline-width": 2,
 }
@@ -410,7 +410,7 @@ class SettingsManager:
             if moved:
                 log.error(f"Invalid json in {file_path}: {e} -- preserved at {dest}, loading empty")
                 # Bounded retention, scoped to the file that just gained a
-                # sidecar -- never a startup-wide sweep (#152). Covers pages
+                # sidecar -- never a startup-wide sweep. Covers pages
                 # and deck/app settings alike: PageManagerBackend routes its
                 # corrupt-read handling through this loader.
                 for pruned in prune_corrupt_sidecars(file_path, protect=dest):
@@ -502,7 +502,7 @@ class SettingsManager:
         # Merge into the existing general section -- replacing it wholesale
         # silently destroyed every other general.* setting (hold-time,
         # rolling-labels, app-launches, show-donate-window) whenever a font
-        # default was changed (#102).
+        # default was changed.
         app = self.app()
         app.default_font = self.font_defaults
         app.save()

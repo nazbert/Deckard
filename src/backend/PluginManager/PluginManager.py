@@ -54,7 +54,7 @@ def build_backend_launch_command(backend_path: str, venv_path: str | None, port:
 
     Shared by ActionCore.launch_backend and PluginBase.launch_backend, which
     carried character-identical copies of this -- so the path validation
-    ActionCore gained for #56 now covers PluginBase too, and the two can no
+    ActionCore gained now covers PluginBase too, and the two can no
     longer drift.
 
     An argv list, never a shell string: a backend or venv path containing a
@@ -83,7 +83,7 @@ def build_backend_launch_command(backend_path: str, venv_path: str | None, port:
             raise ValueError(f"Venv path does not exist: {venv_path}")
     # The gate used to be inverted (`if backend_path is None:` guarding
     # the exists() check), so None reached os.path.exists -> TypeError
-    # and a real-but-missing path sailed through to Popen (issue #56).
+    # and a real-but-missing path sailed through to Popen.
     if backend_path is None or not os.path.exists(backend_path):
         raise ValueError(f"Backend path does not exist: {backend_path}")
 
@@ -156,8 +156,7 @@ class PluginManager:
         self.backend_processes.clear()
 
     def warm_up_plugins(self) -> None:
-        """Eagerly initialize plugin backends without blocking the caller
-        (issue #117).
+        """Eagerly initialize plugin backends without blocking the caller.
 
         Invokes every registered plugin's not-yet-fired on_app_ready() hook
         on a single background daemon thread, one plugin at a time, each
@@ -221,7 +220,7 @@ class PluginManager:
                 # boundary, so e.g. a timestamped backup dir
                 # (com_x_Plugin.bak.20260703) produced a ModuleNotFoundError
                 # traceback and a false "failed to load" toast entry on every
-                # startup (#133). Not a plugin failure -- warn without a
+                # startup. Not a plugin failure -- warn without a
                 # traceback and keep it out of load_errors. (Deliberately
                 # only dots, not isidentifier(): dash/digit-leading names are
                 # importable through importlib and may be real plugins.)
@@ -247,8 +246,8 @@ class PluginManager:
 
         # Hot-installed plugins (store installs re-run load_plugins after
         # startup) must get their on_app_ready like startup-loaded ones --
-        # the on_activate warm-up has already come and gone by then (#117
-        # review round 1). No-op for already-warmed plugins.
+        # the on_activate warm-up has already come and gone by then. No-op
+        # for already-warmed plugins.
         if self._app_ready:
             self.warm_up_plugins()
 
@@ -380,7 +379,7 @@ class PluginManager:
         # the default) hands them out too. The old bare
         # `del PluginBase.plugins[...]` raised KeyError for those, aborting
         # uninstall_plugin mid-way (registry entry kept, sys.modules purge
-        # skipped) -- which under the post-download deregister (#82) meant an
+        # skipped) -- which under the post-download deregister meant an
         # update of a disabled plugin could keep serving the old code from
         # the module cache.
         PluginBase.plugins.pop(plugin_base.plugin_id, None)

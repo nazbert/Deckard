@@ -1,5 +1,5 @@
 """
-Regression test (issue #159): the boot-time faulthandler scrub must preserve
+Regression test: the boot-time faulthandler scrub must preserve
 the file's INODE.
 
 The old scrub rewrote via tmp + os.replace. Atomic for the file -- but the

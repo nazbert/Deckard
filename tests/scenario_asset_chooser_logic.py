@@ -1,5 +1,5 @@
 """
-Scenario (#136): the AssetManager asset choosers' search behaviour, pinned as
+Scenario: the AssetManager asset choosers' search behaviour, pinned as
 pure logic.
 
 `IconChooserPage`, `WallpaperChooserPage` and `SDPlusBarWallpaperChooserPage`

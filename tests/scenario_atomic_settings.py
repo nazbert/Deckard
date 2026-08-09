@@ -1,5 +1,5 @@
 """
-Regression test for atomic JSON writes (issue #119, upstream #618).
+Regression test for atomic JSON writes.
 
 Page.save() got the tmp-file + fsync + os.replace + dir-fsync treatment in
 4faa8ea3, but SettingsManager.save_settings_to_file, PluginBase.set_settings
@@ -18,7 +18,7 @@ Two fault models are exercised:
      (fsync patched to os._exit(9) in a subprocess): the destination must
      still contain the previous, complete JSON.
 
-Review round 1 additions (MR !9): new files must honor the process umask
+Additionally: new files must honor the process umask
 (secret-bearing plugin settings must not come out world-readable under
 umask 077) while pre-existing modes are preserved; symlinked targets must
 stay symlinks (os.replace on the link path would silently detach
@@ -144,7 +144,7 @@ def check_page_save(controller) -> None:
 def check_font_defaults_merge() -> None:
     """save_font_defaults must merge into the general section, not replace
     it -- it used to wipe hold-time/rolling-labels/app-launches/... whenever
-    a font default was changed (#102)."""
+    a font default was changed."""
     app_settings = gl.settings_manager.get_app_settings()
     app_settings.setdefault("general", {})
     app_settings["general"]["hold-time"] = 0.7

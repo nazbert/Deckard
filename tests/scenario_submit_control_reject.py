@@ -4,7 +4,7 @@ reject messages once the writer has been stopped by a terminal ClearAndClose --
 nothing will ever drain the control queue again, so accepting more would grow
 it unbounded for the rest of the process's life.
 
-Split out of scenario_deck_close.py (#69 tier-mixing guard): that scenario is
+Split out of scenario_deck_close.py (tier-mixing guard): that scenario is
 integration-tier (make_headless_controller) but this one sub-test is unit-tier
 (make_stub_controller). Mixing tiers in one process is now refused by the
 install_stub_globals / _install_integration_globals guard, so this check lives

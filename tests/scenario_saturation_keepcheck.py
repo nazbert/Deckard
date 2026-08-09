@@ -1,6 +1,6 @@
 """
-Unit-tier scenario for issue #132 (latent touchscreen bg-video keep-check
-bug; surfaced as ask (5) of the #68 test-coverage audit): the per-touchscreen
+Unit-tier scenario for the latent touchscreen bg-video keep-check bug
+(surfaced by a test-coverage audit): the per-touchscreen
 background VIDEO reuse "keep-check" must invalidate on a display-saturation
 change.
 
@@ -26,13 +26,12 @@ removed/deferred (e.g. the settings font-row debounce pattern applied here,
 or a targeted repaint), the strip goes stale silently. This leg pins that
 missing invalidation.
 
-Always-on regression net since the #132 fix (formerly registered in
+Always-on regression net since the fix (formerly registered in
 run_all.EXPECTED_FAIL_UNTIL_M1 as a latent-bug pin while the keep-check
 lacked the saturation dimension): the keep-check now tracks the factor the
 strip video was constructed at (_background_video_saturation) and rebuilds
 when it diverges, so a saturation change re-acquires the video at the new
-factor. Full diagnosis + unmasking conditions on #132; origin context on
-issue #68.
+factor.
 
 Drives the REAL ControllerTouchScreenState._get_background_video_frame via
 __new__ + the exact attributes it reads, with a spy InputVideo (patched at

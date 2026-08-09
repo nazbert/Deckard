@@ -43,7 +43,7 @@ class Gnome(Integration):
         # InstallRemoteExtension "(s)" signature GnomeExtensions marshals it
         # into. Wrapped in a list it could never match get_installed_
         # extensions' uuids either, so the "already installed" short-circuit
-        # was dead too (#185).
+        # was dead too.
         uuid = "streamcontroller@core447.com"
         installed_extensions = gl.gnome_extensions.get_installed_extensions()
 

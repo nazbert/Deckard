@@ -1,5 +1,5 @@
 """
-Regression scenario for #47: tray icon registration must not be one-shot.
+Regression scenario: tray icon registration must not be one-shot.
 
 `StatusNotifierItemService.register()` used to make a single synchronous
 `RegisterStatusNotifierItem` call against `org.kde.StatusNotifierWatcher`:
@@ -139,7 +139,7 @@ class _StubInterfaceInfo:
 
 
 def check_base_double_register_no_orphan() -> None:
-    """#125 (base class): DBusService.register() with no intervening
+    """Base class: DBusService.register() with no intervening
     unregister() must not orphan the previous object registration on the
     connection -- exactly one live registration after any number of
     register() calls, and none after unregister()."""
@@ -162,11 +162,11 @@ def check_base_double_register_no_orphan() -> None:
 
 
 def check_sni_double_register_keeps_menu_live() -> None:
-    """#125 (real TrayIcon path -- regression guard): the actual
+    """Real TrayIcon path (regression guard): the actual
     double-register path is TrayIcon.initialize() + the Settings-panel
     start(), which goes through StatusNotifierItemService.register(), NOT
     the bare DBusService. That override registers BOTH the SNI object and
-    a nested menu object, and (from !21) overrides unregister() to cascade
+    a nested menu object, and overrides unregister() to cascade
     self._menu.unregister().
 
     An unregister-then-reregister remedy in the base register() dispatches

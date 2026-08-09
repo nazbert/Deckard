@@ -1,5 +1,5 @@
 """
-Regression test for gl#26 -- install/update results ignored across the store
+Regression test -- install/update results ignored across the store
 backend, exercised WITHOUT network:
 
 - install_plugin's failure returns (404/400 ints, NoConnectionError) were
@@ -13,7 +13,7 @@ backend, exercised WITHOUT network:
 The contract is now: install_plugin success is exactly True;
 download_repo/install_icon/install_wallpaper success is exactly 200;
 update_all_* count only real successes. Since the transactional-install
-redesign (gl#82) update_all_plugins never deregisters anything itself:
+redesign, update_all_plugins never deregisters anything itself:
 install_plugin deregisters the old version only AFTER its download
 succeeded, so a failed update leaves the old version on disk AND
 registered and no recovery reload exists.
@@ -135,7 +135,7 @@ def test_update_everything_checks_all_four_legs() -> None:
         f"the sum must include the SD+ bar wallpapers leg (2+1+3+4), got {result!r}"
     )
 
-    # An SD+-only failure must surface too -- before gl#22 the leg simply
+    # An SD+-only failure must surface too -- the leg simply
     # did not exist, so SD+ bar packs were never auto-updated at all.
     def sd_plus_fail(): return NoConnectionError()
     sb.update_all_sd_plus_bar_wallpapers = sd_plus_fail

@@ -1,5 +1,5 @@
 """
-Scenario: StreamDeck-UI importer round-trip (issue #55).
+Scenario: StreamDeck-UI importer round-trip.
 
 Three defects under test:
   1. It wrote `font_size`/`font_family` (underscores) into label dicts; the

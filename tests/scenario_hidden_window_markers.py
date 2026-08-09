@@ -6,7 +6,7 @@ against a video background.
 
 fixtures.make_headless_controller's integration tier attaches no UI, so
 src.backend.ui_port serves the NULL port and push_input_image returns False
-(issue #141) -- every real DeckController built through it is permanently in
+-- every real DeckController built through it is permanently in
 the "nothing is showing this" state as far as
 ControllerKey.set_ui_key_image/ControllerTouchScreen.set_ui_image are
 concerned. That makes the backend half of P5.4 directly exercisable here,

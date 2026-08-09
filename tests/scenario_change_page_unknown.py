@@ -1,5 +1,5 @@
 """
-Regression test for gl#43: App.on_change_page crashed on an unknown page
+Regression test: App.on_change_page crashed on an unknown page
 name.
 
 find_matching_page_path returns None for a name that matches no page, but

@@ -136,7 +136,8 @@ class PasswordEntryRow(GenerativeUI[str]):
             new_value (str): The new password to store, encoded in base64.
         """
         # Local annotation, not a cast: ActionCore.get_settings is declared
-        # `-> dir` (typo for dict) upstream of this file -- see #223.
+        # `-> dir` (typo for dict) upstream of this file, so its declared
+        # return type cannot be relied on here.
         settings: dict = self._action_core.get_settings()
 
         encoded = base64.b64encode(new_value.encode("utf-8")).decode("utf-8")

@@ -417,11 +417,11 @@ class FontPageGroup(Adw.PreferencesGroup):
         # bursts (family+size from one dialog, then colour, then outline; a
         # colour-picker drag fires repeatedly on its own), and each row used
         # to spawn its own full reload-all-pages thread, so a single visit
-        # here could run several page-reload storms concurrently (#78).
+        # here could run several page-reload storms concurrently.
         #
         # The reload is DELAYED, NEVER ELIDED. font_defaults ->
         # reload_all_pages -> create_n_states is what rebuilds every
-        # LabelManager, and the label memos added in !100 treat that rebuild
+        # LabelManager, and the label memos treat that rebuild
         # as their pixel-correctness guarantee. So once any font change has
         # been written, exactly one reload must still happen: no equality
         # check against the previous value, no "nothing looks different"
@@ -737,7 +737,7 @@ class PerformancePageGroup(Adw.PreferencesGroup):
                                           tooltip_text=gl.lm.get("settings.performance.cache-videos.tooltip"))
         self.add(self.cache_videos)
 
-        # Quiescence gating (issue #144). The default -- pause only while the
+        # Quiescence gating. The default -- pause only while the
         # deck screensaver is up -- is what the app has always done, so
         # leaving these alone changes nothing.
         self.animation_pause_mode = Adw.ComboRow(

@@ -1,5 +1,5 @@
 """
-Plugin warm-up scenario (issue #117): PluginManager.warm_up_plugins() must
+Plugin warm-up scenario: PluginManager.warm_up_plugins() must
 invoke every registered plugin's on_app_ready() hook exactly once, off the
 calling (GTK main) thread, returning immediately even when a plugin's hook
 is slow -- and one raising plugin must not prevent the others from being

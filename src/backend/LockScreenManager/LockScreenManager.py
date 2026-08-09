@@ -34,7 +34,7 @@ class LockScreenManager:
     def setup(self):
         # XDG_CURRENT_DESKTOP is a colon-separated list ("ubuntu:GNOME",
         # "GNOME-Classic:GNOME") -- an exact match on the whole string meant
-        # lock detection silently never engaged on such setups (issue #55).
+        # lock detection silently never engaged on such setups.
         env_components = self.get_active_environment_components()
         if "gnome" in env_components:
             self.detector = GnomeLockScreenDetector(self)
@@ -62,7 +62,7 @@ class LockScreenManager:
     def lock(self, active):
         gl.screen_locked = active
         if gl.presence_monitor:
-            # Issue #144. Position is deliberate: the monitor must see the lock
+            # Position is deliberate: the monitor must see the lock
             # before the screensaver work below reads its consequences. Which
             # makes self-containment the price -- this method's @log.catch
             # would swallow an exception from the monitor by returning, and

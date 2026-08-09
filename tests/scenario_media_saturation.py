@@ -1,6 +1,6 @@
 """
 Unit-tier scenario for the two media paths the per-deck display-saturation
-factor used to skip silently (issues #49 and #50):
+factor used to skip silently:
 
   * KeyGIF.__init__ (src/backend/DeckManagement/DeckController.py) -- the
     animated key/dial GIF path. Frames are decoded+fitted once at
@@ -120,7 +120,7 @@ def check_keygif_saturation() -> None:
     try:
         assert len(gif_default.frames) == len(gif_boosted.frames) == 4
 
-        # (a) every retained frame carries the boost (issue #49: the GIF key
+        # (a) every retained frame carries the boost (the GIF key
         # sat visibly duller than the saturated stills around it).
         for i, (plain, boosted) in enumerate(zip(gif_default.frames, gif_boosted.frames)):
             sat_plain = _mean_hsv_saturation(plain)
@@ -197,8 +197,8 @@ def check_touchscreen_background_saturation() -> None:
 
     strip_size = (800, 100)
 
-    # (d) factor 1.3 must measurably boost the fitted strip image (issue
-    # #50: keys boosted, strip didn't).
+    # (d) factor 1.3 must measurably boost the fitted strip image
+    # (keys boosted, strip didn't).
     plain = _make_touch_state(1.0)._get_fitted_background_image(bg_path, strip_size)
     boosted = _make_touch_state(1.3)._get_fitted_background_image(bg_path, strip_size)
     assert plain is not None and boosted is not None
@@ -287,7 +287,7 @@ def check_read_saturation_validates() -> None:
 
 
 def main() -> None:
-    # KeyGIF reads performance.cache-videos at construction (issue #201).
+    # KeyGIF reads performance.cache-videos at construction.
     # This fixture renders alpha, so it keeps the frame list these
     # assertions read either way -- the stub tier just has to exist for the
     # setting to be readable.

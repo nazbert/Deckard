@@ -27,7 +27,7 @@ class OutdatedActionRow(MissingRow):
     # site in ActionManager.load_for_actions. The old (index, state, coords,
     # dial, touch) signature predated InputIdentifier and passed coords= to a
     # parent that has no such parameter, so constructing this row raised
-    # TypeError for every outdated action (#227).
+    # TypeError for every outdated action.
     def __init__(self, action_id:str, identifier: InputIdentifier, state:int, index: int):
         super().__init__(
             action_id=action_id,

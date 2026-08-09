@@ -1,6 +1,6 @@
 """
-Regression checks for the grouped LOW app-shell/UI findings (issue #57,
-docs/deep-audit-2026-07-10.md "App shell").
+Regression checks for the grouped LOW app-shell/UI findings
+(docs/deep-audit-2026-07-10.md "App shell").
 
 All checks drive the real methods UNBOUND on plain stub objects -- no GTK
 widget is instantiated, no display is needed. Each check red-checks against
@@ -115,7 +115,7 @@ def check_deck_name_dedup() -> None:
             get_serial_number=lambda: serial,
         )
         # get_page_attributes reads the controller's cached serial accessor,
-        # not the device, since the issue #156 fix (one read, one truth).
+        # not the device (one read, one truth).
         return Obj(deck=deck, serial_number=lambda: serial)
 
     _, first = DeckStack.get_page_attributes(stub, make_controller("SN1"))
@@ -180,7 +180,7 @@ def check_deck_manager_usb_callback_guards() -> None:
 
     # (b) Trailing-dot typo: add_newly_connected_deck must actually reach the
     # "re-check whether any deck is available" call (the old
-    # recursive_hasattr(gl, "app.main_win.") was always False). Since #141 that
+    # recursive_hasattr(gl, "app.main_win.") was always False). That
     # is a port call, not a direct main_win poke, so the recorder is a port.
     from src.backend import ui_port
 
@@ -204,7 +204,7 @@ def check_deck_manager_usb_callback_guards() -> None:
     saved_ctor = dm_mod.DeckController
     dm_mod.DeckController = lambda manager, deck: Obj(deck=deck)
     try:
-        # !8 (fix/boot-lifecycle) wraps the controller construction in
+        # DeckManager wraps the controller construction in
         # _init_deck_controller_with_retry(); stub it so the method reaches
         # the availability refresh this test verifies.
         stub = Obj(
@@ -340,7 +340,7 @@ def check_asset_manager_drops_callback_refs() -> None:
 
 
 def check_custom_asset_flowbox_drops_callback_refs() -> None:
-    # Item #8's second delivery path: CustomAssets/FlowBox.on_child_activated
+    # The second delivery path: CustomAssets/FlowBox.on_child_activated
     # captures the callback then nulls the manager's refs *before* spawning the
     # delivery thread. Stub threading.Thread so the callback is captured
     # synchronously and no real thread runs.

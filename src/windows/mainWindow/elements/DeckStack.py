@@ -73,8 +73,8 @@ class DeckStack(Gtk.Stack):
             return
         deck_number, deck_type = attr
 
-        # Clear any previous binding BEFORE constructing the new child
-        # (issue #156): KeyGrid.__init__ runs load_from_changes() during
+        # Clear any previous binding BEFORE constructing the new child:
+        # KeyGrid.__init__ runs load_from_changes() during
         # construction, and its touchscreen branch replays dirty markers into
         # whatever screenbar it can resolve -- on a window rebuild a stale
         # binding would consume the markers into dead widgets and leave the
@@ -114,8 +114,7 @@ class DeckStack(Gtk.Stack):
         try:
             # The controller's cached accessor, not a fresh device read: this
             # string becomes the stack-child name, and every consumer must
-            # agree on one value even if a later device read would differ
-            # (issue #156).
+            # agree on one value even if a later device read would differ.
             serial_number = deck_controller.serial_number()
         except Exception as e:
             log.error(e)

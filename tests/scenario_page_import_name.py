@@ -1,5 +1,5 @@
 """
-Regression test for gl#120: page import via the PageManager menu raised
+Regression test: page import via the PageManager menu raised
 NameError.
 
 MenuButton.import_page_name_selected_callback derived the new page's name

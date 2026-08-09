@@ -42,7 +42,7 @@ def check_fires_within_tolerance() -> None:
     # must impose a real delay) and a generous liveness ceiling. Tight
     # thresholds around 0.1s are a CI flake candidate (scheduler granularity /
     # loaded runner); what matters is "delayed, and fired within a sane
-    # window", not the exact 0.1s (#69 flake hardening).
+    # window", not the exact 0.1s (flake hardening).
     assert 0.02 <= delta <= 1.5, f"timer fired outside tolerance: {delta:.3f}s (expected ~0.1s)"
 
     print(f"PASS: schedule() fires within tolerance ({delta:.3f}s for a 0.1s delay)")
@@ -167,7 +167,7 @@ def check_slow_callback_does_not_delay_unrelated_timer() -> None:
     # callback returns -- which can only happen if callbacks dispatch off the
     # scheduler thread rather than inline. Asserting the event order directly
     # (rather than a wall-clock threshold on fast_delay) proves exactly that
-    # and can't flake on a loaded runner (#69 flake hardening). A generous
+    # and can't flake on a loaded runner (flake hardening). A generous
     # liveness ceiling on the fast delay backstops a total scheduler stall.
     assert fast_ts < slow_end_ts, (
         f"the slow callback delayed the unrelated timer: fast fired at "

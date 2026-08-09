@@ -1,5 +1,5 @@
 """
-Regression test for gl#41: main.py's update_assets failure path called a
+Regression test: main.py's update_assets failure path called a
 non-existent MainWindow.show_error_toast (every store-update failure died
 as AttributeError inside @log.catch, invisible to the user), and its
 success path called show_info_toast directly from the update_assets worker
@@ -7,7 +7,7 @@ thread -- constructing an Adw.Toast and calling add_toast off the GTK main
 thread.
 
 Guards:
-  1. show_error_toast exists, and is defined exactly ONCE (#182: a second
+  1. show_error_toast exists, and is defined exactly ONCE (a second
      definition shadowed the first, so whichever copy lost was dead code
      and the surviving behaviour depended on definition order).
   2. Both toast methods, called from a worker thread (as update_assets
@@ -58,7 +58,7 @@ def main() -> None:
         "error path raises AttributeError and the user never sees the failure"
     )
 
-    # 1b (#182). Duplicate definitions are invisible at runtime -- the last
+    # 1b. Duplicate definitions are invisible at runtime -- the last
     # one silently wins -- so pin the count in the source instead.
     source_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                "src", "windows", "mainWindow", "mainWindow.py")
@@ -126,7 +126,7 @@ def main() -> None:
     assert by_title["Failed to update store assets"].get_priority() == Adw.ToastPriority.HIGH
     assert by_title["3 assets updated"].get_priority() == Adw.ToastPriority.NORMAL
     # The error toast's longer dwell was the behaviour of the surviving
-    # duplicate (#182); folding the two definitions together must keep it.
+    # duplicate; folding the two definitions together must keep it.
     assert by_title["Failed to update store assets"].get_timeout() == 7, (
         "error toasts must linger 7s -- they explain missing functionality"
     )

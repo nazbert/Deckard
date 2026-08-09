@@ -55,7 +55,7 @@ class PageManagerBackend:
         # In-flight cache-miss constructions, keyed (controller, path) and
         # guarded by _pages_lock: a second caller for the same page waits on
         # the first construction instead of building a twin Page whose
-        # actions register live event/signal handlers (issue #55).
+        # actions register live event/signal handlers.
         self._loads_in_flight: dict[tuple, tuple[threading.Thread, threading.Event]] = {}
         self.custom_pages = []
 
@@ -210,7 +210,7 @@ class PageManagerBackend:
         # (no Page.save/atomic_write_json here) and never touches the page's
         # JSON. clear_action_objects() tears down live action objects and
         # drops the cache entry -- nothing on disk is mutated. So the harm of
-        # gutting a live page (issue #4) is USE-AFTER-EVICT -- a visible page
+        # gutting a live page is USE-AFTER-EVICT -- a visible page
         # whose actions are all dead (keypresses do nothing, imagery frozen)
         # plus a duplicate Page minted on the next get_page() -- recoverable
         # by a page reload/replug; it is NOT on-disk data loss.
@@ -250,8 +250,8 @@ class PageManagerBackend:
         # is still the same (now possibly orphaned) dict object, so the pop
         # below is a harmless no-op in that case rather than a KeyError.
         for _, controller_pages, path, page_obj in to_evict:
-            # Re-validate under the lock immediately before teardown (issue
-            # #4): between the snapshot and this point the page may have
+            # Re-validate under the lock immediately before teardown:
+            # between the snapshot and this point the page may have
             # become live -- activated by a load_page (WindowGrabber cycling
             # generates exactly this cache pressure), stashed as a
             # controller's screensaver-pending page, or re-marked mid-tick.
@@ -259,7 +259,7 @@ class PageManagerBackend:
             # get_page() mints a fresh Page instead of receiving this gutted
             # one.
             #
-            # Residual NOT covered here (deferred to #81, pin-counts): a page
+            # Residual NOT covered here (needs ownership pin-counts): a page
             # already fetched via get_page() but not yet handed to load_page()
             # is neither active_page nor screensaver-pending and is born
             # ready_to_clear=True (Page.__init__), so it stays evictable in
@@ -268,7 +268,7 @@ class PageManagerBackend:
             # initialize_actions, which runs only after active_page is set),
             # so clear_action_objects() is a near-no-op -- the observable
             # effect is just the duplicate-Page mint. Only ownership
-            # pin-counts (#81) close this structurally.
+            # pin-counts close this structurally.
             with self._pages_lock:
                 page_data = controller_pages.get(path)
                 if page_data is None or page_data.get("page") is not page_obj:
@@ -289,7 +289,7 @@ class PageManagerBackend:
         active, or stashed as the screensaver-pending page (held for the
         whole screensaver duration and invisible to the snapshot guards --
         evicting it made ScreenSaver.hide() load a page whose every action
-        was dead; issue #4 window 1)."""
+        was dead)."""
         for controller in (gl.deck_manager.deck_controller if gl.deck_manager is not None else []):
             if controller.active_page is page_obj:
                 return True
@@ -387,7 +387,7 @@ class PageManagerBackend:
             # guard) -- invisible to the active_page checks below. If THAT
             # page is being deleted, drop the request and its cache entry:
             # hide() would otherwise load a page whose file is gone, and the
-            # first save would resurrect the deleted file (issue #129). The
+            # first save would resurrect the deleted file. The
             # controller then simply stays on its current page on dismiss.
             pending = getattr(controller, "_screensaver_pending_page", None)
             if pending is not None and pending.json_path == page_path:
@@ -429,8 +429,8 @@ class PageManagerBackend:
                 controller_pages = self.pages.get(controller, {})
                 entry = controller_pages.pop(page_path, None)
             if entry is not None:
-                # Unlike eviction, this teardown needs NO _page_is_live guard
-                # (issue #4): it can never gut a live page. The cache is keyed
+                # Unlike eviction, this teardown needs NO _page_is_live guard:
+                # it can never gut a live page. The cache is keyed
                 # per-controller with a distinct Page object per (controller,
                 # path), so popping THIS controller's entry can't touch
                 # another controller's live page. For this controller, we only
@@ -576,8 +576,8 @@ class PageManagerBackend:
 
         # Corrupt primary: heal from the backup REGARDLESS of use_backup and
         # regardless of whether the loader could move the primary aside. This
-        # is the crux of #32: every page-settings mutator reads via
-        # get_page_data(path, False) and then writes the result straight back
+        # is the crux of the corrupt-read problem: every page-settings mutator
+        # reads via get_page_data(path, False) and then writes the result straight back
         # (set_page_settings). Returning {} for a corrupt page there guts the
         # live page (keys/background/dials erased) and, once written, the
         # gutted file is valid JSON so auto-heal never recovers it. The heal
@@ -755,7 +755,7 @@ class PageManagerBackend:
         # next Page.save() from any trigger (plugin set_settings, key/state
         # edits, ...) rewrote the file from that stale dict -- silently
         # erasing the just-saved settings section (auto-change, screensaver,
-        # brightness, background overrides). See #113/#104.
+        # brightness, background overrides).
         self.update_dict_of_pages_with_path(path)
 
     def get_auto_change_settings(self, path: str) -> dict:

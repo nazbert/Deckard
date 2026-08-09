@@ -1,5 +1,5 @@
 """
-Integration-tier scenario (issue #196, phase 2): GIF deck backgrounds must
+Integration-tier scenario (phase 2): GIF deck backgrounds must
 decode through the PIL provider (GifBackground), preserving colors and
 alpha, instead of the cv2 canvas cache (whose GIF demuxer mangles palette
 frames and drops the alpha channel -- the defect upstream's bf218894

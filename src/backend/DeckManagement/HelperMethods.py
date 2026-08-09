@@ -31,8 +31,8 @@ from PIL import Image
 import gi
 from gi.repository import Gio, GLib
 
-# Gdk and Pango are imported lazily inside the four colour/font helpers below
-# (#141): they are the only consumers, their only callers live under
+# Gdk and Pango are imported lazily inside the four colour/font helpers below:
+# they are the only consumers, their only callers live under
 # src/windows/, and a module-level import would drag the widget stack into
 # every engine import closure that touches HelperMethods.
 if TYPE_CHECKING:
@@ -298,14 +298,14 @@ def instance_cache(func):
 
 
 def _load_gdk():
-    """Import Gdk on demand -- see the TYPE_CHECKING note at the top (#141)."""
+    """Import Gdk on demand -- see the TYPE_CHECKING note at the top."""
     gi.require_version("Gdk", "4.0")
     from gi.repository import Gdk
     return Gdk
 
 
 def _load_pango():
-    """Import Pango on demand -- see the TYPE_CHECKING note at the top (#141)."""
+    """Import Pango on demand -- see the TYPE_CHECKING note at the top."""
     from gi.repository import Pango
     return Pango
 
@@ -328,7 +328,7 @@ def color_values_to_gdk(color_values: Sequence[int]) -> "Gdk.RGBA":
     # persist). CSS rgba() takes the channels in 0-255 but the ALPHA in
     # 0-1, so the raw value has to be scaled -- feeding it 0-255 clamped
     # every alpha >= 1 to fully opaque, and a semi-transparent label colour
-    # came back out of the colour chooser as opaque (#203).
+    # came back out of the colour chooser as opaque.
     color.parse(f"rgba({values[0]}, {values[1]}, {values[2]}, {values[3] / 255})")
 
     return color

@@ -1,5 +1,5 @@
 """
-Scenario for issue #172: run_command must detach a command line without
+Scenario: run_command must detach a command line without
 forking the interpreter -- and must not leave the child as a zombie.
 
 Pre-fix, run_command wrapped subprocess.Popen in a multiprocessing.Process:
@@ -81,8 +81,8 @@ def main() -> None:
     print("PASS: shell semantics (redirection + &&) survive")
 
     # (b) -- the interpreter is never forked any more. Forking the whole app
-    # (GTK, plugins, deck threads, open HID handles) to spawn a shell is what
-    # #172 is about.
+    # (GTK, plugins, deck threads, open HID handles) to spawn a shell is
+    # exactly what this scenario forbids.
     assert forked == [], f"run_command forked the interpreter: {forked!r}"
     print("PASS: no multiprocessing child -- the interpreter is not forked")
 

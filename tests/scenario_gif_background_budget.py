@@ -1,5 +1,5 @@
 """
-Integration-tier scenario (issue #196, phase 2): the GIF-background RAM
+Integration-tier scenario (phase 2): the GIF-background RAM
 budget. A GIF whose decoded footprint (n_frames x canvas_w x canvas_h x 4)
 would exceed GIF_BG_BUDGET_MB must NOT be decoded into RAM: the provider
 raises pre-decode and the background falls back to the EXISTING cv2/mp4

@@ -36,7 +36,7 @@ class MediaManager:
     def get_fallback_thumbnail(self) -> Image.Image:
         """
         In-memory "broken image" placeholder returned instead of raising when
-        a file cannot be decoded (#112). Tagged via img.info["sc_broken"] so
+        a file cannot be decoded. Tagged via img.info["sc_broken"] so
         callers can tell it apart from a real thumbnail and never persist it
         (a corrupt file must stay retryable, not poison the on-disk cache).
         """
@@ -54,7 +54,7 @@ class MediaManager:
         """
         Crash-safe image save: write to a unique temp file in the same
         directory, then os.replace() into place. A crash/disk-full mid-save
-        must never leave a half-written (poison) file at `path` (#112 rev1).
+        must never leave a half-written (poison) file at `path`.
         """
         tmp_path = f"{path}.{uuid.uuid4().hex}.tmp"
         try:
@@ -68,7 +68,7 @@ class MediaManager:
                     pass
 
     def get_thumbnail(self, file_path):
-        # Guarded whole (#112): sha256() raises on unreadable files
+        # Guarded whole: sha256() raises on unreadable files
         # (chmod 000), Image.open raises on a poisoned cache entry, and the
         # .thumbnail() calls force lazy decodes -- every caller here is a UI
         # path that must get *an* image back, never an exception.
@@ -94,7 +94,7 @@ class MediaManager:
                 except Exception as e:
                     # Poisoned cache entry (e.g. an old crash mid-write
                     # truncated it): a bad CACHE file must never wedge a valid
-                    # SOURCE file to the broken placeholder (#112 rev1) --
+                    # SOURCE file to the broken placeholder --
                     # drop the entry and fall through to regeneration.
                     log.opt(exception=True).warning(
                         f"Poisoned thumbnail cache entry for {file_path}, regenerating: {e}")
@@ -116,7 +116,7 @@ class MediaManager:
             return self.get_fallback_thumbnail()
 
     def generate_thumbnail(self, file_path):
-        # Never raises (#112): one corrupt/unreadable file must not kill the
+        # Never raises: one corrupt/unreadable file must not kill the
         # import worker thread, the Custom Assets build or app startup
         # (AssetManagerBackend.fill_missing_thumbnails). On any decode failure
         # this logs the path and returns the tagged fallback placeholder.

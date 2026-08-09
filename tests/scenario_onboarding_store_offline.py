@@ -1,5 +1,5 @@
 """
-Regression test for issue #118's fresh-install mode: a first launch behind a
+Regression test for the fresh-install mode: a first launch behind a
 dead/rate-limited store must not silently strand the user with zero plugins.
 
 Two legs, both driven unbound with duck-typed selves (real onboarding
@@ -10,7 +10,7 @@ widgets need a display; the control flow and the GLib marshalling are real):
    GitHub rate limit). load() iterated it -> TypeError killed the loader
    thread -> the onboarding Plugins page span forever; the user paged past,
    installed nothing, and landed in the main window with an empty Add-Action
-   list (the upstream #610 report). Now: the error state is shown (spinner
+   list (as reported upstream). Now: the error state is shown (spinner
    stopped), and a raising fetch gets the same treatment. A fetch returning
    a normal list still completes the load.
 

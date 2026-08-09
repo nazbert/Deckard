@@ -1,5 +1,5 @@
 """
-Scenario for issue #56 item 5: DeckController.close() must be idempotent
+Scenario: DeckController.close() must be idempotent
 under CONCURRENT callers, not just sequential ones.
 
 The `_closing` gate was an unlocked check-then-set: two teardown callers

@@ -1,5 +1,5 @@
 """
-Regression test for gl#21 -- get_last_commit serialized/evaded the store
+Regression test -- get_last_commit serialized/evaded the store
 fetch path, exercised WITHOUT network:
 
 get_last_commit used to issue its requests.get() outside the shared fetch
@@ -9,7 +9,7 @@ that 782a1dac routed every other fetch through. Its requests exceptions
 also raised straight through instead of returning NoConnectionError,
 bypassing the error contract every sibling fetch obeys.
 
-The contract is now (post-#176 sync backend): catalog prepare_* tasks fan
+The contract is now (with the sync backend): catalog prepare_* tasks fan
 out on StoreBackend._prepare_pool so per-entry lookups overlap;
 get_last_commit runs under _fetch_limiter like every sibling fetch;
 network failures return NoConnectionError; prepare_plugin and
@@ -84,7 +84,7 @@ def test_catalog_fanout_overlaps() -> None:
 
 def test_lookup_respects_fetch_limiter() -> None:
     """get_last_commit must take the shared fetch limiter like every
-    sibling fetch (the other half of gl#21: it used to evade it)."""
+    sibling fetch (it used to evade it)."""
     in_flight = 0
     peak = 0
     lock = threading.Lock()

@@ -1,5 +1,5 @@
 """
-Scenario (#170 rapidfuzz swap): pins the fuzzy-search contract the app's seven
+Scenario (the rapidfuzz swap): pins the fuzzy-search contract the app's seven
 search call sites rely on, now that they import `rapidfuzz.fuzz` instead of
 `fuzzywuzzy.fuzz`.
 

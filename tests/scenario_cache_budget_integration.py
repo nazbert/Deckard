@@ -1,5 +1,5 @@
 """
-Integration scenario (gl#142): the image-cache budget over REAL
+Integration scenario: the image-cache budget over REAL
 DeckControllers.
 
 `scenario_cache_budget.py` pins the manager against synthetic caches; this
@@ -257,7 +257,7 @@ def check_gif_frames_census(controller) -> None:
     asset's per-frame memo); this census column is what sizes whether an
     aggregate cap across GIF keys is ever warranted.
 
-    The fixture carries ALPHA on purpose: since #201 only an alpha-carrying
+    The fixture carries ALPHA on purpose: only an alpha-carrying
     GIF keeps a frame list at all -- an opaque one plays off the shared mp4
     tile cache and shows up under video_readers instead (that route's census
     contract is pinned by scenario_gif_opaque_route)."""

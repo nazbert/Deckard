@@ -33,7 +33,7 @@ from loguru import logger as log
 import globals as gl
 
 # The thread kit lives in the toolkit-free src/backend/main_loop.py so engine
-# code can marshal to the main loop without importing the widget stack (#141).
+# code can marshal to the main loop without importing the widget stack.
 # Re-exported here unchanged: every plugin imports these names from GtkHelper.
 # Note RUN_ON_MAIN_TIMEOUT_S is deliberately NOT re-bound here -- run_on_main
 # reads it from main_loop at call time, so a copy in this namespace would be a

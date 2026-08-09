@@ -1,6 +1,6 @@
 """
 Scenario: concurrent get_page() cache misses must construct exactly one Page
-(issue #55 -- cache-miss double construction built twin Pages whose actions
+(cache-miss double construction built twin Pages whose actions
 hold live event/signal registrations).
 
 Also covers the guard's failure path: a load for a nonexistent path must not

@@ -232,7 +232,7 @@ def parse_keys_as_keycodes(keys: str) -> list[list[int]]:
         # the importer's `except Exception`, which dropped the whole hotkey
         # with a confusing message. Deckard's Hotkey action has no delay
         # representation to map these onto, so reject them explicitly rather
-        # than inventing an encoding (#227).
+        # than inventing an encoding.
         for key in individual:
             if isinstance(key, str) and key.startswith("delay"):
                 raise ValueError(f"Delays are not supported in imported hotkeys: {key!r}")

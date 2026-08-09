@@ -1,5 +1,5 @@
 """
-Regression test for issue #54 (asset-manager recycler + chooser races).
+Regression test for asset-manager recycler + chooser races.
 
 1. DynamicFlowBox.show_range set recycled children VISIBLE synchronously
    (possibly off the main thread) while binding their new asset via one

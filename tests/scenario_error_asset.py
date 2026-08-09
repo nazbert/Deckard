@@ -1,6 +1,6 @@
 """
-Unit-tier scenario for SingleKeyAsset's error/fallback image (issue #53
-item 7): the image was opened via the CWD-relative path
+Unit-tier scenario for SingleKeyAsset's error/fallback image: the image
+was opened via the CWD-relative path
 "Assets/images/error.png", so get_raw_image() raised FileNotFoundError
 whenever the process was launched from anywhere but the repo root (e.g. a
 desktop launcher with a different working directory). It must resolve

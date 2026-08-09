@@ -1,6 +1,6 @@
 """
 Scenario: the tile-cache builder thread must terminate when a build cannot
-complete (issue #2 / B-02, audit TG-04).
+complete.
 
 _run_builder looped `get_frame(last+1)` with no sleep; when _end_of_source()
 released the source capture WITHOUT promoting the cache, every further

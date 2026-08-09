@@ -20,7 +20,7 @@ Shoutout to Dean Camera alias abcminiuser for his amazing work!
 from PIL import Image, ImageOps
 from StreamDeck.ImageHelpers import PILHelper
 
-# GLib/GdkPixbuf are imported lazily inside image2pixbuf (#141): it is their
+# GLib/GdkPixbuf are imported lazily inside image2pixbuf: it is their
 # only consumer and every one of its callers lives under src/windows/, so a
 # module-level import would drag the widget stack into the engine's import
 # closure (ImageHelpers is core to the render path).

@@ -1,12 +1,12 @@
 """
-Coverage for the destructive filesystem half of the store install path
-(gl#62), exercised WITHOUT network. Every existing store scenario pins
-result *propagation* (gl#26 / gl#7 / gl#23); nothing exercised
+Coverage for the destructive filesystem half of the store install path,
+exercised WITHOUT network. Every existing store scenario pins
+result *propagation*; nothing exercised
 download_repo's own extract/cleanup contract or install_plugin's
 delete-only-after-a-good-download behavior.
 
 download_repo is the single choke point every install_*/download_repo caller
-funnels through. Its contract (transactional since gl#82):
+funnels through. Its contract (transactional):
 
   1. A network fault mid-stream removes the partial/zero-byte .zip from the
      cache instead of leaving it to poison the next run.
@@ -26,7 +26,7 @@ funnels through. Its contract (transactional since gl#82):
 The shared session's `http_client.get` is monkeypatched to serve bytes from
 an in-memory archive (or raise) -- no socket is ever opened. Extraction and
 cleanup run against the real shutil/zipfile machinery in the isolated temp
-DATA_PATH. Since gl#168 the archive itself is fetched by
+DATA_PATH. The archive itself is fetched by
 http_client.download_to_file, which is where contract 1 (no partial/zero-
 byte .zip survives a failed download) is now enforced.
 """
@@ -283,9 +283,9 @@ def test_traversal_member_is_refused() -> None:
 
 def test_download_fault_leaves_existing_install_intact() -> None:
     """download_repo touches the destination only at swap time, AFTER a good
-    download + extract + validation (the gl#82 transactional install). A
+    download + extract + validation (the transactional install). A
     fault before that must leave a pre-existing install byte-for-byte
-    intact. Since gl#82 the icon/wallpaper/sd_plus install_* wrappers ride
+    intact. The icon/wallpaper/sd_plus install_* wrappers ride
     on this same safety instead of pre-deleting (B-06, pinned in
     scenario_store_b06_pack_survival.py)."""
     sb = _make_backend()

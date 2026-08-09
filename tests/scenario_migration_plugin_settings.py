@@ -1,5 +1,5 @@
 """
-Regression scenario for gl#30: Migrator_1_5_0_beta_5.migrate_plugin_settings
+Regression scenario: Migrator_1_5_0_beta_5.migrate_plugin_settings
 had an inverted existence check -- in the normal case (new settings path does
 not exist yet) nothing was written before `os.remove(old_settings_path)`, so
 the migration permanently deleted every plugin's settings.json; and when the
@@ -14,7 +14,7 @@ Covers:
       after a lost migrations.json): the current settings at the new path
       are NOT clobbered with the stale old copy; the stale old file is
       still cleaned up;
-  (c) crash-safety (M2, MR !11 review): the new file is written atomically
+  (c) crash-safety: the new file is written atomically
       (temp + fsync + os.replace), so process death between writing the new
       file and removing the old one cannot leave a truncated settings.json.
       Simulated by killing a child at fsync (os._exit); the old file must
@@ -182,7 +182,7 @@ def check_atomic_write_survives_death_before_replace() -> None:
         # An orphaned .migrate-*.tmp under the target dir is the EXPECTED residue
         # of a pre-replace death (the temp file itself, never renamed). It is a
         # distinct name, so it never masquerades as the live settings.json. The
-        # migrator runs once and lacks a temp-reaper (unlike MR !9's helper);
+        # migrator runs once and lacks a temp-reaper (unlike atomic_json's helper);
         # this is a known, tolerated trade-off documented in the source comment.
         import glob
         orphans = glob.glob(os.path.join(os.path.dirname(new), ".migrate-*.tmp"))

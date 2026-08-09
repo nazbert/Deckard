@@ -1,5 +1,5 @@
 """
-Scenario for issue #172: plugin/action backends must be launched with an argv
+Scenario: plugin/action backends must be launched with an argv
 list and a real interpreter, not with a shell string built by f-string.
 
 Pre-fix, both launch_backend implementations built
@@ -20,7 +20,7 @@ Both classes now go through PluginManager.build_backend_launch_command:
       open_in_terminal debug form passes user paths as bash positional
       parameters (nothing interpolated) and honors $DECKARD_TERMINAL as a
       whole command prefix (terminals disagree about `--` vs `-e`).
-  (b) The #56 ValueError contract, now shared -- PluginBase.launch_backend
+  (b) The ValueError contract, now shared -- PluginBase.launch_backend
       validates too, which it never used to -- extended to a venv whose
       bin/python does not resolve.
   (c) End-to-end: a real stub backend under a directory whose name contains
@@ -181,7 +181,7 @@ def check_argv_shape(backend_path: str) -> None:
 
 
 def check_path_validation(backend_path: str) -> None:
-    """The #56 contract, now enforced for PluginBase as well as ActionCore
+    """The path-validation contract, now enforced for PluginBase as well as ActionCore
     because both go through the shared helper."""
     missing = os.path.join(gl.DATA_PATH, "definitely", "not", "here.py")
 

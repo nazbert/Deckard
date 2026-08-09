@@ -58,8 +58,8 @@ class CustomAssetChooser(ChooserPage):
         try:
             # The whole GTK construction runs on the main loop: building the
             # flow box (a page's worth of AssetPreviews) and the button on
-            # this worker thread was the off-main-GTK crash class (issue
-            # #10). One-time jank on opening the tab beats a segfault; only
+            # this worker thread was the off-main-GTK crash class.
+            # One-time jank on opening the tab beats a segfault; only
             # the build bookkeeping around this stays on the thread.
             def _build_ui():
                 self.asset_chooser = CustomAssetChooserFlowBox(self)
@@ -82,7 +82,7 @@ class CustomAssetChooser(ChooserPage):
 
             self.load_defaults()
         finally:
-            # GUARANTEE the spinner is dismissed (#112): any exception above
+            # GUARANTEE the spinner is dismissed: any exception above
             # used to be swallowed by @log.catch with set_loading(False) never
             # reached, leaving the Custom Assets page loading forever.
             # (@log.catch stays -- finally runs first, then the exception

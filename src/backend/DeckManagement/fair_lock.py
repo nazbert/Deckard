@@ -16,8 +16,8 @@ import threading
 import time
 from typing import Literal
 
-# FIFO ticket lock, used as the Stream Deck per-device transport mutex
-# (issue #164). CPython's threading.Lock is unfair: a thread that releases
+# FIFO ticket lock, used as the Stream Deck per-device transport mutex.
+# CPython's threading.Lock is unfair: a thread that releases
 # and immediately re-acquires usually wins against a waiter that has been
 # parked for milliseconds. The transport serializes every read and write of
 # one device on ONE mutex, so an unpaced write burst can repeatedly out-race

@@ -275,7 +275,7 @@ class LabelRow(Adw.PreferencesRow):
             controller_input = controller.get_input(self.active_identifier)
             composed_label = controller_input.get_active_state().label_manager.get_composed_label(position=self.key_name)
 
-        # Every KeyLabel property is optional (#225): an unset one means
+        # Every KeyLabel property is optional: an unset one means
         # "nothing configured here", which for the text is the empty entry.
         text = composed_label.text or ""
 
@@ -316,7 +316,7 @@ class LabelRow(Adw.PreferencesRow):
 
         self.connect_signals()
 
-    # None means the label does not set this property (#225); the widget
+    # None means the label does not set this property; the widget
     # then keeps its current value rather than being handed a None.
     def set_color(self, color_values: list | None):
         if color_values is None:

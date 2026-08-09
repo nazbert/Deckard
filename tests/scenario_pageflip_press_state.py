@@ -1,5 +1,5 @@
 """
-Regression test for issue #103: a button that flips pages must not start
+Regression test: a button that flips pages must not start
 "pressed" on the new page.
 
 press_state lives on the ControllerKey, which init_inputs() creates once and
@@ -60,7 +60,7 @@ def main() -> None:
         assert key.is_pressed() is False
         # The physical gesture itself must NOT be cancelled by the reset:
         # the release still needs to classify (SHORT_UP vs HOLD_STOP) and
-        # dispatch to the DOWN-time actions (issue #107).
+        # dispatch to the DOWN-time actions.
         assert key.down_start_time is not None, (
             "load_page must reset only the visual press state, not the "
             "gesture bookkeeping"

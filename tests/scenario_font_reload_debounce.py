@@ -1,5 +1,5 @@
 """
-Unit-tier scenario for the shared font-row reload debounce (gl#78).
+Unit-tier scenario for the shared font-row reload debounce.
 
 `GtkHelper/debounce.py`'s `TrailingDebouncer` is what the four Settings font
 rows (family/size, colour, outline width, outline colour) now share instead
@@ -11,9 +11,9 @@ Covers:
   (b) a trigger raised while a fire is pending re-arms the timer (trailing,
       not leading): the pending handle is cancelled and a fresh full-length
       one takes its place.
-  (c) THE !100 CONSTRAINT: any trigger is eventually followed by a fire.
+  (c) THE NEVER-ELIDE CONSTRAINT: any trigger is eventually followed by a fire.
       The font-defaults -> reload_all_pages -> create_n_states path is what
-      rebuilds every LabelManager, and the !100 label memos treat that
+      rebuilds every LabelManager, and the label memos treat that
       rebuild as their pixel-correctness guarantee, so the debounce may
       DELAY the reload but must never ELIDE it. Checked across the shapes a
       dedupe/early-return regression would break: repeated identical
@@ -114,7 +114,7 @@ def check_trigger_during_window_rearms() -> None:
 
 
 def check_callback_always_fires_after_any_trigger() -> None:
-    """The !100 constraint: DELAY the reload, never ELIDE it."""
+    """The never-elide constraint: DELAY the reload, never ELIDE it."""
     # 1. Repeated *identical* triggers still fire. The debouncer carries no
     #    value at all, so there is nothing an equality check could dedupe
     #    against -- this pins that property.
@@ -270,7 +270,7 @@ def check_font_rows_route_through_the_group() -> None:
     assert "self.reload_debouncer.trigger" in _called_names(request), (
         "FontPageGroup.request_page_reload bypasses the debouncer"
     )
-    # The !100 never-elide invariant, enforced structurally (review M-1): the
+    # The never-elide invariant, enforced structurally: the
     # trigger must be UNCONDITIONAL. Any If/Return in the body is the
     # "skip the reload when nothing changed" optimization that silently
     # breaks the label memos' correctness contract -- the reload may be

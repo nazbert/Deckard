@@ -1,6 +1,5 @@
 """
-Scenario: the input-event pipeline (press/dial/touch -> action delivery),
-issue #58.
+Scenario: the input-event pipeline (press/dial/touch -> action delivery).
 
 The injection API (FaultyFakeDeck.fire_key_event / fire_dial_event /
 fire_touchscreen_event) was dead code at audit time: zero scenarios fired any

@@ -1,5 +1,5 @@
 """
-Regression test for gl#23 -- auto-update could replace an installed plugin
+Regression test -- auto-update could replace an installed plugin
 with an incompatible version, exercised WITHOUT network:
 
 When no compatible version exists, prepare_plugin pins the newest

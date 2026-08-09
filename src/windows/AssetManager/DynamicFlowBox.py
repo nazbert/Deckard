@@ -152,7 +152,7 @@ class DynamicFlowBox(Gtk.Box):
                 break
             if i < len(page_items):
                 # Bind BEFORE showing: the child only ever becomes
-                # clickable already carrying its new asset. Guarded (#197):
+                # clickable already carrying its new asset. Guarded:
                 # one poison item must not abort the rest of the rebind --
                 # and a child whose bind failed must stay hidden, or it
                 # would be clickable with the PREVIOUS page's asset.

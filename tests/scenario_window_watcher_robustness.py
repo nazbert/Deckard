@@ -1,5 +1,5 @@
 """
-Regression scenario for #44: the window-based auto-page-switch machinery
+Regression scenario: the window-based auto-page-switch machinery
 must survive a deck without a page and an exception inside one watcher
 iteration.
 
@@ -132,7 +132,7 @@ def check_pageless_deck_routing() -> None:
 
 def check_pageless_guard_is_a_clean_noop() -> None:
     """Part 1 routes through on_active_window_changed, whose per-deck
-    try/except (the #104 restructure) also swallows the pre-fix
+    try/except (the per-deck restructure) also swallows the pre-fix
     active_page.json_path deref -- so Part 1 alone stays green even if the
     None-guard is deleted, and cannot red-test the guard on its own.
 
@@ -140,7 +140,7 @@ def check_pageless_guard_is_a_clean_noop() -> None:
     no surrounding try/except) so the guard's own effect is what is under
     test: with the guard, a pageless deck is a clean no-op; without it the
     deref raises straight out to here. Flips red iff the None-guard
-    specifically is removed, independent of #104's isolation."""
+    specifically is removed, independent of that per-deck isolation."""
     deck_manager = fixtures.install_stub_globals()
 
     pageless = StubWGDeckController("HOTPLUG", active_page=None,
@@ -200,7 +200,7 @@ class ScriptedX11:
 
 class RecordingGrabber:
     """Records routed windows; raises on the marked one, like the real
-    WindowGrabber did for a pageless deck (#44)."""
+    WindowGrabber did for a pageless deck."""
 
     def __init__(self, raise_on_class: str):
         self.calls: list[Window] = []
@@ -249,7 +249,7 @@ def check_x11_watcher_survives() -> None:
 
 
 def check_gnome_install_extension_uuid() -> None:
-    """#185: the GNOME integration asked for its shell extension with the
+    """The GNOME integration asked for its shell extension with the
     uuid wrapped in a LIST -- unmarshallable against InstallRemoteExtension's
     "(s)" signature (it would raise the moment anything called it), and never
     equal to any entry of get_installed_extensions() either, so the

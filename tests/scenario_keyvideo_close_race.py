@@ -1,5 +1,5 @@
 """
-Unit-tier scenario for issue #19: InputVideo.close() racing a concurrent
+Unit-tier scenario: InputVideo.close() racing a concurrent
 get_next_frame().
 
 close() (called from load/teardown threads via close_resources()) used to

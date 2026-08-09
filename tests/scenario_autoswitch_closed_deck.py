@@ -1,6 +1,6 @@
 """
 Regression test for "auto-page-switch regex changes require deck
-disable/enable" (issue #104) -- the handler-abort half.
+disable/enable" -- the handler-abort half.
 
 WindowGrabber.on_active_window_changed used `return` where it needed to
 skip: as soon as one closed/disabled deck was encountered on a regex match
@@ -10,7 +10,7 @@ deck plus one enabled auto-change page whose regex matched the foreground
 window was enough to kill auto-switching everywhere; re-enabling the deck
 "fixed" it, which is exactly the reported symptom.
 
-(The other half of #104 -- the saved regex being erased from disk by a stale
+(The other half -- the saved regex being erased from disk by a stale
 cached Page.save() -- is covered by scenario_page_settings_sync.)
 
 Repro: two headless controllers, the FIRST one's deck reporting closed, an
@@ -68,7 +68,7 @@ def main() -> None:
         )
         print("PASS: non-matching window change handled with a closed deck present")
 
-        # Review round 1 (#104): per-deck exception isolation. A deck that
+        # Per-deck exception isolation. A deck that
         # passes the loop-top is_open() check but raises mid-body (narrow
         # teardown race: close() flips is_open() after the check) must not
         # abort auto-switching for the decks after it -- and must not let the

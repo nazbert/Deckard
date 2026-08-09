@@ -1,11 +1,11 @@
 """
-Scenario: three small guards (issues #14, #16, #127).
+Scenario: three small guards.
 
-  #14: Page.set_media_fps live-applied to matching inputs on ALL
+  (a): Page.set_media_fps live-applied to matching inputs on ALL
        controllers -- editing one page's FPS row rebased the playing video
        timeline on another deck showing a DIFFERENT page. Now filtered by
        active page, like update_input.
-  #16: mark_page_ready_to_clear dereferenced active_page at call time; a
+  (b): mark_page_ready_to_clear dereferenced active_page at call time; a
        page switch during a slow on_tick left the OLD page pinned
        ready_to_clear=False forever (unevictable). The bracket now captures
        the page at the False-call and resets that same object. Covered three
@@ -14,7 +14,7 @@ Scenario: three small guards (issues #14, #16, #127).
        evicted -- the whole point of the fix); and the real key-handler path
        (event_callback 3706/3737) with a press-triggered page change landing
        mid-bracket.
-  #127: initialize_actions' bare check-then-set on on_ready_called let two
+  (c): initialize_actions' bare check-then-set on on_ready_called let two
        concurrent load_page(samePage) calls both claim the same action --
        a second concurrent on_ready (duplicate backends). The claim is now
        atomic under a per-page lock. Made deterministic with a
@@ -114,7 +114,7 @@ def check_ready_to_clear_repoint(controller) -> int:
 
 def _make_claim_probe(barrier):
     """Builds a barrier-rendezvous ActionCore probe and returns the instance.
-    Shared by both #127 tests (load_page-vs-load_page and the reload path) so
+    Shared by both ready-claim tests (load_page-vs-load_page and the reload path) so
     they drive the SAME deterministic interleave.
 
     The probe subclasses ActionCore (get_all_actions filters on isinstance) but
@@ -196,7 +196,7 @@ def check_atomic_ready_claim(controller) -> int:
 
 
 def check_atomic_ready_claim_reload_path(controller) -> int:
-    """#127, second entry point: Page.load() calls initialize_actions() at
+    """Ready-claim, second entry point: Page.load() calls initialize_actions() at
     Page.py:214 when this page is already active (reload picks up newly-added
     actions). The issue only named the load_page path; the fix's per-page lock
     is at the claim site, so it covers the reload trigger too -- assert it. A
@@ -248,7 +248,7 @@ def check_atomic_ready_claim_reload_path(controller) -> int:
 
 
 def check_ready_to_clear_evicts_end_to_end(controller) -> int:
-    """#16, end-to-end: the point of the fix is not the flag value in isolation
+    """ready_to_clear, end-to-end: the point of the fix is not the flag value in isolation
     -- it's that a page which was mid-work (marked ready_to_clear=False, then
     correctly reset) becomes EVICTABLE again via clear_old_cached_pages. Fill
     the cache past max_pages so a non-active, older page is eligible; put it
@@ -281,7 +281,7 @@ def check_ready_to_clear_evicts_end_to_end(controller) -> int:
             gl.page_manager.get_page(seed_page(name), controller)
 
         # Run the tick bracket ON pinned_page, with a page switch landing
-        # mid-work (exactly the slow-on_tick interleave issue #16 describes):
+        # mid-work (exactly the slow-on_tick interleave described above):
         # capture at the False-call, swap active_page away, reset via the
         # captured page at the True-call.
         controller.active_page = pinned_page
@@ -325,7 +325,7 @@ def check_ready_to_clear_evicts_end_to_end(controller) -> int:
 
 
 def check_ready_to_clear_key_handler(controller) -> int:
-    """#16, key-handler path (event_callback 3706/3737): a real key press that
+    """ready_to_clear, key-handler path (event_callback 3706/3737): a real key press that
     triggers a page change lands the switch BETWEEN the False-call and the
     True-call. Drive the real ControllerKey.event_callback and inject the page
     switch at self.update() (line 3709, between the bracket's two calls). The

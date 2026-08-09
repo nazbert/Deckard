@@ -43,8 +43,8 @@ def _quarantine_corrupt_json(file_path: str, context: str, error: Exception) -> 
     """Move an APP-WRITTEN plugin JSON file that failed to DECODE aside, loudly.
 
     The same failure class SettingsManager.load_settings_reporting_corruption
-    handles for pages/app settings (issue #32), applied to the disjoint
-    plugin file set (issue #152). A file whose content cannot be parsed is
+    handles for pages/app settings, applied to the disjoint plugin file set.
+    A file whose content cannot be parsed is
     indistinguishable from "no settings" to every caller, so it used to sit
     in place until the next set_settings()/save overwrote the only surviving
     copy of the user's plugin configuration -- silent data loss on top of a
@@ -69,7 +69,7 @@ def _quarantine_corrupt_json(file_path: str, context: str, error: Exception) -> 
     if moved:
         log.error(f"{context} {file_path} contains invalid JSON: {error} -- preserved at {dest}")
         # Bounded retention, scoped to this one file and only on the path that
-        # just added a sidecar -- no startup-wide sweep (#152). The copy just
+        # just added a sidecar -- no startup-wide sweep. The copy just
         # made is protected: it inherits the corrupt primary's mtime, which
         # can be older than every sidecar already on disk.
         for pruned in prune_corrupt_sidecars(file_path, protect=dest):
@@ -172,7 +172,7 @@ class PluginBase(rpyc.Service):
         registration and the store -- not the folder name: a plugin whose
         folder name differs from its id (or changes between installs, e.g.
         store install vs. git clone) used to lose its settings on every
-        reinstall (issue #102). Settings written by earlier versions under
+        reinstall. Settings written by earlier versions under
         the folder-name path are migrated once, the first time the plugin
         constructs with an id-diverging folder name.
 
@@ -203,12 +203,12 @@ class PluginBase(rpyc.Service):
                         f"(used) and {folder_dir} (ignored, left in place)"
                     )
             elif os.path.isfile(folder_settings):
-                # Visibility for the quarantine/legacy interplay (#152): if the
+                # Visibility for the quarantine/legacy interplay: if the
                 # id-path settings were quarantined, that file is GONE and this
                 # branch fires, migrating the old folder-name settings in --
                 # so a corruption silently resurrects pre-rename configuration
                 # instead of starting empty. Whether that is the right outcome
-                # is a #102-adjacent design question and deliberately NOT
+                # is an open design question and deliberately NOT
                 # decided here; it must not happen invisibly in the meantime.
                 try:
                     quarantined = sorted(
@@ -620,7 +620,7 @@ class PluginBase(rpyc.Service):
             except ValueError as e:
                 # Corrupt, not merely unreadable: move it aside so the next
                 # set_settings() cannot overwrite the only copy that is left
-                # (plugin settings have no backup to heal from -- #152).
+                # (plugin settings have no backup to heal from).
                 # ValueError rather than JSONDecodeError: a file of garbage
                 # bytes raises UnicodeDecodeError while decoding, which is a
                 # ValueError but NOT a JSON error, so it used to escape every
@@ -772,7 +772,7 @@ class PluginBase(rpyc.Service):
                         content = json.load(f)
                 except ValueError as e:
                     # THE data-loss moment: the atomic write below replaces the
-                    # corrupt file wholesale. Preserve it first (#152).
+                    # corrupt file wholesale. Preserve it first.
                     _quarantine_corrupt_json(
                         self.settings_path,
                         f"Plugin {self.plugin_name or self.PATH}: settings file",
@@ -807,7 +807,7 @@ class PluginBase(rpyc.Service):
         Adds a CSS stylesheet to the application's style context.
 
         Marshalled onto the GTK main loop: plugins call this from __init__,
-        which runs on a store worker thread on the install path (issue #35),
+        which runs on a store worker thread on the install path,
         and provider construction / style-context mutation are
         main-thread-only. Inline (zero-cost) when already on main.
 
@@ -848,7 +848,7 @@ class PluginBase(rpyc.Service):
         Returns a Gtk.Image widget with the icon "view-paged".
 
         Marshalled onto the GTK main loop for the same reason as
-        add_css_stylesheet and ActionHolder's default icon (issue #35): GTK4
+        add_css_stylesheet and ActionHolder's default icon: GTK4
         is main-thread-only, and while the sole in-tree caller
         (ActionChooser) is on main, a plugin override reachable from an
         off-main path would otherwise build a widget off-main -- the
@@ -965,7 +965,7 @@ class PluginBase(rpyc.Service):
         # Deliberate stop (deactivation/unload route here explicitly, and an
         # rpyc drop lands here too): disarm a still-armed registration
         # watchdog so the terminate below isn't reported as "backend exited
-        # before registering" (#117 review round 1).
+        # before registering".
         self._backend_stop_requested = True
         self._release_backend_resources()
 
@@ -1045,7 +1045,7 @@ class PluginBase(rpyc.Service):
         Raises:
             ValueError: if backend_path is None or missing, or venv_path is
                 given but missing. This validation used to live only on
-                ActionCore.launch_backend (#56); a bad path here previously
+                ActionCore.launch_backend; a bad path here previously
                 went straight to Popen as garbage.
 
         Returns:
@@ -1056,7 +1056,7 @@ class PluginBase(rpyc.Service):
         self.start_server()
         port = self.server.port
 
-        # Validates the paths (#56) and yields argv, not a shell string (#172).
+        # Validates the paths and yields argv, not a shell string.
         command = build_backend_launch_command(backend_path, venv_path, port, open_in_terminal)
 
         log.info(f"Launching backend: {command}")
@@ -1076,7 +1076,7 @@ class PluginBase(rpyc.Service):
             # rpyc-connect back and call register_backend) and the bounded
             # wait above gives up after ~0.3s. At boot that window is
             # routinely missed -- keep watching so the gap is visible
-            # instead of silently leaving self.backend None (issue #117).
+            # instead of silently leaving self.backend None.
             self._watch_backend_registration(self.backend_process, self._backend_launch_gen)
 
     def _watch_backend_registration(self, process: subprocess.Popen, launch_gen: int, timeout: float = 30.0) -> None:
@@ -1191,7 +1191,7 @@ class PluginBase(rpyc.Service):
         __init__ runs during (and blocks) startup, and an action's on_ready
         never fires while no deck is connected, so backends launched from
         either can leave the first hardware presses inert after an
-        autostart boot (issue #117). Runs on a background thread -- do not
+        autostart boot. Runs on a background thread -- do not
         touch GTK directly. Default: no-op.
         """
         pass

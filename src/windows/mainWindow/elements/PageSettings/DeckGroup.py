@@ -276,7 +276,7 @@ class Screensaver(Adw.PreferencesRow):
         overwrite = page_dict.get("screensaver", {}).get("overwrite", False)
         enable = page_dict.get("screensaver", {}).get("enable", False)
         path = page_dict.get("screensaver", {}).get("path", None)
-        loop = page_dict.get("screensaver", {}).get("loop", True)  # #204
+        loop = page_dict.get("screensaver", {}).get("loop", True)  # default: loop on
         fps = page_dict.get("screensaver", {}).get("fps", 30)
         time = page_dict.get("screensaver", {}).get("time-delay", 5)
         brightness = page_dict.get("screensaver", {}).get("brightness", 75)

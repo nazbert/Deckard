@@ -1,6 +1,6 @@
 """
 Scenario: corrupt-but-present JSON must not become silent data loss
-(issue #32, read side -- the write side landed with the atomic-write seam).
+(read side -- the write side landed with the atomic-write seam).
 
 Four sites, all against the real code:
 
@@ -13,8 +13,8 @@ Four sites, all against the real code:
      sitting in place waiting to be overwritten by the next save.
   3. Migrator.get_settings on a torn migrations.json: pre-fix the raw
      json.load raised out of run_migrators and aborted startup; post-fix it
-     quarantines and reports all migrations pending (safe to re-run since
-     #30/#31).
+     quarantines and reports all migrations pending (safe to re-run, since
+     the migrators are idempotent).
   4. remove_asset_from_all_pages with one poison page: pre-fix the raw
      json.load aborted the sweep for every remaining page; post-fix the
      poison page skips and the healthy page is still cleaned.

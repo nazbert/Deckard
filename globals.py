@@ -149,7 +149,7 @@ app_version: str = "1.5.0-beta.15"  # In breaking.feature.fix-state format
 exact_app_version_check: bool = False
 
 # Deckard fork release version, stamped into the root VERSION file by the CI
-# release pipeline (issue #128). Kept DISTINCT from app_version above -- that one
+# release pipeline. Kept DISTINCT from app_version above -- that one
 # stays upstream-aligned so plugin `min_app_version` gates and the migration
 # system keep working; deckard_version is purely the number shown to users in the
 # About dialog. Resolved from the repo root beside this file so it works for both

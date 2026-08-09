@@ -123,7 +123,7 @@ class KeyGrid(Gtk.Grid):
         """Our sibling screenbar, found by walking up the widget tree.
 
         Duck-typed on purpose: importing DeckStackChild/DeckConfig here would
-        be a cycle, and since #141 the engine no longer caches the child for
+        be a cycle, and the engine no longer caches the child for
         us to borrow. Allowed to fail: during __init__ this grid is not in the
         widget tree yet (DeckConfig.build appends the grid before the
         screenbar exists), so the touchscreen replay defers to ScreenBar's own
@@ -308,7 +308,7 @@ class KeyButton(Gtk.Frame):
         internal_path = gl.asset_manager_backend.add_custom_media_set_by_ui(url=url, path=path)
         # Anything that is not a path IS a refusal: the import used to answer
         # a rejected url with -1, which slipped past an `is None` test and
-        # landed in the key's media path (#191).
+        # landed in the key's media path.
         if not isinstance(internal_path, str) or internal_path == "":
             return False
 
@@ -369,7 +369,7 @@ class KeyButton(Gtk.Frame):
         # callback: painting a disposed widget crashes GTK.
         try:
             if not self.get_mapped():
-                # Late failure (#141): push_input_image already answered True
+                # Late failure: push_input_image already answered True
                 # for this frame, so the engine did NOT dirty-mark it. Record
                 # the drop here or load_from_changes has nothing to replay on
                 # remap and the preview goes stale.

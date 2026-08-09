@@ -1,5 +1,5 @@
 """
-Integration scenario for issue #129: deleting a page that is some
+Integration scenario: deleting a page that is some
 controller's _screensaver_pending_page must clear the pending request.
 
 remove_page() only handled controllers whose ACTIVE page was the deleted

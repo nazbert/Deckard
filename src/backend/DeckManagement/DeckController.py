@@ -321,7 +321,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _install_fair_transport_lock(deck) -> bool:
-    """Swaps the transport's per-device mutex for a FIFO one (issue #164).
+    """Swaps the transport's per-device mutex for a FIFO one.
 
     The library guards every read, write and feature report of a device with
     `deck.device.mutex`, a stock threading.Lock. Unfair ordering there lets a
@@ -375,7 +375,7 @@ class MediaPlayerThread(threading.Thread):
     # the batch loop in perform_media_player_tasks).
     YIELD_STRIDE = 3
     # Quiet render ticks the page-generation watch owes a new generation
-    # before the quiescence gate may re-engage (issue #144). Small on
+    # before the quiescence gate may re-engage. Small on
     # purpose: these run at full FPS, so the window costs ~100ms of frames
     # per page change made while the user is away.
     GATE_SETTLE_TICKS = 3
@@ -414,7 +414,7 @@ class MediaPlayerThread(threading.Thread):
         # be a starvation defense: the transport serializes all reads and
         # writes of a deck on one mutex, and with an unfair lock a write
         # flood out-raced the 20Hz HID read poll, so dial events arrived
-        # coalesced. The FIFO transport lock (issue #164,
+        # coalesced. The FIFO transport lock (see
         # _install_fair_transport_lock) is the guarantee now -- the reader
         # waits at most for the chunk in flight -- so this cap is only a
         # rate alignment: the same gate drives the repaint DECISION at
@@ -443,12 +443,12 @@ class MediaPlayerThread(threading.Thread):
 
         self.running = False
         self.media_ticks = 0
-        # Ticks that skipped the animation section because the user is away
-        # (issue #144). The assertion handle for the quiescence scenarios and
+        # Ticks that skipped the animation section because the user is away.
+        # The assertion handle for the quiescence scenarios and
         # the hardware driver; `media_ticks - gated_ticks` is the number of
         # ticks that actually rendered.
         self.gated_ticks = 0
-        # Ticks the settle window rendered instead of gating (issue #144).
+        # Ticks the settle window rendered instead of gating.
         # Lives next to gated_ticks so "the render window is open" is
         # observable from outside the loop: a window that never closes is
         # this gate's worst failure mode and would otherwise be invisible --
@@ -469,7 +469,7 @@ class MediaPlayerThread(threading.Thread):
         self.image_tasks: dict[int, MediaPlayerSetImageTask] = {}
         self.touchscreen_task: MediaPlayerSetTouchscreenImageTask | None = None
         # Guards the single-slot task stores against producer/consumer
-        # interleaves (issue #8): the drain's read-then-null on
+        # interleaves: the drain's read-then-null on
         # touchscreen_task and the Clear's get-then-del on image_tasks could
         # both discard a task assigned in between -- and the producer had
         # already stamped _last_enqueued_hash, so static content stayed
@@ -485,8 +485,8 @@ class MediaPlayerThread(threading.Thread):
         self.control_q: collections.deque = collections.deque()
         # Per-writer monotonic stamp counter: image/touchscreen tasks are
         # stamped with next(self._submit_seq) under _slot_lock, atomically
-        # with their slot assignment (add_image_task/add_touchscreen_task --
-        # issue #130: stamping before the lock let racing producers assign
+        # with their slot assignment (add_image_task/add_touchscreen_task:
+        # stamping before the lock let racing producers assign
         # out of seq order, leaving a slot holding an older frame), and a
         # Clear captures the counter at its own submission (next_submit_seq())
         # so it can tell which already-queued frames predate it (plan
@@ -505,21 +505,21 @@ class MediaPlayerThread(threading.Thread):
 
         self.show_fps_warnings = gl.settings_manager.app().enable_fps_warnings
 
-        # Loop-guard state (issue #1): this thread is the sole writer for
+        # Loop-guard state: this thread is the sole writer for
         # paints/brightness/Clear/ClearAndClose -- if it dies the deck is
         # frozen until replug. The guard in run() keeps it alive; these
         # rate-limit its logging so a per-tick failure can't storm the sinks
-        # (local until #91's general limiter exists).
+        # (local, pending a general limiter).
         self._last_tick_error_log: float = 0.0
         self._suppressed_tick_errors: int = 0
 
     def run(self):
         self.running = True
 
-        # The body is guarded (issue #1): an uncaught exception here used to
+        # The body is guarded: an uncaught exception here used to
         # kill the sole writer and permanently freeze the deck. @log.catch on
         # run() would be wrong -- it logs once and RETURNS, dying anyway; the
-        # guard must sit inside the while. #80's threading.excepthook is the
+        # guard must sit inside the while. The central threading.excepthook is
         # complement (reports an escaping death); this prevents the death.
         try:
             while True:
@@ -572,7 +572,7 @@ class MediaPlayerThread(threading.Thread):
             self.running = False
 
     def _open_gate_window(self) -> None:
-        """(Re-)opens the gated render window (issue #144): GATE_SETTLE_TICKS
+        """(Re-)opens the gated render window: GATE_SETTLE_TICKS
         quiet render ticks, and never more than GATE_WINDOW_MAX_S of wall
         clock however busy the task queues stay. Writer thread only."""
         self._gate_render_ticks = self.GATE_SETTLE_TICKS
@@ -606,7 +606,7 @@ class MediaPlayerThread(threading.Thread):
         self.check_resume_gap(start)
         repaint_fired = self.deck_controller._run_pending_repaint()
 
-        # Quiescence gate (issue #144). STRICTLY after the control-queue
+        # Quiescence gate. STRICTLY after the control-queue
         # drain and the _stop check above: quit/clear/brightness must never
         # wait on quiescence. When it holds, this tick skips the whole
         # animation section below -- no background decode/composite, no key/
@@ -690,7 +690,7 @@ class MediaPlayerThread(threading.Thread):
         bg_strip_dirty = False
         video_repaint = False
 
-        # Snapshot once (issue #1 vector b): Background.set_video(None) from
+        # Snapshot once: Background.set_video(None) from
         # another thread must not null this between the check and the reads.
         video = self.deck_controller.background.video
         if video is not None and not gated:
@@ -720,7 +720,7 @@ class MediaPlayerThread(threading.Thread):
 
         # Only iterate keys if there is animated content to update
         if not gated and (video_repaint or self._needs_key_ticks()):
-            # Snapshot + .get (issue #1 vector a): the screensaver swaps the
+            # Snapshot + .get: the screensaver swaps the
             # whole inputs dict from another thread. init_inputs is
             # build-then-swap so any dict we see is complete -- but read
             # `deck_controller.inputs` once per tick and never hard-subscript
@@ -761,7 +761,7 @@ class MediaPlayerThread(threading.Thread):
         # read only mis-picks the target FPS for a single tick, never affects
         # correctness -- the next tick re-reads and self-corrects.
         #
-        # `gated` outranks _cached_needs_ticks deliberately (issue #144): that
+        # `gated` outranks _cached_needs_ticks deliberately: that
         # cache is written by _needs_key_ticks() INSIDE the block the gate
         # skips, so under the gate it holds whatever the last rendering tick
         # saw -- a page with a key video would otherwise spin this loop at 30
@@ -902,11 +902,11 @@ class MediaPlayerThread(threading.Thread):
         # after this Clear survive and paint afterward, which is what makes
         # the queued Clear order-preserving against the caller's
         # clear-then-paint sequence (plan §2.1).
-        # Under _slot_lock (issue #8, Clear half): the per-key get-then-del
+        # Under _slot_lock (Clear half): the per-key get-then-del
         # could delete a NEWER task assigned in between -- one whose
         # submit_seq contractually survives this Clear. Same for the
         # touchscreen slot (also nulled by clear_media_player_tasks()/close()
-        # from other threads -- issue #1 vector e).
+        # from other threads).
         with self._slot_lock:
             for key in list(self.image_tasks.keys()):
                 task = self.image_tasks.get(key)
@@ -1007,7 +1007,7 @@ class MediaPlayerThread(threading.Thread):
         (Event.set()). The in-module producers (submit_control, add_task,
         add_image_task, add_touchscreen_task, stop) poke `_wake_event`
         directly; this is the public name for external callers with no task
-        to submit -- the presence monitor's transition fan-out (issue #144),
+        to submit -- the presence monitor's transition fan-out,
         whose whole effect is that the NEXT tick evaluates the gate
         differently."""
         self._wake_event.set()
@@ -1038,7 +1038,7 @@ class MediaPlayerThread(threading.Thread):
             controller_touchscreen=controller_touchscreen,
             img_hash=img_hash
         )
-        # Stamp INSIDE the slot lock (issue #130): allocating the seq before
+        # Stamp INSIDE the slot lock: allocating the seq before
         # taking the lock let two racing producers (media tick vs. a dial
         # update on another thread) allocate in one order and assign in the
         # other, leaving the single slot holding the LOWER-seq (older) frame.
@@ -1061,7 +1061,7 @@ class MediaPlayerThread(threading.Thread):
             controller_key=controller_key,
             img_hash=img_hash
         )
-        # Same stamp-inside-the-lock as add_touchscreen_task (issue #130):
+        # Same stamp-inside-the-lock as add_touchscreen_task:
         # the per-key slots have the identical producer-vs-producer shape.
         with self._slot_lock:
             task.submit_seq = self.next_submit_seq()
@@ -1088,8 +1088,8 @@ class MediaPlayerThread(threading.Thread):
 
         # Under _slot_lock: a producer assigning between the read and the
         # null lost its frame -- and with _last_enqueued_hash already
-        # stamped, a static strip stayed stale forever (issue #8, drain
-        # half). clear_media_player_tasks (GTK thread) also nulls this.
+        # stamped, a static strip stayed stale forever (drain half).
+        # clear_media_player_tasks (GTK thread) also nulls this.
         with self._slot_lock:
             touch_task = self.touchscreen_task
             self.touchscreen_task = None
@@ -1113,7 +1113,7 @@ class MediaPlayerThread(threading.Thread):
             if task.page is active_page:
                 task.run()
 
-        # Bulk-batch write pacing, off by default since issue #164: a
+        # Bulk-batch write pacing, off by default: a
         # video-frame repaint lands as a burst of back-to-back writes, and
         # the transport serializes reads and writes of a deck on one mutex,
         # so with an unfair lock the writer could release and immediately
@@ -1161,8 +1161,8 @@ class MediaPlayerThread(threading.Thread):
             min_gap = 1.0 / self._video_write_hz if self._video_write_hz > 0 else 0
             if min_gap and now - self._last_touch_write < min_gap:
                 # Locked check-then-set: a producer assigning a NEWER frame
-                # between the None-check and the putback must win (issue #8;
-                # unguarded, the putback clobbered it with this older frame).
+                # between the None-check and the putback must win (unguarded,
+                # the putback clobbered it with this older frame).
                 with self._slot_lock:
                     if self.touchscreen_task is None:
                         self.touchscreen_task = touch_task
@@ -1173,7 +1173,7 @@ class MediaPlayerThread(threading.Thread):
                 touch_task.run()
 
 class DeckController:
-    # Bound on close() step 6's wait for plugin teardown hooks (issue #12);
+    # Bound on close() step 6's wait for plugin teardown hooks;
     # class-level so the harness can tighten it.
     TEARDOWN_JOIN_TIMEOUT_S = 10.0
 
@@ -1258,7 +1258,7 @@ class DeckController:
         # producer paths (ScreenSaver.show/hide/on_key_change, load_page)
         # that would otherwise resurrect a controller mid-teardown, and makes
         # close() itself idempotent against a second call. The transition is
-        # made under _close_lock (issue #56 item 5): unplug-thread and
+        # made under _close_lock: unplug-thread and
         # app-quit teardown can race, and an unlocked check-then-set let both
         # callers pass the gate and run the teardown sweep -- plugin
         # on_removed hooks and device closes -- concurrently.
@@ -1296,10 +1296,10 @@ class DeckController:
         # (looping background video) skip conversion + JPEG encode.
         self.encode_memo = EncodedImageCache(max_bytes=32 * 1024 * 1024)
         # native_tile_cache: the same natives keyed by FRAME IDENTITY for the
-        # passthrough path (#163) -- a bare key over a video background skips
+        # passthrough path -- a bare key over a video background skips
         # the tobytes+hash too, so a warmed loop costs a dict lookup per key.
         self.native_tile_cache = NativeTileCache(max_bytes=native_tile_cache_max_bytes())
-        # Enrol both in the process-wide image-cache budget (#142): their own
+        # Enrol both in the process-wide image-cache budget: their own
         # caps bound each cache, the budget bounds the SUM across decks --
         # without it, total image-cache RAM scales with deck count and a cold
         # deck's full memo never yields a byte to a hot one. The registry is
@@ -1335,7 +1335,7 @@ class DeckController:
         # guard's except path from the run loop) -- no lock needed, single
         # writer. MUST be initialized before the media thread starts: its
         # very first iteration dereferences _full_repaint_pending. (The loop
-        # is guarded now -- issue #1 -- so an AttributeError here no longer
+        # is guarded now, so an AttributeError here no longer
         # kills the writer, but it would still fail every tick until this
         # init won the race; keep the order.)
         self._had_write_failure: bool = False
@@ -1407,7 +1407,7 @@ class DeckController:
             self.load_default_page()
 
     def init_inputs(self):
-        # Build-then-swap (issue #1 vector a): the media writer reads
+        # Build-then-swap: the media writer reads
         # self.inputs concurrently; filling a live dict in place gives it an
         # empty/partial view (the screensaver-entry KeyError window). Build
         # complete, then publish with one GIL-atomic assignment.
@@ -1487,7 +1487,7 @@ class DeckController:
             # re-pushing the UI reconciles them.
             for i in self.inputs[Input.Key]:
                 try:
-                    # Initial DEVICE paint for opaque keys (issue #11): the
+                    # Initial DEVICE paint for opaque keys: the
                     # per-frame video loop deliberately never repaints keys
                     # whose composed color is fully opaque (their tile hides
                     # the video, nothing changes frame-to-frame) -- but that
@@ -1548,7 +1548,7 @@ class DeckController:
 
     def animations_gated(self) -> bool:
         """Whether this deck's media loop should skip its animation section
-        this tick because nobody is looking (issue #144).
+        this tick because nobody is looking.
 
         Two terms:
           * the process-wide presence signal (`gl.presence_monitor`), which
@@ -1558,7 +1558,7 @@ class DeckController:
           * `not screen_saver.showing`. While the screensaver owns the deck,
             its animation IS the intended visible content -- the physical
             deck is visible even when the monitor is locked -- so the gate
-            never applies to it (issue #144 item d). No per-page logic is
+            never applies to it. No per-page logic is
             needed beyond that: show() already released the underlying
             page's media, so a showing screensaver has nothing else left to
             decode.
@@ -1705,7 +1705,7 @@ class DeckController:
 
     def _register_image_caches(self) -> None:
         """Enrols this deck's two native-image caches with the process-wide
-        budget (#142). Labels carry the serial so a multi-deck rig's
+        budget. Labels carry the serial so a multi-deck rig's
         eviction/thrash logs are attributable; `totals()` sums per group, so
         the telemetry columns stay deck-agnostic."""
         serial = self.serial_number()
@@ -1931,7 +1931,7 @@ class DeckController:
         self.screen_saver.set_media_path(config.get("media-path"))
         self.screen_saver.set_enable(config.get("enable", False))
         self.screen_saver.set_time(config.get("time-delay", 5))
-        # loop defaults ON (issue #204): a screensaver video/GIF whose config
+        # loop defaults ON: a screensaver video/GIF whose config
         # predates the loop toggle used to play exactly one pass and then hold
         # its last frame on-device for the whole idle window -- a frozen deck,
         # never what "screensaver" means. True is also what every media-layer
@@ -2042,7 +2042,7 @@ class DeckController:
             for i in self.inputs[t]:
                 i.close_resources()
 
-        # Sweep the background under _background_load_lock (issue #15,
+        # Sweep the background under _background_load_lock (a known
         # residual): a load_background already inside set_from_path holds this
         # lock while it attaches a fresh BackgroundVideo. Without taking it
         # here, the sweep could run BETWEEN that load's gen-gate and its
@@ -2107,8 +2107,8 @@ class DeckController:
 
             old_path = self.active_page.json_path if self.active_page is not None else None
 
-            # Reset every key's pressed visual BEFORE the generation bump
-            # (#103): press_state lives on the reused ControllerKey and
+            # Reset every key's pressed visual BEFORE the generation bump:
+            # press_state lives on the reused ControllerKey and
             # survives the page swap, so the key that triggered this switch
             # (still physically down) had every new-page render composed
             # through is_pressed() -> shrink_image(), and the release's
@@ -2120,7 +2120,7 @@ class DeckController:
             # guarantees any render stamped with the new generation composes
             # unpressed. Gesture bookkeeping (down_start_time, hold timer,
             # the DOWN-time action snapshot) is deliberately untouched: the
-            # physical release must still dispatch its events (#107).
+            # physical release must still dispatch its events.
             for controller_key in self.inputs.get(Input.Key, []):
                 controller_key.press_state = False
 
@@ -2283,7 +2283,7 @@ class DeckController:
                     for i in self.inputs[t]:
                         i.update()
 
-            # Reset the SAME page the False-call marked (issue #16).
+            # Reset the SAME page the False-call marked.
             self.mark_page_ready_to_clear(True, ticked_page)
 
             end = time.time()
@@ -2317,7 +2317,7 @@ class DeckController:
         re-dereferencing active_page after the work marked whatever page a
         concurrent switch had installed, leaving the OLD page pinned
         ready_to_clear=False forever -- unevictable, silently shrinking the
-        eviction budget (issue #16)."""
+        eviction budget."""
         if page is None:
             page = self.active_page
         if page is not None:
@@ -2389,11 +2389,11 @@ class DeckController:
             self.load_page(self.active_page, allow_reload=True)
     
     def get_own_deck_stack_child(self):
-        """Deprecated in-process shim (#141): kept for out-of-tree plugins.
+        """Deprecated in-process shim: kept for out-of-tree plugins.
 
         The engine no longer caches or resolves widgets -- the attached UI
         owns the controller->child binding (by object identity at add_page
-        time, issue #156, never by matching a re-read serial against a stack
+        time, never by matching a re-read serial against a stack
         child's name). Returns None when no UI is attached.
         """
         return ui_port.get().query_deck_widget(self, "deck_stack_child")
@@ -2438,7 +2438,7 @@ class DeckController:
         self.media_player.submit_control(ClearMsg(seq=seq))
 
     def get_own_key_grid(self):
-        """Deprecated in-process shim (#141) -- see get_own_deck_stack_child."""
+        """Deprecated in-process shim -- see get_own_deck_stack_child."""
         return ui_port.get().query_deck_widget(self, "key_grid")
     
     def clear_media_player_tasks(self, gen=None):
@@ -2450,7 +2450,7 @@ class DeckController:
                 return
             self.media_player.tasks.clear()
             # Under the writer's slot lock so this can't interleave with the
-            # drain's read-then-null or a producer's assignment (issue #8).
+            # drain's read-then-null or a producer's assignment.
             with self.media_player._slot_lock:
                 self.media_player.image_tasks.clear()
                 self.media_player.touchscreen_task = None
@@ -2478,7 +2478,7 @@ class DeckController:
         + caches); the rest of the sequence (device/thread/registration
         teardown) always runs.
         """
-        # Locked compare-and-set (issue #56 item 5): two teardown callers
+        # Locked compare-and-set: two teardown callers
         # (USB unplug thread vs. app-quit main thread) racing the unlocked
         # check-then-set could both pass the gate and run the whole sweep
         # concurrently -- duplicate plugin on_removed hooks, double device
@@ -2489,7 +2489,7 @@ class DeckController:
                 return
             self._closing = True
 
-        # Invalidate any in-flight page load NOW (issue #15): a load_page
+        # Invalidate any in-flight page load NOW: a load_page
         # that already passed the _closing gate could otherwise attach a
         # fresh BackgroundVideo (cv2 capture + registry ref + possible
         # builder thread) AFTER step 7's resource sweep -- leaked until
@@ -2570,7 +2570,7 @@ class DeckController:
         # run_on_main here would block it. Device hygiene (steps 1-5, 7-9)
         # is what matters at quit, not plugin notification.
         #
-        # Bounded (issue #12): a wedged plugin teardown hook (pulsectl
+        # Bounded: a wedged plugin teardown hook (pulsectl
         # precedent) used to strand this thread inside step 6 forever --
         # steps 7-9 (media sweep, fallback deck.close, deregistration) never
         # ran, the unplug leak returned, and _closing=True made a retry a
@@ -2874,7 +2874,7 @@ class Background:
 
     def _discard_prebuilt(self, kind: str, payload) -> None:
         """Release the resources a prebuilt-but-never-applied payload holds
-        (issue #15, residual): a "video"/"image" payload already opened its
+        (a known residual): a "video"/"image" payload already opened its
         cv2 capture / retained its PIL image in prebuild_from_path. Dropping
         the object without closing it leaks that handle. "keep"/"noop"/"blank"
         carry no fresh resource, so they are no-ops here."""
@@ -2894,7 +2894,7 @@ class Background:
         generation re-check already done; no file I/O happens here, only
         object assignment + the same update_all_inputs() fan-out set_video/
         set_image already trigger."""
-        # Authoritative close-vs-load guard (issue #15, residual): a
+        # Authoritative close-vs-load guard (a known residual): a
         # load_background that already passed load_background's
         # _page_is_current(gen) gate before close() bumped the generation is
         # in-flight HERE with a freshly prebuilt payload -- prebuild_from_path
@@ -3283,7 +3283,7 @@ class GifBudgetExceeded(Exception):
     instead of risking an OOM on a pathological many-frame GIF."""
 
 
-# RAM ceiling for a fully-decoded GIF background (issue #196). One constant,
+# RAM ceiling for a fully-decoded GIF background. One constant,
 # no new cache layer: GifBackground estimates n_frames x W x H x 4 against it
 # at open and falls back to the opaque cv2 path when over. 128MB covers
 # ~200 canvas frames on an SD+ (~600KB each) / ~90 on an XL (~1.4MB each) --
@@ -3291,12 +3291,12 @@ class GifBudgetExceeded(Exception):
 # what the old unbounded cv2 canvas pool used to swallow (mem-plan §3).
 GIF_BG_BUDGET_MB = 128
 
-# Per-GIF ceiling for a KEY's retained RGBA frame list (issue #201). Only
+# Per-GIF ceiling for a KEY's retained RGBA frame list. Only
 # alpha-carrying GIFs build one at all -- opaque ones play off the mp4 tile
 # cache at O(1) RAM -- so this bounds the exception, not the common case.
 # 32MB is ~220 frames at 2x an SD+ tile / ~110 at 2x an XL tile: far beyond
 # the looping badges and spinners this feature targets, and small enough that
-# a pathological page cannot outweigh the whole #142 budget by itself.
+# a pathological page cannot outweigh the whole image-cache budget by itself.
 GIF_KEY_BUDGET_MB = 32
 
 # Cache-file variant for the over-budget ladder's artifact (see
@@ -3434,7 +3434,7 @@ class GifTimeline:
     wall-clock edges, and the source dimensions.
 
     This is what a KeyGIF needs when the pixels come from somewhere else --
-    a tile cache PIL already wrote on an earlier page load (issue #201).
+    a tile cache PIL already wrote on an earlier page load.
     Timing authority always lives here, never in the video container."""
     n_frames: int
     frame_delays: "list[int]"
@@ -3495,7 +3495,7 @@ def frame_has_alpha(frame: Image.Image) -> bool:
     against the previous frame (disposal 1) declares the index purely to
     mean "leave this pixel alone". Routing on the declaration therefore
     stranded ~64% of real GIFs on the expensive path for nothing, which is
-    why v2 asks the pixels instead (issue #201).
+    why v2 asks the pixels instead.
 
     One C-level extrema pass per frame (min alpha over the band); the caller
     stops asking once the answer is yes."""
@@ -3594,7 +3594,7 @@ def decode_gif_frames(path: str, max_size: "tuple[int, int]" = None,
 
 
 class GifBackground:
-    """RGBA GIF provider for deck/strip backgrounds (issue #196).
+    """RGBA GIF provider for deck/strip backgrounds.
 
     Satisfies the contract BackgroundVideo (the cv2/mp4 canvas cache)
     exposes to the compositor -- get_next_tiles() -> (entries, identity)
@@ -3686,7 +3686,7 @@ class GifBackground:
         # Frame identity for the passthrough-key native-encode memo
         # (Background.get_identified_tile consumers): (md5, frame index),
         # the exact BackgroundVideo contract, so steady-state loop playback
-        # is a dict lookup + USB write per key (#163).
+        # is a dict lookup + USB write per key.
         self.video_md5 = get_video_md5(gif_path)
 
         self.active_frame: int = -1
@@ -3806,7 +3806,7 @@ class KeyGIF(SingleKeyAsset):
     """Animated-GIF provider for one key, playing its own per-frame delay
     timeline.
 
-    Holds its frames one of two ways (issue #201):
+    Holds its frames one of two ways:
 
       * OPAQUE GIF -> the shared mp4 tile registry (mp4_tile_cache): one
         refcounted cache file per (source, size, saturation), one reader
@@ -3836,8 +3836,8 @@ class KeyGIF(SingleKeyAsset):
     delays only and attaches a reader, decoding no pixels at all.
 
     With `performance.cache-videos` off there is no disk cache to route to,
-    so every GIF stays on the frame list -- exactly the pre-#201 behavior,
-    and no GIF ever reaches the registry.
+    so every GIF stays on the frame list and no GIF ever reaches the
+    registry.
 
     Either way the TIMELINE is PIL's: wall-clock picking over the cumulative
     per-frame delays, so an irregularly-timed GIF plays at its own rhythm
@@ -3866,7 +3866,7 @@ class KeyGIF(SingleKeyAsset):
         self._last_frame_tick: float | None = None
 
         # Serializes close() against an in-flight frame fetch on the video
-        # route -- InputVideo._close_lock's contract (issue #19): a
+        # route -- InputVideo._close_lock's contract: a
         # get_frame() that starts after release() can resurrect a capture
         # through _maybe_adopt_shared_cache and leak it.
         self._close_lock = threading.Lock()
@@ -3899,7 +3899,7 @@ class KeyGIF(SingleKeyAsset):
         self._total_delay: float = 0.0
 
         # No disk cache configured -> nothing to route to. Every GIF keeps
-        # its frame list, exactly as it did before #201, and the registry
+        # its frame list, and the registry
         # never sees a GIF at all: a reader with no artifact to read falls
         # back to decoding the SOURCE, which for a GIF means both FFmpeg's
         # divergent compositing and (with no builder to promote anything) a
@@ -3921,7 +3921,7 @@ class KeyGIF(SingleKeyAsset):
 
         # Raises on a corrupt/truncated file (the header parse), exactly
         # like the decode it precedes -- the construct site fails soft to
-        # InputVideo (issue #199).
+        # InputVideo.
         n_frames, source_size = gif_header_geometry(self.gif_path)
         out_size = tile_video_size(source_size, fit_size)
 
@@ -4001,12 +4001,12 @@ class KeyGIF(SingleKeyAsset):
         return frames, alpha[0]
 
     def _hold_frame_list(self, frames: "list[Image.Image]") -> None:
-        """Keep the decoded frames as this key's per-frame memo (issue
-        #196): the only representation that carries alpha.
+        """Keep the decoded frames as this key's per-frame memo: the only
+        representation that carries alpha.
 
-        Registers the #142 census, accounting-only and only for this route
-        -- the video route's RAM is the reader's, already counted under
-        video_readers. Never evictable: these frames ARE the memo, so
+        Registers with the image-cache census, accounting-only and only for
+        this route -- the video route's RAM is the reader's, already counted
+        under video_readers. Never evictable: these frames ARE the memo, so
         evicting them would re-decode the GIF every media tick."""
         self.frames = frames
         self._frames_bytes = sum(
@@ -4129,7 +4129,7 @@ class KeyGIF(SingleKeyAsset):
         return self._video_frame(index)
 
     def budget_bytes(self) -> int:
-        """Pixel bytes of the retained frame list (#142 census). Computed
+        """Pixel bytes of the retained frame list (image-cache census). Computed
         once at decode time: the list is immutable for this object's life.
         Zero on the video route, which registers nothing here -- its RAM is
         the reader's, counted under video_readers."""
@@ -4201,7 +4201,7 @@ class KeyGIF(SingleKeyAsset):
         """Drops the retained frame list (the whole footprint) and leaves the
         object safely tickable.
 
-        Swaps in fresh EMPTY containers instead of None/del (issue #199): a
+        Swaps in fresh EMPTY containers instead of None/del: a
         media tick can land after close() -- teardown races the media loop --
         and get_next_frame()/get_frame_delay() read len(self.frames) /
         len(self.frame_delays) on every tick, where `None` raised TypeError
@@ -4210,7 +4210,7 @@ class KeyGIF(SingleKeyAsset):
         both no-ops by construction (GifBackground.close()'s pattern -- the
         two providers stay in lockstep).
 
-        Also leaves the #142 census immediately: the frames are gone, so the
+        Also leaves the image-cache census immediately: the frames are gone, so the
         registered byte count must stop being reported rather than linger
         until GC drops the weak registration.
 
@@ -4235,7 +4235,7 @@ class KeyGIF(SingleKeyAsset):
 # detection: textbbox only computes layout (it never touches the pixels), and
 # it matches what the per-key render's own draw context would report --
 # unlike font.getbbox, which is single-line and counts '\n' toward the width
-# (issue #116's phantom-scroll trigger).
+# (the phantom-scroll trigger).
 _label_measure_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
 
 
@@ -4257,7 +4257,7 @@ class _BitmapRecorder:
     target with a solid ink -- cheap. A static label re-runs both on every
     media tick even though only the pixels UNDER it changed. Standing in for
     the draw core while text() runs records step 2's arguments, so later
-    frames can replay the blit with the mask already rasterized (#207).
+    frames can replay the blit with the mask already rasterized.
 
     Everything else is delegated to the real core object -- notably
     draw_ink(), which ImageDraw._getink() calls to resolve the fill colors,
@@ -4336,10 +4336,10 @@ class LabelManager:
         # position -> (cache key, strip image, ax, ay): the label's text +
         # outline rasterized ONCE onto a transparent strip; scroll frames
         # composite a window of it instead of re-running draw.text
-        # (issue #115/#116 -- the per-tick raster was ~2.5ms per key).
+        # (the per-tick raster was ~2.5ms per key).
         self._scroll_strips: dict[str, tuple] = {}
         # position -> (cache key, blit ops | None): the STATIC label's glyph
-        # masks, rasterized once and replayed per frame (issue #207 -- the
+        # masks, rasterized once and replayed per frame (the
         # per-tick draw.text with stroke was ~820us per key, ~50% of the tick
         # on a populated animated page). None ops = this position is pinned
         # to the direct draw (see _draw_static_label).
@@ -4407,7 +4407,7 @@ class LabelManager:
         must call this, or get_scroll_label_widths() keeps returning the old
         overflow set and the render composites a stale strip: a shortened
         label keeps scrolling forever and a lengthened one never starts until
-        a page reload (#115 through the editor, review round 1). Cheap: the
+        a page reload (when the label is edited through the editor). Cheap: the
         widths/visible flags are recomputed lazily and the strip/bbox/static
         dicts are re-keyed on demand."""
         self._bump_label_epoch()
@@ -4532,7 +4532,7 @@ class LabelManager:
         The merge itself is not free: three KeyLabel copies plus
         inject_defaults' nine settings reads measured ~60us per key per media
         tick, paid on every frame of an animated background even though the
-        labels only change when something sets one (#207).
+        labels only change when something sets one.
 
         Invalidation: every label mutation goes through set_page_label /
         set_action_label / clear_labels, or -- for the in-place editor path --
@@ -4653,7 +4653,7 @@ class LabelManager:
         the same multiline-aware textbbox the render path uses, so detection
         can never flag a label the render would draw statically (that
         mismatch kept the media loop at full FPS re-rendering identical
-        frames -- issues #115/#116)."""
+        frames)."""
         # Cache invalidation: label edits go through invalidate_scroll_caches()
         # (set_page_label/set_action_label and the Page.set_label_* setters); a
         # rolling-labels TOGGLE lands via reload_page(), which rebuilds these
@@ -4665,7 +4665,7 @@ class LabelManager:
         #
         # Epoch-stamped like the other latch memos: a store landing after a
         # concurrent edit would otherwise pin the pre-edit overflow set --
-        # exactly #115/#116's "a shortened label keeps scrolling forever".
+        # exactly the "a shortened label keeps scrolling forever" shape.
         memo = self._scroll_widths_cache
         if memo is not None and memo[0] == self._label_epoch:
             return memo[1]
@@ -4709,7 +4709,7 @@ class LabelManager:
         ONLY place scroll state moves -- rendering is pure -- so the hold
         plateaus and the between-step ticks cost integer/time math here
         instead of a full composite that the hash de-dup would throw away
-        anyway (#115)."""
+        anyway."""
         changed = False
         now = time.monotonic()
         available_width = self.get_available_width()
@@ -4818,7 +4818,7 @@ class LabelManager:
         set_label API / hand-edited page JSON, not the color picker) blends
         with straight-alpha OVER here vs PIL's coverage blend in draw.text, so
         the scrolling frame differs slightly from the static draw for those.
-        The static twin (_draw_static_label, #207) caches one layer lower --
+        The static twin (_draw_static_label) caches one layer lower --
         the glyph masks rather than a composited strip -- which is exact for
         any ink, but needs a fixed paste position, so it does not generalize
         back to the sweep."""
@@ -4896,7 +4896,7 @@ class LabelManager:
         outline, alignment, image geometry) -- none of which change between
         media ticks -- yet draw.text() re-rasterized the stroked glyph run
         every frame: ~820us per key, ~50% of the whole tick on a populated
-        page over an animated background (#207). The rasterization is
+        page over an animated background. The rasterization is
         recorded ONCE here (via _BitmapRecorder standing in for the draw
         core) and later frames replay only the mask blits, ~11us.
 
@@ -5430,7 +5430,7 @@ class ControllerInputState:
     @log.catch
     def own_actions_event_callback(self, event: InputEvent, data: dict = None, show_notifications: bool = False, actions: list = None) -> None:
         # `actions` lets the caller pin the dispatch to a list resolved
-        # earlier (ControllerKey's DOWN-time gesture snapshot, #107). By
+        # earlier (ControllerKey's DOWN-time gesture snapshot). By
         # default it's resolved here, when the pool worker actually runs --
         # which reads deck_controller.active_page and therefore tracks any
         # page swap that happened between the event and this dispatch.
@@ -5600,7 +5600,7 @@ class ControllerInput(Generic[StateT]):
         # against action media writes (ActionCore.set_media): a paint must
         # land either fully before the wipe (so the load's stash-and-restore
         # carries it over) or fully after (on the recreated state object) --
-        # never on a destroyed state (issue #131).
+        # never on a destroyed state.
         self._states_lock = threading.RLock()
 
         self.states: dict[int, StateT] = {
@@ -5797,9 +5797,9 @@ class ControllerInput(Generic[StateT]):
     def clear(self, update: bool = True):
         active_state = self.get_active_state()
         # Abstract-by-convention: ControllerKeyState and ControllerTouchScreenState
-        # define clear(); a dial therefore raises AttributeError here. Pre-existing,
-        # reported on #224, not fixed in a type-only change.
-        active_state.clear()  # type: ignore[attr-defined]  # root cause: ControllerDialState has no clear() (DeckController.py, unfixed -- #224)
+        # define clear(); a dial therefore raises AttributeError here.
+        # Pre-existing and still unfixed.
+        active_state.clear()  # type: ignore[attr-defined]  # root cause: ControllerDialState has no clear()
         if update:
             self.update()
 
@@ -5835,13 +5835,13 @@ class ControllerKey(ControllerInput["ControllerKeyState"]):
         super().__init__(deck_controller, ControllerKeyState, ident)
         self.index = ident.get_index(deck_controller)
         # Seed the cached press state from the device so event_callback can diff
-        # against it. key_states() is logical-indexed (rotation map fixed, #17),
+        # against it. key_states() is logical-indexed (rotation applied there),
         # so self.index -- a logical index -- selects this key's own state.
         self.press_state: bool = self.deck_controller.deck.key_states()[self.index]
 
         self.down_start_time: float | None = None
 
-        # DOWN-time gesture snapshot (#107): a (state, actions) pair captured
+        # DOWN-time gesture snapshot: a (state, actions) pair captured
         # when the key went down, or None outside a gesture. The rest of the
         # gesture (HOLD_START, HOLD_STOP/SHORT_UP, UP) dispatches to this
         # snapshot, NOT to whatever the key resolves to at release time --
@@ -5849,7 +5849,7 @@ class ControllerKey(ControllerInput["ControllerKeyState"]):
         # this key's states) synchronously during the DOWN dispatch, which
         # used to send the UP to the NEW page's actions: the old page's
         # actions never saw their release (RunCommand's registered_down
-        # latch then jammed shut, upstream #475) while the new page's
+        # latch then jammed shut) while the new page's
         # actions got a spurious SHORT_UP for a press that wasn't theirs.
         # A single attribute (not one per field) so writers clear it in one
         # atomic store and the hold-timer callback -- which can race the UP
@@ -5912,7 +5912,7 @@ class ControllerKey(ControllerInput["ControllerKeyState"]):
         page = self.deck_controller.active_page
         config_gen = self.config_gen
 
-        # Frame-identity fast path (#163): a passthrough key over a video
+        # Frame-identity fast path: a passthrough key over a video
         # background composites to exactly the shared tile, so its native
         # bytes are a pure function of the frame it came from -- no pixels
         # have to be serialized, hashed or re-encoded to know what belongs
@@ -6034,7 +6034,7 @@ class ControllerKey(ControllerInput["ControllerKeyState"]):
         # Rolling labels advance their state here, on the tick, whether or
         # not anything else forces a repaint (rendering is pure); the key
         # only re-renders when a scroll offset visibly moved, instead of 30x
-        # a second producing frames the hash de-dup discards (#115/#116).
+        # a second producing frames the hash de-dup discards.
         scroll_moved = False
         if state.label_manager.get_has_scroll_labels():
             scroll_moved = state.label_manager.tick_scroll_labels()
@@ -6085,7 +6085,7 @@ class ControllerKey(ControllerInput["ControllerKeyState"]):
         active_state = self.get_active_state()
         if press_state: # Key down
             self.down_start_time = time.time()
-            # Snapshot the state and its resolved actions NOW (#107, see
+            # Snapshot the state and its resolved actions NOW (see
             # __init__): every event of this gesture -- including this DOWN,
             # which otherwise resolves actions only when the pool worker
             # runs -- goes to the actions that were on the key when the
@@ -6134,7 +6134,7 @@ class ControllerKey(ControllerInput["ControllerKeyState"]):
             # still-armed hold timer or pinned snapshot from that orphaned
             # DOWN must not outlive the physical release.
             self.cancel_gesture()
-        # Reset the SAME page the False-call marked (issue #16) -- a press
+        # Reset the SAME page the False-call marked -- a press
         # that triggers a page change would otherwise pin the old page.
         self.deck_controller.mark_page_ready_to_clear(True, pressed_page)
 
@@ -6293,8 +6293,8 @@ class ControllerKey(ControllerInput["ControllerKeyState"]):
 
         # create_n_states destroys every state object, closing any action-set
         # media; afterwards only on_update() can repaint, and an action that
-        # dedups there never does -- the key settled permanently blank (issue
-        # #131). Detach action-owned media (plus its action layout) before the
+        # dedups there never does -- the key settled permanently blank.
+        # Detach action-owned media (plus its action layout) before the
         # wipe and restore it only when the exact action object that painted
         # it still drives the recreated state: a same-page reload reuses the
         # action objects (identity match -> restore, no blank), a cross-page
@@ -6404,8 +6404,8 @@ class ControllerKey(ControllerInput["ControllerKeyState"]):
                             # truncated GIF, where InputVideo's detached cv2
                             # builder fails soft. Unguarded, one bad asset in a
                             # page's config took the whole page load down with
-                            # it (issue #199) -- the set_media route got this
-                            # try/except in !93, this one did not. Same policy,
+                            # it. The set_media route already had this
+                            # try/except; this one did not. Same policy,
                             # same fallback: the opaque cv2 path.
                             #
                             # Scope, stated honestly: this contains the
@@ -6490,7 +6490,7 @@ class ControllerKey(ControllerInput["ControllerKeyState"]):
 
 
     def get_own_ui_key(self):
-        """Deprecated in-process shim (#141): the attached UI resolves its own
+        """Deprecated in-process shim: the attached UI resolves its own
         widget for this input. None when headless."""
         return ui_port.get().query_input_widget(self.deck_controller, self.identifier)
     
@@ -6556,7 +6556,7 @@ class ControllerTouchScreen(ControllerInput["ControllerTouchScreenState"]):
         if self.deck_controller.screen_saver.showing:
             return False
         state = self.get_active_state()
-        # Snapshot (issue #1 vector d): _release_background_video() nulls
+        # Snapshot: _release_background_video() nulls
         # this from compositing threads between the check and the .fps read.
         bg_video = None if state is None else state.background_video
         if bg_video is None:
@@ -6622,7 +6622,7 @@ class ControllerTouchScreen(ControllerInput["ControllerTouchScreenState"]):
         # to keep). But the default dispatch resolves the target actions
         # against active_page when the pool worker runs, so a page swap in
         # the event->worker window used to redirect the event to the new
-        # page's actions (#123, same window as the dial TURN case). Resolve
+        # page's actions (the same window as the dial TURN case). Resolve
         # at READ time instead, here on the deck's input thread.
         active_state = self.get_active_state()
         if event_type == TouchscreenEventType.DRAG:
@@ -6675,15 +6675,15 @@ class ControllerDial(ControllerInput["ControllerDialState"]):
 
         self.down_start_time: float | None = None
 
-        # DOWN-time gesture snapshot (#123) -- the dial twin of
-        # ControllerKey._gesture (#107, see its __init__ for the full
+        # DOWN-time gesture snapshot -- the dial twin of
+        # ControllerKey._gesture (see its __init__ for the full
         # rationale): a (state, actions) pair captured when the dial went
         # down, or None outside a gesture. The gesture tail (HOLD_START,
         # HOLD_STOP/SHORT_UP, UP) dispatches to this snapshot, not to
         # whatever the dial resolves to at release time -- a ChangePage on
         # this dial's DOWN swaps active_page mid-gesture, which used to send
         # the tail to the NEW page's dial actions (jamming EasyCommand's
-        # registered_down latch exactly like upstream #475). Single attribute
+        # registered_down latch the same way). Single attribute
         # so writers clear it in one atomic store and the hold-timer callback
         # reads a coherent pair or None, never a torn half.
         self._gesture: tuple | None = None
@@ -6740,7 +6740,7 @@ class ControllerDial(ControllerInput["ControllerDialState"]):
         if event_type == DialEventType.PUSH:
             if value:
                 self.down_start_time = time.time()
-                # Snapshot the state and its resolved actions NOW (#123, see
+                # Snapshot the state and its resolved actions NOW (see
                 # __init__): every event of this gesture -- including this
                 # DOWN, which otherwise resolves actions only when the pool
                 # worker runs -- goes to the actions that were on the dial
@@ -6787,7 +6787,7 @@ class ControllerDial(ControllerInput["ControllerDialState"]):
                 self.cancel_gesture()
 
         elif event_type == DialEventType.TURN:
-            # Resolve the target actions at READ time (#123): a turn is a
+            # Resolve the target actions at READ time: a turn is a
             # single event, but the default dispatch resolves against
             # active_page when the pool worker runs -- a page swap in that
             # window used to redirect the turn to the new page's actions.
@@ -6915,7 +6915,7 @@ class ControllerDial(ControllerInput["ControllerDialState"]):
         if state is None:
             return False
         # Rolling labels advance here on the tick (rendering is pure); the
-        # strip only re-renders when a scroll offset visibly moved (#115).
+        # strip only re-renders when a scroll offset visibly moved.
         scroll_moved = False
         if state.label_manager.get_has_scroll_labels():
             scroll_moved = state.label_manager.tick_scroll_labels()
@@ -6963,7 +6963,7 @@ class ControllerTouchScreenState(ControllerInputState):
         # _get_background_video_frame: the factor is baked into the cache at
         # construction and set_playback never revisits it, so reusing the
         # video across a saturation change would keep serving frames
-        # enhanced at the old factor (issue #132).
+        # enhanced at the old factor.
         self._background_video_saturation: float | None = None
         # Timestamp gate for the fps render cap in on_media_player_tick.
         self._last_background_video_render: float = 0.0
@@ -7028,7 +7028,7 @@ class ControllerTouchScreenState(ControllerInputState):
             if path == self._background_video_failed:
                 return None
 
-            # Saturation is part of the keep-check (issue #132): the factor
+            # Saturation is part of the keep-check: the factor
             # is baked into the video's shared tile cache at construction
             # (mp4_tile_cache.acquire) and set_playback only updates
             # fps/loop, so a factor change must rebuild even for the same
@@ -7049,7 +7049,7 @@ class ControllerTouchScreenState(ControllerInputState):
                     video.close()
                 video = None
                 if os.path.splitext(path)[1].lower() == ".gif":
-                    # .gif diverts to the PIL provider (issue #196): frames
+                    # .gif diverts to the PIL provider: frames
                     # are fitted to EXACTLY the strip size -- the
                     # alpha_composite in get_current_image needs same-size
                     # RGBA -- and alpha + per-frame delays survive. Budget/
@@ -7110,7 +7110,7 @@ class ControllerTouchScreenState(ControllerInputState):
 
         # Start with background image if set
         background: Image.Image | None = None
-        # Snapshot + guard (issue #1 vector c): load_page(None) and close()
+        # Snapshot + guard: load_page(None) and close()
         # step 8 null active_page from other threads while the writer
         # composites; a blank strip is the only sensible frame then.
         active_page = self.controller_touch.deck_controller.active_page
@@ -7343,7 +7343,7 @@ class ControllerKeyState(ControllerInputState):
         # set_media(), or None when the media is page/user-owned. Every other
         # media writer resets it to None; set_media() re-stamps it after the
         # write. ControllerKey.load_from_input_dict uses it to carry
-        # action-owned media across the create_n_states wipe (issue #131).
+        # action-owned media across the create_n_states wipe.
         self.media_owner_action = None
 
     def close_resources(self) -> None:

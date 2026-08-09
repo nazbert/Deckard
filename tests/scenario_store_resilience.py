@@ -206,7 +206,7 @@ def test_fetches_run_concurrently() -> None:
     # proves is that the 10 x 0.2s blocking fetches did NOT serialize behind
     # the limiter (fully serial would be >=2.0s). Any ceiling comfortably
     # under 2.0s preserves that proof; 1.8s buys headroom against a loaded
-    # CI runner without ever admitting a serialized run (#69 flake hardening).
+    # CI runner without ever admitting a serialized run (flake hardening).
     assert elapsed < 1.8, (
         f"10 x 0.2s fetches took {elapsed:.2f}s -- fetches are "
         f"serializing (fully serial would be >=2.0s)"

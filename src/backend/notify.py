@@ -1,5 +1,5 @@
 """
-Thread-safe user-notification facade (issue #183).
+Thread-safe user-notification facade.
 
 Every caller that wanted to tell the user something used to carry its own
 copy of the same dance: is `gl.app` up yet, does it have a `main_win`, do I

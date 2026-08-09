@@ -1,5 +1,5 @@
 """
-Regression test for gl#24 -- two ways the store tab froze or built garbage
+Regression test -- two ways the store tab froze or built garbage
 URLs, exercised WITHOUT network:
 
 1. get_official_store_branch returned the NoConnectionError INSTANCE when
@@ -59,7 +59,7 @@ def test_branch_survives_truncated_cached_versions_json() -> None:
     sb = _make_backend()
 
     # Seed the cache with a TRUNCATED versions.json (what a crash mid-write
-    # used to leave behind, see gl#25), stamped fresh...
+    # used to leave behind), stamped fresh...
     with sb.store_cache.open_cache_file(
         url=StoreBackend.STORE_REPO_URL, branch="versions", path="versions.json", mode="w"
     ) as f:

@@ -95,11 +95,11 @@ class App(Adw.Application):
         super().__init__(**kwargs)
         self.deck_manager = deck_manager
 
-        # Re-entry latch for on_quit (issue #169). Set before the handlers are
+        # Re-entry latch for on_quit. Set before the handlers are
         # registered below so the very first signal already sees it.
         self._quit_started = False
 
-        # The live engine->UI adapter, so on_quit can detach it (#141). None
+        # The live engine->UI adapter, so on_quit can detach it. None
         # until on_activate builds the window -- a TERM before that must not
         # raise here.
         self._ui_adapter = None
@@ -135,7 +135,7 @@ class App(Adw.Application):
             # Remote activation: a second launch was forwarded here by
             # GApplication. Rebuilding the window would orphan every
             # gl.app.main_win consumer and the controllers' cached UI
-            # bindings (issue #158, field 2026-07-16: the replacement was
+            # bindings (field incident 2026-07-16: the replacement was
             # also never presented because the boot argv had -b, so preview
             # pushes dirty-marked forever). Delegate to on_reopen so this
             # route behaves exactly like the single-instance probe's
@@ -151,7 +151,7 @@ class App(Adw.Application):
             self.on_reopen()
             return
         # Install the engine->UI adapter BEFORE constructing the window
-        # (#141): every boot-time add_page runs INSIDE MainWindow's
+        # first: every boot-time add_page runs INSIDE MainWindow's
         # constructor (build() -> leftArea -> deck_stack.add_pages()), so an
         # adapter installed afterwards would miss every bind and leave all
         # previews permanently dirty-marked. attach_window() runs after, for
@@ -215,7 +215,7 @@ class App(Adw.Application):
         if not gl.IS_MAC:
             start_dbus_service()
 
-        # Eagerly warm plugin backends (issue #117): async on its own daemon
+        # Eagerly warm plugin backends: async on its own daemon
         # thread, so backend subprocess launches can never block this GTK
         # main loop. Matters most in background mode (-b), where no config
         # UI ever opens to trigger lazy backend init before the first
@@ -292,7 +292,7 @@ class App(Adw.Application):
         self.permissions.present()
 
     def on_quit(self, *args):
-        # Run at most once (issue #169). SIGINT is a Python-level handler, so
+        # Run at most once. SIGINT is a Python-level handler, so
         # it fires between bytecodes on the main thread: a Ctrl+C landing
         # during a teardown already in flight would otherwise re-enter here
         # and re-destroy the window, re-trigger AppQuit, re-run close_all()
@@ -306,7 +306,7 @@ class App(Adw.Application):
 
         # Detach the UI first: the media/tick threads keep running for a
         # while yet, and a push into a window that is being destroyed is a
-        # crash shape. The null port makes them dirty-mark instead (#141).
+        # crash shape. The null port makes them dirty-mark instead.
         ui_port.install(None)
         # Drop the adapter's own references too (bound DeckStackChildren, the
         # window, per-controller throttle/coalescer state): uninstalling only
@@ -314,7 +314,7 @@ class App(Adw.Application):
         # still points at while the tick threads wind down.
         # getattr, not self._ui_adapter: guarded for the same reason as the
         # window teardown below -- a quit landing before __init__ finished
-        # must still reach terminate_all_backends() (issue #169).
+        # must still reach terminate_all_backends().
         adapter = getattr(self, "_ui_adapter", None)
         if adapter is not None:
             adapter.detach_window()
@@ -349,7 +349,7 @@ class App(Adw.Application):
 
         gl.threads_running = False
 
-        # Stop a pending boot re-enumeration (issue #106) before close_all()
+        # Stop a pending boot re-enumeration before close_all()
         # below: the stop event wakes a rescan parked in backoff immediately,
         # and the bounded join covers an in-flight enumeration -- so the
         # rescan can't register a fresh controller while the quit path tears
@@ -360,7 +360,7 @@ class App(Adw.Application):
         # Force quit if normal quit is not possible
         timer_wheel.schedule(6, self.force_quit, name="force_quit_timer")
 
-        # Drain the store cache's deferred index writes (issue #180). This
+        # Drain the store cache's deferred index writes. This
         # process ends in os._exit(0), which skips StoreCache's atexit hook,
         # and the flush timer is a daemon -- without this call the last
         # browse's last-use clock renewals are lost on every quit. Guarded:
@@ -426,7 +426,7 @@ class App(Adw.Application):
         # Stop accepting plugin-event batches, so a late trigger_event()
         # can't spawn a fresh lane thread mid-teardown. Nothing is joined:
         # lane runners are daemon threads, so a wedged observer cannot delay
-        # quit (issue #178).
+        # quit.
         from src.backend.PluginManager import event_dispatch
         event_dispatch.shutdown()
 
@@ -453,15 +453,15 @@ class App(Adw.Application):
     def _destroy_main_window(self) -> None:
         """Tear down the main window, if there is one that can be torn down.
 
-        GTK 4.22 segfaults disposing a window that was never realized (issue
-        #193, reproduced down to a bare Gtk/Adw.ApplicationWindow: destroy(),
+        GTK 4.22 segfaults disposing a window that was never realized
+        (reproduced down to a bare Gtk/Adw.ApplicationWindow: destroy(),
         remove_window() and set_application(None) all abort on the unrealized
         dispose path; only close() and leaving it alone are safe). In
         background mode (-b -- the autostart path) on_activate builds
         main_win but skips present(), so the window is never realized and
         this statement killed the process mid-teardown, before
         terminate_all_backends() below: every plugin backend was orphaned on
-        every quit, which is the symptom #169 set out to fix.
+        every quit, which is the symptom this teardown exists to prevent.
 
         close() is not a substitute: MainWindow.on_close pops the
         keep-running dialog when the setting is unset and otherwise
@@ -486,13 +486,13 @@ class App(Adw.Application):
         except Exception as e:
             # main_win is published by MainWindow.__init__'s first statement,
             # before the build can still fail (see on_activate), so this can
-            # be a half-built window. Note this cannot catch #193 itself --
-            # that is a native abort, not a Python exception.
+            # be a half-built window. Note this cannot catch the unrealized-
+            # dispose abort itself -- that is native, not a Python exception.
             log.warning(f"Failed to destroy the main window during shutdown: {e}")
 
     def force_quit(self):
         log.info("Forcing quit...")
-        # Last chance to reap the plugin backends (issue #169): they are
+        # Last chance to reap the plugin backends: they are
         # spawned with start_new_session=True, so once this os._exit lands
         # nothing else kills them -- a wedged teardown that never reached
         # on_quit's terminate_all_backends() would orphan them. Non-blocking
@@ -516,8 +516,8 @@ class App(Adw.Application):
         further TERM/HUP would fall through the latch, return None, disarm the
         handler, and hand the next signal back to the default disposition,
         killing the process mid-teardown with the backends still running --
-        precisely the failure issue #169 is about. SOURCE_CONTINUE keeps the
-        source armed for as long as the process lives.
+        precisely the failure this handler exists to prevent. SOURCE_CONTINUE
+        keeps the source armed for as long as the process lives.
 
         Deliberately not reused for the Gio "quit" action or the
         GLib.idle_add(on_quit) routes (mainWindow.on_close, the hamburger
@@ -540,7 +540,7 @@ class App(Adw.Application):
         # GLib unix-signal source, and would install its own handler routing
         # Ctrl+C to app.quit(), bypassing on_quit's whole teardown.
         signal.signal(signal.SIGINT, self.on_quit)
-        # SIGTERM/SIGHUP (issue #169): GLib-native sources dispatched on the
+        # SIGTERM/SIGHUP: GLib-native sources dispatched on the
         # main loop, so a logout/systemd TERM runs the full teardown -- notably
         # terminate_all_backends(), without which the backends (own session,
         # so no killpg reaches them) are orphaned. Registered here rather than

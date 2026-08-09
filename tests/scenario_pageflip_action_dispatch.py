@@ -1,5 +1,5 @@
 """
-Regression test for issue #107 (upstream #475): with "Change Page" +
+Regression test: with "Change Page" +
 "Run Command" on one button, the command fired only once.
 
 Mechanism (all verified against the real code paths): ControllerKey used to

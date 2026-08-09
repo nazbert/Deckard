@@ -22,7 +22,7 @@ Three checks, each a small self-contained sub-test:
 (A fourth check -- submit_control() rejecting messages after the terminal
 ClearAndCloseMsg, bug 12 -- lived here but was unit-tier; it moved to
 scenario_submit_control_reject.py so this integration-tier scenario doesn't
-mix tiers, which the #69 tier-mixing guard now refuses.)
+mix tiers, which the tier-mixing guard now refuses.)
 """
 import gc
 import threading
@@ -51,7 +51,7 @@ def test_double_close_is_safe() -> None:
     # guard almost instantly (~ms). 1.5s stays cleanly below the 2s stop
     # timeout (so it still catches "the guard didn't fire and it re-ran a
     # bounded join") while giving a loaded CI runner 3x the original 0.5s
-    # headroom (#69 flake hardening).
+    # headroom (flake hardening).
     assert elapsed < 1.5, f"second close() call should be an immediate no-op, took {elapsed:.2f}s"
 
     if controller in gl.deck_manager.deck_controller:
@@ -183,7 +183,7 @@ def test_close_sweeps_screensaver_stash() -> None:
 
 
 def test_close_sweeps_populated_stash_unplug_race() -> None:
-    """#71 (a): the unplug-races-screensaver case the scenario name implies.
+    """The unplug-races-screensaver case the scenario name implies.
 
     test_close_sweeps_screensaver_stash above deliberately WAITS for show()'s
     P2.6 release (a ReleaseStashedInputsMsg on the media-player control queue)
@@ -284,7 +284,7 @@ def main() -> None:
     # test_submit_control_rejected_after_stop moved to
     # scenario_submit_control_reject.py: it is unit-tier and this scenario is
     # integration-tier -- mixing the two in one process is now refused by the
-    # tier-mixing guard (#69).
+    # tier-mixing guard.
     print("PASS: scenario_deck_close")
 
 

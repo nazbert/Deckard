@@ -1,7 +1,7 @@
 """
-Regression fence: no dbus-python anywhere in the tree (gl#195).
+Regression fence: no dbus-python anywhere in the tree.
 
-The #168-#172/#175 dependency swap removed dbus-python entirely (Gio for
+The dependency swap removed dbus-python entirely (Gio for
 bus work, dasbus where a proxy layer is wanted); dbus-python's implicit
 main-loop integration (its GLib mainloop glue class) and abandoned upstream
 are exactly what those issues paid to leave behind. Upstream's logind

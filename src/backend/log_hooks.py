@@ -14,7 +14,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 ---
 
-Central exception hooks (issue #80, deep-audit-2026-07-10 RD-01).
+Central exception hooks.
 
 Only @log.catch-decorated functions feed exceptions into loguru; an uncaught
 exception on any other path reaches stderr only and is lost the moment the
@@ -40,7 +40,7 @@ stored on their Future and NEVER reach threading.excepthook -- submit sites
 must attach a done-callback (the main_loop.run_in_background /
 DeckController._log_callback_exception convention).
 
-Pressure valve (issue #91): _log_exc() rate-limits per failing SITE -- one
+Pressure valve: _log_exc() rate-limits per failing SITE -- one
 record per (exception type, innermost frame) per RATE_LIMIT_WINDOW_S, with
 the suppressed count reported on that site's next record. A raising GTK
 signal handler on a hot path would otherwise put a full diagnose=True
@@ -56,10 +56,10 @@ exact failure mode this exists to prevent. The suppressed-count line is
 therefore worded "N further failures at <site>", never "N repeats": the
 guard knows the site, and does not know that the failures were identical.
 
-Kill switch (issue #92): SC_NO_ERROR_HOOKS=1 makes install_exception_hooks()
+Kill switch: SC_NO_ERROR_HOOKS=1 makes install_exception_hooks()
 and redirect_faulthandler() no-ops, so a field anomaly suspected to involve
 the hooks (double logging, exit-path interaction, a hook firing where it
-shouldn't) can be A/B'd against pre-#80 behavior with an env var instead of
+shouldn't) can be A/B'd against the un-hooked behavior with an env var instead of
 a revert + rebuild. See install_exception_hooks() for the one thing the flag
 deliberately does NOT disable.
 
@@ -67,7 +67,7 @@ Import discipline: this module must stay importable before `globals` (the
 test harness's fixtures.py contract) -- stdlib + loguru only, nothing from
 src/ or globals.py. log_redaction is the one allowed sibling import: it
 follows the same stdlib+loguru-only contract, and install_exception_hooks()
-installs its scrubbing patcher (issue #105) so these hooks can never route
+installs its scrubbing patcher so these hooks can never route
 an unredacted traceback into the sinks.
 """
 import atexit
@@ -89,14 +89,14 @@ from loguru import logger as _LOG
 
 from src.backend.log_redaction import install_log_redaction, scrub
 
-# Issue #92 bisect switch, read once at import -- like SC_STRONG_CALLBACKS
+# Bisect switch, read once at import -- like SC_STRONG_CALLBACKS
 # (src/Signals/weak_callbacks.py) this is a debugging knob, not something that
 # may change behavior mid-run (the hooks are process-global; a mid-run flip
 # would leave half of them installed).
 #
-# STRICTLY "1", matching that precedent and #92's spec. A truthiness test
+# STRICTLY "1", matching that precedent. A truthiness test
 # would read SC_NO_ERROR_HOOKS=false / no / off -- what an operator writes to
-# turn a switch OFF -- as "on", silently dropping the entire #80 safety net
+# turn a switch OFF -- as "on", silently dropping the entire safety net
 # on the run that was trying to keep it.
 _HOOKS_DISABLED = os.environ.get("SC_NO_ERROR_HOOKS") == "1"
 _announced_disabled = False
@@ -111,7 +111,7 @@ _prev_sys_hook: _ExceptHook = None  # type: ignore[assignment]  # late-init: ins
 _fault_file = None
 
 
-# --- Per-site rate limiting (issue #91) ------------------------------------
+# --- Per-site rate limiting -------------------------------------------------
 #
 # GLib idle/timeout sources self-cancel on exception, but GTK signal handlers
 # are NOT disconnected: a raising handler on a frequent signal (notify::, a
@@ -352,7 +352,7 @@ def _is_terminal(exc_tb) -> bool:
     The distinction is load-bearing: in THIS app sys.excepthook is not
     primarily a terminal path. PyGObject routes every uncaught callback
     exception through it (see the module docstring), which is the 20-30Hz
-    storm vector issue #91 exists for -- so exempting the whole surface from
+    storm vector the rate limit exists for -- so exempting the whole surface from
     the rate limit would reopen exactly that vector. Exempting only the
     terminal SHAPE gives the guarantee that matters (a fatal exception is
     never swallowed by a window some hot handler opened) at no such cost.
@@ -376,7 +376,7 @@ def _is_terminal(exc_tb) -> bool:
 def _log_exc(kind: str, exc_type, exc_value, exc_tb, extra: str = "",
              rate_limit: bool = True) -> None:
     # Rate limiting sits HERE rather than in the individual hooks, so all four
-    # #80 surfaces inherit it (issue #91). Any failure inside the guard falls
+    # hook surfaces inherit it. Any failure inside the guard falls
     # through to logging: it may drop repeats, never an original.
     try:
         key, label = _exc_site(exc_type, exc_value, exc_tb)
@@ -450,11 +450,11 @@ def asyncio_exception_handler(loop, context) -> None:
     event_dispatch._get_loop): an un-retrieved task exception or failing
     call_soon callback otherwise dies in asyncio's default stderr handler."""
     if _HOOKS_DISABLED:
-        # SC_NO_ERROR_HOOKS covers this surface too (issue #92): it is one of
-        # the four #80 hooks, and the wiring lives in event_dispatch, not in
+        # SC_NO_ERROR_HOOKS covers this surface too: it is one of the four
+        # hooks, and the wiring lives in event_dispatch, not in
         # a call this module's install path owns -- so the opt-out has to be
         # here. Delegating (rather than returning) is what makes the flag
-        # "pre-#80 behavior exactly": asyncio's own stderr handler.
+        # "exactly the un-hooked behavior": asyncio's own stderr handler.
         loop.default_exception_handler(context)
         return
     exc = context.get("exception")
@@ -469,12 +469,12 @@ def install_exception_hooks() -> None:
     """Install sys/threading/unraisable hooks. Idempotent; call before any
     code that can throw on a background thread or GLib callback.
 
-    Also installs the issue-#105 redaction patcher: these hooks are what
+    Also installs the redaction patcher: these hooks are what
     route full tracebacks into the sinks, so they must never fire without
     the scrubbing layer in place. main()'s boot path relies on this
     piggyback -- scenario_log_redaction asserts the coupling.
 
-    SC_NO_ERROR_HOOKS=1 (issue #92) turns the hook installs into a no-op --
+    SC_NO_ERROR_HOOKS=1 turns the hook installs into a no-op --
     sys.excepthook/threading.excepthook/sys.unraisablehook are left exactly
     as the interpreter set them. The redaction patcher is deliberately NOT
     part of that opt-out: this call is its ONLY boot-path install site, so
@@ -493,24 +493,24 @@ def install_exception_hooks() -> None:
 
 
 def _scrub_fault_log(path: str) -> None:
-    """Scrub PREVIOUS sessions' faulthandler dumps in place (issue #122).
+    """Scrub PREVIOUS sessions' faulthandler dumps in place.
 
     faulthandler writes its dumps at the C level straight to the stored fd
     -- by design, so they still land when the interpreter is wedged -- which
-    means the issue-#105 loguru patcher never sees them, and traceback frame
+    means the loguru redaction patcher never sees them, and traceback frame
     paths (File "/home/<user>/...") reach disk raw. A live intercept is
     impossible without breaking that wedged-interpreter guarantee, so the
     file is scrubbed here instead, at boot, right before the next boot
     marker is appended: the sharing scenario only ever reads this file after
-    a restart. Residual risk (accepted, see #122): a dump written during the
+    a restart. Residual risk (accepted): a dump written during the
     CURRENT session stays raw on disk until the next boot.
 
     Streams line-by-line (dumps are line-oriented and every scrub() pattern
     is single-line) so a years-old multi-boot file cannot balloon memory:
     the scrubbed content goes to a unique same-dir mkstemp tmp first, then
-    is copied back over the original IN PLACE. In place, not os.replace
-    (issue #159): replace swaps the inode, which strands every already-
-    RUNNING instance's registered faulthandler fd on the unlinked old file
+    is copied back over the original IN PLACE. In place, not os.replace:
+    replace swaps the inode, which strands every already-RUNNING
+    instance's registered faulthandler fd on the unlinked old file
     -- a booting secondary (this runs before the single-instance gate) then
     silently redirected the primary's future crash/SIGQUIT dumps into a
     file nothing can find. Same-inode rewrite keeps live fds valid, and
@@ -528,9 +528,9 @@ def _scrub_fault_log(path: str) -> None:
     the read snapshot and is lost to truncate() -- accepted; the old code
     lost the same dump to the unlinked inode AND stranded the fd forever.
     Scrubbing is idempotent for faulthandler content (frame paths, boot
-    markers -- all fixed points; scrub() is NOT idempotent in general, see
-    issue #162), so a second boot's re-scrub is a content no-op -- and the
-    unchanged-detection below turns it into a no-WRITE as well: the file is
+    markers -- all fixed points; scrub() is NOT idempotent in general), so a
+    second boot's re-scrub is a content no-op -- and the unchanged-detection
+    below turns it into a no-WRITE as well: the file is
     only rewritten when a line actually changed, so the partial-writeback
     window (crash/ENOSPC mid-copy) exists only on boots that had raw PII to
     redact. Any failure is logged and swallowed -- a scrub problem must
@@ -587,9 +587,9 @@ def redirect_faulthandler(directory: str) -> None:
     falls back silently to the stderr enable() -- a missing dump target must
     never block startup. Idempotent.
 
-    SC_NO_ERROR_HOOKS=1 (issue #92) skips the redirection entirely, leaving
+    SC_NO_ERROR_HOOKS=1 skips the redirection entirely, leaving
     main.py's import-time faulthandler.enable() pointed at stderr: the
-    pre-#80 arrangement, and no logs/faulthandler.log is opened or scrubbed.
+    un-hooked arrangement, and no logs/faulthandler.log is opened or scrubbed.
     This is also where the flag announces itself -- see _announce_disabled()
     for why the announcement is here and not at install time."""
     global _fault_file
@@ -601,10 +601,10 @@ def redirect_faulthandler(directory: str) -> None:
     try:
         os.makedirs(directory, exist_ok=True)
         path = os.path.join(directory, "faulthandler.log")
-        # Previous sessions' dumps bypassed the #105 redaction layer
+        # Previous sessions' dumps bypassed the redaction layer
         # (C-level fd writes); scrub them BEFORE opening the append fd, so
         # this boot's marker lands after the rewritten content. The scrub is
-        # in-place (same inode -- issue #159), so it is also safe while
+        # in-place (same inode), so it is also safe while
         # other instances hold registered fds on the file. Dumps from THIS
         # session stay raw until the next boot -- see _scrub_fault_log for
         # why that is accepted.

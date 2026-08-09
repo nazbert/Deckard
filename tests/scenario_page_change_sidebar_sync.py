@@ -1,5 +1,5 @@
 """
-Regression test (issue #157): the page-change UI sync must actually refresh
+Regression test: the page-change UI sync must actually refresh
 the sidebar.
 
 The original body resolved `...page_settings.settings_page` -- an attribute
@@ -8,7 +8,7 @@ AttributeError on EVERY page change, a blanket except mislabeled it as
 first-deck noise, and the sidebar update (the only still-meaningful piece)
 never ran.
 
-Since #141 the logic lives in `GtkUIAdapter.on_page_changed`, not in
+The logic lives in `GtkUIAdapter.on_page_changed`, not in
 DeckController: the engine just calls the port. The assertions are unchanged
 in substance -- the visible-deck guard, the sub-view guard, the coalescer --
 and the fake DeckStackChild still deliberately has NO settings_page anywhere

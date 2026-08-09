@@ -1,5 +1,5 @@
 """
-Scenario: deck unplug/replug mid-render (issue #59).
+Scenario: deck unplug/replug mid-render.
 
 The hardware-verified backend-reap / close-teardown fixes (commit 08aae662
 "opaque-key initial paint, bounded close teardown, close-vs-load bg leak"
@@ -357,7 +357,7 @@ def test_unplug_races_page_load() -> int:
 
 def main() -> int:
     start_watchdog(60, "deck_unplug")
-    # ONE tier only (the issue-#69 order-dependence class): install the
+    # ONE tier only (the order-dependence class): install the
     # integration globals up front. Leg (a)'s bare FaultyFakeDecks only need
     # gl.settings_manager.get_deck_settings() (FakeDeck.__init__), which the
     # real SettingsManager satisfies ({} for an unknown serial), and the

@@ -1,7 +1,7 @@
 """
-Regression test for issue #123: dial/touchscreen gestures still live-resolved
+Regression test: dial/touchscreen gestures still live-resolved
 their target actions across page changes -- the dial/touchscreen variant of
-issue #107 (fixed for keys by the DOWN-time snapshot this scenario's
+the key bug (fixed for keys by the DOWN-time snapshot this scenario's
 mechanism mirrors).
 
 Mechanisms exercised (all against the real code paths):
@@ -12,7 +12,7 @@ Mechanisms exercised (all against the real code paths):
     landed on the NEW page's dial actions. The old page's actions never saw
     their release -- EasyCommand (com_core447_OSPlugin) carries the same
     registered_down latch as RunCommand, so a ChangePage+EasyCommand combo on
-    a dial jammed exactly like upstream #475.
+    a dial jammed exactly like the upstream bug.
   * ControllerDial.on_hold_timer_end live-resolved too: a hold crossing a
     page swap fired HOLD_START into the new page's actions.
   * TURN_CW/CCW and every touchscreen event (DRAG_*, and the SHORT/LONG

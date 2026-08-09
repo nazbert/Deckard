@@ -1,6 +1,6 @@
 """
 Unit-tier scenario for the startup video-cache sweep
-(video_cache_sweeper.py), covering issue #53 items 2 and 8:
+(video_cache_sweeper.py), covering two strands:
 
   (a) a cache whose source video is referenced ONLY from a plugin's own
       settings JSON (settings/plugins/<id>/settings.json) must survive the
@@ -136,7 +136,7 @@ def check_stale_sat_variants_swept() -> None:
 
 
 def check_out_of_range_saturation_protects_clamped_variant() -> None:
-    """Issue #53 item 8 (round 1): a persisted display.saturation outside the
+    """A persisted display.saturation outside the
     valid [1.0, 1.5] range (corruption or a hand-edit) is clamped by the
     runtime before it derives a cache filename, so playback writes the
     CLAMPED variant. The sweep must protect that same clamped variant -- a
@@ -172,7 +172,7 @@ def check_out_of_range_saturation_protects_clamped_variant() -> None:
 
 
 def check_tmp_age_gate() -> None:
-    """#67 ask: the `.tmp.` age gate (sweeper.py's `.tmp.` branch). A
+    """The `.tmp.` age gate (sweeper.py's `.tmp.` branch). A
     writer temp file YOUNGER than TMP_MAX_AGE_S may be a build in progress and
     must survive; one OLDER is a crash leftover and must be swept. The sweep
     keys purely on `.tmp.` in the name and the file's mtime -- assert the
@@ -205,7 +205,7 @@ def check_tmp_age_gate() -> None:
 
 
 def check_legacy_dir_sweep_idempotent() -> None:
-    """#67 ask: legacy-dir sweep idempotence. The two legacy top-level dirs
+    """Legacy-dir sweep idempotence. The two legacy top-level dirs
     (`single_key/`, `key: <n>/`) that the deleted key_video_cache.py's
     JPEG-per-frame format wrote are UNCONDITIONALLY dead -- removed even when
     the source video's hash is still referenced, because nothing can decode
@@ -255,7 +255,7 @@ def check_legacy_dir_sweep_idempotent() -> None:
 
 
 def check_entry_name_parsing() -> None:
-    """#67 ask: the `entry.split(".")[0]` hash parse and the per-branch name
+    """The `entry.split(".")[0]` hash parse and the per-branch name
     dispatch. Assert the EXACT split across every branch in one dir:
       - `.cache` legacy pickle -> swept (unreadable format).
       - `<hash>.satNNN.mp4` -> hash parsed from `split(".")[0]`, so a

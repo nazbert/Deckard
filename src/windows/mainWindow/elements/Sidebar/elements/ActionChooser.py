@@ -226,7 +226,7 @@ class PluginGroup(BetterPreferencesGroup):
             # Show all
             return True
 
-        # Compare the *rounded* score (#170): rapidfuzz returns a float where
+        # Compare the *rounded* score: rapidfuzz returns a float where
         # fuzzywuzzy returned int(round(...)), and a ratio of exactly 20 comes
         # back as 19.999999999999996 -- one ULP below the threshold. Rounding
         # keeps those matches visible, as they were before the swap. Sorting
@@ -298,7 +298,7 @@ class ActionChooserExpander(BetterExpander):
             # Show all
             return True
 
-        # Rounded for the same reason as PluginGroup.filter_func (#170).
+        # Rounded for the same reason as PluginGroup.filter_func.
         fuzz_score = round(fuzz.ratio(search_string.lower(), label.lower()))
 
         MIN_FUZZY_SCORE = 20

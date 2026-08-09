@@ -1,6 +1,6 @@
 """
 Scenario: onboarding and store-page loaders must not construct GTK widgets
-on their worker threads (issue #10 / B-10).
+on their worker threads.
 
 The trap in the store pages was subtle: `GLib.idle_add(section.append_child,
 XPreview(...))` marshals the APPEND, but the widget tree is built as the

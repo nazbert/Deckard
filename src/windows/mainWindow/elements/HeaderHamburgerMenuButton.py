@@ -98,7 +98,7 @@ class HeaderHamburgerMenuButton(Gtk.MenuButton):
 
     def get_contributer_list(self):
         try:
-            # Shared session (#168): api.github.com rate-limits by IP, and the
+            # Shared session: api.github.com rate-limits by IP, and the
             # store hits the same endpoint -- going through http_client means
             # this fetch retries a 429 and reuses a pooled connection like
             # every other one. raise_for_status keeps urlopen's old semantics,

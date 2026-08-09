@@ -28,7 +28,7 @@ class EventHolder:
         # dominant steady-state growth mechanism for event-using plugins
         # like AudioControl).
         self.observers = CallbackRegistry()
-        # This holder's own dispatch lane (issue #178). Observers of THIS
+        # This holder's own dispatch lane. Observers of THIS
         # event are serialized on one thread of their own, so an observer
         # that blocks (the pulsectl-wedge precedent) stalls only this event
         # source's queue -- every other holder keeps delivering. The lane is
@@ -39,7 +39,7 @@ class EventHolder:
     def add_listener(self, callback: Callable[..., Any]):
         if not self.observers.add(callback):
             # functools.partial (and other callable objects) have no
-            # __name__ -- the warning must not crash the connect (issue #56).
+            # __name__ -- the warning must not crash the connect.
             name = getattr(callback, "__name__", repr(callback))
             log.warning(f"Callback {name} is already subscribed to: {self.event_id}")
 

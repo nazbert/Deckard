@@ -137,7 +137,7 @@ def check_builder_promotes_while_consumer_plays_from_source() -> None:
 
 
 def check_plays_from_source_in_forced_window() -> None:
-    """#71 (b): check_builder_promotes_while_consumer_plays_from_source guards
+    """check_builder_promotes_while_consumer_plays_from_source guards
     its from-source assertion behind `if not entry.ready:` -- on a fast
     machine the tiny-frame builder promotes before the consumer's first
     get_frame(), so the assertion is skipped and the "plays from source while
@@ -302,7 +302,7 @@ def check_cache_videos_disabled_starts_no_builder() -> None:
 
 
 def check_saturation_key_and_path_agree() -> None:
-    """Issue #53 item 1: the registry key's saturation component and the
+    """The registry key's saturation component and the
     cache-file suffix must be pure functions of the SAME rounding. With the
     old split (`round(sat, 2)` for the key, `int(round(sat * 100))` for the
     suffix) two acquires whose raw factors round to the same key could share
@@ -348,7 +348,7 @@ def check_saturation_key_and_path_agree() -> None:
 
 
 def check_missing_shared_cache_degrades_and_self_heals() -> None:
-    """Issue #53 items 1+2 (degrade/self-heal): if the registry claims a
+    """Degrade/self-heal: if the registry claims a
     shared cache is ready but the file cannot be opened (deleted behind the
     registry's back), the reader must keep playing from the source, and
     after a bounded number of failed adoption attempts must invalidate the
@@ -415,7 +415,7 @@ class _HandoffLock:
 
 
 def check_close_does_not_retain_last_payload() -> None:
-    """Issue #53 item 3: get_frame() used to publish `last_payload` after
+    """get_frame() used to publish `last_payload` after
     releasing the lock, so a close() that ran in that window had its
     `last_payload = None` overwritten -- one decoded frame retained for the
     life of the (supposedly closed) cache object."""
@@ -447,7 +447,7 @@ def check_close_does_not_retain_last_payload() -> None:
 
 
 def check_md5_memo_bounded() -> None:
-    """Issue #53 item 4: the (path, size, mtime) -> md5 memo grew one entry
+    """The (path, size, mtime) -> md5 memo grew one entry
     per source-file version forever; it must be a small bounded LRU."""
     fixtures.install_stub_globals()
     original_cap = mp4_tile_cache._MD5_MEMO_MAX

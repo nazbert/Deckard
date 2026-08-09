@@ -1,5 +1,5 @@
 """
-Pins the page state-key type contract (gl#174).
+Pins the page state-key type contract.
 
 A page json's ``states`` map is keyed by STRINGS -- Page.save() writes
 self.dict verbatim through atomic_write_json, and JSON has no other option.

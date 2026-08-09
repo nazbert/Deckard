@@ -1,6 +1,6 @@
 """
 clone_repo must never install a tree it did not actually move onto
-(gl#197 for pinned refs, gl#200 for pinned commit shas).
+(for pinned refs and for pinned commit shas).
 
 clone_repo used `git switch <ref>` to move the staged clone onto the
 configured ref. `switch` refuses tags (and any other detachable ref)
@@ -17,7 +17,7 @@ dispatches straight into clone_repo -- the exact path a custom-plugin
 prepare/install takes on a devel setup.
 
 The commit-sha branch (`git reset --hard <sha>`) had the identical hole
-until #200: a catalog sha that is unreachable (upstream force-push, GC'd
+until the rc check: a catalog sha that is unreachable (upstream force-push, GC'd
 commit) left staging on the default tip, which then passed the tree
 validation and was VERSION-stamped with the sha it is not.
 
@@ -163,7 +163,7 @@ def test_nonexistent_ref_fails_install(sb: StoreBackend) -> None:
 
 
 def test_commit_sha_installs_that_commit(sb: StoreBackend) -> None:
-    # Regression guard for the #200 rc check: a REACHABLE catalog sha must
+    # Regression guard for the rc check: a REACHABLE catalog sha must
     # still install, and must install that commit's tree rather than the
     # default tip it was cloned at.
     dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_ShaPlugin")
@@ -181,7 +181,7 @@ def test_commit_sha_installs_that_commit(sb: StoreBackend) -> None:
 
 
 def test_unreachable_commit_sha_fails_install(sb: StoreBackend) -> None:
-    # #200: a well-formed but unreachable catalog sha (upstream force-push,
+    # A well-formed but unreachable catalog sha (upstream force-push,
     # GC'd commit) passed is_safe_commit_sha, so it reached `git reset
     # --hard`. With that rc ignored the reset failed, staging stayed on the
     # default-branch tip, and THAT tree was validated, stamped with the

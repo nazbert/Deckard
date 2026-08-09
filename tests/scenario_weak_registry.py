@@ -16,7 +16,7 @@ Covers:
   (e) SC_STRONG_CALLBACKS=1 keeps a bound method alive past its owner's
       death (checked in a subprocess, since the flag is read once at import)
   (f) snapshot() logs a DEBUG record naming each dead entry it prunes
-      (issue #38 -- the silent-drop shape must at least leave a trace)
+      (the silent-drop shape must at least leave a trace)
 """
 import gc
 import os
@@ -196,7 +196,7 @@ def check_strong_callbacks_env_escape_hatch():
 
 
 def check_prune_logs_debug():
-    # Issue #38: dropping a subscription because its owner died is a
+    # Dropping a subscription because its owner died is a
     # deliberate D2 tradeoff, but it must leave a trace -- a DEBUG record
     # naming the pruned callback -- or ecosystem regressions ("my plugin's
     # events just stopped") are undiagnosable.

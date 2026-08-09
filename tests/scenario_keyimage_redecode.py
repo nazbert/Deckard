@@ -1,7 +1,6 @@
 """
 Scenario: InputImage must not re-decode from disk on every composite for
-sub-tile sources, and must not close the image under concurrent readers
-(issue #3 / B-03).
+sub-tile sources, and must not close the image under concurrent readers.
 
 get_raw_image() -> _ensure_fits_composed() re-decoded when the composed
 layout needed more resolution than the retained copy -- but when the SOURCE

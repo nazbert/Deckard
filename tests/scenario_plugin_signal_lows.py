@@ -1,5 +1,5 @@
 """
-Unit-tier scenario for the grouped plugin/signal/GtkHelper LOWs (issue #56).
+Unit-tier scenario for the grouped plugin/signal/GtkHelper LOWs.
 
 Covers the behavioral fixes:
   (a) SignalManager.trigger_signal forwards **kwargs to handlers and a

@@ -173,7 +173,7 @@ def check_widget_builds_exactly_once(page) -> None:
 
 
 def _all_concrete_subclass_factories():
-    """#71 (d): every concrete GenerativeUI subclass paired with a
+    """Every concrete GenerativeUI subclass paired with a
     zero-config factory (action, var_name) -> instance. Titles are left None
     so build() -> get_translation(None) short-circuits to "" without needing a
     plugin_base/locale_manager (the value-layer _FakeAction has none) -- this
@@ -210,7 +210,7 @@ def _all_concrete_subclass_factories():
 
 
 def check_all_subclasses_lazy_and_build_once(page) -> None:
-    """#71 (d): the scenario tested laziness on ONE subclass (SwitchRow), but
+    """The scenario tested laziness on ONE subclass (SwitchRow), but
     laziness has to hold for EVERY concrete subclass -- a subclass whose
     build() closure accidentally ran widget work at construction time (e.g. a
     stray super().__init__ ordering bug) would regress silently. Iterate all
@@ -235,7 +235,7 @@ def check_all_subclasses_lazy_and_build_once(page) -> None:
 
 
 def check_ensure_built_double_build_race(page) -> None:
-    """#71 (d): two threads reading `.widget` (calling _ensure_built)
+    """Two threads reading `.widget` (calling _ensure_built)
     concurrently must build the widget EXACTLY once. _ensure_built guards the
     flag transition with _build_flag_lock and flips _built True BEFORE running
     the build, so whichever thread loses the lock sees _built and returns
@@ -297,7 +297,7 @@ def check_ensure_built_double_build_race(page) -> None:
         f"built {obj.build_count} times"
     )
     # The loser of the flag-lock race may observe the documented transient
-    # (_built True, _widget still None -- issue #56, an accepted residual the
+    # (_built True, _widget still None -- an accepted residual the
     # base class comments call out), so a racing reader's result can be None.
     # But every result that IS non-None must be the one built widget, and once
     # the build has landed a fresh read must converge on it for both.

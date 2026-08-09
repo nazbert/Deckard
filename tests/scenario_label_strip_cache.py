@@ -1,5 +1,5 @@
 """
-Regression test for the static-label blit cache (issue #207, folds in #188).
+Regression test for the static-label blit cache.
 
 Root cause: `LabelManager.add_labels_to_image` re-ran `ImageDraw.text` --
 FreeType rasterization of the stroked glyph run -- for every STATIC label on
@@ -88,7 +88,7 @@ def _set_label(key, position: str, **kwargs):
 
 
 def _reference(lm, position: str, size: tuple, bg: tuple) -> Image.Image:
-    """The pre-#207 render of one label: a direct draw.text at the geometry
+    """The pre-cache render of one label: a direct draw.text at the geometry
     add_labels_to_image computes. Deliberately re-derived here rather than
     called through the code under test."""
     label = lm.get_composed_label(position)

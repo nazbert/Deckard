@@ -349,7 +349,7 @@ class MainWindow(Adw.ApplicationWindow):
         if controller is None:
             # Was `return gl.page_manager.dummy_page`, an attribute that
             # exists nowhere in the codebase -- so the no-deck-selected path
-            # raised AttributeError instead of reporting "no page" (#227).
+            # raised AttributeError instead of reporting "no page".
             return None
         if hasattr(controller, "active_page"):
             return controller.active_page

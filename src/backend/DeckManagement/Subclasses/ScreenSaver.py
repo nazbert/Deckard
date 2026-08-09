@@ -146,7 +146,7 @@ class ScreenSaver:
             # A configured screensaver media file that no longer exists
             # (deleted/moved, or a config carried to another machine)
             # prebuilds as "noop" -- and apply_prebuilt() early-returns on
-            # "noop" WITHOUT touching the background (issue #144 §1.2). The
+            # "noop" WITHOUT touching the background. The
             # underlying page's video capture would then stay open behind
             # the showing screensaver and keep decoding/compositing at full
             # rate for the screensaver's entire duration, which is exactly
@@ -179,7 +179,7 @@ class ScreenSaver:
             self.showing = True
 
             self.original_inputs = self.deck_controller.inputs
-            # No `inputs = {}` pre-clear (issue #1 vector a): init_inputs is
+            # No `inputs = {}` pre-clear: init_inputs is
             # build-then-swap, so the concurrent media writer sees the old
             # complete dict or the new complete dict, never empty/partial.
             # In-flight key/dial gestures die with the stash: once the swap
@@ -350,7 +350,7 @@ class ScreenSaver:
         # Deck presses never reach the compositor, so this funnel -- which
         # every key/dial/touch interaction already passes through -- is the
         # only thing that can tell the presence monitor a user drumming on
-        # the deck is present (issue #144). None-guarded: the unit-tier
+        # the deck is present. None-guarded: the unit-tier
         # harness never installs one.
         if gl.presence_monitor is not None:
             gl.presence_monitor.notify_activity()

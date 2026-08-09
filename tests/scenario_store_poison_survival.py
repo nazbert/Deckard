@@ -1,5 +1,5 @@
 """
-Regression test for gl#20 -- poison-entry survival stopped at plugins,
+Regression test -- poison-entry survival stopped at plugins,
 exercised WITHOUT network:
 
 prepare_plugin lists a plugin with `image = None` when only its thumbnail

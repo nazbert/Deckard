@@ -1,7 +1,6 @@
 """
 Scenario: LayoutManager._fg_cache must not serve a stale resized foreground
-after the source asset's backing image is swapped in place (issue #3 / B-03
-follow-up, review round 1 MEDIUM).
+after the source asset's backing image is swapped in place.
 
 add_image_to_background() memoizes the resized foreground keyed on the asset
 object (cache_token) + a layout key. InputImage._ensure_fits_composed()

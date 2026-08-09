@@ -123,7 +123,7 @@ class StorePage(Gtk.Stack):
         The pages' loaders run on worker threads; the old
         `GLib.idle_add(section.append_child, XPreview(...))` marshalled only
         the append -- the widget tree was still built as the argument, on the
-        loader thread: the process-fatal off-main-GTK class (issue #10)."""
+        loader thread: the process-fatal off-main-GTK class."""
         def _build():
             section.append_child(factory())
             return False

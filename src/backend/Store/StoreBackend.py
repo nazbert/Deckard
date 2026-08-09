@@ -1176,7 +1176,7 @@ class StoreBackend:
             self.subp_call(["git", "-C", staging, "pull"])
 
             # Set repository to the given commit_sha. The rc is checked for
-            # the same reason as the checkout below (#200): an unreachable
+            # the same reason as the checkout below: an unreachable
             # catalog sha (upstream force-push, GC'd commit) otherwise leaves
             # staging on the default-branch tip, which then passes the tree
             # validation, gets VERSION-stamped with the sha it is NOT, and
@@ -1199,7 +1199,7 @@ class StoreBackend:
             elif branch_name is not None:
                 # checkout, not switch: custom plugins may pin a TAG (or any
                 # detachable ref), which `git switch` refuses without
-                # --detach (#197). The rc must be checked -- ignoring it
+                # --detach. The rc must be checked -- ignoring it
                 # shipped the default-branch tip stamped as the ref whenever
                 # the (user-typed) ref didn't exist.
                 rc = self.subp_call(["git", "-C", staging, "checkout", branch_name])
@@ -1288,7 +1288,7 @@ class StoreBackend:
         # disabled_plugins during the reload above -- and the only feedback
         # used to be the NEXT launch's disabled-plugins toast: in the install
         # session it silently never appeared, reading later as "my config
-        # reset after restart" (the custom-repo half of #102). Say so now.
+        # reset after restart" (the custom-repo case). Say so now.
         self.notify_if_installed_disabled(plugin_id)
 
         # Update ui
@@ -1315,7 +1315,7 @@ class StoreBackend:
         """If the plugin that was just installed got version-disabled by the
         register() gate (in disabled_plugins, not in plugins), tell the user
         immediately instead of leaving the first feedback to the next
-        launch's startup toast (#102). Returns whether it notified."""
+        launch's startup toast. Returns whether it notified."""
         if plugin_id in PluginBase.plugins:
             return False
         entry = PluginBase.disabled_plugins.get(plugin_id)

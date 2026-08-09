@@ -1,5 +1,5 @@
 """
-Scenario: single-slot assignment must be highest-seq-wins (issue #130).
+Scenario: single-slot assignment must be highest-seq-wins.
 
 add_touchscreen_task/add_image_task used to allocate next_submit_seq() and
 construct the task OUTSIDE _slot_lock; only the slot assignment was locked.
@@ -8,8 +8,8 @@ and a GTK/action-thread dial update() funnelling into the same strip (or two
 writers of the same key slot) -- could therefore allocate seqs in one order
 and reach the locked assignment in the opposite order: the single slot ended
 up holding the LOWER-seq (older) frame and the newer frame was lost
-(one-frame staleness for animated content; found in the !36 round-1 review,
-out of #8's drain/clear scope).
+(one-frame staleness for animated content, outside the drain/clear
+scope).
 
 The fix stamps the seq INSIDE _slot_lock, atomically with the assignment,
 so seq order IS assignment order and the slot always ends with the maximum

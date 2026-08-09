@@ -13,7 +13,7 @@ Covers:
       frame at or below 2x the tile size in both dimensions.
   (b) alpha survives the decode+fit round trip (the reason an ALPHA GIF
       stays a PIL frame list instead of routing through the mp4 tile cache
-      like an opaque one does since #201 -- an mp4 has no alpha channel).
+      like an opaque one does -- an mp4 has no alpha channel).
       Every fixture here RENDERS transparency, which is the criterion that
       keeps them on the frame-list route: what the header declares is not
       the question (scenario_gif_opaque_route pins that).
@@ -138,7 +138,7 @@ def _count_open_fds_to(path: str) -> int:
 
 
 def check_non_square_gif_preserves_aspect_ratio() -> None:
-    """#71 (e): the scenario never asserted aspect ratio. KeyGIF fits with
+    """The scenario never asserted aspect ratio. KeyGIF fits with
     ImageOps.contain, which shrinks to fit the 2x-tile budget while preserving
     the source aspect ratio -- a non-square GIF must NOT be squished to the
     budget's square. Build a 2:1 source well above budget and assert every
@@ -179,7 +179,7 @@ def check_non_square_gif_preserves_aspect_ratio() -> None:
 
 
 def check_disposal_method_1_gif() -> None:
-    """#71 (e): disposal-method-1 (do-not-dispose / incremental-frame) GIFs
+    """Disposal-method-1 (do-not-dispose / incremental-frame) GIFs
     were untested. With disposal=1 each frame is composited onto the previous
     frame's result rather than a cleared canvas, so a naive decode that reads
     raw frame buffers (instead of PIL's coalesced RGBA) loses earlier frames'
@@ -246,7 +246,7 @@ def check_disposal_method_1_gif() -> None:
 
 
 def check_source_fd_released() -> None:
-    """#71 (e): the source-handle check was a `hasattr(gif, 'gif')` attribute
+    """The source-handle check was a `hasattr(gif, 'gif')` attribute
     proxy. Replace it with a REAL fd assertion: count open fds pointing at the
     source file via /proc/self/fd immediately before and after construction.
     KeyGIF opens the source only for the decode loop and closes it in a
@@ -296,7 +296,7 @@ def check_small_gif_keeps_source_size() -> None:
 
 
 def main() -> None:
-    # KeyGIF reads performance.cache-videos at construction (issue #201).
+    # KeyGIF reads performance.cache-videos at construction.
     # Every fixture here renders alpha, so they all keep the frame list this
     # scenario is about -- the stub tier just has to exist to be read.
     fixtures.install_stub_globals({"performance": {"cache-videos": True}})

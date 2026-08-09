@@ -1,5 +1,5 @@
 """
-Unit-tier scenario for issue #68 ask (4): the KeyVideoCache tile-cache
+Unit-tier scenario: the KeyVideoCache tile-cache
 registry (mp4_tile_cache.acquire/_registry_key) must carry the saturation as
 a *distinguishing* dimension -- two key/dial videos of the same source and
 tile size but DIFFERENT display-saturation factors must resolve to distinct
@@ -10,7 +10,7 @@ This is the SEPARATION direction of the registry's saturation key. The
 existing scenario_tile_cache.check_saturation_key_and_path_agree() proves the
 COLLAPSE direction only (two raw factors that round to the same bucket share
 one entry, and the reader targets the file that entry's builder actually
-wrote -- issue #53). Neither it nor scenario_display_saturation (which covers
+wrote). Neither it nor scenario_display_saturation (which covers
 the *background* BackgroundVideoCache naming, a different class) asserts that
 two genuinely different factors are kept apart in the key/dial tile registry
 -- the audit draws exactly this distinction (docs/deep-audit-2026-07-10.md

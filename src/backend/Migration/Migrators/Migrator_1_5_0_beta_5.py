@@ -71,7 +71,7 @@ class Migrator_1_5_0_beta_5(Migrator):
                 continue
 
             new_settings_path = os.path.join(gl.DATA_PATH, "settings", "plugins", plugin_dir_name, "settings.json")
-            # INVARIANT (gl#30): write the migrated copy to the new path FIRST,
+            # INVARIANT: write the migrated copy to the new path FIRST,
             # and only remove the old file once that copy is durably in place.
             # NEVER the inverted exists-check main had -- gating the write on
             # the new path already existing meant the normal case (new path
@@ -87,8 +87,8 @@ class Migrator_1_5_0_beta_5(Migrator):
                 # os.replace (atomic on POSIX) -- so a crash leaves either the
                 # old file intact (temp discarded) or the complete new file.
                 # NOTE: duplicates src/backend/atomic_json.py::atomic_write_json
-                # from MR !9; kept self-contained so !11 runs standalone before
-                # !9 merges -- de-dupe to that helper once !9 lands.
+                # kept self-contained so this migrator has no dependency on the
+                # app's own helpers; de-dupe to that helper if that ever changes.
                 self._atomic_write_json(new_settings_path, settings)
 
             # Remove old settings -- a complete copy now exists at the new path.

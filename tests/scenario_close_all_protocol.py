@@ -1,5 +1,5 @@
 """
-Integration scenario (#69): exercises the REAL close_all_controllers() free
+Integration scenario: exercises the REAL close_all_controllers() free
 function in DeckManager.py directly, over multiple FaultyFakeDeck controllers.
 
 Before this, the M1 terminal-close protocol (submit ClearAndClose to every
@@ -17,7 +17,7 @@ Checks, with TWO controllers so the two-phase ordering actually matters:
 
 (A controller whose deck is *already closed* being skipped is not covered
 here: FakeDeck.is_open() is hardcoded True, so the fake can't yet represent a
-closed device -- that's issue #59.)
+closed device.)
 """
 import time
 

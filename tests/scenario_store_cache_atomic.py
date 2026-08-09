@@ -1,5 +1,5 @@
 """
-Regression test for gl#25 -- StoreCache stamped entry["fetched"]=now and
+Regression test -- StoreCache stamped entry["fetched"]=now and
 persisted the index BEFORE the caller wrote a byte of content, and wrote
 in-place with no per-file lock. A crash mid-write left a truncated file the
 index swore was fresh, and get_remote_file's stale-fallback (782a1dac) then

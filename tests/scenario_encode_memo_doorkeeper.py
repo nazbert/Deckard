@@ -160,7 +160,7 @@ def check_background_set_video_clears_encode_memo() -> None:
 
 
 def check_byte_cap_lru_eviction() -> None:
-    """#71 (c): the byte-size cap and its LRU eviction order were unexercised.
+    """The byte-size cap and its LRU eviction order were unexercised.
     Admit several entries past the cap and prove: (1) total bytes stay <=
     max_bytes, (2) the LEAST-recently-used entry is the one evicted (a get()
     on an older key promotes it, sparing it), (3) a fresh key is never
@@ -199,7 +199,7 @@ def check_byte_cap_lru_eviction() -> None:
 
 
 def check_memo_consulted_on_real_encode_path() -> None:
-    """#71 (c): the scenario tested EncodedImageCache in isolation but never
+    """The scenario tested EncodedImageCache in isolation but never
     proved the memo is CONSULTED on the real encode path -- unplugging it
     entirely still passed. Drive a real ControllerKey.update() on a headless
     controller and prove the second identical paint is a memo HIT: the
@@ -276,7 +276,7 @@ def check_memo_consulted_on_real_encode_path() -> None:
 
 
 def check_put_vs_clear_race() -> None:
-    """#71 (c): a put() racing a clear() (a background content change or a
+    """A put() racing a clear() (a background content change or a
     close() firing while a paint is mid-put) must never corrupt the cache --
     it must leave the memo in a consistent state (total_bytes matching the
     entries actually held, never negative, never over the cap), regardless of

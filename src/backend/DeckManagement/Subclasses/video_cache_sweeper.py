@@ -277,7 +277,7 @@ def sweep_stale_video_caches(startup_delay: float = 0.0) -> None:
                         if suffix in active_sat_suffixes:
                             continue
                         # Referenced video, but a saturation variant no
-                        # deck's current factor produces (issue #53 item 8):
+                        # deck's current factor produces:
                         # fall through and sweep it.
                     size = os.path.getsize(entry_path)
                     os.remove(entry_path)

@@ -1,5 +1,5 @@
 """
-Pins MediaConfig.from_dict against the old inline media defaults (gl#174).
+Pins MediaConfig.from_dict against the old inline media defaults.
 
 The two state-load blocks in DeckController (ControllerKey and
 ControllerDial) used to spell the "media" section defaults inline at every

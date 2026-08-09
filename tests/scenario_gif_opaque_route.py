@@ -1,11 +1,11 @@
 """
-Unit-tier scenario (issue #201): KeyGIF must hold an OPAQUE GIF off the
+Unit-tier scenario: KeyGIF must hold an OPAQUE GIF off the
 shared mp4 tile cache instead of in a retained RGBA frame list -- without
 ever letting a second compositor near the pixels.
 
 The frame list is the largest uncapped image holder in the app -- ~147 KB
 per frame at 2x an XL tile, so a 200-frame GIF is ~29 MB and a 32-key page
-of them ~0.9 GiB, roughly 10x the whole #142 evictable budget. Opaque GIFs
+of them ~0.9 GiB, roughly 10x the whole evictable image-cache budget. Opaque GIFs
 (the common case) do not need it: an mp4 only lacks the ALPHA channel, so
 the existing refcounted key-video registry can serve their pixels at O(1)
 RAM while PIL's per-frame delay timeline keeps driving playback.
@@ -565,7 +565,7 @@ def check_close_releases_the_reader() -> None:
 def check_close_waits_for_an_inflight_fetch() -> None:
     """(l) The _close_lock's whole job, on a real thread. A media tick and a
     page teardown genuinely race, and releasing the reader while a decode is
-    in flight is how InputVideo's #19 leak happened: the fetch resurrects a
+    in flight is how InputVideo's leak happened: the fetch resurrects a
     capture on an object nobody will ever close again.
 
     Drops the lock and this leg fails twice over -- the reader is observed

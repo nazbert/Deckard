@@ -1,5 +1,5 @@
 """
-Regression test for SD+ touchscreen swipe dispatch (#108, upstream #520).
+Regression test for SD+ touchscreen swipe dispatch.
 
 Since the event-assigner rework (aadbaa59, in the 1.5.0 betas) touchscreen
 DRAG events travel the whole pipeline -- reader callback ->

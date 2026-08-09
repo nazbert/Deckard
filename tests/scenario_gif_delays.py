@@ -1,5 +1,5 @@
 """
-Unit-tier scenario (issue #196, phase 1b): KeyGIF's per-frame delay
+Unit-tier scenario (phase 1b): KeyGIF's per-frame delay
 normalization must follow the browser-compatible rule (Firefox/Chrome):
 
     duration missing or < 20ms  ->  100ms
@@ -143,7 +143,7 @@ def check_mixed_durations_normalized() -> None:
 
 
 def check_probe_matches_the_full_decode() -> None:
-    """(e, issue #201) The pixel-free timeline probe and the full decode
+    """(e) The pixel-free timeline probe and the full decode
     must agree to the last float -- a warm KeyGIF (its pixels already in the
     tile cache) builds its timeline from the probe while a cold one builds
     it from the decode walk, so any drift would change playback depending on
@@ -172,7 +172,7 @@ def check_probe_matches_the_full_decode() -> None:
 
 
 def check_close_leaves_late_ticks_harmless() -> None:
-    """(d, issue #199) close() must leave the object tickable. Teardown races
+    """(d) close() must leave the object tickable. Teardown races
     the media loop, so a tick can land after close(); the old close() set
     frames/frame_delays to None and then `del`eted them, so the very next
     get_next_frame() raised (TypeError on len(None), AttributeError once the
@@ -208,7 +208,7 @@ def check_close_leaves_late_ticks_harmless() -> None:
 
 
 def main() -> None:
-    # KeyGIF reads performance.cache-videos at construction (issue #201): a
+    # KeyGIF reads performance.cache-videos at construction: a
     # GIF only has somewhere to route to when the disk cache is on. Every
     # fixture here carries alpha, so they all stay on the frame list either
     # way -- the stub tier just has to exist for the setting to be readable.
