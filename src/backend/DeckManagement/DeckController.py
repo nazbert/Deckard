@@ -3570,6 +3570,15 @@ class KeyGIF(SingleKeyAsset):
 _label_measure_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
 
 
+class _RecordingTooLarge(Exception):
+    """A label's glyph masks blew the retention budget mid-recording.
+
+    Not an error condition: the caller drops the partial recording and pins
+    the label to the direct per-frame draw. Raised from inside draw_bitmap so
+    the abort also stops the RASTERIZATION -- the expensive half -- rather
+    than letting text() finish and discarding the result afterwards."""
+
+
 class _BitmapRecorder:
     """Captures the bitmap blits ImageDraw.text() would issue, instead of
     running them.
@@ -3583,17 +3592,32 @@ class _BitmapRecorder:
 
     Everything else is delegated to the real core object -- notably
     draw_ink(), which ImageDraw._getink() calls to resolve the fill colors,
-    so the recorded ink is exactly the one a direct draw would have used."""
-    __slots__ = ("_core", "ops")
+    so the recorded ink is exactly the one a direct draw would have used.
 
-    def __init__(self, core):
+    max_ops/max_bytes are the hard retention bound (see
+    LabelManager._MAX_LABEL_OPS / _MAX_LABEL_MASK_BYTES): text() emits one
+    blit per line per pass, so both the retained bytes and the FreeType work
+    scale with the line count, and this recording runs on the sole device
+    writer. Exceeding either raises _RecordingTooLarge on the spot."""
+    __slots__ = ("_core", "ops", "_max_ops", "_max_bytes", "_bytes")
+
+    def __init__(self, core, max_ops: int, max_bytes: int):
         self._core = core
         self.ops: list[tuple] = []
+        self._max_ops = max_ops
+        self._max_bytes = max_bytes
+        self._bytes = 0
 
     def __getattr__(self, name):
         return getattr(self._core, name)
 
     def draw_bitmap(self, coord, mask, ink) -> int:
+        # The mask is an 8-bit coverage ImagingCore, so 1 byte per pixel.
+        self._bytes += mask.size[0] * mask.size[1]
+        if len(self.ops) >= self._max_ops or self._bytes > self._max_bytes:
+            raise _RecordingTooLarge(
+                f"{len(self.ops) + 1} blits / {self._bytes} mask bytes past the "
+                f"{self._max_ops}-op / {self._max_bytes}-byte budget")
         self.ops.append((tuple(coord), mask, ink))
         return 0
 
@@ -4049,6 +4073,55 @@ class LabelManager:
     # key label -- and caps the retained strip near ~1.6 MB even on a
     # 100px-tall SD+ dial image.
     _MAX_STRIP_WIDTH = 4096
+    # ...but only on ONE axis. Strip HEIGHT tracks the composed text block,
+    # so a multiline label re-opens the same hole vertically: a 2000-line
+    # label measures ~42000 px tall, i.e. a ~700 MB strip (review round 2).
+    # 4 MiB leaves ~2.5x headroom over the widest legitimate strip the width
+    # cap already permits (4096 x 100 x 4 = 1.6 MB on an SD+ dial image) and
+    # rejects the pathological-height case outright.
+    _MAX_STRIP_BYTES = 4 * 1024 * 1024
+
+    # The same bound for the recorded static-label blits. Retention there is
+    # 1 byte/px of glyph mask rather than 4 byte/px of RGBA canvas, but it
+    # scales with LINE COUNT the same way -- and unlike the strip, the
+    # recording also costs FreeType time on the sole device writer: measured
+    # headless, 500 lines = 1000 blits / 430 KB / 0.22 s, 2000 lines = 4000
+    # blits / 2.0 MB / 1.06 s, and the reviewer's 20k-line probe = 32 MB and
+    # a 5 s media-thread stall.
+    #
+    # 512 KiB per position is ~6x the largest label that can actually be READ
+    # on an input: a 200x200 dial image covered edge to edge in glyphs is
+    # ~40k px per pass, ~80 KB for the stroke+fill pair. It also covers a
+    # single-line label stretched to the full 4096 px width cap (~240 KB).
+    # Three positions -> a 1.5 MiB ceiling per input state, bounded on BOTH
+    # axes. 512 ops is 256 lines x (stroke pass + fill pass); a label that
+    # tall is already thousands of pixels past any key.
+    #
+    # Enforced twice: cheaply BEFORE recording from the measurements the
+    # render already has (_label_ops_budget_ok), and as a hard abort inside
+    # the recorder, which is what actually bounds the wall time.
+    _MAX_LABEL_MASK_BYTES = 512 * 1024
+    _MAX_LABEL_OPS = 512
+
+    def _label_ops_budget_ok(self, label: "KeyLabel", w: int, h: int) -> bool:
+        """Whether recording this label's blits is worth the retention and
+        the media-thread stall, decided from measurements the caller already
+        has (no rasterization).
+
+        text() masks each LINE separately and runs the whole thing twice when
+        there is an outline, so the op count is 2 per line and the stroke
+        padding is paid per line rather than once for the block. That makes
+        this an over-estimate of the real mask total (~2x on measured cases,
+        because a mask is the glyph run's tight bbox, not the block
+        rectangle) -- the safe direction for a pre-check, since the exact
+        bound is enforced inside _BitmapRecorder."""
+        lines = label.text.count("\n") + 1
+        if lines * 2 > self._MAX_LABEL_OPS:
+            return False
+        stroke = label.outline_width or 0
+        estimated_bytes = (2 * (int(w) + 2 * stroke)
+                           * (int(h) + lines * 2 * stroke))
+        return estimated_bytes <= self._MAX_LABEL_MASK_BYTES
 
     def _composite_scroll_strip(self, image: Image.Image, position: str, label: "KeyLabel",
                                 w: int, h: int, x_position: float, y_position: float) -> None:
@@ -4074,11 +4147,15 @@ class LabelManager:
         pad = outline_width + 6
 
         strip_width = int(w) + 2 * pad + 1
-        if strip_width > self._MAX_STRIP_WIDTH:
+        strip_height = int(h) + 2 * pad + 1
+        if strip_width > self._MAX_STRIP_WIDTH or \
+                strip_width * strip_height * 4 > self._MAX_STRIP_BYTES:
             # Pathological label: skip the strip cache entirely and draw the
             # text directly at the scroll offset (the pre-MR path). Bounded
             # memory (nothing retained), correct pixels; per-frame raster CPU
-            # is the trade, acceptable for a label this long.
+            # is the trade, acceptable for a label this long. The byte test
+            # is what covers a many-LINE label, whose block grows vertically
+            # and slips straight past the width cap.
             self._scroll_strips.pop(position, None)
             ImageDraw.Draw(image).text((x_position, y_position), text=label.text,
                                        font=font, anchor="mm", align=label.alignment,
@@ -4155,11 +4232,12 @@ class LabelManager:
         a direct draw.)
 
         Falls back to the direct draw -- today's behavior, no cache retained
-        -- for non-RGB(A) targets (the recorded ink is mode-derived), for
-        pathological labels past the strip-width cap, and if PIL's text()
-        internals ever stop routing through draw_bitmap."""
+        -- for non-RGB(A) targets (the recorded ink is mode-derived), for a
+        label past the width cap or past the retention/op budget, and if
+        PIL's text() internals ever stop routing through draw_bitmap."""
         if image.mode not in ("RGB", "RGBA") or \
-                int(w) + 2 * (label.outline_width + 6) + 1 > self._MAX_STRIP_WIDTH:
+                int(w) + 2 * (label.outline_width + 6) + 1 > self._MAX_STRIP_WIDTH or \
+                not self._label_ops_budget_ok(label, w, h):
             self._static_ops.pop(position, None)
             draw.text((x_position, y_position), text=label.text, font=label.get_font(),
                       anchor=anchor, align=label.alignment, fill=tuple(label.color),
@@ -4177,15 +4255,19 @@ class LabelManager:
                image.size, image.mode, w, h)
         cached = self._static_ops.get(position)
         if cached is None or cached[0] != key:
-            cached = (key, self._record_label_blits(
-                image, label, font, (x_position, y_position), anchor))
-            self._static_ops[position] = cached
+            ops = self._record_label_blits(
+                image, label, font, (x_position, y_position), anchor)
+            # A failed recording is memoized as None under the SAME key: the
+            # attempt can cost hundreds of milliseconds, so it must not be
+            # retried on every frame of an animated background.
+            self._static_ops[position] = (key, ops)
             if media_prof:
                 media_prof.count("label_ops_miss")
-        elif media_prof:
-            media_prof.count("label_ops_hit")
+        else:
+            ops = cached[1]
+            if media_prof:
+                media_prof.count("label_ops_hit")
 
-        ops = cached[1]
         if ops is None:
             # Recording is not available for this label (see above): keep
             # drawing it the old way, without re-attempting the recording
@@ -4204,18 +4286,29 @@ class LabelManager:
                             xy: tuple, anchor: str) -> tuple:
         """Runs draw.text() against a throwaway target whose draw core only
         RECORDS the mask blits, and returns them (None = not recordable, draw
-        directly instead). The probe target must match the real image's mode
-        and size: the ink is resolved for the mode, and the blit coordinates
-        text() computes are absolute."""
+        directly instead).
+
+        The probe target must match the real image's mode and size: the ink is
+        resolved for the mode, and the blit coordinates text() computes are
+        absolute."""
         try:
             probe = ImageDraw.Draw(Image.new(image.mode, image.size))
-            recorder = _BitmapRecorder(probe.draw)
+            recorder = _BitmapRecorder(probe.draw, self._MAX_LABEL_OPS,
+                                       self._MAX_LABEL_MASK_BYTES)
             probe.draw = recorder
             probe.text(xy, text=label.text, font=font, anchor=anchor,
                        align=label.alignment, fill=tuple(label.color),
                        stroke_width=label.outline_width,
                        stroke_fill=tuple(label.outline_color))
             ops = tuple(recorder.ops)
+        except _RecordingTooLarge as too_large:
+            # Expected for pathological labels that slipped past the cheap
+            # pre-check; the partial recording is dropped here and the caller
+            # pins the label to the direct draw.
+            log.info(f"Label blit recording exceeded the retention budget "
+                     f"({too_large}); falling back to the per-frame draw for "
+                     f"this label")
+            return None
         except Exception:
             log.warning("Label blit recording failed; falling back to the "
                         "per-frame draw for this label", exc_info=True)
