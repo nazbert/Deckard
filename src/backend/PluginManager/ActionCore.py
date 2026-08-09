@@ -166,6 +166,22 @@ class ActionCore(rpyc.Service):
         """
         This method gets called when the app wants the action to redraw itself (image, labels, etc.).
         """
+        # The compat call below re-runs the whole on_ready body, so it only
+        # fires once a ready has actually COMPLETED (#179). A caller reaching
+        # here while the initial on_ready is still in flight used to run a
+        # second on_ready body concurrently with it -- the duplicate-ready
+        # class (plugins allocate, subscribe and spawn backend processes in
+        # on_ready). own_actions_update gates the app's own dispatch; this
+        # covers every other caller, including a plugin calling on_update()
+        # on itself from inside on_ready.
+        # Skipped, never deferred: the in-flight ready sequence ends with its
+        # own on_update (Page._run_ready_callbacks), so the redraw is not
+        # lost, and a queued duplicate is exactly the re-entry being removed.
+        # After a completed ready this path is unchanged -- the compat call
+        # still fires per update, as it always did.
+        if not self.on_ready_finished:
+            log.debug(f"{self.action_id}: on_update compat on_ready skipped, on_ready has not finished")
+            return
         self.on_ready() # backward compatibility
 
     def set_media(self, image = None, media_path=None, size: float = None, valign: float = None, halign: float = None, fps: int = 30, loop: bool = True, update: bool = True):
