@@ -65,10 +65,6 @@ if TYPE_CHECKING:
 # A candidate must score at least this against the query to stay in the grid.
 SEARCH_SCORE_THRESHOLD = 50
 
-# How many assets one page of the recycler shows.
-PAGE_SIZE = 50
-
-
 def asset_display_name(item, attr: str = "path") -> str:
     """The string the search matches on: the asset's file name without its
     directory or extension (what the preview's label shows)."""
@@ -361,7 +357,8 @@ class GenericAssetChooserPage(_ChooserBuildPage):
             self._pending_pack = pack
             return
         self.asset_flow.set_item_list(self.get_assets(pack))
-        self.asset_flow.show_range(0, PAGE_SIZE)
+        # The recycler owns its page size (it sized its preview pool to it).
+        self.asset_flow.show_range(0, self.asset_flow.N_ITEMS_PER_PAGE)
 
     def select_asset(self, path: str) -> None:
         """Pre-selects the asset at `path` once it is rendered."""
@@ -395,7 +392,7 @@ class GenericAssetChooserPage(_ChooserBuildPage):
             # Nothing rendered yet (build still queued on the main loop);
             # the first render already reads the current search text.
             return
-        self.asset_flow.show_range(0, PAGE_SIZE)
+        self.asset_flow.show_range(0, self.asset_flow.N_ITEMS_PER_PAGE)
 
     # ----------------------------------------------------------------- #
     # Subclass hooks

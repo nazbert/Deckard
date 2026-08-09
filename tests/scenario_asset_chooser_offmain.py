@@ -80,6 +80,8 @@ def make_stubs(recorder: Recorder):
     bare preview stand-in. Both record their construction thread."""
 
     class StubFlowBox:
+        N_ITEMS_PER_PAGE = 50
+
         def __init__(self, *args, **kwargs):
             recorder.note()
             self.flow_box = types.SimpleNamespace(
@@ -281,13 +283,14 @@ def _marshalled_targets(fn: ast.AST) -> set[str]:
 
 
 def find_offmain_constructions(class_node: ast.ClassDef,
-                               entry: str = "build") -> list[str]:
-    """Widget constructions reachable from `entry` WITHOUT crossing a
+                               entries: tuple = ("build",)) -> list[str]:
+    """Widget constructions reachable from any of `entries` WITHOUT crossing a
     main-loop marshal. Follows self.<method>() calls inside the class."""
     methods = {n.name: n for n in class_node.body
                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    if entry not in methods:
-        return [f"{class_node.name}: no {entry}() to check"]
+    missing = [e for e in entries if e not in methods]
+    if missing:
+        return [f"{class_node.name}: no {', '.join(missing)}() to check"]
 
     violations: list[str] = []
     seen: set[str] = set()
@@ -324,14 +327,12 @@ def find_offmain_constructions(class_node: ast.ClassDef,
 
         walk(fn)
 
-    visit(entry, entry)
+    for entry in entries:
+        visit(entry, entry)
     return violations
 
 
-def class_node_for(cls, entry: str = "build") -> tuple[ast.ClassDef, str]:
-    """The ClassDef that actually defines `entry` for cls (the shared base
-    after the extraction, the leaf class before it)."""
-    owner = next(k for k in cls.__mro__ if entry in k.__dict__)
+def class_node(owner: type) -> tuple[ast.ClassDef, str]:
     source_file = inspect.getsourcefile(owner)
     tree = ast.parse(open(source_file, encoding="utf-8").read(), source_file)
     node = next(n for n in ast.walk(tree)
@@ -339,7 +340,30 @@ def class_node_for(cls, entry: str = "build") -> tuple[ast.ClassDef, str]:
     return node, source_file
 
 
-def check_static(label: str, module_path: str, class_name: str) -> int:
+def class_node_for(cls, entry: str = "build") -> tuple[ast.ClassDef, str]:
+    """The ClassDef that actually defines `entry` for cls (the shared base
+    after the extraction, the leaf class before it)."""
+    owner = next(k for k in cls.__mro__ if entry in k.__dict__)
+    return class_node(owner)
+
+
+# Hooks the BUILD WORKER calls into. A subclass may override these, and its
+# body then runs off the main thread just like build() does -- so they get the
+# same reachability check, in the subclass's own file. (The rest of the
+# subclass surface -- get_assets/bind_preview/get_child_asset -- is only ever
+# called from main-loop callbacks, and the runtime leg above exercises every
+# concrete class end to end anyway.)
+WORKER_SIDE_HOOKS = ("get_packs", "get_pack_thumbnail_path",
+                     "on_build_finished", "_reset_build_state")
+
+# Sum of those hooks across the six classes (3x get_packs + 2x
+# on_build_finished today). Guards the static leg against going vacuous when
+# the six classes collapse onto shared bases.
+MIN_SUBCLASS_HOOKS_CHECKED = 5
+
+
+def check_static(label: str, module_path: str, class_name: str) -> tuple[int, int]:
+    """Returns (rc, number of subclass-owned worker-side hooks checked)."""
     import importlib
 
     module = importlib.import_module(module_path)
@@ -347,10 +371,21 @@ def check_static(label: str, module_path: str, class_name: str) -> int:
 
     node, source_file = class_node_for(cls)
     violations = find_offmain_constructions(node)
+
+    # The six classes share two bases, so the check above covers the same two
+    # ClassDefs six times. What IS unique per class are its own hook bodies.
+    own_node, own_file = class_node(cls)
+    own_methods = {n.name for n in own_node.body
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    own_hooks = tuple(h for h in WORKER_SIDE_HOOKS if h in own_methods)
+    if own_hooks:
+        violations += [f"{v} [{own_file}]"
+                       for v in find_offmain_constructions(own_node, own_hooks)]
+
     if violations:
         for v in violations:
             print(f"FAIL({label}): {v} [{source_file}]")
-        return 1
+        return 1, len(own_hooks)
 
     # The check is only meaningful while build() really is a thread body --
     # directly, or through the one-hop _run_build wrapper that clears the
@@ -359,10 +394,11 @@ def check_static(label: str, module_path: str, class_name: str) -> int:
     if not re.search(r"threading\.Thread\(target=self\.(build|_run_build)\b", owner_src):
         print(f"FAIL({label}): build() is no longer started on a worker thread "
               f"in {source_file} -- re-point this tripwire at the new loader")
-        return 1
+        return 1, len(own_hooks)
 
-    print(f"PASS: {label} reaches no off-main widget construction from build()")
-    return 0
+    print(f"PASS: {label} reaches no off-main widget construction from build() "
+          f"or its {len(own_hooks)} own worker-side hook(s)")
+    return 0, len(own_hooks)
 
 
 # The tripwire's own regression test: it must flag the pre-fix shape (both
@@ -707,10 +743,25 @@ def main() -> int:
     gl.lm = types.SimpleNamespace(get=lambda key, *a, **k: key)
 
     rc = check_tripwire_self_test()
+    hooks_checked = 0
     for label, module_path, class_name, minimum in CASES:
         rc |= check_runtime(label, module_path, class_name, minimum)
-        rc |= check_static(label, module_path, class_name)
+        static_rc, hooks = check_static(label, module_path, class_name)
+        rc |= static_rc
+        hooks_checked += hooks
+    # Today: three get_packs + two on_build_finished. A drop means subclass
+    # bodies moved somewhere this static leg no longer looks at.
+    if hooks_checked < MIN_SUBCLASS_HOOKS_CHECKED:
+        print(f"FAIL: the static leg only checked {hooks_checked} subclass-owned "
+              f"worker-side hooks, expected at least "
+              f"{MIN_SUBCLASS_HOOKS_CHECKED} -- it has gone partly vacuous")
+        rc |= 1
+    else:
+        print(f"PASS: the static leg checked {hooks_checked} subclass-owned "
+              f"worker-side hook bodies on top of the two shared build()s")
     # One pack page and one leaf page: the two build() bodies that marshal.
+    print("NOTE: the next two ERROR tracebacks are DELIBERATE -- the timeout "
+          "legs stall the loop on purpose and this is the log the fix emits.")
     for label, module_path, class_name, _ in (CASES[0], CASES[1]):
         rc |= check_marshal_timeout(label, module_path, class_name)
     # Last: it installs a real window and real gl.* collaborators.
