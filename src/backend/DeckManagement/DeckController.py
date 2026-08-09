@@ -3981,7 +3981,11 @@ class LabelManager:
         transparent fill/outline (alpha < 255, reachable only via the plugin
         set_label API / hand-edited page JSON, not the color picker) blends
         with straight-alpha OVER here vs PIL's coverage blend in draw.text, so
-        the scrolling frame differs slightly from the static draw for those."""
+        the scrolling frame differs slightly from the static draw for those.
+        The static twin (_draw_static_label, #207) caches one layer lower --
+        the glyph masks rather than a composited strip -- which is exact for
+        any ink, but needs a fixed paste position, so it does not generalize
+        back to the sweep."""
         font = label.get_font()
         outline_width = label.outline_width
         pad = outline_width + 6
