@@ -17,12 +17,19 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 # must still be able to import this.
 import json
 import os
+import stat
 import tempfile
 import time
 
 # Temps orphaned by a hard kill between write and rename are reaped on the
 # next write for the same target once they're older than this (seconds).
 STALE_TMP_MAX_AGE = 60 * 60
+
+# How many ``.corrupt*`` sidecars to keep per primary file. They exist for
+# post-mortem, not as a version history: a file that keeps getting corrupted
+# would otherwise fill the config dir forever (issue #152), and three
+# generations is already more than anyone reads.
+CORRUPT_SIDECAR_KEEP = 3
 
 
 def _process_umask() -> int:
@@ -102,6 +109,67 @@ def quarantine_corrupt_file(file_path: str) -> tuple[bool, str]:
         # Rename failed (or the source vanished under a concurrent
         # quarantine). Leave the caller to recover from a backup regardless.
         return False, file_path
+
+
+def prune_corrupt_sidecars(primary_path: str, keep: int = CORRUPT_SIDECAR_KEEP) -> list[str]:
+    """Best-effort, oldest-first pruning of ``<primary_path>.corrupt*``.
+
+    Call this from a loader immediately after it quarantined something --
+    never as a startup-wide filesystem walk. The scope is exactly one primary
+    file's own sidecars, so the work is bounded by how often that one file has
+    been corrupt, and only names the quarantine primitive itself can produce
+    are considered: ``<name>.corrupt`` and ``<name>.corrupt.<n>`` with a
+    purely numeric suffix. A user's own ``settings.json.corrupt.bak`` (or a
+    directory that happens to match) is never touched.
+
+    Age is the sidecar's mtime, which os.replace carries over from the corrupt
+    primary -- i.e. when that corrupt content was written, which is the
+    interesting timestamp. Names are NOT an age order: quarantine_corrupt_file
+    takes the first free slot, so a pruned ``.corrupt`` is recycled by the
+    next corruption.
+
+    Returns the paths actually removed. Every filesystem error is swallowed:
+    failing to tidy up must never break the load that triggered it.
+    """
+    keep = max(keep, 0)
+    dir_path = os.path.dirname(primary_path) or "."
+    plain = os.path.basename(primary_path) + ".corrupt"
+    numbered = plain + "."
+
+    try:
+        entries = os.listdir(dir_path)
+    except OSError:
+        return []
+
+    sidecars: list[tuple[float, str, str]] = []
+    for entry in entries:
+        if entry != plain:
+            suffix = entry[len(numbered):] if entry.startswith(numbered) else ""
+            if not (suffix.isascii() and suffix.isdigit()):
+                continue
+        path = os.path.join(dir_path, entry)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        # Name as a stable tie-break for equal mtimes (coarse-granularity
+        # filesystems) so the outcome is deterministic either way.
+        sidecars.append((st.st_mtime, entry, path))
+
+    if len(sidecars) <= keep:
+        return []
+
+    sidecars.sort()
+    removed: list[str] = []
+    for _mtime, _entry, path in sidecars[:len(sidecars) - keep]:
+        try:
+            os.remove(path)
+            removed.append(path)
+        except OSError:
+            pass
+    return removed
 
 
 def atomic_write_json(file_path: str, data, indent: int | None = 4) -> None:

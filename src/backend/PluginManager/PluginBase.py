@@ -33,7 +33,7 @@ import globals as gl
 from locales.LegacyLocaleManager import LegacyLocaleManager
 from src.backend.PluginManager.ActionHolder import ActionHolder
 from src.backend.PluginManager.EventHolder import EventHolder
-from src.backend.atomic_json import atomic_write_json, quarantine_corrupt_file
+from src.backend.atomic_json import atomic_write_json, prune_corrupt_sidecars, quarantine_corrupt_file
 
 
 def _quarantine_corrupt_json(file_path: str, context: str, error: Exception) -> None:
@@ -57,6 +57,10 @@ def _quarantine_corrupt_json(file_path: str, context: str, error: Exception) -> 
     moved, dest = quarantine_corrupt_file(file_path)
     if moved:
         log.error(f"{context} {file_path} contains invalid JSON: {error} -- preserved at {dest}")
+        # Bounded retention, scoped to this one file and only on the path that
+        # just added a sidecar -- no startup-wide sweep (#152).
+        for pruned in prune_corrupt_sidecars(file_path):
+            log.info(f"Pruned old quarantined copy {pruned}")
     else:
         log.error(
             f"{context} {file_path} contains invalid JSON: {error} -- could NOT move it "
