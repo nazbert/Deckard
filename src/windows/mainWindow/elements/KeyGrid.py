@@ -305,7 +305,7 @@ class KeyButton(Gtk.Frame):
         # tests/scenario_asset_reject_sentinel.py, so do NOT short-circuit it.
         path = file.get_path()
 
-        internal_path = gl.asset_manager_backend.add_custom_media_set_by_ui(url=url, path=path)  # type: ignore[arg-type]  # cross-MR: add_custom_media_set_by_ui declares path: str but its first branch is `if path is None and url is not None` (root cause: src/backend/AssetManagerBackend.py:328, MR 6/#226)
+        internal_path = gl.asset_manager_backend.add_custom_media_set_by_ui(url=url, path=path)
         # Anything that is not a path IS a refusal: the import used to answer
         # a rejected url with -1, which slipped past an `is None` test and
         # landed in the key's media path (#191).

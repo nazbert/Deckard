@@ -238,12 +238,7 @@ class ActionCore(rpyc.Service):
                 return
 
             if image is not None:
-                # The attr-defined ignores on the set_image/set_video calls in
-                # this block: only the Key/Dial state subclasses declare them,
-                # and the guard at the top of set_media leaves only those two
-                # here. Root cause is the base ControllerInputState not
-                # declaring the pair (DeckController.py).
-                input_state.set_image(InputImage(  # type: ignore[attr-defined]  # root cause: ControllerInputState does not declare set_image/set_video (DeckController.py, MR 4)
+                input_state.set_image(InputImage(
                     controller_input=controller_input,
                     image=image,
                     path=path_for_reopen,
@@ -280,9 +275,9 @@ class ActionCore(rpyc.Service):
                         log.opt(exception=True).warning(
                             f"GIF decode failed in set_media, falling back to the opaque cv2 path: {media_path}")
                 if key_gif is not None:
-                    input_state.set_video(key_gif)  # type: ignore[attr-defined]  # root cause: ControllerInputState does not declare set_image/set_video (DeckController.py, MR 4)
+                    input_state.set_video(key_gif)
                 else:
-                    input_state.set_video(InputVideo(  # type: ignore[attr-defined]  # root cause: ControllerInputState does not declare set_image/set_video (DeckController.py, MR 4)
+                    input_state.set_video(InputVideo(
                         controller_input=controller_input,
                         video_path=media_path,
                         fps=fps,
@@ -291,16 +286,14 @@ class ActionCore(rpyc.Service):
                 self._stamp_media_owner(input_state)
 
             else:
-                input_state.set_image(None, update=False)  # type: ignore[attr-defined]  # root cause: ControllerInputState does not declare set_image/set_video (DeckController.py, MR 4)
+                input_state.set_image(None, update=False)
 
             # valign/halign/size are optional here and ImageLayout stores them
-            # as-is; its dataclass fields are declared non-optional despite
-            # defaulting to None (KeyLayout.py) -- that is the root cause of
-            # the three arg-type ignores.
+            # as-is.
             input_state.layout_manager.set_action_layout(ImageLayout(
-                valign=valign,  # type: ignore[arg-type]  # root cause: ImageLayout fields declared non-optional with None defaults (KeyLayout.py, MR 5)
-                halign=halign,  # type: ignore[arg-type]  # root cause: ImageLayout fields declared non-optional with None defaults (KeyLayout.py, MR 5)
-                size=size  # type: ignore[arg-type]  # root cause: ImageLayout fields declared non-optional with None defaults (KeyLayout.py, MR 5)
+                valign=valign,
+                halign=halign,
+                size=size
             ), update=False)
 
         if update:
@@ -423,20 +416,18 @@ class ActionCore(rpyc.Service):
 
         text = str(text)
 
-        # Every ignore below has the same root cause: KeyLabel's dataclass
-        # fields are declared non-optional although they all default to None,
-        # and controller_input is declared ControllerKey although dial labels
-        # legitimately pass a ControllerDial (KeyLabel.py).
+        # Every field below is optional on KeyLabel: an unset one means
+        # "inherit the page/font default" at compose time, not "empty".
         key_label = KeyLabel(
-            controller_input=state.controller_input,  # type: ignore[arg-type]  # root cause: KeyLabel.controller_input declared ControllerKey (KeyLabel.py, MR 5)
+            controller_input=state.controller_input,
             text=text,
             font_size=font_size,
-            font_name=font_family,  # type: ignore[arg-type]  # root cause: KeyLabel fields declared non-optional with None defaults (KeyLabel.py, MR 5)
-            color=color,  # type: ignore[arg-type]  # root cause: KeyLabel fields declared non-optional with None defaults (KeyLabel.py, MR 5)
-            outline_width=outline_width,  # type: ignore[arg-type]  # root cause: KeyLabel fields declared non-optional with None defaults (KeyLabel.py, MR 5)
-            outline_color=outline_color,  # type: ignore[arg-type]  # root cause: KeyLabel fields declared non-optional with None defaults (KeyLabel.py, MR 5)
-            font_weight=font_weight,  # type: ignore[arg-type]  # root cause: KeyLabel fields declared non-optional with None defaults (KeyLabel.py, MR 5)
-            style=font_style  # type: ignore[arg-type]  # root cause: KeyLabel fields declared non-optional with None defaults (KeyLabel.py, MR 5)
+            font_name=font_family,
+            color=color,
+            outline_width=outline_width,
+            outline_color=outline_color,
+            font_weight=font_weight,
+            style=font_style
         )
 
         self.labels[position] = {
@@ -608,18 +599,19 @@ class ActionCore(rpyc.Service):
             return None
         return actions.index(self)
 
-    def get_page_event_assignments(self) -> dict[InputEvent, InputEvent]:
-        assignment = {}
+    # None is a legitimate VALUE here: Input.EventFromStringName answers None for
+    # the stored str(None) sentinel, i.e. "this event is explicitly mapped to no
+    # assigner". Every event key is always present, so callers iterate the map
+    # and skip None rather than probing for missing keys.
+    def get_page_event_assignments(self) -> dict[InputEvent, InputEvent | None]:
+        assignment: dict[InputEvent, InputEvent | None] = {}
 
         page_assignment_dict = self.page.get_action_event_assignments(action_object=self)
 
         all_events = Input.AllEvents()
         for event in all_events:
-            # string_name is attached in InputEvent.__new__ rather than
-            # declared on the class, so it is invisible to the checker
-            # (InputIdentifier.py).
-            if event.string_name in page_assignment_dict:  # type: ignore[attr-defined]  # root cause: InputEvent.string_name set in __new__, undeclared (InputIdentifier.py, MR 5)
-                assignment[event] = Input.EventFromStringName(page_assignment_dict[event.string_name])  # type: ignore[attr-defined]  # root cause: InputEvent.string_name set in __new__, undeclared (InputIdentifier.py, MR 5)
+            if event.string_name in page_assignment_dict:
+                assignment[event] = Input.EventFromStringName(page_assignment_dict[event.string_name])
             else:
                 assignment[event] = event
 
@@ -638,10 +630,7 @@ class ActionCore(rpyc.Service):
     def set_event_assignment(self, input_event: InputEvent | None, event_assigner: EventAssigner | None):
         self.page.set_action_event_assigment(
             event_assigner=event_assigner,
-            # Page.set_action_event_assigment annotates input_event as
-            # evdev.events.InputEvent -- a wrong import in Page.py; the value
-            # passed here (and stringified there) is ours.
-            input_event=input_event,  # type: ignore[arg-type]  # root cause: set_action_event_assigment annotates evdev InputEvent (Page.py, MR 6)
+            input_event=input_event,
             action_object=self
         )
 

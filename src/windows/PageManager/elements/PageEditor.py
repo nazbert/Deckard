@@ -254,7 +254,7 @@ class DefaultPageGroup(PageEditorGroup):
         # None clears the deck's default page -- see
         # PageManagerBackend.get_all_default_page_serial_numbers, which skips
         # falsy entries.
-        gl.page_manager.set_default_page(serial_number, path)  # type: ignore[arg-type]  # cross-MR: PageManagerBackend.set_default_page declares path: str, but None is the documented "no default" value (root cause: src/backend/PageManagement/PageManagerBackend.py, MR 6/#226)
+        gl.page_manager.set_default_page(serial_number, path)
 
 class AutoChangeGroup(PageEditorGroup):
     def __init__(self, page_editor: PageEditor):
