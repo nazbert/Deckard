@@ -90,7 +90,10 @@ FONT_DEFAULTS: dict = {
     "font-weight": 400,
     "font-style": "normal",
     "font-color": (255, 255, 255, 255),
-    "outline-color": (0, 0, 0, 1),
+    # 255, not 1: this feeds color_values_to_gdk (0-255 on all four channels
+    # since #203) and the render fallback is (0,0,0,255) -- the old value 1
+    # only looked opaque because the pre-#203 clamp rounded any alpha >=1 up.
+    "outline-color": (0, 0, 0, 255),
     "outline-width": 2,
 }
 

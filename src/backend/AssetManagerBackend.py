@@ -341,7 +341,11 @@ class AssetManagerBackend(list):
                     message="The image is invalid.",
                     detail="You can only use urls directly pointing to images (not directly from Google).",
                 )
-                return -1
+                # None, like every other refusal here: the callers test the
+                # result for a usable media path, and the old -1 sentinel
+                # passed KeyGrid's `is None` check and was written into the
+                # key's config (#191).
+                return None
 
             os.makedirs(os.path.join(gl.DATA_PATH, "cache", "downloads"), exist_ok=True)
             # Download file from url. Since #168 download_file RAISES on a

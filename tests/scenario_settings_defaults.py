@@ -73,7 +73,7 @@ EXPECTED_FONT_DEFAULTS = {
     "font-weight": 400,
     "font-style": "normal",
     "font-color": (255, 255, 255, 255),
-    "outline-color": (0, 0, 0, 1),
+    "outline-color": (0, 0, 0, 255),  # opaque since the #203 scale fix (review on !103)
     "outline-width": 2,
 }
 
