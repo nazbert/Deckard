@@ -23,8 +23,12 @@ import globals as gl
 
 @lru_cache(maxsize=128)
 def _load_font(font_path: str, font_size: int, encoding: str) -> ImageFont.FreeTypeFont:
-    # ImageFont.truetype() re-parses the font file from disk every call otherwise,
-    # and this can run a few times per key per render
+    # ImageFont.truetype re-reads the file and re-parses the FreeType face on
+    # every call. Since #207 the label rasterization itself is cached per
+    # composed label (LabelManager._draw_static_label), so this is no longer
+    # on the per-frame path -- but get_font() is still called per label per
+    # composite to build that cache's key, and the scroll path measures
+    # through it too.
     return ImageFont.truetype(font_path, font_size, encoding=encoding)
 
 
@@ -43,13 +47,6 @@ def _is_symbol_font(font_path: str) -> bool:
         return False
     except Exception:
         return False
-
-
-@lru_cache(maxsize=64)
-def _load_font(font_path: str, font_size: int, encoding: str) -> ImageFont.FreeTypeFont:
-    # ImageFont.truetype re-reads the file and re-parses the FreeType face on
-    # every call; labels render every frame, so cache the face object.
-    return ImageFont.truetype(font_path, font_size, encoding=encoding)
 
 
 def _find_font_path(font_name: str, font_weight, style) -> str:
