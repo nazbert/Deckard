@@ -4195,7 +4195,7 @@ class KeyGIF(SingleKeyAsset):
     def get_raw_image(self) -> Image.Image:
         # get_next_frame() is None once close() has released the frames;
         # widening only this override would be an incompatible return type.
-        return self.get_next_frame()  # type: ignore[return-value]  # root cause: SingleKeyAsset.get_raw_image -> Image.Image (Subclasses/SingleKeyAsset.py, MR 5)
+        return self.get_next_frame()  # type: ignore[return-value]  # root cause: SingleKeyAsset.get_raw_image -> Image.Image is too narrow (Subclasses/SingleKeyAsset.py)
     
     def close(self) -> None:
         """Drops the retained frame list (the whole footprint) and leaves the
@@ -5560,7 +5560,7 @@ class ControllerInputState:
             return
 
         # Clearing the media is exactly a None path.
-        page.set_media_path(identifier=self.controller_input.identifier, state=self.state, path=None)  # type: ignore[arg-type]  # root cause: Page.set_media_path(path: str) (PageManagement/Page.py, MR 6)
+        page.set_media_path(identifier=self.controller_input.identifier, state=self.state, path=None)  # type: ignore[arg-type]  # root cause: Page.set_media_path declares path: str while None is the clear-media value (PageManagement/Page.py)
 
         self.update()
 
