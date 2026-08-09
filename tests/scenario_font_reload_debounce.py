@@ -221,10 +221,33 @@ def _func_def(class_node: ast.ClassDef, name: str) -> ast.FunctionDef:
     raise AssertionError(f"{class_node.name}.{name} vanished from Settings.py -- update this scenario")
 
 
+def _derive_font_row_classes(tree) -> tuple:
+    """Every class whose on_set touches font_page_group IS a font row --
+    derived from the AST so a fifth row added later is covered without
+    anyone remembering to extend a hardcoded list (review L-4). The
+    literal FONT_ROW_CLASSES stays as the minimum expected set."""
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef) and item.name == "on_set":
+                    if any("font_page_group" in name
+                           for name in _called_names(item)) or \
+                       "font_page_group" in ast.dump(item):
+                        found.append(node.name)
+    return tuple(found)
+
+
 def check_font_rows_route_through_the_group() -> None:
     tree = ast.parse(open(SETTINGS_PY, encoding="utf-8").read(), filename=SETTINGS_PY)
 
-    for class_name in FONT_ROW_CLASSES:
+    derived = _derive_font_row_classes(tree)
+    missing = set(FONT_ROW_CLASSES) - set(derived)
+    assert not missing, (
+        f"font rows vanished from Settings.py without this scenario being told: {missing}"
+    )
+
+    for class_name in derived:
         on_set = _func_def(_class_def(tree, class_name), "on_set")
         calls = _called_names(on_set)
         assert "threading.Thread" not in calls, (
@@ -243,8 +266,23 @@ def check_font_rows_route_through_the_group() -> None:
     group = _class_def(tree, "FontPageGroup")
     init_calls = _called_names(_func_def(group, "__init__"))
     assert "TrailingDebouncer" in init_calls, "FontPageGroup no longer owns a TrailingDebouncer"
-    assert "self.reload_debouncer.trigger" in _called_names(_func_def(group, "request_page_reload")), (
+    request = _func_def(group, "request_page_reload")
+    assert "self.reload_debouncer.trigger" in _called_names(request), (
         "FontPageGroup.request_page_reload bypasses the debouncer"
+    )
+    # The !100 never-elide invariant, enforced structurally (review M-1): the
+    # trigger must be UNCONDITIONAL. Any If/Return in the body is the
+    # "skip the reload when nothing changed" optimization that silently
+    # breaks the label memos' correctness contract -- the reload may be
+    # delayed, never elided.
+    conditional = [n for n in ast.walk(request)
+                   if isinstance(n, (ast.If, ast.Return, ast.IfExp))]
+    assert not conditional, (
+        "FontPageGroup.request_page_reload grew conditional logic "
+        f"({[type(n).__name__ for n in conditional]}) -- the trigger must be "
+        "unconditional: font_defaults -> reload_all_pages -> create_n_states "
+        "is a pixel-correctness dependency of the label memos (!100); the "
+        "reload may be DELAYED, never ELIDED"
     )
     spawn_calls = _called_names(_func_def(group, "_reload_all_pages"))
     assert "threading.Thread" in spawn_calls, (
@@ -255,6 +293,34 @@ def check_font_rows_route_through_the_group() -> None:
     print(f"PASS: all {len(FONT_ROW_CLASSES)} font rows route their reload through the shared debouncer")
 
 
+def check_trigger_is_single_thread() -> None:
+    """The debouncer's _pending has no lock; a second triggering thread must
+    fail loudly instead of racing it (review L-1)."""
+    import threading
+
+    from GtkHelper.debounce import TrailingDebouncer
+
+    deb = TrailingDebouncer(10, lambda: None, scheduler=FakeScheduler())
+    deb.trigger()  # binds the owner thread (this one)
+
+    caught = []
+
+    def cross_thread():
+        try:
+            deb.trigger()
+        except RuntimeError as e:
+            caught.append(e)
+
+    t = threading.Thread(target=cross_thread)
+    t.start()
+    t.join(5)
+    assert caught, (
+        "a second thread triggered the debouncer without the single-thread "
+        "contract firing -- the unlocked _pending handle would race"
+    )
+    print("PASS: cross-thread trigger fails loudly")
+
+
 def main() -> None:
     fixtures.start_watchdog(WATCHDOG_SECONDS, label="scenario_font_reload_debounce")
 
@@ -262,6 +328,7 @@ def main() -> None:
     check_trigger_during_window_rearms()
     check_callback_always_fires_after_any_trigger()
     check_glib_scheduler_coalesces_and_is_one_shot()
+    check_trigger_is_single_thread()
     check_font_rows_route_through_the_group()
 
     print("PASS: scenario_font_reload_debounce")

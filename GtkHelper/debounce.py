@@ -17,6 +17,7 @@ Single-thread only: ``trigger()`` and the callback both run on whichever
 thread drives the scheduler -- the GTK main thread in production, since
 signal handlers are dispatched there -- so the pending handle needs no lock.
 """
+import threading
 from typing import Any, Callable, Optional, Protocol
 
 
@@ -75,9 +76,22 @@ class TrailingDebouncer:
         self.callback = callback
         self.scheduler: Scheduler = scheduler or GLibScheduler()
         self._pending: Optional[Any] = None
+        self._owner_thread: Optional[int] = None
 
     def trigger(self) -> None:
         """Request a callback ``delay_ms`` from now, replacing any pending one."""
+        # Single-thread contract, enforced: _pending has no lock, so a
+        # second triggering thread would race it (double fire, or a
+        # source_remove on a dead id). All current callers are GTK signal
+        # handlers on the main thread; fail loudly if that ever changes
+        # instead of racing quietly.
+        ident = threading.get_ident()
+        if self._owner_thread is None:
+            self._owner_thread = ident
+        elif ident != self._owner_thread:
+            raise RuntimeError(
+                "TrailingDebouncer.trigger() called from a second thread -- "
+                "this class is single-thread by contract (class docstring)")
         if self._pending is not None:
             self.scheduler.cancel(self._pending)
             self._pending = None
