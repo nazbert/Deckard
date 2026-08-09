@@ -53,6 +53,16 @@ class EventManager:
             # Apply the overrides
             for input_event_str, event_id in self._overrides.items():
                 input_event = Input.EventFromStringName(input_event_str)
+                if input_event is None:
+                    # Same junk-key class as the default-events loop above:
+                    # EventFromStringName answers None for an override key it
+                    # cannot resolve -- including the literal "None", which
+                    # page JSON carries because assignments are persisted as
+                    # str(input_event). Inserting that as a key would put an
+                    # unlookupable entry in the map (and a bogus row in the
+                    # event configurator), and it would silently shadow
+                    # nothing, so drop the stale override instead.
+                    continue
                 override_assigner = self.get_event_assigner_by_id(event_id) if event_id else None
                 event_map[input_event] = override_assigner
 

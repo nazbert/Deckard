@@ -35,6 +35,11 @@ Legs:
   5. hold timer: a key held past hold_time delivers HOLD_START (from the
      timer-wheel fire), and the release after that delivers HOLD_STOP, not
      SHORT_UP.
+  6. event map junk keys: EventManager.get_event_map() is keyed by real
+     InputEvents only -- neither an assigner declared without events nor an
+     unresolvable override key (e.g. the literal "None" that page JSON
+     carries) may insert a None key, and doing so must not cost the
+     resolvable overrides their entries.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
@@ -55,6 +60,7 @@ from StreamDeck.Devices.StreamDeck import DialEventType, TouchscreenEventType
 from src.backend.DeckManagement.InputIdentifier import Input
 from src.backend.PluginManager.ActionCore import ActionCore
 from src.backend.PluginManager.EventAssigner import EventAssigner
+from src.backend.PluginManager.EventManager import EventManager
 
 FAKE_PLUGIN_BASE = types.SimpleNamespace(PATH="/tmp", backend=None)
 
@@ -406,6 +412,45 @@ def test_hold_timer() -> int:
         fixtures.teardown(controller)
 
 
+def test_event_map_junk_keys() -> int:
+    """Leg 6: the event map is keyed by real InputEvents only.
+
+    Two paths used to insert a None key, which nothing can ever look up (the
+    map is read with a real InputEvent) but which does reach the event
+    configurator's row loop:
+      a) an EventAssigner declared with neither default_events nor
+         default_event falls back to [default_event] == [None];
+      b) an override whose key does not resolve -- notably the literal
+         "None", which page JSON carries because assignments persist as
+         str(input_event).
+    No controller needed: EventManager is a plain object.
+    """
+    manager = EventManager()
+
+    # (a) assigner with no declared events at all.
+    manager.add_event_assigner(EventAssigner(
+        id="no-events", ui_label="No Events", callback=lambda *a, **k: None))
+    # (b) a real assigner, addressed by a stale/unresolvable override key.
+    manager.add_event_assigner(EventAssigner(
+        id="real", ui_label="Real", default_events=[Input.Key.Events.DOWN],
+        callback=lambda *a, **k: None))
+    manager.set_overrides({str(None): "real", "Key Up": "real"})
+
+    event_map = manager.get_event_map()
+    if None in event_map:
+        print("FAIL(6): get_event_map inserted a None key -- an entry no "
+              "lookup can reach, from an event-less assigner or an "
+              "unresolvable override key")
+        return 1
+    # The fix must not cost the resolvable override its entry.
+    if event_map.get(Input.Key.Events.UP) is not manager.get_event_assigner_by_id("real"):
+        print("FAIL(6): dropping the junk override key also dropped the "
+              "adjacent resolvable override")
+        return 1
+    print("PASS: get_event_map keeps junk keys out and resolvable overrides in")
+    return 0
+
+
 def main() -> int:
     start_watchdog(75, "input_pipeline")
     gl.plugin_manager = _PluginManager()
@@ -414,6 +459,7 @@ def main() -> int:
     rc |= test_dial_events()
     rc |= test_touchscreen_events()
     rc |= test_hold_timer()
+    rc |= test_event_map_junk_keys()
     if rc == 0:
         print("PASS: scenario_input_pipeline")
     return rc
