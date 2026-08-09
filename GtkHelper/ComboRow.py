@@ -23,7 +23,7 @@ class BaseComboRowItem(GObject.GObject):
             return self.get_value() == other.get_value()
         return self.get_value() == str(other)
 
-    @GObject.Property(type=GObject.TYPE_STRING)
+    @GObject.Property(type=GObject.TYPE_STRING)  # type: ignore[arg-type]  # gi stub: Property(type=) accepts a GType, stubs only declare type[Any] | None
     def filter_value(self):
         return self.__str__()
 
@@ -72,8 +72,8 @@ class ComboRow(Adw.ComboRow):
                  title: str = None,
                  subtitle: str = None,
                  enable_search: bool = True,
-                 default_selection: BaseComboRowItem = None):
-        super().__init__(title=title, subtitle=subtitle)
+                 default_selection: BaseComboRowItem | str | None = None):
+        super().__init__(title=title, subtitle=subtitle)  # type: ignore[arg-type]  # gi stub: Adw string props accept None (PyGObject maps it to NULL, i.e. empty string)
 
         self.model = Gio.ListStore(item_type=GObject.GObject)
 
@@ -100,7 +100,7 @@ class ComboRow(Adw.ComboRow):
 
         return converted_list
 
-    def set_selected_item(self, item: BaseComboRowItem | str):
+    def set_selected_item(self, item: BaseComboRowItem | str | None):
         selected_item_index = 0
 
         for index in range(self.model.get_n_items()):
@@ -150,14 +150,15 @@ class ComboRow(Adw.ComboRow):
     def remove_all_items(self):
         self.model.remove_all()
 
-    def get_item_at(self, index: int) -> BaseComboRowItem:
-        return self.model.get_item(index)
+    def get_item_at(self, index: int) -> BaseComboRowItem | None:
+        item = self.model.get_item(index)
+        return item if isinstance(item, BaseComboRowItem) else None
 
-    def get_item(self, name: str) -> BaseComboRowItem | None:
-        for item in range(self.model.get_n_items()):
-            item = self.model.get_item(item)
+    def get_item(self, name: BaseComboRowItem | str | None) -> BaseComboRowItem | None:
+        for index in range(self.model.get_n_items()):
+            item = self.model.get_item(index)
 
-            if item and item == name:
+            if isinstance(item, BaseComboRowItem) and item == name:
                 return item
         return None
 
@@ -172,7 +173,7 @@ class ComboRow(Adw.ComboRow):
 
         return self.get_item_at(selected_index)
 
-    def populate(self, items: list[BaseComboRowItem], selected_item: BaseComboRowItem | str = ""):
+    def populate(self, items: list[BaseComboRowItem], selected_item: BaseComboRowItem | str | None = ""):
         self.remove_all_items()
         self.add_items(items)
         self.set_selected_item(selected_item)

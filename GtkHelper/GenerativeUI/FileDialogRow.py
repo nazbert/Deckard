@@ -4,7 +4,8 @@ from GtkHelper.FileDialogRow import FileDialogRow as FileDialog, FileDialogFilte
 
 from gi.repository import Gio
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from src.backend.PluginManager.ActionCore import ActionCore
@@ -30,7 +31,7 @@ class FileDialogRow(GenerativeUI[str]):
                  block_interaction: bool = True,
                  only_show_filename: bool = True,
                  filters: list[FileDialogFilter] = None,
-                 on_change: callable = None,
+                 on_change: Callable[..., Any] | None = None,
                  can_reset: bool = True,
                  auto_add: bool = True,
                  complex_var_name: bool = False
@@ -103,7 +104,13 @@ class FileDialogRow(GenerativeUI[str]):
         Args:
             file (Gio.File): The newly selected file in the file dialog.
         """
-        self._handle_value_changed(file.get_path())
+        path = file.get_path()
+        if path is None:
+            # Non-local GFiles (gvfs URIs with no FUSE mount) have no path.
+            # The value layer stores a path string, so there is nothing to
+            # record -- keep the previous value rather than persisting None.
+            return
+        self._handle_value_changed(path)
 
     @GenerativeUI.signal_manager
     def set_ui_value(self, value: str):

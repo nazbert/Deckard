@@ -2,7 +2,8 @@ from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
 
 from gi.repository import Adw
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from GtkHelper.GtkHelper import better_disconnect
 
@@ -24,7 +25,7 @@ class SwitchRow(GenerativeUI[bool]):
                  default_value: bool,
                  title: str = None,
                  subtitle: str = None,
-                 on_change: callable = None,
+                 on_change: Callable[..., Any] | None = None,
                  can_reset: bool = True,
                  auto_add: bool = True,
                  complex_var_name: bool = False

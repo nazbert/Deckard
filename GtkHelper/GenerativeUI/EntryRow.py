@@ -2,7 +2,8 @@ from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
 
 from gi.repository import Adw, GLib
 
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 from GtkHelper.GtkHelper import better_disconnect
 
 if TYPE_CHECKING:
@@ -24,7 +25,7 @@ class EntryRow(GenerativeUI[str]):
                  default_value: str,
                  title: str = None,
                  filter_func: Callable[[str], str] = None,
-                 on_change: callable = None,
+                 on_change: Callable[..., Any] | None = None,
                  can_reset: bool = True,
                  auto_add: bool = True,
                  complex_var_name: bool = False

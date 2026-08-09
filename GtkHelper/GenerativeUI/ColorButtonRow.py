@@ -2,7 +2,7 @@
 from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
 from GtkHelper.ColorButtonRow import ColorButtonRow as ColorDialog
 
-from gi.repository import Gtk
+from gi.repository import Gdk, Gtk
 
 from typing import TYPE_CHECKING, Callable
 
@@ -112,10 +112,10 @@ class ColorButtonRow(GenerativeUI[tuple[int, int, int, int]]):
         """
         self.widget.color = value
 
-    def convert_from_rgba(self, color: "Gdk.RGBA") -> tuple[int, int, int, int]:
+    def convert_from_rgba(self, color: Gdk.RGBA) -> tuple[int, int, int, int]:
         return self.widget.convert_from_rgba(color)
 
-    def convert_to_rgba(self, color: tuple[int, int, int, int]) -> "Gdk.RGBA":
+    def convert_to_rgba(self, color: tuple[int, int, int, int]) -> Gdk.RGBA:
         return self.widget.convert_to_rgba(color)
 
     def normalize_to_255(self, color: tuple[float, float, float, float]) -> tuple[int, int, int, int]:

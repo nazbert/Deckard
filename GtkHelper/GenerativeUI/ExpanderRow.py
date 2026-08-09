@@ -3,7 +3,8 @@ from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
 
 from gi.repository import Gtk
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 from GtkHelper.GtkHelper import better_disconnect, on_main
 
 if TYPE_CHECKING:
@@ -29,7 +30,7 @@ class ExpanderRow(GenerativeUI[bool]):
                  subtitle: str = None,
                  show_enable_switch: bool = False,
                  start_expanded: bool = False,
-                 on_change: callable = None,
+                 on_change: Callable[..., Any] | None = None,
                  can_reset: bool = False,
                  auto_add: bool = True,
                  complex_var_name: bool = False

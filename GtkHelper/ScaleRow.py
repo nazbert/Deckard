@@ -43,7 +43,7 @@ class ScaleRow(Adw.ActionRow):
                  round_digits: bool = True,
                  text_entry_max_length: int = 6
                  ):
-        super().__init__(title=title, subtitle=subtitle)
+        super().__init__(title=title, subtitle=subtitle)  # type: ignore[arg-type]  # gi stub: Adw string props accept None (PyGObject maps it to NULL, i.e. empty string)
 
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, hexpand=True)
 

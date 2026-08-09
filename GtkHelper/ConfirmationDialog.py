@@ -1,12 +1,17 @@
+from collections.abc import Callable
+from typing import Any
+
 import globals as gl
 from gi.repository import Adw
 
 class ConfirmationDialog(Adw.MessageDialog):
-    def __init__(self, title: str, body: str, confirm: str, transient_for, on_cancel: callable = None, on_confirm: callable = None, *args, **kwargs):
+    def __init__(self, title: str, body: str, confirm: str, transient_for,
+                 on_cancel: Callable[[], Any] | None = None,
+                 on_confirm: Callable[[], Any] | None = None, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.on_cancel: callable = on_cancel
-        self.on_confirm: callable = on_confirm
+        self.on_cancel: Callable[[], Any] | None = on_cancel
+        self.on_confirm: Callable[[], Any] | None = on_confirm
 
         self.set_transient_for(transient_for)
         self.set_modal(True)
@@ -20,7 +25,7 @@ class ConfirmationDialog(Adw.MessageDialog):
 
         self.connect("response", self.on_response)
 
-    def on_response(self, dialog: Adw.MessageDialog, response: int) -> None:
+    def on_response(self, dialog: Adw.MessageDialog, response: str) -> None:
         if response == "cancel" and self.on_cancel:
             self.on_cancel()
         if response == "confirm" and self.on_confirm:

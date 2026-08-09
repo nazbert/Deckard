@@ -34,8 +34,10 @@ class SearchComboRow(Adw.PreferencesRow):
         'item-changed': (GObject.SignalFlags.RUN_FIRST, None, (SearchComboRowItem, int,)),
     }
 
-    def __init__(self, title: str, use_single_line: bool = False, *args, **kwargs):
-        super().__init__(title=title, *args, **kwargs)
+    def __init__(self, title: str, use_single_line: bool = False, **kwargs):
+        # No *args: Adw.PreferencesRow is a GObject, whose constructor takes
+        # keyword properties only -- any positional extra raised TypeError.
+        super().__init__(title=title, **kwargs)
         self.search_text = '' # Initial search text for widgets
 
         # Setup DropDown for Widgets

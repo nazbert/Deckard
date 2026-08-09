@@ -72,7 +72,7 @@ class IpEntryRow(Adw.PreferencesRow):
 
             new_key = key + 1
             if new_key < len(self.ip_boxes):
-                self.ip_boxes.get(new_key)[0].grab_focus()
+                self.ip_boxes[new_key][0].grab_focus()
                 break
         self.ip_changed()
 
@@ -93,7 +93,7 @@ class IpEntryRow(Adw.PreferencesRow):
 
             new_key = key + 1
             if new_key < len(self.ip_boxes):
-                self.ip_boxes.get(new_key)[0].grab_focus()
+                self.ip_boxes[new_key][0].grab_focus()
                 break
 
         entry.set_text(ip_text)

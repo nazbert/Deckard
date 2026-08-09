@@ -2,7 +2,8 @@ from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
 
 from gi.repository import Adw
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from GtkHelper.GtkHelper import better_disconnect
 
@@ -11,7 +12,10 @@ from GtkHelper.ToggleRow import ToggleRow as Toggle
 if TYPE_CHECKING:
     from src.backend.PluginManager.ActionCore import ActionCore
 
-class ToggleRow(GenerativeUI[bool]):
+class ToggleRow(GenerativeUI[int]):
+    """The stored value is the *index* of the active toggle, not a flag --
+    hence GenerativeUI[int] (see default_value/set_ui_value below)."""
+
     def __init__(self, action_core: "ActionCore",
                  var_name: str,
                  default_value: int,
@@ -21,7 +25,7 @@ class ToggleRow(GenerativeUI[bool]):
                  can_shrink: bool = True,
                  homogeneous: bool = True,
                  active: bool = True,
-                 on_change: callable = None,
+                 on_change: Callable[..., Any] | None = None,
                  can_reset: bool = True,
                  auto_add: bool = True,
                  complex_var_name: bool = False
