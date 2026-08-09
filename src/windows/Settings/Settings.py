@@ -18,6 +18,7 @@ import gi
 
 from loguru import logger as log
 
+from GtkHelper.debounce import TrailingDebouncer
 from GtkHelper.GtkHelper import BetterPreferencesGroup
 from autostart import setup_autostart
 from src.backend.DeckManagement.HelperMethods import color_values_to_gdk, gdk_color_to_values, get_pango_font_description, get_values_from_pango_font_description
@@ -404,9 +405,28 @@ class GeneralPageGroup(Adw.PreferencesGroup):
             controller.reload_page()
 
 class FontPageGroup(Adw.PreferencesGroup):
+    # Trailing window for the shared page-reload debounce, in ms -- same
+    # 300ms the saturation row uses (DeckSettings/DeckGroup.py).
+    RELOAD_DEBOUNCE_MS = 300
+
     def __init__(self, settings: Settings):
         self.settings = settings
         super().__init__(title=gl.lm.get("settings-font-settings-header"))
+
+        # One debouncer shared by all four rows: font changes arrive in
+        # bursts (family+size from one dialog, then colour, then outline; a
+        # colour-picker drag fires repeatedly on its own), and each row used
+        # to spawn its own full reload-all-pages thread, so a single visit
+        # here could run several page-reload storms concurrently (#78).
+        #
+        # The reload is DELAYED, NEVER ELIDED. font_defaults ->
+        # reload_all_pages -> create_n_states is what rebuilds every
+        # LabelManager, and the label memos added in !100 treat that rebuild
+        # as their pixel-correctness guarantee. So once any font change has
+        # been written, exactly one reload must still happen: no equality
+        # check against the previous value, no "nothing looks different"
+        # early return, may ever swallow the trailing fire.
+        self.reload_debouncer = TrailingDebouncer(self.RELOAD_DEBOUNCE_MS, self._reload_all_pages)
 
         self.font_row = FontRow(self)
         self.add(self.font_row)
@@ -419,6 +439,15 @@ class FontPageGroup(Adw.PreferencesGroup):
 
         self.font_outline_color_row = FontOutlineColorRow(self)
         self.add(self.font_outline_color_row)
+
+    def request_page_reload(self) -> None:
+        """Every font row asks for its reload through here -- see the
+        debouncer note in __init__. The settings write itself already
+        happened by the time this is called; only the reload is deferred."""
+        self.reload_debouncer.trigger()
+
+    def _reload_all_pages(self) -> None:
+        threading.Thread(target=gl.page_manager.reload_all_pages, daemon=True, name="reload-all-pages").start()
 
 
 class FontRow(Adw.ActionRow):
@@ -455,7 +484,7 @@ class FontRow(Adw.ActionRow):
 
         self.font_page_group.settings.save_json()
 
-        threading.Thread(target=gl.page_manager.reload_all_pages, daemon=True, name="reload-all-pages").start()
+        self.font_page_group.request_page_reload()
 
 class FontColorRow(Adw.ActionRow):
     def __init__(self, font_page_group: FontPageGroup):
@@ -479,7 +508,7 @@ class FontColorRow(Adw.ActionRow):
         self.font_page_group.settings.app.default_font = gl.settings_manager.font_defaults
         gl.settings_manager.save_font_defaults()
 
-        threading.Thread(target=gl.page_manager.reload_all_pages, daemon=True, name="reload-all-pages").start()
+        self.font_page_group.request_page_reload()
 
 class FontOutlineColorRow(Adw.ActionRow):
     def __init__(self, font_page_group: FontPageGroup):
@@ -503,7 +532,7 @@ class FontOutlineColorRow(Adw.ActionRow):
         self.font_page_group.settings.app.default_font = gl.settings_manager.font_defaults
         gl.settings_manager.save_font_defaults()
 
-        threading.Thread(target=gl.page_manager.reload_all_pages, daemon=True, name="reload-all-pages").start()
+        self.font_page_group.request_page_reload()
 
 class FontOutlineWidthRow:
     """
@@ -528,7 +557,7 @@ class FontOutlineWidthRow:
         self.font_page_group.settings.app.default_font = gl.settings_manager.font_defaults
         gl.settings_manager.save_font_defaults()
 
-        threading.Thread(target=gl.page_manager.reload_all_pages, daemon=True, name="reload-all-pages").start()
+        self.font_page_group.request_page_reload()
 
 
 class StorePage(Adw.PreferencesPage):
