@@ -46,6 +46,16 @@ the suppressed count reported on that site's next record. A raising GTK
 signal handler on a hot path would otherwise put a full diagnose=True
 traceback into every sink on every emission.
 
+Known bound of that key: two DIFFERENT failures raised from the same line
+with the same exception type -- one `raise ValueError(...)` reached by
+several callers, with different messages -- share one budget and can mask
+each other for a window. Folding the message into the key was considered and
+rejected: real messages carry varying ids, paths and counters, so a
+message-keyed guard degenerates into no throttling at all, which is the
+exact failure mode this exists to prevent. The suppressed-count line is
+therefore worded "N further failures at <site>", never "N repeats": the
+guard knows the site, and does not know that the failures were identical.
+
 Kill switch (issue #92): SC_NO_ERROR_HOOKS=1 makes install_exception_hooks()
 and redirect_faulthandler() no-ops, so a field anomaly suspected to involve
 the hooks (double logging, exit-path interaction, a hook firing where it
@@ -142,9 +152,17 @@ def _exc_site(exc_type, exc_value, exc_tb) -> tuple[tuple, str]:
         tb = tb.tb_next
     if tb is not None:
         where = (tb.tb_frame.f_code.co_filename, tb.tb_lineno)
-        return (type_name, where), f"{type_name} at {where[0]}:{where[1]}"
-    where = ("<no-traceback>", str(exc_value)[:120])
-    return (type_name, where), f"{type_name} <no traceback> ({where[1]})"
+    else:
+        where = ("<no-traceback>", str(exc_value)[:120])
+    return (type_name, where), _label_for_key((type_name, where))
+
+
+def _label_for_key(key: tuple) -> str:
+    """Printable site for a key. Rebuildable from the key alone, so a pending
+    count can still be reported after its exception object is long gone (the
+    prune and atexit flushes hold keys, never exceptions)."""
+    type_name, where = key
+    return f"{where[0]}:{where[1]} [{type_name}]"
 
 
 def _prune_locked(now: float) -> None:
@@ -219,9 +237,14 @@ def _log_exc(kind: str, exc_type, exc_value, exc_tb, extra: str = "") -> None:
         if suppress:
             return
         if suppressed:
+            # "since the last record", not "in the last 5s": the gap between
+            # two records from one site is unbounded (a site that goes quiet
+            # for an hour and fires again reports counts an hour old), so a
+            # window-worded summary would be a lie on exactly the slow
+            # trickle it is meant to describe.
             extra = (
-                f"{extra} (suppressed {suppressed} repeats of {label} "
-                f"in the last {RATE_LIMIT_WINDOW_S:g}s)"
+                f"{extra} ({suppressed} further failures at {label} "
+                f"since the last record)"
             )
     except Exception:
         pass

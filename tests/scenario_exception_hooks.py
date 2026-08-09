@@ -288,10 +288,14 @@ def main() -> None:
         st.start()
         st.join()
         assert sum("boom-storm" in r for r in records) == 1
-        assert "suppressed 99 repeats" in joined(), (
+        assert "99 further failures at" in joined(), (
             f"the next record must carry the suppressed count, got: {joined()[:300]!r}"
         )
-        assert "ValueError at" in joined() and "scenario_exception_hooks.py" in joined(), (
+        assert "since the last record" in joined(), (
+            "the summary must not claim a window it cannot know (the gap "
+            "between two records from one site is unbounded)"
+        )
+        assert "scenario_exception_hooks.py" in joined() and "[ValueError]" in joined(), (
             "the summary must name the site it is summarizing"
         )
 
