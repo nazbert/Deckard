@@ -313,7 +313,13 @@ def color_values_to_gdk(color_values: tuple[int, int, int] | tuple[int, int, int
     if len(values) == 3:
         values.append(255)
     color = Gdk.RGBA()
-    color.parse(f"rgba({values[0]}, {values[1]}, {values[2]}, {values[3]})")
+    # Every caller works in 0-255 on all four channels (that is what
+    # gdk_color_to_values hands back, and what the label/font settings
+    # persist). CSS rgba() takes the channels in 0-255 but the ALPHA in
+    # 0-1, so the raw value has to be scaled -- feeding it 0-255 clamped
+    # every alpha >= 1 to fully opaque, and a semi-transparent label colour
+    # came back out of the colour chooser as opaque (#203).
+    color.parse(f"rgba({values[0]}, {values[1]}, {values[2]}, {values[3] / 255})")
 
     return color
 
