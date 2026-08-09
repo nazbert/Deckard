@@ -275,15 +275,19 @@ class LabelRow(Adw.PreferencesRow):
             controller_input = controller.get_input(self.active_identifier)
             composed_label = controller_input.get_active_state().label_manager.get_composed_label(position=self.key_name)
 
-        if self.text_entry.entry.get_text() != composed_label.text:
+        # Every KeyLabel property is optional (#225): an unset one means
+        # "nothing configured here", which for the text is the empty entry.
+        text = composed_label.text or ""
+
+        if self.text_entry.entry.get_text() != text:
             pos = self.text_entry.entry.get_position()
             
-            self.text_entry.entry.set_text(composed_label.text)
+            self.text_entry.entry.set_text(text)
 
-            pos = min(pos, len(composed_label.text))
+            pos = min(pos, len(text))
             self.text_entry.entry.set_position(pos)
 
-        hide_details = composed_label.text.strip() == ""
+        hide_details = text.strip() == ""
         self.font_chooser_box.set_visible(not hide_details)
         self.outline_box.set_visible(not hide_details)
         self.alignment_box.set_visible(not hide_details)
@@ -294,28 +298,46 @@ class LabelRow(Adw.PreferencesRow):
         self.set_alignment(composed_label.alignment)
 
         # self.font_chooser_button.button.set_font_desc(Pango.FontDescription.from_string(f"{composed_label.font_name} {composed_label.style} {composed_label.font_size}px"))
-        desc = get_pango_font_description(
-            font_family=composed_label.font_name,
-            font_size=composed_label.font_size,
-            font_style=composed_label.style,
-            font_weight=composed_label.font_weight
-        )
-        self.font_chooser_button.button.set_font_desc(desc)
+        # A font description needs all four; an incompletely composed label
+        # leaves the chooser showing whatever it had.
+        font_name = composed_label.font_name
+        font_size = composed_label.font_size
+        style = composed_label.style
+        font_weight = composed_label.font_weight
+        if (font_name is not None and font_size is not None
+                and style is not None and font_weight is not None):
+            desc = get_pango_font_description(
+                font_family=font_name,
+                font_size=font_size,
+                font_style=style,
+                font_weight=font_weight
+            )
+            self.font_chooser_button.button.set_font_desc(desc)
 
         self.connect_signals()
 
-    def set_color(self, color_values: list):
-        color = color_values_to_gdk(color_values)  # type: ignore[arg-type]  # cross-MR: color_values_to_gdk declares tuple[int,...] but every caller passes a list and the body handles both (root cause: src/backend/DeckManagement/HelperMethods.py:308, MR 5/#225)
+    # None means the label does not set this property (#225); the widget
+    # then keeps its current value rather than being handed a None.
+    def set_color(self, color_values: list | None):
+        if color_values is None:
+            return
+        color = color_values_to_gdk(color_values)
         self.color_chooser_button.button.set_rgba(color)
 
-    def set_outline_width(self, outline_width: int):
+    def set_outline_width(self, outline_width: int | None):
+        if outline_width is None:
+            return
         self.outline_width.button.set_value(outline_width)
 
-    def set_outline_color(self, color_values: list):
-        color = color_values_to_gdk(color_values)  # type: ignore[arg-type]  # cross-MR: color_values_to_gdk declares tuple[int,...] but every caller passes a list and the body handles both (root cause: src/backend/DeckManagement/HelperMethods.py:308, MR 5/#225)
+    def set_outline_color(self, color_values: list | None):
+        if color_values is None:
+            return
+        color = color_values_to_gdk(color_values)
         self.outline_color_chooser_button.button.set_rgba(color)
 
-    def set_alignment(self, alignment: str):
+    def set_alignment(self, alignment: str | None):
+        if alignment is None:
+            return
         self.alignment_buttons.set_alignment(alignment)
 
     def on_change_color(self, _):

@@ -150,7 +150,11 @@ class SizeRow(Adw.PreferencesRow):
             controller_input = controller.get_input(self.active_identifier)
             composed_label = controller_input.get_active_state().layout_manager.get_composed_layout()
 
-        self.size_spinner.button.set_value(composed_label.size*100)
+        # ImageLayout.size is optional (#225): unset means the spinner
+        # keeps whatever it is showing.
+        size = composed_label.size
+        if size is not None:
+            self.size_spinner.button.set_value(size*100)
 
         self.connect_signals()
 

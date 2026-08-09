@@ -360,7 +360,7 @@ class EventAssignerUI(BetterPreferencesGroup):
             row.select_event(event_assigner_map.get(row.event, None))
 
             action_input_type = type(action.input_ident)
-            row.set_visible(row.event in action_input_type.Events)  # type: ignore[attr-defined]  # cross-MR: Events is declared on the concrete Input.Key/Dial/Touchscreen subclasses, not on the InputIdentifier base (root cause: src/backend/DeckManagement/InputIdentifier.py, MR 5/#225)
+            row.set_visible(row.event in action_input_type.Events)
 
 
         return
@@ -372,7 +372,7 @@ class EventAssignerUI(BetterPreferencesGroup):
             row.select_event(new_assignment)
 
             action_input_type = type(action.input_ident)
-            row.set_visible(row.event in action_input_type.Events)  # type: ignore[attr-defined]  # cross-MR: Events is declared on the concrete Input.Key/Dial/Touchscreen subclasses, not on the InputIdentifier base (root cause: src/backend/DeckManagement/InputIdentifier.py, MR 5/#225)
+            row.set_visible(row.event in action_input_type.Events)
 
     def reset_assignments(self):
         self.action.set_all_events_to_null()
