@@ -4232,13 +4232,23 @@ class LabelManager:
         a direct draw.)
 
         Falls back to the direct draw -- today's behavior, no cache retained
-        -- for non-RGB(A) targets (the recorded ink is mode-derived), for a
-        label past the width cap or past the retention/op budget, and if
-        PIL's text() internals ever stop routing through draw_bitmap."""
+        -- for a label past the width cap or past the retention/op budget,
+        and if PIL's text() internals ever stop routing through draw_bitmap.
+
+        The non-RGB(A) guard is not a working fallback, it is behavior
+        PARITY. The recorded ink is resolved for the target's mode (a
+        palette index for "P", a packed int for "RGB"/"RGBA"), so a
+        recording is only valid on the mode it was taken on, and this branch
+        keeps such targets on whatever main already did with them -- which
+        for "L" is to RAISE: a direct draw.text with an RGBA fill tuple onto
+        an "L" image is a TypeError there too. In-app every label target is
+        RGBA."""
         if image.mode not in ("RGB", "RGBA") or \
                 int(w) + 2 * (label.outline_width + 6) + 1 > self._MAX_STRIP_WIDTH or \
                 not self._label_ops_budget_ok(label, w, h):
             self._static_ops.pop(position, None)
+            if media_prof:
+                media_prof.count("label_ops_fallback")
             draw.text((x_position, y_position), text=label.text, font=label.get_font(),
                       anchor=anchor, align=label.alignment, fill=tuple(label.color),
                       stroke_width=label.outline_width,
@@ -4261,17 +4271,23 @@ class LabelManager:
             # attempt can cost hundreds of milliseconds, so it must not be
             # retried on every frame of an animated background.
             self._static_ops[position] = (key, ops)
-            if media_prof:
+            # Only a recording that actually produced replayable blits is a
+            # cache MISS; a failed one is a fallback, counted below. Lumping
+            # them together made a permanently-uncacheable label read as a
+            # healthy warm cache in the profile.
+            if media_prof and ops is not None:
                 media_prof.count("label_ops_miss")
         else:
             ops = cached[1]
-            if media_prof:
+            if media_prof and ops is not None:
                 media_prof.count("label_ops_hit")
 
         if ops is None:
             # Recording is not available for this label (see above): keep
             # drawing it the old way, without re-attempting the recording
             # every frame.
+            if media_prof:
+                media_prof.count("label_ops_fallback")
             draw.text((x_position, y_position), text=label.text, font=font,
                       anchor=anchor, align=label.alignment, fill=tuple(label.color),
                       stroke_width=label.outline_width,
@@ -4330,8 +4346,12 @@ class LabelManager:
                      f"this label")
             return None
         except Exception:
-            log.warning("Label blit recording failed; falling back to the "
-                        "per-frame draw for this label", exc_info=True)
+            # log.opt(exception=True), not exc_info=: loguru has no exc_info
+            # kwarg and would treat it as a format argument, so the traceback
+            # this fallback exists to surface was being dropped.
+            log.opt(exception=True).warning(
+                "Label blit recording failed; falling back to the per-frame "
+                "draw for this label")
             return None
         if not ops or residue is not None:
             # Either no blit at all for non-empty text, or pixels on the probe
@@ -4406,8 +4426,14 @@ class LabelManager:
 
         del draw
 
-        # The copy stays: this method draws IN PLACE, and both callers pass a
-        # buffer they still own (and close) afterwards.
+        # The copy stays for ControllerKey.get_current_image: this method
+        # draws IN PLACE, and that caller closes the buffer it passed in as
+        # soon as the labelled result is a different object (its
+        # `key_image is not labeled_image` guard). The dial/touchscreen
+        # caller (ControllerTouchScreenState.get_rendered_touch_image) just
+        # rebinds the name and never closes, so the copy is redundant on that
+        # path -- droppable, but only by giving the two callers separate
+        # contracts, and this only runs for inputs that carry a label at all.
         return image.copy()
         # return image.copy().rotate(self.deck.get_rotation())
 
