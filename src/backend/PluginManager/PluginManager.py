@@ -48,7 +48,7 @@ def terminate_backend_process(process, escalate: bool = True) -> None:
             pass
 
 
-def build_backend_launch_command(backend_path: str, venv_path: str, port: int,
+def build_backend_launch_command(backend_path: str, venv_path: str | None, port: int,
                                  open_in_terminal: bool = False) -> list[str]:
     """Build the argv for launching a plugin/action backend.
 
@@ -120,7 +120,7 @@ def build_backend_launch_command(backend_path: str, venv_path: str, port: int,
 
 
 class PluginManager:
-    action_index = {}
+    action_index: dict[str, ActionHolder] = {}
     def __init__(self):
         self.initialized_plugin_classes = list[PluginBase]()
         self.backends:list[BackendBase] = []
@@ -361,7 +361,7 @@ class PluginManager:
     def get_actions_for_plugin_id(self, plugin_id: str):
         return PluginBase.plugins[plugin_id]["object"].ACTIONS
     
-    def get_action_holder_from_id(self, action_id: str) -> ActionHolder:
+    def get_action_holder_from_id(self, action_id: str) -> ActionHolder | None:
         """
         Example string: dev_core447_MediaPlugin::Pause
         """
@@ -371,7 +371,7 @@ class PluginManager:
             log.warning(f"Requested action {action_id} not found, skipping...")
             return None
             
-    def get_plugin_by_id(self, plugin_id:str, include_disabled: bool = True) -> PluginBase:
+    def get_plugin_by_id(self, plugin_id:str, include_disabled: bool = True) -> PluginBase | None:
         return self.get_plugins(include_disabled).get(plugin_id, {}).get("object", None)
             
     def remove_plugin_from_list(self, plugin_base: PluginBase):

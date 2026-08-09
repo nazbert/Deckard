@@ -5,6 +5,9 @@ import json
 import threading
 import time
 import subprocess
+from collections.abc import Callable
+from typing import Any
+
 from packaging import version
 
 from loguru import logger as log
@@ -88,14 +91,15 @@ class PluginBase(rpyc.Service):
     The base class for all plugins.
     """
 
-    plugins = {}
-    disabled_plugins = {}
+    # {plugin_id: {"object": PluginBase, "meta": ..., ...}} -- see register().
+    plugins: dict[str, dict[str, Any]] = {}
+    disabled_plugins: dict[str, dict[str, Any]] = {}
 
     def __init__(self, use_legacy_locale: bool = True, legacy_dir: str = "locales"):
         self.backend_connection: Connection = None
         self.backend: netref = None
         self.server: ThreadedServer = None
-        self.backend_process: subprocess.Popen = None
+        self.backend_process: subprocess.Popen | None = None
         # Registration-watchdog bookkeeping (_watch_backend_registration):
         # the generation counter disarms a stale watchdog after a rapid
         # relaunch (it would otherwise misattribute the NEW backend's
@@ -122,6 +126,7 @@ class PluginBase(rpyc.Service):
         # into locked code.
         self._settings_lock = threading.Lock()
 
+        self.locale_manager: LegacyLocaleManager | LocaleManager
         if use_legacy_locale:
             self.locale_manager = LegacyLocaleManager(os.path.join(self.PATH, legacy_dir))
         else:
@@ -136,7 +141,7 @@ class PluginBase(rpyc.Service):
 
         self.registered: bool = False
 
-        self.plugin_name: str = None
+        self.plugin_name: str | None = None
 
         self.asset_manager: AssetManager = AssetManager(self)
         self.asset_manager.load_assets()
@@ -407,6 +412,11 @@ class PluginBase(rpyc.Service):
         """
         module = importlib.import_module(self.__module__)
         subclass_file = module.__file__
+        if subclass_file is None:
+            # Only namespace packages and built-ins have no __file__; a plugin
+            # is always loaded from a folder. Previously this fell into
+            # os.path.abspath(None) and raised a bare TypeError.
+            raise RuntimeError(f"Plugin module {self.__module__} has no file location")
         return os.path.basename(os.path.dirname(os.path.abspath(subclass_file)))
     
     def is_minimum_version_ok(self) -> bool:
@@ -500,7 +510,7 @@ class PluginBase(rpyc.Service):
     def add_action_holder_groups(self, action_holder_groups: list[ActionHolderGroup]) -> None:
         self.action_holder_groups.update(action_holder_groups)
 
-    def connect_to_event(self, callback: callable, event_id: str = None, event_id_suffix: str = None) -> None:
+    def connect_to_event(self, callback: Callable[..., Any], event_id: str = None, event_id_suffix: str = None) -> None:
         """
         Connects a Callback to the Event which gets specified by the event ID
 
@@ -520,7 +530,7 @@ class PluginBase(rpyc.Service):
         else:
             log.warning(f"{full_id} does not exist in {self.plugin_name}")
 
-    def connect_to_event_directly(self, plugin_id: str, event_id: str, callback: callable) -> None:
+    def connect_to_event_directly(self, plugin_id: str, event_id: str, callback: Callable[..., Any]) -> None:
         """
         Connects a Callback directly to a Plugin with the specified ID
 
@@ -538,7 +548,7 @@ class PluginBase(rpyc.Service):
         else:
             plugin.connect_to_event(callback=callback, event_id=event_id)
 
-    def disconnect_from_event(self, event_id: str = None, callback: callable = None, event_id_suffix: str = None) -> None:
+    def disconnect_from_event(self, event_id: str = None, callback: Callable[..., Any] = None, event_id_suffix: str = None) -> None:
         """
         Disconnects a Callback from the Event which gets specified by the event ID
 
@@ -559,7 +569,7 @@ class PluginBase(rpyc.Service):
         else:
             log.warning(f"{full_id} does not exist in {self.plugin_name}")
 
-    def disconnect_from_event_directly(self, plugin_id: str, event_id: str, callback: callable) -> None:
+    def disconnect_from_event_directly(self, plugin_id: str, event_id: str, callback: Callable[..., Any]) -> None:
         """
         Disconnects a Callback directly from a plugin with the specified ID
 
@@ -829,7 +839,8 @@ class PluginBase(rpyc.Service):
         Returns:
             None
         """
-        gl.page_manager.register_page(path)
+        if gl.page_manager is not None:
+            gl.page_manager.register_page(path)
         self.registered_pages.append(path)
 
     def get_selector_icon(self) -> Gtk.Widget:
@@ -860,7 +871,8 @@ class PluginBase(rpyc.Service):
             None
         """ 
         for page in self.registered_pages:
-            gl.page_manager.unregister_page(page)
+            if gl.page_manager is not None:
+                gl.page_manager.unregister_page(page)
         try:
             # Stop backend if running
             if self.backend is not None:
@@ -868,7 +880,7 @@ class PluginBase(rpyc.Service):
         except Exception as e:
             log.error(e)
 
-    def get_plugin(self, plugin_id: str) -> "PluginBase":
+    def get_plugin(self, plugin_id: str) -> "PluginBase | None":
         """
         Retrieves a plugin by its ID.
 
@@ -878,6 +890,8 @@ class PluginBase(rpyc.Service):
         Returns:
             PluginBase: The plugin object if found, otherwise None.
         """
+        if gl.plugin_manager is None:
+            return None
         return gl.plugin_manager.get_plugin_by_id(plugin_id) or None
 
     # Asset Management
@@ -978,12 +992,12 @@ class PluginBase(rpyc.Service):
         self.backend = None
 
         # Drop from the global registries synchronously (cheap list removals).
-        if connection is not None:
+        if connection is not None and gl.plugin_manager is not None:
             try:
                 gl.plugin_manager.backends.remove(connection)
             except ValueError:
                 pass
-        if process is not None:
+        if process is not None and gl.plugin_manager is not None:
             try:
                 gl.plugin_manager.backend_processes.remove(process)
             except ValueError:
@@ -1053,7 +1067,8 @@ class PluginBase(rpyc.Service):
         # instantly on the previous one's.
         self._backend_ready.clear()
         self.backend_process = subprocess.Popen(command, start_new_session=True)
-        gl.plugin_manager.backend_processes.append(self.backend_process)
+        if gl.plugin_manager is not None:
+            gl.plugin_manager.backend_processes.append(self.backend_process)
 
         self.wait_for_backend()
         if self.backend_connection is None:
@@ -1141,7 +1156,8 @@ class PluginBase(rpyc.Service):
         self.backend_connection = rpyc.connect("localhost", port, config={"allow_public_attrs": True})
         self.backend = self.backend_connection.root
 
-        gl.plugin_manager.backends.append(self.backend_connection)
+        if gl.plugin_manager is not None:
+            gl.plugin_manager.backends.append(self.backend_connection)
 
         # Only after the connection attributes are in place: whoever
         # wait_for_backend wakes goes straight for self.backend. Also before

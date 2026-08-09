@@ -46,8 +46,8 @@ class ActionHolder:
     def __init__(self,
         plugin_base: "PluginBase",
         action_name: str,
-        action_core: ActionCore = None,
-        action_base: ActionBase = None,
+        action_core: type[ActionCore] = None,
+        action_base: type[ActionBase] = None,
         icon: Gtk.Widget = None,
         min_app_version: str = None,
         action_id: str = None,
@@ -95,9 +95,16 @@ class ActionHolder:
         return True
 
     @log.catch
-    def init_and_get_action(self, deck_controller: DeckController, page: Page, state: int, input_ident: InputIdentifier) -> ActionCore:
+    def init_and_get_action(self, deck_controller: DeckController, page: Page, state: int, input_ident: InputIdentifier) -> ActionCore | None:
         if not self.get_is_compatible():
-            return
+            return None
+
+        if self.action_core is None:
+            # Neither action_core nor action_base was given to __init__; the
+            # call below used to raise TypeError into @log.catch, which
+            # swallowed it and returned None anyway.
+            log.error(f"Action holder {self.action_id} has no action class")
+            return None
 
         return self.action_core(
             action_id=self.action_id,

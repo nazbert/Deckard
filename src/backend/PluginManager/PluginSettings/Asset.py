@@ -1,7 +1,8 @@
 from os.path import isfile
 
+from PIL import Image
+
 from src.backend.DeckManagement.Media.Media import Media
-from os.path import isfile
 
 class Asset:
     def __init__(self, *args, **kwargs):
@@ -35,14 +36,20 @@ class Color(Asset):
 class Icon(Asset):
     def __init__(self, path: str, size=1.0, valign=0.0, halign=0.0, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # All three stay None when the file is missing (a user-deleted custom
+        # icon still has its entry in the plugin's settings JSON), so they are
+        # genuinely optional rather than late-initialized.
+        self._path: str | None
+        self._icon: Media | None
+        self._rendered: Image.Image | None
         if isfile(path):
             self._path = path
             self._icon = Media.from_path(path, size=size, valign=valign, halign=halign)
             self._rendered = self._icon.get_final_media()
         else:
-            self._path: str = None
-            self._icon: Media = None
-            self._rendered: Media = None
+            self._path = None
+            self._icon = None
+            self._rendered = None
 
     def get_values(self):
         return self._icon, self._rendered

@@ -26,9 +26,12 @@ class EventManager:
         for event_assigner in self._event_assigners:
             if event_assigner.id == id:
                 return event_assigner
+        return None
 
-    def get_event_map(self, ignore_overrides: bool = False) -> dict[InputEvent, EventAssigner]:
-        event_map: dict[InputEvent, EventAssigner] = {}
+    def get_event_map(self, ignore_overrides: bool = False) -> dict[InputEvent, EventAssigner | None]:
+        # Every known event is a key; the value is None for events no assigner
+        # claims (and for an override that maps an event to nothing).
+        event_map: dict[InputEvent, EventAssigner | None] = {}
 
         all_events = Input.AllEvents()
         for event in all_events:
@@ -36,37 +39,34 @@ class EventManager:
 
         # Assign default events
         for event_assigner in self._event_assigners:
-            for event in event_assigner.default_events:
-                event_map[event] = event_assigner
+            for default_event in event_assigner.default_events:
+                if default_event is None:
+                    # EventAssigner falls back to [default_event] when neither
+                    # default_events nor default_event was given, so an
+                    # assigner declared with no events at all yields [None].
+                    # Such an entry could never be looked up (the map is read
+                    # by real InputEvent) -- keep it out of the map.
+                    continue
+                event_map[default_event] = event_assigner
 
         if not ignore_overrides:
             # Apply the overrides
             for input_event_str, event_id in self._overrides.items():
                 input_event = Input.EventFromStringName(input_event_str)
-                event_assigner = self.get_event_assigner_by_id(event_id) if event_id else None
-                event_map[input_event] = event_assigner
+                if input_event is None:
+                    # Same junk-key class as the default-events loop above:
+                    # EventFromStringName answers None for an override key it
+                    # cannot resolve -- including the literal "None", which
+                    # page JSON carries because assignments are persisted as
+                    # str(input_event). Inserting that as a key would put an
+                    # unlookupable entry in the map (and a bogus row in the
+                    # event configurator), and it would silently shadow
+                    # nothing, so drop the stale override instead.
+                    continue
+                override_assigner = self.get_event_assigner_by_id(event_id) if event_id else None
+                event_map[input_event] = override_assigner
 
         return event_map
 
-
-
-
-        return
-        event_map: dict[EventAssigner, InputEvent] = {}
-
-        # Assign default events
-        for event_assigner in self._event_assigners:
-            event_map[event_assigner] = event_assigner.default_event
-
-        for input_event_str, event_id in self._overrides.items():
-            input_event = Input.EventFromStringName(input_event_str)
-            event_assigner = self.get_event_assigner_by_id(event_id) if event_id else None
-            event_map[event_assigner] = input_event
-
-        # Swap keys and values
-        event_map = {v: k for k, v in event_map.items()}
-
-        return event_map
-    
     def get_event_assigner_for_event(self, event: InputEvent) -> EventAssigner | None:
         return self.get_event_map().get(event)

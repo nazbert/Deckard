@@ -42,11 +42,15 @@ from src.Signals.Signals import Signal
 import globals as gl
 
 # Import typing
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, cast
 
 from src.backend.PluginManager.PluginSettings.Asset import Color,Icon
 
 if TYPE_CHECKING:
+    # Type-only: gi.require_version("Adw", "1") is not run here, and the
+    # annotation using it is a string.
+    from gi.repository import Adw
     # GenerativeUI imports Gtk at module scope; ActionCore is in the engine's
     # import closure (DeckController, Page), so it stays a type-only name here
     # and is imported lazily for the one runtime isinstance below (#141).
@@ -64,7 +68,7 @@ class ActionCore(rpyc.Service):
         self.backend_connection: Connection = None
         self.backend: netref = None
         self.server: ThreadedServer = None
-        self.backend_process: subprocess.Popen = None
+        self.backend_process: subprocess.Popen | None = None
         # Set by register_backend (on an rpyc service thread, driven by the
         # backend process) to wake wait_for_backend on the launching thread.
         self._backend_ready = threading.Event()
@@ -99,7 +103,7 @@ class ActionCore(rpyc.Service):
 
         self.put_custom_config_rows_below_gen_ui: bool = False
 
-        self.labels = {}
+        self.labels: dict[str, dict[str, Any]] = {}
 
         self.event_manager = EventManager()
 
@@ -123,12 +127,14 @@ class ActionCore(rpyc.Service):
         """
         self.page = page
 
-    def get_input(self) -> "ControllerInput":
+    def get_input(self) -> "ControllerInput | None":
+        # None when the identifier addresses an input this deck does not have
+        # (DeckController.get_input falls off the end of its search loop).
         return self.deck_controller.get_input(self.input_ident)
-    
-    def get_state(self) -> "ControllerInputState":
+
+    def get_state(self) -> "ControllerInputState | None":
         i = self.get_input()
-        if i is None: return
+        if i is None: return None
         return i.states.get(self.state)
     
     def add_event_assigner(self, event_assigner: EventAssigner):
@@ -198,7 +204,7 @@ class ActionCore(rpyc.Service):
 
         if input_state is None:
             return
-        if self.get_state().state != self.state:
+        if input_state.state != self.state:
             return
 
         # mem-plan P2.4: only set when `image` came from opening media_path
@@ -232,7 +238,12 @@ class ActionCore(rpyc.Service):
                 return
 
             if image is not None:
-                input_state.set_image(InputImage(
+                # The attr-defined ignores on the set_image/set_video calls in
+                # this block: only the Key/Dial state subclasses declare them,
+                # and the guard at the top of set_media leaves only those two
+                # here. Root cause is the base ControllerInputState not
+                # declaring the pair (DeckController.py).
+                input_state.set_image(InputImage(  # type: ignore[attr-defined]  # root cause: ControllerInputState does not declare set_image/set_video (DeckController.py, MR 4)
                     controller_input=controller_input,
                     image=image,
                     path=path_for_reopen,
@@ -269,9 +280,9 @@ class ActionCore(rpyc.Service):
                         log.opt(exception=True).warning(
                             f"GIF decode failed in set_media, falling back to the opaque cv2 path: {media_path}")
                 if key_gif is not None:
-                    input_state.set_video(key_gif)
+                    input_state.set_video(key_gif)  # type: ignore[attr-defined]  # root cause: ControllerInputState does not declare set_image/set_video (DeckController.py, MR 4)
                 else:
-                    input_state.set_video(InputVideo(
+                    input_state.set_video(InputVideo(  # type: ignore[attr-defined]  # root cause: ControllerInputState does not declare set_image/set_video (DeckController.py, MR 4)
                         controller_input=controller_input,
                         video_path=media_path,
                         fps=fps,
@@ -280,16 +291,20 @@ class ActionCore(rpyc.Service):
                 self._stamp_media_owner(input_state)
 
             else:
-                input_state.set_image(None, update=False)
+                input_state.set_image(None, update=False)  # type: ignore[attr-defined]  # root cause: ControllerInputState does not declare set_image/set_video (DeckController.py, MR 4)
 
+            # valign/halign/size are optional here and ImageLayout stores them
+            # as-is; its dataclass fields are declared non-optional despite
+            # defaulting to None (KeyLayout.py) -- that is the root cause of
+            # the three arg-type ignores.
             input_state.layout_manager.set_action_layout(ImageLayout(
-                valign=valign,
-                halign=halign,
-                size=size
+                valign=valign,  # type: ignore[arg-type]  # root cause: ImageLayout fields declared non-optional with None defaults (KeyLayout.py, MR 5)
+                halign=halign,  # type: ignore[arg-type]  # root cause: ImageLayout fields declared non-optional with None defaults (KeyLayout.py, MR 5)
+                size=size  # type: ignore[arg-type]  # root cause: ImageLayout fields declared non-optional with None defaults (KeyLayout.py, MR 5)
             ), update=False)
 
         if update:
-            self.get_input().update()
+            controller_input.update()
 
     def _stamp_media_owner(self, input_state) -> None:
         # Record this action as the owner of the media it just set, so
@@ -318,15 +333,20 @@ class ActionCore(rpyc.Service):
 
         state.background_manager.set_action_color(color)
         if update:
-            self.get_input().update()
+            controller_input = self.get_input()
+            if controller_input is not None:
+                controller_input.update()
 
     def show_error(self, duration: int = -1) -> None:
         self.raise_error_if_not_ready()
 
         if not self.get_is_present(): return
         if self.get_is_multi_action(): return
+        state = self.get_state()
+        if state is None:
+            return
         try:
-            self.get_state().show_error(duration=duration)
+            state.show_error(duration=duration)
         except AttributeError as e:
             log.error(e)
             pass
@@ -336,8 +356,11 @@ class ActionCore(rpyc.Service):
 
         if not self.get_is_present(): return
         if self.get_is_multi_action(): return
+        state = self.get_state()
+        if state is None:
+            return
         try:
-            self.get_state().hide_error()
+            state.hide_error()
         except AttributeError:
             pass
 
@@ -346,8 +369,11 @@ class ActionCore(rpyc.Service):
 
         if not self.get_is_present(): return
         if self.get_is_multi_action(): return
+        state = self.get_state()
+        if state is None:
+            return
         try:
-            self.get_state().show_overlay(image, duration=duration)
+            state.show_overlay(image, duration=duration)
         except AttributeError:
             pass
 
@@ -356,8 +382,11 @@ class ActionCore(rpyc.Service):
 
         if not self.get_is_present(): return
         if self.get_is_multi_action(): return
+        state = self.get_state()
+        if state is None:
+            return
         try:
-            self.get_state().hide_overlay()
+            state.hide_overlay()
         except AttributeError:
             pass
 
@@ -370,10 +399,11 @@ class ActionCore(rpyc.Service):
         if type(self.input_ident) not in [Input.Key, Input.Dial]:
             return
         
-        if self.get_state() is None:
+        state = self.get_state()
+        if state is None:
             log.error(f"Could not find state, action: {self.action_id}, state: {self.state}")
             return
-        
+
         if not self.get_is_present():
             return
         if not self.on_ready_called:
@@ -393,16 +423,20 @@ class ActionCore(rpyc.Service):
 
         text = str(text)
 
+        # Every ignore below has the same root cause: KeyLabel's dataclass
+        # fields are declared non-optional although they all default to None,
+        # and controller_input is declared ControllerKey although dial labels
+        # legitimately pass a ControllerDial (KeyLabel.py).
         key_label = KeyLabel(
-            controller_input=self.get_state().controller_input,
+            controller_input=state.controller_input,  # type: ignore[arg-type]  # root cause: KeyLabel.controller_input declared ControllerKey (KeyLabel.py, MR 5)
             text=text,
             font_size=font_size,
-            font_name=font_family,
-            color=color,
-            outline_width=outline_width,
-            outline_color=outline_color,
-            font_weight=font_weight,
-            style=font_style
+            font_name=font_family,  # type: ignore[arg-type]  # root cause: KeyLabel fields declared non-optional with None defaults (KeyLabel.py, MR 5)
+            color=color,  # type: ignore[arg-type]  # root cause: KeyLabel fields declared non-optional with None defaults (KeyLabel.py, MR 5)
+            outline_width=outline_width,  # type: ignore[arg-type]  # root cause: KeyLabel fields declared non-optional with None defaults (KeyLabel.py, MR 5)
+            outline_color=outline_color,  # type: ignore[arg-type]  # root cause: KeyLabel fields declared non-optional with None defaults (KeyLabel.py, MR 5)
+            font_weight=font_weight,  # type: ignore[arg-type]  # root cause: KeyLabel fields declared non-optional with None defaults (KeyLabel.py, MR 5)
+            style=font_style  # type: ignore[arg-type]  # root cause: KeyLabel fields declared non-optional with None defaults (KeyLabel.py, MR 5)
         )
 
         self.labels[position] = {
@@ -416,7 +450,7 @@ class ActionCore(rpyc.Service):
             "font-style": key_label.style
         }
 
-        self.get_state().label_manager.set_action_label(label=key_label, position=position, update=update)
+        state.label_manager.set_action_label(label=key_label, position=position, update=update)
 
     def set_top_label(self, text: str, color: list[int] = None,
                       font_family: str = None, font_size = None, outline_width: int = None, outline_color: list[int] = None,
@@ -452,7 +486,7 @@ class ActionCore(rpyc.Service):
     def get_custom_config_area(self):
         return
     
-    def get_settings(self) -> dir:
+    def get_settings(self) -> dict:
         # self.page.load()
         if self.page is None:
             return {}
@@ -463,13 +497,13 @@ class ActionCore(rpyc.Service):
             return
         self.page.set_action_settings(action_object=self, settings=settings)
 
-    def connect(self, signal: Signal = None, callback: callable = None) -> None:
+    def connect(self, signal: type[Signal], callback: Callable[..., Any]) -> None:
         # Connect
         gl.signal_manager.connect_signal(signal = signal, callback = callback)
         # Track so we can disconnect on teardown (see clean_up)
         self._connected_signals.append((signal, callback))
 
-    def get_own_key(self) -> "ControllerKey":
+    def get_own_key(self) -> "ControllerKey | None":
         # The old body read `deck_controller.keys` / `self.key_index`,
         # neither of which has ever existed on these classes (issue #56).
         # Kept (rather than deleted) because it is upstream plugin-API
@@ -477,12 +511,14 @@ class ActionCore(rpyc.Service):
         # Returns None for non-key actions.
         if not isinstance(self.input_ident, Input.Key):
             return None
-        return self.deck_controller.get_input(self.input_ident)
+        # A Key identifier only ever resolves to a ControllerKey; get_input()
+        # is declared over the whole input family, so narrow it here.
+        return cast("ControllerKey | None", self.deck_controller.get_input(self.input_ident))
     
     def get_is_multi_action(self) -> bool:
         self.raise_error_if_not_ready()
 
-        if not self.get_is_present(): return
+        if not self.get_is_present(): return False
         actions = self.page.action_objects.get(self.input_ident.input_type, {}).get(self.input_ident.json_identifier, [])
         return len(actions) > 1
 
@@ -520,9 +556,12 @@ class ActionCore(rpyc.Service):
         own_action_index = self.get_own_action_index()
         return [own_action_index == i for i in self.get_state().action_permission_manager.get_label_control_indices()]
     
-    def has_label_control(self, label_index) -> list[bool]:
+    def has_label_control(self, label_index) -> bool:
         #TODO: Might require performance improvements
-        return self.get_state().action_permission_manager.get_label_control_index(label_index) == self.get_own_action_index()
+        state = self.get_state()
+        if state is None:
+            return False
+        return state.action_permission_manager.get_label_control_index(label_index) == self.get_own_action_index()
 
     def has_image_control(self):
         #TODO: Might require performance improvements
@@ -557,11 +596,16 @@ class ActionCore(rpyc.Service):
         media = self.input_ident.get_state_dict(self.page, self.state).get("media", {})
         return media.get("path", None) is not None
     
-    def get_own_action_index(self) -> int:
+    def get_own_action_index(self) -> int | None:
+        # Two distinct "no index" answers, both pre-existing: -1 when the
+        # action is not on the active page, None when it is not among this
+        # input's actions. None is load-bearing -- the permission getters
+        # compare it against an unset "*-control-action" entry, which is also
+        # None -- so it is annotated, not normalized.
         if not self.get_is_present(): return -1
         actions = self.page.get_all_actions_for_input(self.input_ident, self.state)
         if self not in actions:
-            return
+            return None
         return actions.index(self)
 
     def get_page_event_assignments(self) -> dict[InputEvent, InputEvent]:
@@ -571,8 +615,11 @@ class ActionCore(rpyc.Service):
 
         all_events = Input.AllEvents()
         for event in all_events:
-            if event.string_name in page_assignment_dict:
-                assignment[event] = Input.EventFromStringName(page_assignment_dict[event.string_name])
+            # string_name is attached in InputEvent.__new__ rather than
+            # declared on the class, so it is invisible to the checker
+            # (InputIdentifier.py).
+            if event.string_name in page_assignment_dict:  # type: ignore[attr-defined]  # root cause: InputEvent.string_name set in __new__, undeclared (InputIdentifier.py, MR 5)
+                assignment[event] = Input.EventFromStringName(page_assignment_dict[event.string_name])  # type: ignore[attr-defined]  # root cause: InputEvent.string_name set in __new__, undeclared (InputIdentifier.py, MR 5)
             else:
                 assignment[event] = event
 
@@ -591,7 +638,10 @@ class ActionCore(rpyc.Service):
     def set_event_assignment(self, input_event: InputEvent | None, event_assigner: EventAssigner | None):
         self.page.set_action_event_assigment(
             event_assigner=event_assigner,
-            input_event=input_event,
+            # Page.set_action_event_assigment annotates input_event as
+            # evdev.events.InputEvent -- a wrong import in Page.py; the value
+            # passed here (and stringified there) is ours.
+            input_event=input_event,  # type: ignore[arg-type]  # root cause: set_action_event_assigment annotates evdev InputEvent (Page.py, MR 6)
             action_object=self
         )
 
@@ -686,7 +736,8 @@ class ActionCore(rpyc.Service):
         # instantly on the previous one's.
         self._backend_ready.clear()
         self.backend_process = subprocess.Popen(command, start_new_session=True)
-        gl.plugin_manager.backend_processes.append(self.backend_process)
+        if gl.plugin_manager is not None:
+            gl.plugin_manager.backend_processes.append(self.backend_process)
 
         self.wait_for_backend()
 
@@ -705,7 +756,8 @@ class ActionCore(rpyc.Service):
         """
         self.backend_connection = rpyc.connect("localhost", port, config={"allow_public_attrs": True})
         self.backend = self.backend_connection.root
-        gl.plugin_manager.backends.append(self.backend_connection)
+        if gl.plugin_manager is not None:
+            gl.plugin_manager.backends.append(self.backend_connection)
         # Only after the connection attributes are in place: whoever
         # wait_for_backend wakes goes straight for self.backend.
         self._backend_ready.set()
@@ -840,12 +892,12 @@ class ActionCore(rpyc.Service):
         self.backend = None
 
         # Drop from the global registries synchronously (cheap list removals).
-        if connection is not None:
+        if connection is not None and gl.plugin_manager is not None:
             try:
                 gl.plugin_manager.backends.remove(connection)
             except ValueError:
                 pass
-        if process is not None:
+        if process is not None and gl.plugin_manager is not None:
             try:
                 gl.plugin_manager.backend_processes.remove(process)
             except ValueError:
