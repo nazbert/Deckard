@@ -16,7 +16,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 import threading
 from typing import TYPE_CHECKING
 
-from src.backend.PluginManager.ActionCore import ActionCore
 if TYPE_CHECKING:
     from src.backend.DeckManagement.DeckController import ControllerInputState
 
@@ -31,7 +30,7 @@ class ActionPermissionManager:
         state_dict = self.get_state_dict()
         return state_dict.get("label-control-actions", [None, None, None])
     
-    def get_label_control_index(self, label_position: int) -> ActionCore:
+    def get_label_control_index(self, label_position: int) -> int | None:
         return self.get_label_control_indices()[label_position]
     
     def set_label_control_index(self, label_position: int, index: int, reload_pages: bool = True, reload_self: bool = True):
@@ -43,7 +42,7 @@ class ActionPermissionManager:
         self.reload_pages(reload_pages, reload_self)
 
     ## Media
-    def get_image_control_index(self) -> ActionCore:
+    def get_image_control_index(self) -> int | None:
         state_dict = self.get_state_dict()
         return state_dict.get("image-control-action", None)
     
@@ -55,7 +54,7 @@ class ActionPermissionManager:
         self.reload_pages(reload_pages, reload_self)
 
     ## Background
-    def get_background_control_index(self) -> ActionCore:
+    def get_background_control_index(self) -> int | None:
         state_dict = self.get_state_dict()
         return state_dict.get("background-control-action", None)
     

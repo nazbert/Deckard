@@ -13,7 +13,9 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
+from collections.abc import Callable
 from io import BytesIO
+from typing import Any
 import uuid
 from PIL import Image
 
@@ -36,7 +38,11 @@ class RemoteDeck:
         self._is_touch = False
         self._dial_count = 0
 
-        key_callback: callable = None
+        # RemoteDeckManager reads deck.key_callback directly to deliver a
+        # remote press. This used to be a bare local (`key_callback: ... =
+        # None`, no `self.`), so the attribute simply did not exist until
+        # set_key_callback ran.
+        self.key_callback: Callable[..., Any] | None = None
 
     def deck_type(self):
         return self._deck_type
@@ -50,7 +56,7 @@ class RemoteDeck:
         return
     def key_count(self):
         return self.key_layout()[0] * self.key_layout()[1]
-    def set_key_callback(self, callback: callable):
+    def set_key_callback(self, callback: Callable[..., Any]):
         self.key_callback = callback
     def set_dial_callback(self, *args, **kwargs):
         return
@@ -59,8 +65,7 @@ class RemoteDeck:
     def set_brightness(self, *args, **kwargs):
         return
     def set_key_image(self, key: int, image: bytes):
-        pillow_image = Image.open(BytesIO(image))
-        pillow_image = pillow_image.rotate(180)
+        pillow_image = Image.open(BytesIO(image)).rotate(180)
         self.remote_deck_manager.send_button_image(key, pillow_image)
     def key_states(self):
         return [False] * self.key_count()
@@ -95,7 +100,9 @@ class RemoteDeck:
         return True
     
     def is_touch(self) -> bool:
-        return self.is_touch
+        # Was `return self.is_touch` -- the bound method, i.e. always truthy,
+        # so every caller saw a remote deck as touch-capable.
+        return self._is_touch
     
     def dial_count(self) -> int:
         return self._dial_count

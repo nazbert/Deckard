@@ -20,13 +20,13 @@ class MediaConfig:
         valign (float, optional): The vertical alignment of the media. Defaults to None.
         halign (float, optional): The horizontal alignment of the media. Defaults to None.
     """
-    path: str = None
+    path: str | None = None
     loop: bool = True
     fps: int = 30
-    fill_mode: str = None
-    size: float = None
-    valign: float = None
-    halign: float = None
+    fill_mode: str | None = None
+    size: float | None = None
+    valign: float | None = None
+    halign: float | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "MediaConfig":

@@ -109,15 +109,25 @@ def _sweep_legacy_key_video_dirs() -> None:
 
 
 def _collect_json_paths() -> list[str]:
-    paths = []
+    paths: list[str] = []
     decks_dir = os.path.join(gl.DATA_PATH, "settings", "decks")
     if os.path.isdir(decks_dir):
         paths.extend(
             os.path.join(decks_dir, name)
             for name in os.listdir(decks_dir) if name.endswith(".json")
         )
-    # Includes plugin-registered custom pages.
-    paths.extend(gl.page_manager.get_pages(add_custom_pages=True, sort=False))
+    # Includes plugin-registered custom pages. The sweep thread is started
+    # after create_global_objects(), so the page manager is set by the time
+    # this runs; if it somehow is not, the reference set would be
+    # incomplete and the sweep would delete live caches -- abort instead
+    # (sweep_stale_video_caches is @log.catch'd, so this skips the sweep
+    # exactly as the previous AttributeError did).
+    page_manager = gl.page_manager
+    if page_manager is None:
+        raise RuntimeError(
+            "video cache sweep started before the page manager exists -- "
+            "refusing to sweep against an incomplete reference set")
+    paths.extend(page_manager.get_pages(add_custom_pages=True, sort=False))
     # Plugins keep their own settings JSONs (PluginBase.settings_path:
     # settings/plugins/<id>/settings.json) and may reference media there
     # that appears in no deck or page file. Missing these used to delete
@@ -131,7 +141,7 @@ def _collect_json_paths() -> list[str]:
     return paths
 
 
-def _walk_for_video_paths(node, found: set) -> None:
+def _walk_for_video_paths(node, found: set[str]) -> None:
     """Any string anywhere in the JSON that points at an existing video file
     counts as a reference — media can appear as deck/page backgrounds,
     screensavers, or per-key/dial media, and this survives structure drift."""
@@ -156,7 +166,7 @@ def _md5_of_file(path: str) -> str:
 
 
 def collect_referenced_video_hashes() -> set[str]:
-    video_paths = set()
+    video_paths: set[str] = set()
     for json_path in _collect_json_paths():
         try:
             _walk_for_video_paths(gl.settings_manager.load_settings_from_file(json_path), video_paths)

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 @dataclass
 class ImageLayout:
-    valign: float = None
-    halign: float = None
-    fill_mode: str = None
-    size: float = None
+    valign: float | None = None
+    halign: float | None = None
+    fill_mode: str | None = None
+    size: float | None = None

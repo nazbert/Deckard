@@ -85,7 +85,7 @@ FC_FILE = b"file"
 _FC_MATCH_PATTERN = 0  # FcMatchKind.FcMatchPattern
 
 
-def _ot_weight_to_fc(weight: int) -> int:
+def _ot_weight_to_fc(weight: int | None) -> int:
     """Translate a numeric Pango/CSS weight (100-900) to fontconfig's 0-215
     scale, via the same piecewise-linear table fontconfig itself uses."""
     if weight is None:
@@ -272,15 +272,16 @@ def _resolve_pattern(family: str, weight: int | None, style: str | None):
 
 
 @functools.lru_cache(maxsize=256)
-def resolve(family: str, weight: int = 400, style: str = "normal") -> str | None:
+def resolve(family: str | None, weight: int | None = 400, style: str | None = "normal") -> str | None:
     """Resolve (family, weight, style) to a concrete font file path via
     fontconfig, mirroring what Pango/GTK's own font picker would land on.
 
     weight is a numeric Pango/CSS weight (100-900); style is
-    "normal"/"italic"/"oblique". Either may be passed as None (e.g. a
-    KeyLabel whose defaults haven't been injected yet) and is coalesced to
-    the CSS default. Returns None if fontconfig couldn't be reached at all
-    (missing library AND missing fc-match binary).
+    "normal"/"italic"/"oblique". Any of the three may be passed as None
+    (e.g. a KeyLabel whose defaults haven't been injected yet) and is
+    coalesced to the CSS/fontconfig default. Returns None if fontconfig
+    couldn't be reached at all (missing library AND missing fc-match
+    binary).
     """
     if weight is None:
         weight = 400
@@ -303,7 +304,10 @@ def _resolve_mac(family: str, weight: int, style: str) -> str | None:
     # imported lazily here so the Linux path never touches it.
     import matplotlib.font_manager
     return matplotlib.font_manager.findfont(
-        matplotlib.font_manager.FontProperties(family=family, weight=weight, style=style)
+        # style is typed Literal["normal", "italic", "oblique"] upstream; the
+        # app carries font styles as plain strings out of the settings JSON
+        # and matplotlib does its own validation on anything else.
+        matplotlib.font_manager.FontProperties(family=family, weight=weight, style=style)  # type: ignore[arg-type]  # matplotlib stub: Literal style vs the app's str
     )
 
 
@@ -348,7 +352,8 @@ def font_name_from_path(font_path: str) -> str | None:
     except KeyError:
         return None
 
-    best = {}
+    # nameID -> (priority, family name); see the priority comment below.
+    best: dict[int, tuple[tuple[int, int], str]] = {}
     for record in name_table.names:
         if record.nameID not in (1, 16):
             continue

@@ -160,7 +160,7 @@ _evictions = 0
 _evicted_bytes = 0
 _degenerate_passes = 0
 
-_default_ceiling_cache: int = None
+_default_ceiling_cache: int | None = None
 _warned_ceiling_values: set = set()
 
 
@@ -168,7 +168,7 @@ _warned_ceiling_values: set = set()
 # Ceiling
 # --------------------------------------------------------------------- #
 
-def _mem_total_bytes() -> int:
+def _mem_total_bytes() -> int | None:
     """MemTotal from /proc/meminfo, or None. House precedent for /proc
     reads: mem_telemetry.py."""
     try:

@@ -21,6 +21,13 @@ StateDict = TypedDict("StateDict", {
 
 
 class InputIdentifier:
+    # Every concrete input below (Input.Key/Dial/Touchscreen) defines its own
+    # nested Events enum, so code holding the base type can reach it.
+    # Annotation only -- like InputEvent.string_name, this declares the
+    # attribute without creating one, so `hasattr(InputIdentifier, "Events")`
+    # stays False exactly as before.
+    Events: "type[InputEvent]"
+
     def __init__(self, input_type: str, json_identifier: str, controller_class_name: str):
         self.input_type = input_type
         self.json_identifier: str = json_identifier
@@ -79,6 +86,11 @@ class InputIdentifier:
         return hash((self.input_type, self.json_identifier))
 
 class InputEvent(Enum):
+    # Annotation only -- an Enum body turns *assignments* into members, so
+    # this declares the per-member attribute __new__ sets below without
+    # creating a member of its own.
+    string_name: str
+
     def __new__(cls, string_name):
         obj = object.__new__(cls)
         obj.string_name = string_name
@@ -201,9 +213,9 @@ class Input:
         return events
     
     @staticmethod
-    def EventFromStringName(string_name: str) -> InputEvent:
+    def EventFromStringName(string_name: str | None) -> InputEvent | None:
         if string_name in [None, str(None)]:
-            return
+            return None
         for event in Input.AllEvents():
             if event.string_name == string_name:
                 return event

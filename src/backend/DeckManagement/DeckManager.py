@@ -409,6 +409,7 @@ class DeckManager:
         for controller in self.deck_controller:
             if controller.deck is deck:
                 return controller
+        return None
 
     def add_newly_connected_deck(self, deck:StreamDeck, is_fake: bool = False):
         # Retrying init (not a bare DeckController construction): a deck

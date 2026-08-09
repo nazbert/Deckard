@@ -21,7 +21,7 @@ class ImageLayer:
         self.valign = valign
 
     @classmethod
-    def from_image_path(cls, media_path: str, size: float = 1.0, halign: float = 0.0, valign: float = 0.0) -> "ImageLayer":
+    def from_image_path(cls, media_path: str, size: float = 1.0, halign: float = 0.0, valign: float = 0.0) -> "ImageLayer | None":
         """
         Creates an ImageLayer from a media path.
 
@@ -32,7 +32,9 @@ class ImageLayer:
             valign (float, optional): Vertical offset for image alignment. Negative for top, positive for bottom. Defaults to 0.0.
 
         Returns:
-            ImageLayer: An instance of the ImageLayer class with the loaded image.
+            ImageLayer: An instance of the ImageLayer class with the loaded
+                image, or None when `media_path` is neither an image nor an
+                SVG.
         """
         if is_image(media_path):
             with Image.open(media_path) as img:

@@ -30,9 +30,14 @@ class ScreenSaver:
     def __init__(self, deck_controller: "DeckController"):
         self.deck_controller: "DeckController" = deck_controller
 
-        # Init vars
-        self.original_inputs = []
-        self.original_background: "Background" = None
+        # Init vars. original_inputs is the stashed `deck_controller.inputs`
+        # MAPPING (input type -> list of inputs), not a list: show() assigns
+        # the dict, hide()/close() call .clear() and .values() on it, and
+        # close() compares it against {}. The `[]` this used to start as was
+        # only ever a placeholder -- and the wrong shape for a close() that
+        # ran before any show().
+        self.original_inputs: dict = {}
+        self.original_background: "Background | None" = None
         self.original_brightness: int = 0
 
         # Time when last key state changed
@@ -44,13 +49,13 @@ class ScreenSaver:
         self.enable: bool = False
         self.showing: bool = False
 
-        self.media_path: str = None
+        self.media_path: str | None = None
         self.brightness: int = 25
         self.fps: int = 30
         self.loop: bool = True
-        # timer_wheel.TimerHandle | None -- non-None only while actually
-        # armed (enabled and not showing); see set_time/set_enable.
-        self.timer: "timer_wheel.TimerHandle" = None
+        # Non-None only while actually armed (enabled and not showing);
+        # see set_time/set_enable.
+        self.timer: "timer_wheel.TimerHandle | None" = None
         # True once set_time() has run at least once. DeckController's
         # config load calls set_enable() BEFORE set_time() (P1's own
         # apply_config order), so set_enable(True) at that point must be a
