@@ -26,10 +26,12 @@ Pins, all against the real load path (no GTK, no hardware):
    instead of raising into the plugin-about window, and is quarantined too.
 5. A PRIOR .corrupt IS NEVER CLOBBERED -- a second corruption takes the next
    free slot (.corrupt.1); the first forensic copy survives intact.
-6. RETENTION -- five successive corruptions leave exactly three sidecars,
-   the OLDEST pruned (contents pin which three survived). Names are checked
-   only for shape: quarantine_corrupt_file reuses a pruned slot, so the name
-   is not the age order.
+6. RETENTION, ONCE PER WIRED QUARANTINE CALL SITE (the plugin loader, the
+   SettingsManager loader reached through PageManagerBackend's page read,
+   and the Migrator's pre-SettingsManager loader) -- five successive
+   corruptions leave exactly three sidecars, the OLDEST pruned (contents pin
+   which three survived). Names are deliberately not asserted as an age
+   order: quarantine_corrupt_file reuses a pruned slot.
 7. OSError IS NOT CORRUPTION -- an unreadable (EACCES) settings file keeps
    the old behavior: {} returned, file left exactly where it is, no sidecar.
    Quarantining there would move a perfectly healthy file out of the way.
@@ -158,24 +160,27 @@ def check_prior_sidecar_not_clobbered(plugin) -> None:
     print("PASS(3): a prior .corrupt is never clobbered")
 
 
-def check_retention(plugin) -> None:
-    path = plugin.settings_path
+def check_retention(path: str, corrupting_read, label: str) -> None:
+    """Five successive corruptions of `path` must leave exactly three
+    sidecars, the oldest pruned. `corrupting_read` is the loader call that
+    quarantines -- one per wired call site."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     for n in range(1, 6):
         corrupt(path, f"gen{n}")
-        assert plugin.get_settings() == {}
+        got = corrupting_read()
+        assert got == {}, f"{label}: corrupt read must fall back to empty, got {got}"
         # Distinct mtimes: the sidecar inherits the corrupt primary's mtime,
         # which is what the oldest-first prune orders by.
         time.sleep(0.01)
 
     names = sidecars(path)
-    assert len(names) == 3, f"5 corruptions must leave exactly 3 sidecars, got {names}"
+    assert len(names) == 3, f"{label}: 5 corruptions must leave exactly 3 sidecars, got {names}"
     survived = {read(os.path.join(os.path.dirname(path), n)) for n in names}
     markers = sorted(s.split('"marker": "')[1].split('"')[0] for s in survived)
     assert markers == ["gen3", "gen4", "gen5"], (
-        f"retention must keep the NEWEST three and prune oldest-first, kept {markers}"
+        f"{label}: retention must keep the NEWEST three and prune oldest-first, kept {markers}"
     )
-    print("PASS(4): .corrupt sidecars are retention-bounded, oldest pruned")
+    print(f"PASS(4): .corrupt sidecars are retention-bounded, oldest pruned -- {label}")
 
 
 def check_oserror_is_not_corruption(plugin) -> None:
@@ -251,8 +256,14 @@ def check_about_degrades_to_empty(plugin) -> None:
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_plugin_settings_quarantine")
 
+    from src.backend.Migration.Migrator import Migrator
     from src.backend.PluginManager.PluginBase import PluginBase
     from src.backend.PluginManager.PluginManager import PluginManager
+
+    # Real SettingsManager + PageManagerBackend: the page loader delegates its
+    # corrupt-read handling to SettingsManager, so this is how the second
+    # wired call site gets exercised end to end.
+    fixtures._install_integration_globals()
 
     write_plugin("com_test_q_settings", "QSettingsPlugin", manifest_json("com_test_q_settings"))
     write_plugin("com_test_q_retention", "QRetentionPlugin", manifest_json("com_test_q_retention"))
@@ -274,8 +285,20 @@ def main() -> None:
     check_prior_sidecar_not_clobbered(settings_plugin)
     check_about_degrades_to_empty(settings_plugin)
 
-    check_retention(PluginBase.plugins["com_test_q_retention"]["object"])
     check_oserror_is_not_corruption(PluginBase.plugins["com_test_q_oserror"]["object"])
+
+    # Retention, once per wired quarantine call site.
+    retention_plugin = PluginBase.plugins["com_test_q_retention"]["object"]
+    check_retention(retention_plugin.settings_path, retention_plugin.get_settings,
+                    "plugin settings (PluginBase loader)")
+
+    page_path = fixtures.seed_page("QRetentionPage")
+    check_retention(page_path, lambda: gl.page_manager.get_page_data(page_path),
+                    "pages/app settings (SettingsManager loader, via PageManagerBackend)")
+
+    migrator = Migrator("1.5.0")
+    check_retention(Migrator.SETTINGS_DIR, migrator.get_settings,
+                    "migrations.json (Migrator loader)")
 
     print("PASS: scenario_plugin_settings_quarantine")
 

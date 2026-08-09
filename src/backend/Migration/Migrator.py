@@ -20,7 +20,7 @@ import os
 from packaging import version
 from loguru import logger as log
 
-from src.backend.atomic_json import atomic_write_json, quarantine_corrupt_file
+from src.backend.atomic_json import atomic_write_json, prune_corrupt_sidecars, quarantine_corrupt_file
 
 class Migrator:
     SETTINGS_DIR = os.path.join(gl.DATA_PATH, "settings", "migrations.json")
@@ -65,6 +65,12 @@ class Migrator:
                     f"Could not read {self.SETTINGS_DIR} ({e}) -- preserved at "
                     f"{dest}, treating all migrations as pending"
                 )
+                # Bounded retention for this one file's sidecars (#152). Safe
+                # this early: atomic_json is stdlib-only by design precisely so
+                # the migrators (which run before SettingsManager exists) can
+                # use it, and this module already imports from it.
+                for pruned in prune_corrupt_sidecars(self.SETTINGS_DIR):
+                    log.info(f"Pruned old quarantined copy {pruned}")
             else:
                 log.error(
                     f"Could not read {self.SETTINGS_DIR} ({e}) -- could NOT move it "

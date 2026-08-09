@@ -19,7 +19,7 @@ from functools import lru_cache
 
 # Import own modules
 import globals as gl
-from src.backend.atomic_json import atomic_write_json, quarantine_corrupt_file
+from src.backend.atomic_json import atomic_write_json, prune_corrupt_sidecars, quarantine_corrupt_file
 
 
 def _fallback_font() -> str:
@@ -401,6 +401,12 @@ class SettingsManager:
             moved, dest = quarantine_corrupt_file(file_path)
             if moved:
                 log.error(f"Invalid json in {file_path}: {e} -- preserved at {dest}, loading empty")
+                # Bounded retention, scoped to the file that just gained a
+                # sidecar -- never a startup-wide sweep (#152). Covers pages
+                # and deck/app settings alike: PageManagerBackend routes its
+                # corrupt-read handling through this loader.
+                for pruned in prune_corrupt_sidecars(file_path):
+                    log.info(f"Pruned old quarantined copy {pruned}")
             else:
                 log.error(
                     f"Invalid json in {file_path}: {e} -- could NOT move it aside "
