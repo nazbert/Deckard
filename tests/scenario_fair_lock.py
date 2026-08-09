@@ -16,7 +16,14 @@ Covers:
       logical invariant) plus a wall-clock ceiling on the queued wait. Both
       are sampled from the instant the waiter's TICKET IS DRAWN, which is
       when it joins the order the lock promises to keep (see
-      _TicketDrawProbe).
+      _TicketDrawProbe). A SECOND, looser ceiling is measured from the
+      acquire() CALL, so the end-to-end wait a caller actually experiences
+      stays covered: queue entry is not ordered by the ticket (see below),
+      and a lock that starved the HID poll before it could draw would
+      otherwise satisfy every draw-relative bound in this check.
+      NOTE: with a single waiter, (b) cannot tell FIFO from LIFO -- one
+      waiter is trivially both. Ordering across MULTIPLE waiters is (a)'s
+      job; (b) only bounds how far one hot loop can run ahead of one waiter.
   (c) the context manager releases on the exception path.
   (d) non-blocking acquire, timeout, and release-when-unlocked semantics
       match what a threading.Lock stand-in has to provide, and a timed-out
@@ -149,17 +156,21 @@ def check_hot_loop_cannot_starve_a_waiter() -> None:
     hot.start()
 
     worst_latency = 0.0
+    worst_call_latency = 0.0
     worst_overtakes = 0
     samples = 0
     queued_samples = 0
     deadline = time.monotonic() + RUN_S
     while time.monotonic() < deadline:
         probe.snapshot = None
+        called_at = time.monotonic()
         with lock:
             served_at = time.monotonic()
             served = acquisitions
             drawn = probe.snapshot
         samples += 1
+        # End-to-end: what the caller waited, ticket or no ticket.
+        worst_call_latency = max(worst_call_latency, served_at - called_at)
         if drawn is not None:
             # Queued behind the hot loop: this sample is a real measurement
             # of what the ordering guarantee is worth. (`drawn is None` means
@@ -173,11 +184,14 @@ def check_hot_loop_cannot_starve_a_waiter() -> None:
     stop.set()
     hot.join(timeout=10.0)
 
-    assert samples > 10, f"poller only got {samples} samples in {RUN_S}s"
+    # Vacuity first: if the poller never queued, every bound below is
+    # trivially satisfied and the sample count is a red herring.
     assert queued_samples > 5, (
-        f"only {queued_samples} of {samples} samples actually queued behind "
-        f"the hot loop -- the contention this check needs never happened"
+        f"the contention this check needs never happened: only "
+        f"{queued_samples} of {samples} samples queued behind the hot loop, "
+        f"so nothing here measured an ordering guarantee at all"
     )
+    assert samples > 10, f"poller only got {samples} samples in {RUN_S}s"
     assert acquisitions > 100, (
         f"hot loop only managed {acquisitions} acquisitions -- FairLock "
         f"throughput collapsed"
@@ -197,10 +211,25 @@ def check_hot_loop_cannot_starve_a_waiter() -> None:
     assert worst_latency < 0.05, (
         f"worst queued wait {worst_latency * 1000:.1f}ms exceeds one poll window"
     )
+    # And the same bound end-to-end, from the acquire() CALL. Ordering is
+    # dated from the ticket draw, but drawing a ticket means first winning
+    # the condition's own mutex -- a stock unfair threading.Lock. A lock that
+    # kept the HID poll from ever reaching its ticket would starve exactly
+    # the way this module exists to prevent while satisfying every
+    # draw-relative bound above, so the caller's whole wait is bounded too.
+    # Two poll windows rather than one: the pre-draw stretch is scheduler-
+    # governed, so it gets slack the ordered stretch does not need. Measured
+    # worst under 32-core saturation is ~2ms, i.e. ~47x of headroom.
+    assert worst_call_latency < 0.10, (
+        f"worst end-to-end acquire {worst_call_latency * 1000:.1f}ms exceeds "
+        f"two poll windows -- a waiter is being starved before it can even "
+        f"draw a ticket"
+    )
     print(
         f"PASS: hot loop ({acquisitions} acquisitions) never starved the "
         f"poller ({queued_samples} queued samples, worst {worst_overtakes} "
-        f"overtakes, {worst_latency * 1000:.2f}ms)"
+        f"overtakes, {worst_latency * 1000:.2f}ms queued / "
+        f"{worst_call_latency * 1000:.2f}ms end-to-end)"
     )
 
 
