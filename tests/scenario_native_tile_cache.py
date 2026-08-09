@@ -226,27 +226,71 @@ def _record_cached_keys(controller) -> list:
 def _settle(controller) -> None:
     """Waits out the page load. load_page/load_all_inputs finish on their own
     threads and REBUILD each state's managers, so anything staged on a state
-    before that lands (a label) is silently discarded."""
-    assert fixtures.wait_until(lambda: controller.active_page is not None, timeout=5), \
+    before that lands (a label) is silently discarded.
+
+    The background future is part of that wait, not an extra: load_page hands
+    load_background to a worker thread, and for a page with no background of
+    its own that thread ends in `Background.set_video(None)`. A scenario that
+    installs its own video before that lands has it evicted mid-build, and
+    the tile cache then never completes -- the exact shape #202 was reported
+    as, produced by CPU contention delaying that thread into the window.
+    Every wait here is content-based, so a loaded runner is slower, not
+    wrong."""
+    assert fixtures.wait_until(lambda: controller.active_page is not None, timeout=15), \
         "fixture sanity: no page loaded"
-    fixtures.wait_until(lambda: not controller.media_player.image_tasks, timeout=5)
+    def _background_load_done() -> bool:
+        future = getattr(controller, "_bg_future", None)
+        return future is None or future.done()
+
+    assert fixtures.wait_until(_background_load_done, timeout=15), \
+        "fixture sanity: the page's background load never finished"
+    assert fixtures.wait_until(
+        lambda: not controller.media_player.tasks and not controller.media_player.image_tasks,
+        timeout=15), \
+        "fixture sanity: the media player never drained its page-load tasks"
     time.sleep(0.5)
 
 
 def _start_video(controller, path: str) -> "BackgroundVideo":
     """Installs `path` as the deck background and detaches it from the media
     thread (video.page is what the tick predicate matches on), so the
-    scenario is the only thing advancing frames."""
+    scenario is the only thing advancing frames.
+
+    Call _settle() first: the media thread's predicate is `video.page is
+    active_page`, so `page = None` only detaches once a page is actually
+    loaded -- before that it MATCHES, and the media thread drives the
+    sequential build concurrently (interleaved frame requests go backwards,
+    which aborts the writer for good)."""
+    assert controller.active_page is not None, (
+        "fixture sanity: _start_video needs a loaded page -- with active_page "
+        "still None, `video.page = None` matches the media thread's tick "
+        "predicate instead of detaching from it"
+    )
     video = BackgroundVideo(controller, path, loop=True, fps=30)
     video.page = None
     controller.background.set_video(video, update=False)
     # Playing straight through builds the tile cache; from then on frames
     # are picked by wall clock, which _show_frame drives deterministically.
-    for _ in range(video.n_frames * 3 + 10):
-        if video.is_cache_complete():
-            break
+    # Bounded by a deadline, not by a tick count: the old budget was sized
+    # for the decode count, so a starved runner read as a broken cache (#202).
+    deadline = time.monotonic() + 30.0
+    ticks = 0
+    while not video.is_cache_complete():
+        assert controller.background.video is video, (
+            "fixture sanity: the background was replaced mid-build -- a page-load "
+            "background thread landed inside the window (see _settle)"
+        )
+        assert not video.is_build_terminal(), (
+            f"fixture sanity: the tile cache build went terminal after {ticks} ticks "
+            f"(source frame {video.last_frame_index} of {video.n_frames})"
+        )
+        assert time.monotonic() < deadline, (
+            f"fixture sanity: the tile cache never completed -- {ticks} ticks, source "
+            f"frame {video.last_frame_index} of {video.n_frames}, writer "
+            f"{'open' if video._writer is not None else 'closed'}"
+        )
         controller.background.update_tiles()
-    assert video.is_cache_complete(), "fixture sanity: the tile cache never completed"
+        ticks += 1
     return video
 
 
@@ -254,14 +298,27 @@ def _show_frame(video, controller, index: int) -> None:
     """Advances the background to a SPECIFIC frame. get_next_tiles() picks
     by wall clock once the cache is complete, so the timebase is rewound to
     place `index` at now; _last_frame_tick is cleared so the resume-gap
-    clamp (which shifts the timebase after a >1s stall) can't move it."""
+    clamp (which shifts the timebase after a >1s stall) can't move it.
+
+    Retried on a miss: the rewind and the pick are two separate wall-clock
+    reads, so a thread descheduled between them for longer than one frame
+    period (67ms at this fixture's 15fps source) lands one frame late (#202).
+    That is a property of the runner, not of the code under test -- so the
+    landing requirement stays exact and only the attempt is repeated."""
     playback_fps = float(video.get_source_fps() or video.fps or 30)
-    video._last_frame_tick = None
-    video._play_start = time.time() - index / playback_fps
-    controller.background.update_tiles()
-    assert video.active_frame == index, (
-        f"fixture sanity: wanted frame {index}, background advanced to {video.active_frame}"
-    )
+    deadline = time.monotonic() + 15.0
+    attempts = 0
+    while True:
+        attempts += 1
+        video._last_frame_tick = None
+        video._play_start = time.time() - index / playback_fps
+        controller.background.update_tiles()
+        if video.active_frame == index:
+            return
+        assert time.monotonic() < deadline, (
+            f"fixture sanity: wanted frame {index}, background advanced to "
+            f"{video.active_frame} on every one of {attempts} attempts"
+        )
 
 
 def check_second_loop_is_encode_free() -> None:
@@ -346,6 +403,10 @@ def check_background_swap_drops_stale_natives() -> None:
 
     controller = fixtures.make_headless_controller(serial="native-tile-2")
     try:
+        # Before anything is read off the controller: load_all_inputs rebuilds
+        # the inputs, and the page's own background load ends in
+        # set_video(None), which would evict the video installed below (#202).
+        _settle(controller)
         keys = sorted(controller.inputs[Input.Key], key=lambda k: k.index)
         probe = keys[0]
         deck = fixtures.raw_deck(controller)
