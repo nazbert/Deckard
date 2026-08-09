@@ -72,7 +72,7 @@ def unix_signal_add(priority, signum, callback) -> bool:
     if add is None:
         try:
             gi.require_version("GLibUnix", "2.0")
-            from gi.repository import GLibUnix
+            from gi.repository import GLibUnix  # type: ignore[attr-defined]  # gi stub: PyGObject-stubs ships no GLibUnix-2.0; presence is a runtime property of the host GLib, which is exactly what this try/except probes
             add = GLibUnix.signal_add
         except (ImportError, ValueError, AttributeError):
             return False
@@ -364,8 +364,10 @@ class App(Adw.Application):
         # process ends in os._exit(0), which skips StoreCache's atexit hook,
         # and the flush timer is a daemon -- without this call the last
         # browse's last-use clock renewals are lost on every quit. Guarded:
-        # gl.store_backend is None until the store is first constructed, and
-        # a failure here must never abort teardown.
+        # main.create_global_objects() constructs gl.store_backend on every
+        # boot, but quit also has to survive a partially-built process (a
+        # startup that aborted before that point), and a failure here must
+        # never abort teardown.
         # Deliberately placed AFTER the watchdog above rather than earlier in
         # the teardown: the flush is an atomic_write_json, i.e. two fsyncs
         # with no timeout of their own, so on a wedged filesystem it can block
@@ -593,37 +595,43 @@ class App(Adw.Application):
 
     @log.catch
     def _install_plugin(self, plugin_id: str):
-        plugin = gl.store_backend.get_plugin_for_id(plugin_id=plugin_id)
+        store_backend = gl.store_backend
+        if store_backend is None:
+            log.error(f"Cannot install plugin {plugin_id}: no store backend")
+            return
+        plugin = store_backend.get_plugin_for_id(plugin_id=plugin_id)
 
         self.set_working(True)
 
         if plugin is None:
-            gl.app.send_notification("dialog-information-symbolic", "Failed to install plugin",
-                                     f"The plugin {plugin_id} could not be installed")
+            self.send_notification("dialog-information-symbolic", "Failed to install plugin",
+                                   f"The plugin {plugin_id} could not be installed")
             self.set_working(False)
             return
-        
-        success = gl.store_backend.install_plugin(plugin)
+
+        success = store_backend.install_plugin(plugin)
         # Success is exactly True -- failure returns include truthy ints
         # (404/400), which "if not success" misread as installed.
         if success is not True:
-            gl.app.send_notification("dialog-information-symbolic", "Failed to install plugin",
-                                     f"The plugin {plugin_id} could not be installed")
+            self.send_notification("dialog-information-symbolic", "Failed to install plugin",
+                                   f"The plugin {plugin_id} could not be installed")
         else:
-            gl.app.send_notification("dialog-information-symbolic", "Plugin installed",
-                                     f"The plugin {plugin_id} was successfully installed")
+            self.send_notification("dialog-information-symbolic", "Plugin installed",
+                                   f"The plugin {plugin_id} was successfully installed")
 
         self.set_working(False)            
 
     def set_working(self, working: bool) -> None:
+        # self, not gl.app: this is an App method, so the application object is
+        # structurally present -- gl.app is this same instance.
         if working:
-            GLib.idle_add(gl.app.mark_busy)
-            GLib.idle_add(gl.app.main_win.set_cursor_from_name, "wait")
+            GLib.idle_add(self.mark_busy)
+            GLib.idle_add(self.main_win.set_cursor_from_name, "wait")
         else:
-            GLib.idle_add(gl.app.unmark_busy)
-            GLib.idle_add(gl.app.main_win.set_cursor_from_name, "default")
+            GLib.idle_add(self.unmark_busy)
+            GLib.idle_add(self.main_win.set_cursor_from_name, "default")
 
-    def send_notification(self,
+    def send_notification(self,  # type: ignore[override]  # deliberate: shadows Gio.Application.send_notification with the app's own (icon, title, body) form; the base signature is still reached via the `parent_send` binding below
                           icon_name: str,
                           title: str,
                           body: str,
@@ -658,12 +666,17 @@ class App(Adw.Application):
         """
         serial_number, page_name = data.unpack()
 
+        page_manager = gl.page_manager
+        if page_manager is None:
+            log.error(f"Cannot change to page '{page_name}': no page manager")
+            return
+
         for controller in self.deck_manager.deck_controller:
             if controller.serial_number() == serial_number:
-                page_path = gl.page_manager.find_matching_page_path(page_name)
+                page_path = page_manager.find_matching_page_path(page_name)
                 if page_path is None:
                     # Page not found - provide helpful suggestions
-                    available_pages = [os.path.splitext(os.path.basename(p))[0] for p in gl.page_manager.get_pages()]
+                    available_pages = [os.path.splitext(os.path.basename(p))[0] for p in page_manager.get_pages()]
                     log.error(f"Page '{page_name}' not found. Available pages: {', '.join(available_pages)}")
                     continue
 
@@ -671,7 +684,7 @@ class App(Adw.Application):
                     if os.path.abspath(page_path) == os.path.abspath(controller.active_page.json_path):
                         continue
 
-                page = gl.page_manager.get_page(page_path, controller)
+                page = page_manager.get_page(page_path, controller)
                 controller.load_page(page)
 
     def on_change_state(self, action, data: GLib.Variant, *args):
@@ -679,7 +692,12 @@ class App(Adw.Application):
         Change the state of a specific StreamDeck item
         """
         serial_number, page_name, coords, state_number = data.unpack()
-        
+
+        page_manager = gl.page_manager
+        if page_manager is None:
+            log.error(f"Cannot change state on page '{page_name}': no page manager")
+            return
+
         # Find the controller with matching serial number
         target_controller = None
         for controller in self.deck_manager.deck_controller:
@@ -697,16 +715,16 @@ class App(Adw.Application):
             return
 
         # Find the requested page
-        page_path = gl.page_manager.find_matching_page_path(page_name)
+        page_path = page_manager.find_matching_page_path(page_name)
         if page_path is None:
             # Page not found - provide helpful suggestions
-            available_pages = [os.path.splitext(os.path.basename(p))[0] for p in gl.page_manager.get_pages()]
+            available_pages = [os.path.splitext(os.path.basename(p))[0] for p in page_manager.get_pages()]
             log.error(f"Page '{page_name}' not found. Available pages: {', '.join(available_pages)}")
             return
 
         # Load the page if not already active
         if target_controller.active_page is None or os.path.abspath(page_path) != os.path.abspath(target_controller.active_page.json_path):
-            page = gl.page_manager.get_page(page_path, target_controller)
+            page = page_manager.get_page(page_path, target_controller)
             target_controller.load_page(page)
 
         # Parse and validate coordinates

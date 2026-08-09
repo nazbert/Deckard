@@ -19,7 +19,7 @@ import json
 import os
 import re
 from collections import namedtuple
-from typing import Tuple
+from typing import Any, Tuple
 from src.Signals import Signals
 from loguru import logger as log
 
@@ -199,7 +199,9 @@ class DeckardAPI:
         log.info("DBus API: IconPacks read")
         try:
             if gl.icon_pack_manager is not None:
-                packs = gl.icon_pack_manager.get_icon_packs()
+                # Annotated locally because IconPackManager.get_icon_packs is
+                # declared `-> dir` (a typo for dict), which is not a type.
+                packs: dict[str, Any] = gl.icon_pack_manager.get_icon_packs()
                 return list(packs.keys())
         except Exception as e:
             log.error(f"DBus API: IconPacks error: {e}")
@@ -210,7 +212,7 @@ class DeckardAPI:
         log.info(f"DBus API: GetIconNames called – icon_pack_id={icon_pack_id!r}")
         try:
             if gl.icon_pack_manager is not None:
-                packs = gl.icon_pack_manager.get_icon_packs()
+                packs: dict[str, Any] = gl.icon_pack_manager.get_icon_packs()
                 pack = packs.get(icon_pack_id)
                 if pack is None:
                     log.warning(f"DBus API: GetIconNames – pack not found: {icon_pack_id}")

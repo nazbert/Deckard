@@ -14,5 +14,5 @@ patchelf==0.17.2.1         # used by meson-python builds on Linux
 pip-review==1.3.0         # interactive `pip list --outdated` helper
 req2flatpak==0.2.0        # generates the flatpak manifest's python-requirements module from requirements.txt
 ruff==0.16.0              # linter; config in pyproject.toml, enforced by the lint:ruff CI job
-PyGObject-stubs==2.12.0   # editor/type-checker stubs for gi.repository
+PyGObject-stubs==2.17.0   # editor/type-checker stubs for gi.repository
 types-setuptools==75.8.0.20250225  # editor/type-checker stubs for setuptools

@@ -68,6 +68,8 @@ class _WeakMethodEntry(weakref.WeakMethod):
     __dict__.
     """
 
+    description: str
+
     def __new__(cls, meth: Callable):
         self = super().__new__(cls, meth)
         self.description = _describe_callback(meth)
