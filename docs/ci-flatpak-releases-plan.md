@@ -1,4 +1,4 @@
-# CI: flatpak release pipeline — design (issue #128)
+# CI: flatpak release pipeline — design
 
 **Status: implemented on branch `ci/flatpak-releases`** (this doc rides along in the
 MR; the same plan is posted as a note on #128).
@@ -42,7 +42,7 @@ mirrors that release to the GitHub fork (see Key decisions).
   preinstalled, matching the manifest's `runtime-version: '50'`.
 - **Runner**: `tags: [flatpak]` — a dedicated **privileged** runner
   (`run_untagged=false`, so privilege reaches only jobs that ask for the tag).
-  Field finding (#128): userns creation alone isn't enough — bwrap must mount a
+  Field finding: userns creation alone isn't enough — bwrap must mount a
   fresh /proc inside its userns, and docker's masked /proc trips the kernel's
   locked-mounts rule for *any* unprivileged container. `cap_add=SYS_ADMIN` was
   tested and ruled out (the gnome image runs as uid 1000; caps never become
