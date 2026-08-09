@@ -49,6 +49,13 @@ already covered by scenario_plugin_backend_teardown.py; the end-to-end
      plain signal.signal handler -- still routes TERM/HUP to the teardown.
      Forced explicitly, since this machine's GLib does have the source
      (see the INFO lines the run prints).
+  9. on_quit drains StoreCache's deferred index (issue #180) -- and does it
+     only AFTER the force_quit watchdog is armed. This is the sole live
+     drain in the real app: on_quit ends in os._exit(0), which skips the
+     module's atexit hook, and the debounce timer is a daemon. It has to sit
+     behind the watchdog because the flush is an atomic_write_json (two
+     fsyncs, no timeout of their own): on a wedged filesystem, running it
+     earlier hangs the quit with nothing armed to end the process.
 """
 import fixtures  # noqa: F401  (must be first: isolates the data dir)
 
@@ -118,6 +125,12 @@ def no_real_exit():
 class _ReachedAppQuit(BaseException):
     """Sentinel raised from a stub gl.signal_manager to prove on_quit got
     past the main_win teardown line."""
+
+
+class _ProbeDone(BaseException):
+    """Sentinel raised from a stub gl.loggers to stop a driven on_quit once
+    it is past the section under test -- everything below it (close_all, the
+    controller loop, the thread joins) needs a real app to stand on."""
 
 
 class QuitRecorder:
@@ -365,6 +378,105 @@ def check_quit_tolerates_missing_main_win() -> None:
     print("  PASS: on_quit survives a quit that precedes the main window")
 
 
+class _StoreCacheProbe:
+    """Stands in for gl.store_backend.store_cache and notes, per flush, how
+    far on_quit had got when it was called."""
+
+    def __init__(self, watchdog: Recorder):
+        self._watchdog = watchdog
+        self.flushes = []  # one entry per flush: was the watchdog armed yet?
+
+    def flush_index(self) -> None:
+        self.flushes.append(bool(self._watchdog.calls))
+
+
+def check_quit_drains_the_store_cache_index() -> None:
+    """on_quit must flush the deferred store index, behind the watchdog.
+
+    Drives the real on_quit unbound on a stub (the idiom the checks above
+    use) far enough to cover the #180 block, then cuts it short at the log-
+    sink loop with a sentinel. Two failure modes are pinned:
+
+      * no flush at all -- the deferred read-clock renewals of the last store
+        browse are lost on every quit, because os._exit(0) skips the atexit
+        hook and the debounce timer is a daemon. Nothing else in the process
+        drains them, so deleting the block leaves every other test green.
+      * flush before timer_wheel.schedule(6, force_quit) -- atomic_write_json
+        fsyncs twice with no timeout, so a wedged filesystem parks the quit
+        there forever with no watchdog behind it.
+    """
+    import src.app as app_mod
+    from src.backend import ui_port
+
+    watchdog = Recorder()
+    probe = _StoreCacheProbe(watchdog)
+
+    class _RaisingLoggers:
+        def values(self):
+            raise _ProbeDone()
+
+    stub = Obj(_quit_started=False, force_quit=lambda: None)
+    stub._destroy_main_window = lambda: App._destroy_main_window(stub)
+
+    saved = {
+        "dbus": app_mod.stop_dbus_service,
+        "timer_wheel": app_mod.timer_wheel,
+        "port": ui_port.get(),
+        "signal_manager": getattr(gl, "signal_manager", None),
+        "deck_manager": getattr(gl, "deck_manager", None),
+        "store_backend": getattr(gl, "store_backend", None),
+        "loggers": gl.loggers,
+        "threads_running": gl.threads_running,
+    }
+    app_mod.stop_dbus_service = Recorder()
+    app_mod.timer_wheel = Obj(schedule=watchdog)
+    gl.signal_manager = Obj(trigger_signal=Recorder())
+    gl.deck_manager = Obj(stop_boot_rescan=Recorder())
+    gl.store_backend = Obj(store_cache=probe)
+    gl.loggers = _RaisingLoggers()
+    reached = False
+    try:
+        with no_real_exit():
+            try:
+                App.on_quit(stub)
+            except _ProbeDone:
+                reached = True
+    finally:
+        app_mod.stop_dbus_service = saved["dbus"]
+        app_mod.timer_wheel = saved["timer_wheel"]
+        ui_port.install(saved["port"])
+        gl.signal_manager = saved["signal_manager"]
+        gl.deck_manager = saved["deck_manager"]
+        gl.store_backend = saved["store_backend"]
+        gl.loggers = saved["loggers"]
+        gl.threads_running = saved["threads_running"]
+
+    assert reached, (
+        "the driven on_quit never reached the log-sink loop -- the checks "
+        "below cannot be trusted; something on the teardown path raised "
+        "before the store-cache block"
+    )
+    assert probe.flushes, (
+        "on_quit must call store_cache.flush_index(): it is the only live "
+        "drain of the deferred index in the real app (os._exit(0) skips the "
+        "atexit hook, the debounce timer is a daemon), so without it every "
+        "quit inside the debounce window loses the last browse's last-use "
+        "clock renewals (issue #180)"
+    )
+    assert probe.flushes == [True], (
+        f"the index flush must run AFTER timer_wheel.schedule(6, force_quit) "
+        f"arms the watchdog -- it is an atomic_write_json (two fsyncs, no "
+        f"timeout of their own), so on a wedged filesystem an earlier flush "
+        f"hangs the quit with nothing left to end the process. Watchdog-armed "
+        f"per flush: {probe.flushes!r}"
+    )
+    assert watchdog.calls and watchdog.calls[0][0][1] is stub.force_quit, (
+        f"the watchdog this check asserts against must be the force_quit one, "
+        f"got {watchdog.calls!r}"
+    )
+    print("  PASS: on_quit drains the store cache index, behind the watchdog")
+
+
 def check_force_quit_terminates_backends() -> None:
     saved_pm = getattr(gl, "plugin_manager", None)
     terminate = Recorder()
@@ -425,6 +537,7 @@ def main() -> None:
         check_signal_reaches_on_quit(recorder, signum, f"{name} (second delivery)")
     check_quit_is_idempotent()
     check_quit_tolerates_missing_main_win()
+    check_quit_drains_the_store_cache_index()
     check_force_quit_terminates_backends()
     check_unix_signal_add_degrades_instead_of_raising()
     # Last: it replaces GLib's sigaction for TERM/HUP with a Python handler.

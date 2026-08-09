@@ -17,6 +17,7 @@ Writes are counted by wrapping StoreCache's atomic_write_json reference; the
 debounce is shortened per instance instead of sleeping the production 2s.
 All network-free.
 """
+import atexit
 import json
 import os
 import threading
@@ -208,6 +209,53 @@ def test_second_burst_rearms() -> None:
         )
 
 
+def test_read_burst_arms_exactly_one_timer() -> None:
+    """(f) The debounce dedupes: a burst arms ONE timer, not one per read.
+
+    The write-count checks above cannot see this on their own -- N timers
+    all firing inside the same window still collapse to one write once the
+    first has cleared the dirty flag. What N timers do cost is N *threads*
+    per burst, which is the regression this pins: the debounce runs on a
+    threading.Timer, so dropping the "already pending" guard turns a warm
+    catalog browse into a thread storm.
+
+    Debounce long enough that nothing can fire mid-burst, so every timer
+    this leg arms is still countable at the end."""
+    def _armed_flush_threads() -> list:
+        return [t for t in threading.enumerate()
+                if t.name == "store-cache-index-flush" and t.is_alive()]
+
+    # The earlier legs ran on a ~1s debounce and have all fired by now; wait
+    # the last of those threads out so the count below is absolute.
+    assert fixtures.wait_until(lambda: not _armed_flush_threads(), timeout=5.0), (
+        f"stale flush timers from an earlier check: {_armed_flush_threads()!r}"
+    )
+
+    cache = _new_cache(debounce=600.0)
+    names = [f"Dedupe{i}.json" for i in range(BURST)]
+    _seed(cache, names)  # first sighting of Dedupe0 arms the one timer
+
+    armed_timer = cache._flush_timer
+    assert armed_timer is not None, "the first cache-string sighting must arm a flush"
+
+    for name in names:
+        _read(cache, name)
+        assert cache._flush_timer is armed_timer, (
+            "every read in the burst must ride the timer that is already "
+            "armed -- a fresh threading.Timer per read is a thread per cache "
+            "hit, which is exactly what the debounce exists to avoid"
+        )
+
+    armed = len(_armed_flush_threads())
+    assert armed == 1, (
+        f"a {BURST}-file seed plus a {BURST}-read burst must leave exactly "
+        f"ONE flush timer thread armed, got {armed}"
+    )
+
+    cache.flush_index()  # leave nothing pending for the later checks
+    assert cache._flush_timer is None
+
+
 def test_exit_hook_drains_a_dirty_index() -> None:
     """(d) A quit inside the debounce window still persists the renewals:
     the module's atexit hook (and the explicit flush the app's os._exit path
@@ -242,13 +290,40 @@ def test_exit_hook_drains_a_dirty_index() -> None:
     assert cache._flush_timer is None, "flush_index must clear the armed timer"
 
 
+def test_exit_hook_is_registered_with_atexit() -> None:
+    """(g) ...and that drain is actually wired into interpreter exit.
+
+    The check above calls _flush_live_caches() directly, so it stays green
+    even if the @atexit.register decorator is dropped -- at which point a
+    plain CLI/harness exit silently loses every deferred renewal (the GTK app
+    has its own explicit flush in on_quit, which os._exit(0) forces it to
+    need). atexit exposes no way to enumerate its table, so probe it: an
+    unregister that actually removes something is proof it was in there.
+    """
+    before = atexit._ncallbacks()
+    atexit.unregister(store_cache_mod._flush_live_caches)
+    after = atexit._ncallbacks()
+    if after == before - 1:
+        atexit.register(store_cache_mod._flush_live_caches)  # put it back
+
+    assert after == before - 1, (
+        "StoreCache._flush_live_caches must be registered with atexit: "
+        "unregistering it left the callback count unchanged "
+        f"({before} -> {after}), so nothing drains the deferred index on a "
+        "plain interpreter exit"
+    )
+    assert atexit._ncallbacks() == before, "the probe must restore the hook"
+
+
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_store_cache_flush")
     test_read_burst_writes_the_index_once()
     test_deferral_is_real_and_renewed_date_lands()
     test_committed_write_stamps_synchronously()
     test_second_burst_rearms()
+    test_read_burst_arms_exactly_one_timer()
     test_exit_hook_drains_a_dirty_index()
+    test_exit_hook_is_registered_with_atexit()
     print("scenario_store_cache_flush: PASS")
 
 
