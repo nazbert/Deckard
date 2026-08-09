@@ -4288,11 +4288,30 @@ class LabelManager:
         RECORDS the mask blits, and returns them (None = not recordable, draw
         directly instead).
 
-        The probe target must match the real image's mode and size: the ink is
-        resolved for the mode, and the blit coordinates text() computes are
-        absolute."""
+        The probe target matches the real image's MODE because the ink is
+        resolved for the mode. It matches the real SIZE because the probe
+        doubles as the interception TRIPWIRE: a recording is only safe to
+        replay if the recorder saw the WHOLE draw, and the proof of that is
+        that the probe came out blank. Anything text() writes through a
+        channel other than draw_bitmap -- PIL's embedded-color route pastes
+        onto the target image directly, bypassing the draw core entirely --
+        lands on this probe as residue, and a full-size probe is the only one
+        that can still show it. (A 1x1 probe would record the identical ops,
+        since text() derives the blit coordinates from xy/anchor/mask rather
+        than from the canvas, but it would clip every escaped write away and
+        blind this check.)
+
+        So the bar is non-empty ops AND a blank probe. `not ops` alone only
+        catches TOTAL loss; a stroke pass that records while the fill pass
+        escapes would otherwise cache an outline-only label forever.
+
+        Residue detection is one-sided -- black ink escaping onto an "RGB"
+        probe is invisible to getbbox() -- so it can never reject a good
+        recording, only miss a bad one. Every in-app label target is RGBA,
+        where any escaped ink moves the alpha channel off zero."""
         try:
-            probe = ImageDraw.Draw(Image.new(image.mode, image.size))
+            probe_image = Image.new(image.mode, image.size)
+            probe = ImageDraw.Draw(probe_image)
             recorder = _BitmapRecorder(probe.draw, self._MAX_LABEL_OPS,
                                        self._MAX_LABEL_MASK_BYTES)
             probe.draw = recorder
@@ -4301,6 +4320,7 @@ class LabelManager:
                        stroke_width=label.outline_width,
                        stroke_fill=tuple(label.outline_color))
             ops = tuple(recorder.ops)
+            residue = probe_image.getbbox()
         except _RecordingTooLarge as too_large:
             # Expected for pathological labels that slipped past the cheap
             # pre-check; the partial recording is dropped here and the caller
@@ -4313,12 +4333,15 @@ class LabelManager:
             log.warning("Label blit recording failed; falling back to the "
                         "per-frame draw for this label", exc_info=True)
             return None
-        if not ops:
-            # Non-empty text that produced no blit: PIL took a path this
-            # recorder does not model (e.g. embedded-color glyphs). Replaying
-            # nothing would silently erase the label.
-            log.warning("Label blit recording produced no draw operations; "
-                        "falling back to the per-frame draw for this label")
+        if not ops or residue is not None:
+            # Either no blit at all for non-empty text, or pixels on the probe
+            # -- both mean PIL took a path this recorder does not model (e.g.
+            # embedded-color glyphs). Replaying the recording would erase the
+            # label, or keep only the half that was intercepted.
+            log.warning(
+                f"Label blit recording did not intercept the whole draw "
+                f"({len(ops)} ops, probe residue {residue}); falling back to "
+                f"the per-frame draw for this label")
             return None
         return ops
 
