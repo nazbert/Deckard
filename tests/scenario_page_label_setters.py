@@ -28,10 +28,15 @@ plain dataclass that silently grows a stray attribute instead of raising,
 and the intended `font_name` keeps its old value. The setter's own
 controller was covered by the second (`get_label_manager`) block, which
 writes `font_name` correctly, so the drop only showed on the OTHER
-controllers the first block exists for: a second deck displaying the same
-page kept rendering the old family until a page reload. `check_font_family_
-reaches_every_controller` below drives exactly that, plus the state-switch
-leg (a family set on a non-active state must survive switching to it).
+controllers the first block exists for. NOTE the honest scope (review on
+!103): `get_controller_inputs()` iterates EVERY controller with no page
+filter -- the two controllers in the check below do not share a Page
+object, and the write reaching deck B regardless of which page it shows is
+the (pre-existing, all-8-setters) unscoped-broadcast behavior tracked by
+its own issue, NOT page-scoped semantics this scenario pins.
+`check_font_family_reaches_every_controller` below drives the
+every-controller write, plus the state-switch leg (a family set on a
+non-active state must survive switching to it).
 """
 import fixtures
 

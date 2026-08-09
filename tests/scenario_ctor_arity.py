@@ -17,7 +17,10 @@ Two checks:
      defined exactly once in the scanned tree, every parameter of `Foo`'s
      own `__init__` that has no default must be bound by the call, either
      positionally or by keyword. Calls that splat (`*args` / `**kwargs`)
-     and classes whose `__init__` takes `*args` are skipped -- their
+     and classes whose `__init__` takes `*args` are skipped -- as are
+     classes with NO explicit `__init__` (dataclasses and pure subclasses
+     inherit theirs, so ~a third of the tree is invisible to this scan;
+     review on !103 measured 133/405) -- their
      binding is not decidable here.
 
   2. The specific #190 shape: `FlatpakPermissionRequestWindow` must stay

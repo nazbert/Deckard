@@ -89,6 +89,18 @@ def check_alpha_round_trip() -> None:
     assert HelperMethods.gdk_color_to_values(
         HelperMethods.color_values_to_gdk((10, 20, 30))) == (10, 20, 30, 255)
 
+    # The built-in outline-colour default must survive the fixed scale: the
+    # old (0,0,0,1) only looked opaque because the pre-#203 clamp rounded
+    # any alpha >= 1 up (review on !103) -- the default and the conversion
+    # are a pair, so pin them together.
+    from src.backend.SettingsManager import FONT_DEFAULTS
+    default_outline = FONT_DEFAULTS["outline-color"]
+    rgba = HelperMethods.color_values_to_gdk(default_outline)
+    assert rgba.alpha > 0.99, (
+        f"the built-in outline-colour default {default_outline} renders a "
+        f"transparent swatch (alpha {rgba.alpha:.3f}) under the 0-255 scale"
+    )
+
     print("PASS: color_values_to_gdk round-trips every alpha, not just 0 and 255")
 
 
