@@ -421,7 +421,7 @@ def check_second_loop_is_encode_free() -> None:
         assert loop_encodes[1] == 0, (
             f"the second playthrough of a looping background video re-encoded "
             f"{loop_encodes[1]} times -- frame identity must make a warmed loop "
-            f"encode-free (that is the whole point of gl#163)"
+            f"encode-free (that is the whole point of the native tile cache)"
         )
         assert loop_natives[1] == loop_natives[0], (
             "the cached natives presented on loop 2 differ from the bytes encoded on "

@@ -91,12 +91,12 @@ def check_opaque_initial_paint() -> int:
         opaque_writes = [e for e in writes if e[3] == opaque_slot]
         others_written = [e for e in writes if e[3] != opaque_slot]
         if not opaque_writes:
-            print("FAIL(#11): the opaque key got no initial device paint on "
+            print("FAIL(a): the opaque key got no initial device paint on "
                   "a bg-video page -- the device would keep showing the "
                   "previous page's content until a keypress")
             return 1
         if others_written:
-            print(f"FAIL(#11): non-opaque keys were device-written in the "
+            print(f"FAIL(a): non-opaque keys were device-written in the "
                   f"bg-video branch (would fight the video loop): "
                   f"{others_written}")
             return 1
@@ -105,7 +105,7 @@ def check_opaque_initial_paint() -> int:
         # journal records _hash_bytes(native) at index 4.
         written_hash = opaque_writes[-1][4]
         if written_hash != expected_hash:
-            print(f"FAIL(#11): opaque key was painted, but with the WRONG "
+            print(f"FAIL(a): opaque key was painted, but with the WRONG "
                   f"content (journal {written_hash} != expected "
                   f"{expected_hash} for the new opaque color) -- a stale/"
                   f"previous-page frame reached the device")
@@ -117,7 +117,7 @@ def check_opaque_initial_paint() -> int:
             [200, 120, 40, 255], update=False)
         other_hash = _expected_native_hash(controller, opaque_key)
         if other_hash == expected_hash:
-            print("FAIL(#11): content hash does not vary with the opaque "
+            print("FAIL(a): content hash does not vary with the opaque "
                   "color -- the content assertion is vacuous")
             return 1
         print("PASS: opaque keys get their initial paint WITH the new page's "
@@ -142,7 +142,7 @@ def check_close_gen_invalidation() -> int:
     fixtures.teardown(controller)  # drives the real close()
 
     if not fut.cancelled():
-        print("FAIL(#15): close() did not cancel the in-flight background "
+        print("FAIL(c): close() did not cancel the in-flight background "
               "future")
         return 1
 
@@ -150,7 +150,7 @@ def check_close_gen_invalidation() -> int:
     # instead of attaching a fresh BackgroundVideo post-sweep.
     controller.load_background(page, update=False, gen=gen_before_close)
     if attached:
-        print("FAIL(#15): a load that predates close() attached a "
+        print("FAIL(c): a load that predates close() attached a "
               "background AFTER the resource sweep -- leaked until process "
               "exit")
         return 1
@@ -215,7 +215,7 @@ def check_close_load_race() -> int:
     loader = threading.Thread(target=run_load, name="race-load", daemon=True)
     loader.start()
     if not past_gate.wait(timeout=3):
-        print("SETUP-FAIL(#15race): loader never reached prebuild past its gate")
+        print("SETUP-FAIL(c-race): loader never reached prebuild past its gate")
         release.set()
         return 1
 
@@ -231,7 +231,7 @@ def check_close_load_race() -> int:
     # Give close() a beat to set _closing and reach/enter the sweep.
     closer_ready = wait_until(lambda: controller._closing, timeout=3)
     if not closer_ready:
-        print("SETUP-FAIL(#15race): close() never set _closing")
+        print("SETUP-FAIL(c-race): close() never set _closing")
         release.set()
         return 1
 
@@ -240,17 +240,17 @@ def check_close_load_race() -> int:
     closer.join(timeout=3)
 
     if attached.get("video") is fake_video:
-        print("FAIL(#15race): a load past its gen-gate attached a fresh "
+        print("FAIL(c-race): a load past its gen-gate attached a fresh "
               "BackgroundVideo AFTER close() -- cv2 capture leaks until "
               "process exit (gen-bump + future.cancel do NOT cover the "
               "already-past-the-gate interleaving)")
         return 1
     if background.video is fake_video:
-        print("FAIL(#15race): fresh background left attached on the closed "
+        print("FAIL(c-race): fresh background left attached on the closed "
               "controller")
         return 1
     if not fake_video.closed:
-        print("FAIL(#15race): the orphaned prebuilt payload was dropped "
+        print("FAIL(c-race): the orphaned prebuilt payload was dropped "
               "without close() -- its cv2 capture leaks")
         return 1
     print("PASS: a load past its gate cannot attach a background after "
@@ -275,18 +275,18 @@ def check_bounded_teardown() -> int:
     closer.start()
     if not done.wait(timeout=8):
         wedge.set()
-        print("FAIL(#12): close() stranded behind a wedged teardown hook -- "
+        print("FAIL(b): close() stranded behind a wedged teardown hook -- "
               "steps 7-9 never ran and _closing=True makes retry a "
               "permanent no-op (unplug leak)")
         return 1
 
     # Steps 7-9 actually completed despite the wedge.
     if controller in gl.page_manager.pages:
-        print("FAIL(#12): controller never deregistered from the page cache")
+        print("FAIL(b): controller never deregistered from the page cache")
         wedge.set()
         return 1
     if controller.active_page is not None:
-        print("FAIL(#12): active_page not released")
+        print("FAIL(b): active_page not released")
         wedge.set()
         return 1
     wedge.set()

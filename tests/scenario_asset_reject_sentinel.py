@@ -90,7 +90,7 @@ def check_rejected_url_returns_none() -> None:
     assert result is None, (
         f"a rejected url must refuse with None like every other refusal in "
         f"this function, got {result!r} -- a sentinel that is not a path but "
-        f"is not None either is what reaches the key config (#191)"
+        f"is not None either is what reaches the key config"
     )
     assert dialogs, "the rejection must still tell the user (AlertDialog)"
     print("ok: a rejected url refuses with None, with the alert intact")
@@ -108,7 +108,7 @@ def check_key_drop_rejects_every_non_path() -> None:
             assert result is False, (
                 f"an import answering {answer!r} is a refusal, but the drop "
                 f"returned {result!r} and went on to write it into the key's "
-                f"media path (#191)"
+                f"media path"
             )
 
         # The accept branch must still be reachable: with a real path the

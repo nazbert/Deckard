@@ -75,11 +75,11 @@ def check_fps_bleed(controller_a, controller_b) -> int:
     page_a.set_media_fps(ident, 0, 24, update=False)
 
     if vid_a.calls != [24]:
-        print(f"FAIL(#14): the deck actually showing the page did not get "
+        print(f"FAIL(a): the deck actually showing the page did not get "
               f"the fps change: {vid_a.calls}")
         return 1
     if vid_b.calls:
-        print("FAIL(#14): editing one page's FPS rebased the playing video "
+        print("FAIL(a): editing one page's FPS rebased the playing video "
               "timeline on another deck showing a DIFFERENT page")
         return 1
     print("PASS: set_media_fps applies only where the page is showing")
@@ -103,7 +103,7 @@ def check_ready_to_clear_repoint(controller) -> int:
         controller.mark_page_ready_to_clear(True)
 
     if not page_a.ready_to_clear:
-        print("FAIL(#16): the old page stayed pinned ready_to_clear=False "
+        print("FAIL(b): the old page stayed pinned ready_to_clear=False "
               "forever -- unevictable, silently shrinking the eviction "
               "budget")
         return 1
@@ -184,11 +184,11 @@ def check_atomic_ready_claim(controller) -> int:
     for t in threads:
         t.join(timeout=10)
         if t.is_alive():
-            print("FAIL(#127): initialize_actions deadlocked")
+            print("FAIL(c): initialize_actions deadlocked")
             return 1
 
     if len(submits) != 1:
-        print(f"FAIL(#127): {len(submits)} concurrent ready claims for one "
+        print(f"FAIL(c): {len(submits)} concurrent ready claims for one "
               f"action (duplicate on_ready -> duplicate backend processes)")
         return 1
     print("PASS: exactly one ready claim under concurrent initialize_actions")
@@ -234,11 +234,11 @@ def check_atomic_ready_claim_reload_path(controller) -> int:
     for t in threads:
         t.join(timeout=10)
         if t.is_alive():
-            print("FAIL(#127-reload): initialize_actions deadlocked")
+            print("FAIL(c-reload): initialize_actions deadlocked")
             return 1
 
     if len(submits) != 1:
-        print(f"FAIL(#127-reload): {len(submits)} concurrent ready claims for "
+        print(f"FAIL(c-reload): {len(submits)} concurrent ready claims for "
               f"one action via the reload entry point (Page.py:214) -- the "
               f"claim lock does not cover the reload path")
         return 1
@@ -313,7 +313,7 @@ def check_ready_to_clear_evicts_end_to_end(controller) -> int:
 
         cached_after = set(gl.page_manager.pages.get(controller, {}).keys())
         if pinned_path in cached_after:
-            print("FAIL(#16): a page marked ready_to_clear mid-work stayed "
+            print("FAIL(b): a page marked ready_to_clear mid-work stayed "
                   "pinned and was NOT evicted by clear_old_cached_pages -- "
                   "unevictable forever, silently shrinking the eviction budget")
             return 1
@@ -373,7 +373,7 @@ def check_ready_to_clear_key_handler(controller) -> int:
         print("FAIL(setup): the mid-callback switch injection never ran")
         return 1
     if not pressed_page.ready_to_clear:
-        print("FAIL(#16-key): a key press that switched pages left the OLD "
+        print("FAIL(b-key): a key press that switched pages left the OLD "
               "(pressed) page pinned ready_to_clear=False -- the key-handler "
               "bracket re-dereferenced active_page instead of the pressed page")
         return 1

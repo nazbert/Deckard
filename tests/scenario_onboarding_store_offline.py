@@ -69,7 +69,7 @@ def check_recommendations_offline() -> None:
     assert calls["error"] == 1, (
         "a NoConnectionError sentinel from get_all_plugins must show the "
         "error state (pre-fix: TypeError killed the loader thread and the "
-        "spinner span forever -- issue #118 fresh-install mode)"
+        "spinner span forever -- fresh-install mode)"
     )
     assert not fake.group.rows, "no rows may be built on a failed fetch"
 
@@ -146,7 +146,7 @@ def check_install_failures_toast() -> None:
     assert len(toasts) == 1, (
         f"install failures must surface as ONE error toast on the surviving "
         f"main window (got {toasts}) -- pre-fix they only flashed on the "
-        f"progress bar of the closing onboarding window (issue #118)"
+        f"progress bar of the closing onboarding window"
     )
     assert "TestX" in toasts[0] and "Store" in toasts[0], (
         f"the toast must name the failed plugin and point at the store: {toasts[0]}"

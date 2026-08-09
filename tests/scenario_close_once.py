@@ -100,7 +100,7 @@ def main() -> None:
     assert len(stop_calls) == 1, (
         f"the teardown sweep ran {len(stop_calls)} times (by {stop_calls}) -- "
         f"the _closing check-then-set let a concurrent close() through the "
-        f"gate (issue #56 item 5); it must run exactly once"
+        f"gate; it must run exactly once"
     )
     print("PASS: scenario_close_once")
 

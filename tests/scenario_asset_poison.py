@@ -208,7 +208,7 @@ def check_backend_add_batch_continues(files: dict) -> AssetManagerBackend:
         n_before = len(backend)
         asset_id = backend.add(path)  # must not raise
         assert asset_id is None, (
-            f"{name}: an undecodable file must be refused at import (#197), got {asset_id!r}"
+            f"{name}: an undecodable file must be refused at import, got {asset_id!r}"
         )
         assert len(backend) == n_before, f"{name}: refused file must not append an asset"
         copied = os.path.join(INTERNAL_ASSETS_DIR, os.path.basename(path))

@@ -85,7 +85,7 @@ def main() -> None:
         assert not blanks, (
             f"the action-control key settled BLANK on {len(blanks)}/{TRIALS} "
             f"loads ({blanks}) -- create_n_states wiped the action-owned image "
-            "and the deduping on_update never restored it (issue #131)"
+            "and the deduping on_update never restored it"
         )
         print("PASS: scenario_wipe_restore")
     finally:

@@ -335,7 +335,7 @@ def _announce_disabled() -> None:
     _announced_disabled = True
     try:
         _LOG.warning(
-            "SC_NO_ERROR_HOOKS=1: the issue-#80 exception hooks and the "
+            "SC_NO_ERROR_HOOKS=1: the crash-logging exception hooks and the "
             "faulthandler redirection are DISABLED for this run -- uncaught "
             "exceptions reach stderr only, and native crash dumps are not "
             "written to logs/faulthandler.log (log redaction is unaffected)"

@@ -245,7 +245,7 @@ def leg_active_none_distorts_budget() -> int:
     if ghost_left != 4:
         print(f"FAIL(4): an active_page=None controller's pages were evicted "
               f"({ghost_left}/4 left) -- if this changed, the :236 guard was "
-              f"altered (issue #81 pin-count redesign landing?); rewrite this "
+              f"altered (a pin-count redesign landing?); rewrite this "
               f"leg to the new budget contract")
         return 1
     #  - and the live controller is over-evicted BECAUSE the ghost's dead
@@ -254,7 +254,7 @@ def leg_active_none_distorts_budget() -> int:
         print(f"FAIL(4): expected the live controller over-evicted to 1 page "
               f"(all 3 excess evictions displaced onto it by the ghost's "
               f"budget distortion), got {live_left} left -- if the distortion "
-              f"was fixed (issue #81 pin-count redesign), rewrite this leg to "
+              f"was fixed (a pin-count redesign), rewrite this leg to "
               f"the new budget contract")
         return 1
     if live.active_page.json_path not in cached_paths(live):

@@ -279,11 +279,11 @@ def check_writecap_putback() -> int:
     ts_writes = controller.deck.ops_by_name("set_touchscreen_image")
     if ts_writes:
         print(f"FAIL(3): the deferred over-budget frame was written to the "
-              f"device ({len(ts_writes)} touchscreen write(s)) -- the !27 "
+              f"device ({len(ts_writes)} touchscreen write(s)) -- the write-cap "
               f"rate-limit was not preserved")
         return 1
     print("PASS: newer frame survives the write-cap putback; deferred frame "
-          "not written (!27 rate-limit preserved)")
+          "not written (rate-limit preserved)")
     return 0
 
 

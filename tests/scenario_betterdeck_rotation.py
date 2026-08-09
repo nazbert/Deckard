@@ -34,7 +34,7 @@ def check_rotation() -> int:
 
         # Permutation sanity: nothing lost or duplicated.
         if sorted(out) != physical:
-            print(f"FAIL(#17): rotation {rotation} output is not a "
+            print(f"FAIL(a): rotation {rotation} output is not a "
                   f"permutation: {out}")
             return 1
 
@@ -44,7 +44,7 @@ def check_rotation() -> int:
         for logical in range(total):
             p = better.get_physical_index(logical)
             if out[logical] != physical[p]:
-                print(f"FAIL(#17): rotation {rotation}: out[{logical}] = "
+                print(f"FAIL(a): rotation {rotation}: out[{logical}] = "
                       f"{out[logical]}, expected value from physical slot "
                       f"{p} -- the map is applied in the wrong direction")
                 return 1
@@ -54,7 +54,7 @@ def check_rotation() -> int:
     better.set_rotation(90)
     out = better.reorder_physical_for_rotation(physical)
     if out[2] != 0:
-        print(f"FAIL(#17): literal check: out[2] = {out[2]}, expected 0")
+        print(f"FAIL(a): literal check: out[2] = {out[2]}, expected 0")
         return 1
 
     print("PASS: rotation map applied in the correct direction for 0/90/180/270")
@@ -77,12 +77,12 @@ def check_async_setters() -> int:
         better.set_dial_callback_async(cb)
         better.set_touchscreen_callback_async(cb)
     except RecursionError:
-        print("FAIL(#18): async callback setter recursed into itself")
+        print("FAIL(b): async callback setter recursed into itself")
         return 1
 
     missing = {"key", "dial", "touch"} - set(received)
     if missing:
-        print(f"FAIL(#18): setters never reached the wrapped deck: {missing}")
+        print(f"FAIL(b): setters never reached the wrapped deck: {missing}")
         return 1
     print("PASS: async callback setters delegate to the wrapped deck")
     return 0

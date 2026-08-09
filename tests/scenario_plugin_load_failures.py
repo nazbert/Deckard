@@ -319,7 +319,7 @@ def main() -> None:
             ctx.iteration(False)
         assert notified, (
             "installing a version-disabled plugin must notify in the install "
-            "session (#102), not first on the next launch"
+            "session, not first on the next launch"
         )
         assert len(notifications) == 1, f"expected one notification, got {notifications}"
         assert "older version" in notifications[0][1], (

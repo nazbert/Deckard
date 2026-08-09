@@ -227,7 +227,7 @@ def main() -> None:
             f"the state load must run PAST the media block -- expected page color "
             f"{PAGE_MEDIA_BG_COLOR}, got "
             f"{key.get_active_state().background_manager.page_color!r} (the loader "
-            f"raised out of the media branch, issue #199)"
+            f"raised out of the media branch)"
         )
         page_media_video = key.get_active_state().key_video
         assert type(page_media_video).__name__ == "InputVideo", (

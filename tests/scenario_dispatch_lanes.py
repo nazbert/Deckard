@@ -127,7 +127,7 @@ def main() -> int:
         print(f"FAIL(1): holder B delivered only {len(b_ran)}/5 events within "
               f"{DELIVER_S}s while holder A was wedged -- B's events are "
               "queued behind A's blocking observer, which is the app-wide "
-              "stall #178 removes")
+              "stall the per-holder lanes exist to remove")
         release_all()
         return 1
     if a_finished:

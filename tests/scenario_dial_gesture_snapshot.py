@@ -173,7 +173,7 @@ def main() -> None:
         deck.fire_dial_event(0, DialEventType.PUSH, False)
         assert fixtures.wait_until(lambda: UP in easy_action.received), (
             "UP was not delivered to the DOWN-time actions: the page flip "
-            "redirected the dial gesture tail to the new page (issue #123) "
+            "redirected the dial gesture tail to the new page "
             f"-- easy_action saw {easy_action.received}"
         )
         assert SHORT_UP in easy_action.received, \
@@ -194,7 +194,7 @@ def main() -> None:
             "second DOWN never reached the EasyCommand-alike"
         assert easy_action.run_count == 2, (
             "the command did not run on the second press -- the latch from "
-            "press 1 was never cleared (upstream #475's 'fires only once', "
+            "press 1 was never cleared (the classic 'fires only once' latch, "
             "dial edition)"
         )
         assert fixtures.wait_until(lambda: controller.active_page is page_b)

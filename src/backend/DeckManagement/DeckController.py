@@ -2603,7 +2603,7 @@ class DeckController:
                     f"close(): action teardown still running after "
                     f"{self.TEARDOWN_JOIN_TIMEOUT_S:.0f}s -- a plugin teardown "
                     f"hook is wedged; abandoning it and completing "
-                    f"device/registration teardown (issue #12)"
+                    f"device/registration teardown"
                 )
 
         # Step 7: resource sweep. The writer is stopped, so nothing races a
