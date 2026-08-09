@@ -13,8 +13,10 @@ Covers:
   (a) service order equals acquisition order for N queued threads.
   (b) a hot acquire/release loop cannot overtake a waiter more than the one
       acquisition already in flight -- asserted as an overtake COUNT (a
-      logical invariant) plus a generous wall-clock ceiling, so a loaded
-      runner can't flake it.
+      logical invariant) plus a wall-clock ceiling on the queued wait. Both
+      are sampled from the instant the waiter's TICKET IS DRAWN, which is
+      when it joins the order the lock promises to keep (see
+      _TicketDrawProbe).
   (c) the context manager releases on the exception path.
   (d) non-blocking acquire, timeout, and release-when-unlocked semantics
       match what a threading.Lock stand-in has to provide, and a timed-out
@@ -76,6 +78,52 @@ def check_service_order_is_arrival_order() -> None:
     print("PASS: service order equals arrival order")
 
 
+class _TicketDrawProbe:
+    """Stands in for a FairLock's condition variable so the scenario can see
+    the exact instant a thread's ticket is drawn.
+
+    FairLock draws the ticket and calls `wait()` inside one `with self._cond`
+    block, so a watched thread's FIRST wait() is its "I am now queued" edge,
+    observed with no other thread able to draw or serve a ticket in between.
+    Everything is delegated -- acquire()/release() run their real code.
+
+    This exists because the obvious sampling point (read the counter just
+    before calling acquire()) measures the wrong interval. FairLock orders
+    threads by TICKET, and the ticket is drawn behind `self._cond`'s own
+    mutex, which is a stock unfair threading.Lock: a hot loop that takes and
+    drops that mutex twice per cycle can keep a would-be waiter out of the
+    queue for milliseconds before it ever draws a ticket. Acquisitions in
+    that window are not overtakes of a queued waiter -- nothing was queued
+    yet -- but a before-acquire() sample counts them, which is how #186's
+    "overtook the waiter 11 times" was reported on a lock that had not
+    reordered anything (reproduced: 11 pre-queue acquisitions, 0 real
+    overtakes). Sampling at the draw makes the bound exact instead of a
+    fudge factor: see check_hot_loop_cannot_starve_a_waiter.
+    """
+
+    def __init__(self, cond, sample):
+        self._cond = cond
+        self._sample = sample
+        self.watch = None      # thread whose ticket draw to catch
+        self.snapshot = None   # (sample, monotonic) taken at that draw
+
+    def __enter__(self):
+        return self._cond.__enter__()
+
+    def __exit__(self, *exc_info):
+        return self._cond.__exit__(*exc_info)
+
+    def notify_all(self):
+        return self._cond.notify_all()
+
+    def wait(self, timeout=None):
+        # Only the first wait() of the watched thread's acquire(): a re-check
+        # loop must not re-baseline the sample mid-wait.
+        if self.snapshot is None and threading.current_thread() is self.watch:
+            self.snapshot = (self._sample(), time.monotonic())
+        return self._cond.wait(timeout)
+
+
 def check_hot_loop_cannot_starve_a_waiter() -> None:
     HOLD_S = 0.0005
     RUN_S = 2.0
@@ -83,6 +131,10 @@ def check_hot_loop_cannot_starve_a_waiter() -> None:
     lock = FairLock()
     acquisitions = 0
     stop = threading.Event()
+
+    probe = _TicketDrawProbe(lock._cond, lambda: acquisitions)
+    probe.watch = threading.current_thread()
+    lock._cond = probe
 
     def _hot():
         nonlocal acquisitions
@@ -99,44 +151,56 @@ def check_hot_loop_cannot_starve_a_waiter() -> None:
     worst_latency = 0.0
     worst_overtakes = 0
     samples = 0
+    queued_samples = 0
     deadline = time.monotonic() + RUN_S
     while time.monotonic() < deadline:
-        before = acquisitions
-        t0 = time.monotonic()
+        probe.snapshot = None
         with lock:
-            latency = time.monotonic() - t0
-            overtakes = acquisitions - before
-        worst_latency = max(worst_latency, latency)
-        worst_overtakes = max(worst_overtakes, overtakes)
+            served_at = time.monotonic()
+            served = acquisitions
+            drawn = probe.snapshot
         samples += 1
+        if drawn is not None:
+            # Queued behind the hot loop: this sample is a real measurement
+            # of what the ordering guarantee is worth. (`drawn is None` means
+            # the lock was free at the draw and nothing had to be waited out,
+            # so there is no overtaking to measure.)
+            queued_samples += 1
+            worst_overtakes = max(worst_overtakes, served - drawn[0])
+            worst_latency = max(worst_latency, served_at - drawn[1])
         time.sleep(0.05)  # The library's 20Hz read poll cadence.
 
     stop.set()
     hot.join(timeout=10.0)
 
     assert samples > 10, f"poller only got {samples} samples in {RUN_S}s"
+    assert queued_samples > 5, (
+        f"only {queued_samples} of {samples} samples actually queued behind "
+        f"the hot loop -- the contention this check needs never happened"
+    )
     assert acquisitions > 100, (
         f"hot loop only managed {acquisitions} acquisitions -- FairLock "
         f"throughput collapsed"
     )
-    # FIFO bounds the overtakes at the acquisition in flight when the
-    # poller drew its ticket; the sampled `before` is read a few bytecodes
-    # earlier, so allow a small slack. An unfair lock loses this by orders
-    # of magnitude (the hot loop turns over ~1000x per second here).
-    assert worst_overtakes <= 5, (
-        f"hot loop overtook the waiter {worst_overtakes} times -- ordering "
-        f"is not FIFO"
+    # Exact, not a tolerance: once the poller holds ticket T, every hot
+    # acquisition drawn afterwards holds a higher ticket and is served after
+    # it, so the only one that may still land is the one already in flight
+    # when T was drawn -- and only if it had not yet reached its `+= 1`.
+    # An unfair lock loses this by orders of magnitude (the hot loop turns
+    # over ~1000x per second here).
+    assert worst_overtakes <= 1, (
+        f"hot loop overtook the queued waiter {worst_overtakes} times -- "
+        f"ordering is not FIFO"
     )
     # Loose ceiling: the read poll needs one slot per 50ms window. The real
     # figure is sub-millisecond; this only has to catch starvation.
     assert worst_latency < 0.05, (
-        f"worst acquisition latency {worst_latency * 1000:.1f}ms exceeds one "
-        f"poll window"
+        f"worst queued wait {worst_latency * 1000:.1f}ms exceeds one poll window"
     )
     print(
         f"PASS: hot loop ({acquisitions} acquisitions) never starved the "
-        f"poller (worst {worst_overtakes} overtakes, "
-        f"{worst_latency * 1000:.2f}ms)"
+        f"poller ({queued_samples} queued samples, worst {worst_overtakes} "
+        f"overtakes, {worst_latency * 1000:.2f}ms)"
     )
 
 
