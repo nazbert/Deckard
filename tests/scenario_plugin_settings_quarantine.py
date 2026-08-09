@@ -49,6 +49,10 @@ Pins, all against the real load path (no GTK, no hardware):
 10. THE MIGRATOR DOES NOT QUARANTINE ON OSError -- it used to catch it in the
    same tuple as the decode error, renaming a healthy but momentarily
    unreadable migrations.json away and re-running every migrator.
+11. THE ASSET MANAGER READS AND REWRITES THE SAME settings.json -- load_assets
+   is the earliest reader of all (PluginBase.__init__, before register()) and
+   save_assets replaced a corrupt file wholesale from five live UI call
+   sites. Both now quarantine exactly like PluginBase does.
 """
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 
@@ -289,6 +293,42 @@ def check_migrator_oserror_is_not_corruption(migrator) -> None:
     print("PASS(10): the Migrator no longer quarantines on OSError")
 
 
+def check_asset_manager_quarantines(plugin) -> None:
+    """The asset manager reads and REWRITES the same settings.json, with no
+    quarantine of its own: load_assets is the earliest reader (PluginBase
+    __init__, before register()), and save_assets -- reachable from five live
+    UI call sites -- replaced a corrupt file wholesale."""
+    path = plugin.settings_path
+    am = plugin.asset_manager
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    bad = corrupt(path, "asset-load")
+    am.load_assets()  # must not raise; must quarantine
+    assert not os.path.exists(path), "load_assets left the corrupt file in place"
+    names = sidecars(path)
+    assert len(names) == 1, f"load_assets did not quarantine, got {names}"
+    assert read(os.path.join(os.path.dirname(path), names[0])).encode() == bad
+
+    # save_assets: the write below replaces the file wholesale.
+    bad2 = corrupt(path, "asset-save")
+    am.save_assets()
+
+    names = sidecars(path)
+    assert len(names) == 2, f"save_assets destroyed the corrupt file, got {names}"
+    contents = {read(os.path.join(os.path.dirname(path), n)) for n in names}
+    assert bad2.decode() in contents, "save_assets overwrote the corrupt file unpreserved"
+    with open(path) as f:
+        assert "assets" in json.load(f), "save_assets did not write the new content"
+
+    # Valid JSON that is not an object used to raise TypeError on assignment.
+    with open(path, "w") as f:
+        f.write('["not", "an", "object"]')
+    am.save_assets()
+    with open(path) as f:
+        assert "assets" in json.load(f), "a non-object settings file broke save_assets"
+    print("PASS(11): the asset manager quarantines the same file the same way")
+
+
 def check_oserror_is_not_corruption(plugin) -> None:
     path = plugin.settings_path
     plugin.set_settings({"marker": "healthy"})
@@ -391,6 +431,7 @@ def main() -> None:
     write_plugin("com_test_q_oserror", "QOsErrorPlugin", manifest_json("com_test_q_oserror"))
     write_plugin("com_test_q_prune", "QPrunePlugin", manifest_json("com_test_q_prune"))
     write_plugin("com_test_q_garbage", "QGarbagePlugin", manifest_json("com_test_q_garbage"))
+    write_plugin("com_test_q_assets", "QAssetsPlugin", manifest_json("com_test_q_assets"))
     # Corrupt manifest vs. no manifest at all -- the two must be indistinguishable.
     corrupt_dir = write_plugin("com_test_q_manifest_corrupt", "QCorruptManifestPlugin",
                                '{"name": "x", "id": ')
@@ -427,6 +468,7 @@ def main() -> None:
     check_garbage_bytes_are_corruption(
         PluginBase.plugins["com_test_q_garbage"]["object"], migrator)
     check_migrator_oserror_is_not_corruption(migrator)
+    check_asset_manager_quarantines(PluginBase.plugins["com_test_q_assets"]["object"])
 
     print("PASS: scenario_plugin_settings_quarantine")
 
