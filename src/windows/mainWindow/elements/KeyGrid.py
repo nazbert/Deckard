@@ -293,7 +293,10 @@ class KeyButton(Gtk.Frame):
         path = file.get_path()
 
         internal_path = gl.asset_manager_backend.add_custom_media_set_by_ui(url=url, path=path)
-        if internal_path is None:
+        # Anything that is not a path IS a refusal: the import used to answer
+        # a rejected url with -1, which slipped past an `is None` test and
+        # landed in the key's media path (#191).
+        if not isinstance(internal_path, str) or internal_path == "":
             return False
 
         # Set media to key
