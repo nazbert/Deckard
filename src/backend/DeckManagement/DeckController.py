@@ -77,6 +77,35 @@ from src.backend.PluginManager.ActionCore import ActionCore
 if TYPE_CHECKING:
     from src.backend.DeckManagement.DeckManager import DeckManager
 
+    class ComposedKeyLabel(KeyLabel):
+        """A KeyLabel that has been through LabelManager.inject_defaults():
+        every field is populated, so the render path can read them without a
+        None check at each use.
+
+        Declared under TYPE_CHECKING only -- it adds no class at runtime, and
+        inject_defaults() keeps returning the very object it filled in. This
+        exists so "composed" is a type the checker can carry from the one
+        place the invariant is established to the eight places that rely on
+        it, instead of eight narrowings that would each have to re-assert it.
+        """
+        text: str
+        font_size: int
+        font_name: str
+        font_weight: int
+        style: str
+        color: list[int]
+        outline_width: int
+        outline_color: list[int]
+        alignment: str
+
+    class ComposedImageLayout(ImageLayout):
+        """An ImageLayout after LayoutManager.inject_defaults(). Same contract
+        and same TYPE_CHECKING-only rationale as ComposedKeyLabel."""
+        valign: float
+        halign: float
+        fill_mode: str
+        size: float
+
 # Import globals
 import globals as gl
 
@@ -1161,7 +1190,7 @@ class DeckController:
         # Open the deck - why store it as self.deck? So that self.get_alive() returns True in get_deck_settings
         # (the raw handle answers is_open() the same way the BetterDeck wrapper
         # installed a few lines below does).
-        self.deck: BetterDeck = deck
+        self.deck: BetterDeck = deck  # type: ignore[assignment]  # raw StreamDeck handle, rewrapped as BetterDeck a few lines below
         # Order the transport mutex FIFO before open() starts the reader
         # thread -- see _install_fair_transport_lock for why the ordering of
         # these two lines is load-bearing.
@@ -1627,11 +1656,17 @@ class DeckController:
         if self._key_image_size is not None:
             return self._key_image_size
         if not self.get_alive():
-            # Dead/closing deck: hand back the documented fallback without
-            # memoizing it, so a deck that comes back is re-queried. This used
-            # to `return` None, but no caller None-checks -- they unpack two
-            # ints or pass the result straight to Image.new -- so a media tick
-            # racing an unplug raised TypeError instead of drawing a stub tile.
+            # Dead/closing deck: hand back the fallback without memoizing it, so
+            # a deck that comes back is re-queried at its real size. This used to
+            # `return` None, but no caller None-checks -- they unpack two ints or
+            # pass the result straight to Image.new -- so a media tick racing an
+            # unplug raised TypeError instead of drawing a stub tile.
+            #
+            # (72, 72) is the same constant the size-unavailable branch below
+            # uses. It is NOT correct for every device -- an XL's keys are
+            # 96x96 -- but this path only produces throwaway tiles for a deck
+            # that can no longer be written to, and the real size is restored
+            # the moment the deck answers again.
             return (72, 72)
         size = self.deck.key_image_format()["size"]
         if size is None:
@@ -1721,8 +1756,8 @@ class DeckController:
         if self._touchscreen_image_size is not None:
             return self._touchscreen_image_size
         if not self.get_alive():
-            # Same dead-deck contract as get_key_image_size: callers unpack
-            # two ints, none None-checks.
+            # Same dead-deck contract (and same fallback-only caveat) as
+            # get_key_image_size: callers unpack two ints, none None-checks.
             return (800, 100)
         size = self.deck.touchscreen_image_format()["size"]
         if size is None:
@@ -3083,12 +3118,17 @@ class BackgroundImage:
         if extend_touchscreen:
             canvas_height += spacing_y + self._get_touchscreen_canvas_height(canvas_width)
 
-        # close() releases the source image; compose a transparent canvas of
-        # the right geometry rather than raising AttributeError on the media
-        # thread (this runs per background tile refresh).
+        # close() releases the source image. Raise rather than compose a
+        # transparent canvas: Background.update_tiles catches this and KEEPS the
+        # previous tiles behind a rate-limited log, so the failure stays loud and
+        # self-preserving. Returning a blank canvas here would silently blank
+        # every key instead (and do it once per tile refresh, unlogged).
         source = self.image
         if source is None:
-            return Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
+            raise RuntimeError(
+                "background image was released (close()) while its tiles were "
+                "still being composed"
+            )
 
         # Convert to RGBA first to preserve transparency, then resize
         img_rgba = source.convert("RGBA")
@@ -3223,6 +3263,15 @@ class BackgroundVideo(BackgroundVideoCache):
             frame_index = None
         identity = None if frame_index is None else (self.video_md5, frame_index)
         return copied_tiles, identity
+
+
+#: extend_touchscreen implies the strip geometry was computed in __init__.
+#: If that ever breaks, raising keeps Background.update_tiles' contract --
+#: previous tiles retained, one rate-limited log -- instead of publishing a
+#: key-only tile set that would leave the strip frozen and silent.
+_STRIP_GEOMETRY_MISSING = (
+    "extend_touchscreen is set but the strip geometry was never computed"
+)
 
 
 class GifBudgetExceeded(Exception):
@@ -3699,7 +3748,9 @@ class GifBackground:
         strip_box = self._strip_box
         if not frames:
             entries = [self.deck_controller.generate_alpha_key() for _ in range(self.key_count)]
-            if self.extend_touchscreen and strip_size is not None:
+            if self.extend_touchscreen:
+                if strip_size is None:
+                    raise RuntimeError(_STRIP_GEOMETRY_MISSING)
                 entries.append(Image.new("RGBA", strip_size, (0, 0, 0, 0)))
             return entries, None
 
@@ -3708,7 +3759,9 @@ class GifBackground:
         if memo_index != index or memo_entries is None:
             frame = frames[index]
             memo_entries = [frame.crop(box) for box in self._key_regions]
-            if self.extend_touchscreen and strip_size is not None and strip_box is not None:
+            if self.extend_touchscreen:
+                if strip_size is None or strip_box is None:
+                    raise RuntimeError(_STRIP_GEOMETRY_MISSING)
                 # Bottom slice of the extended canvas at strip resolution
                 # (same crop+HAMMING resize as BackgroundVideoCache.
                 # crop_strip_from_deck_sized_image).
@@ -4138,11 +4191,9 @@ class KeyGIF(SingleKeyAsset):
         return self.frame_delays[self.active_frame] / 1000.0  # Convert ms to seconds
     
     def get_raw_image(self) -> Image.Image:
-        # cascade: get_next_frame() is None once close() has released the
-        # frames, but SingleKeyAsset.get_raw_image declares -> Image.Image
-        # (MR 5 owns Subclasses/SingleKeyAsset.py) and widening only the
-        # override would be an incompatible return type.
-        return self.get_next_frame()  # type: ignore[return-value]
+        # get_next_frame() is None once close() has released the frames;
+        # widening only this override would be an incompatible return type.
+        return self.get_next_frame()  # type: ignore[return-value]  # root cause: SingleKeyAsset.get_raw_image -> Image.Image (Subclasses/SingleKeyAsset.py, MR 5)
     
     def close(self) -> None:
         """Drops the retained frame list (the whole footprint) and leaves the
@@ -4297,7 +4348,7 @@ class LabelManager:
         self._bbox_cache: dict[str, tuple] = {}
         # (epoch, {position -> KeyLabel}): the merged page+action+defaults
         # labels. See get_composed_labels() for the invalidation contract.
-        self._composed_labels_cache: tuple[int, dict[str, "KeyLabel"]] | None = None
+        self._composed_labels_cache: tuple[int, dict[str, "ComposedKeyLabel"]] | None = None
 
         self.init_labels()
         # Rolling-label animation state per position: the current scroll
@@ -4313,10 +4364,8 @@ class LabelManager:
 
     def init_labels(self):
         for position in ["top", "center", "bottom"]:
-            # cascade: see get_composed_label -- KeyLabel.controller_input is
-            # typed "ControllerKey" but serves every input kind.
-            self.page_labels[position] = KeyLabel(self.controller_input)  # type: ignore[arg-type]
-            self.action_labels[position] = KeyLabel(self.controller_input)  # type: ignore[arg-type]
+            self.page_labels[position] = KeyLabel(self.controller_input)
+            self.action_labels[position] = KeyLabel(self.controller_input)
  
     def _bump_label_epoch(self) -> None:
         """Retire the latch-style label memos: move the epoch, then drop
@@ -4444,13 +4493,10 @@ class LabelManager:
             "alignment": self.page_labels[position].alignment is not None,
         }
 
-    def get_composed_label(self, position: str) -> "KeyLabel":
+    def get_composed_label(self, position: str) -> "ComposedKeyLabel":
         use_page_label_properties = self.get_use_page_label_properties(position)
         
-        # cascade: KeyLabel.controller_input is declared "ControllerKey", but a
-        # LabelManager is built for every input kind (dials included) -- MR 5
-        # owns widening it in Subclasses/KeyLabel.py.
-        label = copy(self.action_labels.get(position)) or KeyLabel(self.controller_input)  # type: ignore[arg-type]
+        label = copy(self.action_labels.get(position)) or KeyLabel(self.controller_input)
 
         # Set to page values
         page_label = self.page_labels.get(position)
@@ -4477,7 +4523,7 @@ class LabelManager:
         injected = self.inject_defaults(label)
         return self.fix_invalid(injected)
     
-    def get_composed_labels(self) -> dict[str, "KeyLabel"]:
+    def get_composed_labels(self) -> dict[str, "ComposedKeyLabel"]:
         """The merged page+action+defaults labels for all three positions,
         memoized.
 
@@ -4526,11 +4572,18 @@ class LabelManager:
         return labels
 
     
-    def inject_defaults(self, label: "KeyLabel"):
+    def inject_defaults(self, label: "KeyLabel") -> "ComposedKeyLabel":
+        """Fills every unset field from the app-wide font defaults, in place.
+
+        Returns the SAME object, retyped: after this runs there is no field
+        left for a reader to None-check (see ComposedKeyLabel)."""
         if label.text is None:
             label.text = ""
         if label.color is None:
-            label.color = gl.settings_manager.font_defaults.get("font-color") or (255, 255, 255, 255)
+            # List, not tuple: the field is declared list[int] and the
+            # settings path yields a JSON list, so a tuple fallback made the
+            # attribute's runtime type depend on which branch filled it.
+            label.color = gl.settings_manager.font_defaults.get("font-color") or [255, 255, 255, 255]
         if label.font_name is None:
             label.font_name = gl.settings_manager.font_defaults.get("font-family") or gl.fallback_font
         if label.font_size is None:
@@ -4542,13 +4595,13 @@ class LabelManager:
         if label.outline_width is None:
             label.outline_width = round(gl.settings_manager.font_defaults.get("outline-width") or 2)
         if label.outline_color is None:
-            label.outline_color = gl.settings_manager.font_defaults.get("outline-color") or (0, 0, 0, 255)
+            label.outline_color = gl.settings_manager.font_defaults.get("outline-color") or [0, 0, 0, 255]
         if label.alignment is None:
             label.alignment = gl.settings_manager.font_defaults.get("alignment") or "center"
 
-        return label
+        return cast("ComposedKeyLabel", label)
     
-    def fix_invalid(self, label: "KeyLabel"):
+    def fix_invalid(self, label: "ComposedKeyLabel") -> "ComposedKeyLabel":
         if not isinstance(label.text, str):
             label.text = str(label.text)
 
@@ -4575,7 +4628,7 @@ class LabelManager:
         self._has_visible_labels_cache = (epoch, visible)
         return visible
 
-    def _measure_text(self, position: str, label: "KeyLabel") -> tuple[int, int]:
+    def _measure_text(self, position: str, label: "ComposedKeyLabel") -> tuple[int, int]:
         """(w, h) of the composed label's rendered text block, cached per
         position. Both scroll detection and the render path measure through
         here, so they can never disagree about whether a label overflows."""
@@ -4728,7 +4781,7 @@ class LabelManager:
     _MAX_LABEL_MASK_BYTES = 512 * 1024
     _MAX_LABEL_OPS = 512
 
-    def _label_ops_budget_ok(self, label: "KeyLabel", w: int, h: int) -> bool:
+    def _label_ops_budget_ok(self, label: "ComposedKeyLabel", w: int, h: int) -> bool:
         """Whether recording this label's blits is worth the retention and
         the media-thread stall, decided from measurements the caller already
         has (no rasterization).
@@ -4748,7 +4801,7 @@ class LabelManager:
                            * (int(h) + lines * 2 * stroke))
         return estimated_bytes <= self._MAX_LABEL_MASK_BYTES
 
-    def _composite_scroll_strip(self, image: Image.Image, position: str, label: "KeyLabel",
+    def _composite_scroll_strip(self, image: Image.Image, position: str, label: "ComposedKeyLabel",
                                 w: int, h: int, x_position: float, y_position: float) -> None:
         """Draws a scrolling label by compositing a window of its precomposed
         text strip at this tick's offset. The strip is rasterized once per
@@ -4833,7 +4886,7 @@ class LabelManager:
             image.paste(window, (px + crop_left, py + crop_top), window)
 
     def _draw_static_label(self, image: Image.Image, draw: ImageDraw.ImageDraw,
-                           position: str, label: "KeyLabel", w: int, h: int,
+                           position: str, label: "ComposedKeyLabel", w: int, h: int,
                            x_position: float, y_position: float, anchor: str) -> None:
         """Draws a non-scrolling label by replaying its cached glyph blits.
 
@@ -4923,7 +4976,7 @@ class LabelManager:
         for coord, mask, ink in ops:
             core.draw_bitmap(coord, mask, ink)
 
-    def _record_label_blits(self, image: Image.Image, label: "KeyLabel", font,
+    def _record_label_blits(self, image: Image.Image, label: "ComposedKeyLabel", font,
                             xy: tuple, anchor: str) -> tuple | None:
         """Runs draw.text() against a throwaway target whose draw core only
         RECORDS the mask blits, and returns them (None = not recordable, draw
@@ -5091,7 +5144,7 @@ class LayoutManager:
             "size": self.page_layout.size is not None
         }
     
-    def get_composed_layout(self) -> ImageLayout:
+    def get_composed_layout(self) -> "ComposedImageLayout":
         use_page_layout_properties = self.get_use_page_layout_properties()
         
         layout = copy(self.action_layout) or ImageLayout()
@@ -5109,7 +5162,9 @@ class LayoutManager:
 
         return self.inject_defaults(layout)
     
-    def inject_defaults(self, layout: ImageLayout):
+    def inject_defaults(self, layout: ImageLayout) -> "ComposedImageLayout":
+        """Fills every unset field, in place; returns the same object retyped
+        (see ComposedImageLayout)."""
         if layout.valign is None:
             layout.valign = 0
         if layout.halign is None:
@@ -5122,7 +5177,7 @@ class LayoutManager:
         if layout.size is None:
             layout.size = 1
 
-        return layout
+        return cast("ComposedImageLayout", layout)
     
     def set_page_layout(self, layout: ImageLayout, update: bool = True):
         self.page_layout = layout
@@ -5480,18 +5535,21 @@ class ControllerInputState:
     def set_image(self, image: "InputImage | None", /, update: bool = True) -> None:
         """Attach (or clear, with None) this state's still media.
 
-        The media protocol ActionCore.set_media drives every input state
-        through. ControllerKeyState and ControllerDialState implement it;
-        ControllerTouchScreenState does NOT -- a plugin calling set_media()
-        from a touchscreen action has always failed here, and declaring the
-        protocol on the base only changes which exception says so.
+        The media protocol ActionCore.set_media drives an input state through.
+        ControllerKeyState and ControllerDialState implement it;
+        ControllerTouchScreenState does not -- and nothing reaches this base
+        body today, because ActionCore.set_media early-returns for any
+        identifier outside [Input.Key, Input.Dial] (ActionCore.py:190). The
+        declaration exists so the protocol is checkable at that call site; a
+        future touchscreen media route must override it rather than inherit
+        this.
         """
         raise NotImplementedError
 
     def set_video(self, video: "InputVideo | KeyGIF", /) -> None:
         """Attach this state's animated media. See set_image for who implements
-        it. Both providers are accepted: the .gif route builds a KeyGIF,
-        everything else an InputVideo."""
+        it and why the base body is unreachable. Both providers are accepted:
+        the .gif route builds a KeyGIF, everything else an InputVideo."""
         raise NotImplementedError
 
     def remove_media(self) -> None:
@@ -5499,9 +5557,8 @@ class ControllerInputState:
         if page is None:
             return
 
-        # cascade: Page.set_media_path declares `path: str`, but clearing the
-        # media is exactly a None path -- MR 5/6 owns widening it in Page.py.
-        page.set_media_path(identifier=self.controller_input.identifier, state=self.state, path=None)  # type: ignore[arg-type]
+        # Clearing the media is exactly a None path.
+        page.set_media_path(identifier=self.controller_input.identifier, state=self.state, path=None)  # type: ignore[arg-type]  # root cause: Page.set_media_path(path: str) (PageManagement/Page.py, MR 6)
 
         self.update()
 
@@ -5737,12 +5794,10 @@ class ControllerInput(Generic[StateT]):
 
     def clear(self, update: bool = True):
         active_state = self.get_active_state()
-        # abstract-by-convention: ControllerKeyState and
-        # ControllerTouchScreenState define clear(); ControllerDialState does
-        # NOT, so this raises AttributeError on a dial (pre-existing, only
-        # reachable from the plugin-facing API -- reported to #224, not fixed
-        # in a type-only change).
-        active_state.clear()  # type: ignore[attr-defined]
+        # Abstract-by-convention: ControllerKeyState and ControllerTouchScreenState
+        # define clear(); a dial therefore raises AttributeError here. Pre-existing,
+        # reported on #224, not fixed in a type-only change.
+        active_state.clear()  # type: ignore[attr-defined]  # root cause: ControllerDialState has no clear() (DeckController.py, unfixed -- #224)
         if update:
             self.update()
 
@@ -6774,10 +6829,8 @@ class ControllerDial(ControllerInput["ControllerDialState"]):
 
             ## Load labels
             for label in state_dict.get("labels", []):
-                # cascade: KeyLabel.controller_input is declared "ControllerKey"
-                # but dials carry labels too -- MR 5 owns Subclasses/KeyLabel.py.
                 key_label = KeyLabel(
-                    controller_input=self,  # type: ignore[arg-type]
+                    controller_input=self,
                     text=state_dict["labels"][label].get("text"),
                     font_size=state_dict["labels"][label].get("font-size"),
                     font_name=state_dict["labels"][label].get("font-family"),
