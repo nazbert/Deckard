@@ -7,6 +7,31 @@ bundle as a release asset.
 
 ## [Unreleased]
 
+### Fixed
+
+- Remote decks no longer misreport touch capability; touchscreen strip frames
+  are no longer rendered and encoded for decks that cannot display them.
+- Window grabbing survives an unset `XDG_CURRENT_DESKTOP` on X11 — previously
+  a startup crash left it silently disabled for the whole session.
+- Importing a StreamDeck-UI profile now rejects hotkeys carrying delay tokens
+  with a clear message instead of silently dropping the whole hotkey.
+- Outdated-action rows in the sidebar render again instead of failing on
+  construction.
+- Unplugging a deck mid-render no longer crashes the media tick on image-size
+  lookups, and media loads skip cleanly when a deck closes during page load.
+- Store items with missing or corrupt manifests are dropped with a log line
+  instead of crashing catalog preparation workers, and downloads without a
+  resolvable ref fail up front instead of staging junk.
+- Notifications, plugin installs and DBus page/state changes degrade
+  gracefully during startup and teardown instead of raising inside idle
+  callbacks.
+
+### Changed
+
+- The entire tree now type-checks clean under mypy and the CI type-check lane
+  is a blocking gate; roughly fifty latent defects surfaced by the typing work
+  were fixed along the way.
+
 ## [0.2.0] - 2026-08-09
 
 ### Fixed
@@ -17,35 +42,35 @@ bundle as a release asset.
   lifetime of the process.
 
 ### Changed
-- test: deflake fair_lock and native_tile_cache — measure the right intervals, settle the right threads (#186, #202) (!110)
-- fix(action-core): gate the default on_update's compat on_ready on on_ready_finished (#179) (!109)
-- fix(persistence): quarantine corrupt plugin JSON + bound .corrupt retention at every quarantine site (#152) (!108)
-- refactor(asset-manager): one chooser base pair; flow boxes built on the main thread (#136) (!107)
-- fix: backend bug batch — screensaver loop default, store ref fail-hard, redaction idempotence (#204 #200 #162) (!106)
-- docs: retire the false self-heal claim; stamp the landed disposition on the presenter plan (#88, #89) (!105)
-- feat(hooks): SC_NO_ERROR_HOOKS kill-switch + per-site rate limiting (#92, #91) (!104)
-- fix: UI/asset bug batch — permission window arity, label font_name, URL-import sentinel, CSS alpha scale, GNOME ext uuid (#190 #208 #191 #203 #185) (!103)
-- refactor(settings): debounce the font-row page-reload storms (#78) (!102)
-- perf(store): defer read-clock index writes behind a debounced flush (#180) (!101)
-- perf(labels): static-label raster cache — record/replay the draw.text mask blits (#207, #188) (!100)
-- perf(gif): cap the KeyGIF working set — opaque GIFs via the mp4 tile registry, budgeted alpha path (#201, #199) (!99)
-- fix(media): GIF transparency + per-frame timing outside KeyGIF (!93)
-- fix: upstream-derived small fixes — store tag refs, corrupt-asset gate, Gio data-path open (!92)
-- feat(lockscreen): systemd-logind fallback lock detector (Niri/Sway/river) (!91)
-- perf: key/touchscreen mirror PIL→pixbuf off the GTK loop; batch set_main_error (!90)
-- fix(app): skip destroying a never-realized main window at quit (GTK unrealized-dispose abort) (!89)
-- fix: subprocess hygiene — list-argv backend launch, de-forked run_command, Gio URL opening (!87)
-- perf(store): shared requests.Session with 429 retry/backoff + unified download helper (!83)
-- fix(app): route SIGTERM/SIGHUP through on_quit so logout TERM terminates plugin backends (!82)
-- refactor: concurrency-idiom cleanups -- sync StoreBackend, join waits, timer-wheel stragglers (!80)
-- fix(store): transactional installs -- stage, validate, swap, delete old last (!76)
-- perf: frame-identity native tile cache for background video (!72)
-- perf: fair FIFO transport lock; retire 20Hz write cap defaults (!71)
-- fix(ui): page change refreshes the sidebar again (!70)
-- fix(logging): scrub faulthandler.log in place to keep live fds valid (!69)
-- fix(ui): bind deck-stack child to its controller by identity, not serial name (!68)
-- fix(app): never rebuild MainWindow on remote activation (!67)
-- fix(boot): claim the single-instance lock atomically before touching decks (!66)
+- test: deflake fair_lock and native_tile_cache — measure the right intervals, settle the right threads
+- fix(action-core): gate the default on_update's compat on_ready on on_ready_finished
+- fix(persistence): quarantine corrupt plugin JSON + bound .corrupt retention at every quarantine site
+- refactor(asset-manager): one chooser base pair; flow boxes built on the main thread
+- fix: backend bug batch — screensaver loop default, store ref fail-hard, redaction idempotence
+- docs: retire the false self-heal claim; stamp the landed disposition on the presenter plan
+- feat(hooks): SC_NO_ERROR_HOOKS kill-switch + per-site rate limiting
+- fix: UI/asset bug batch — permission window arity, label font_name, URL-import sentinel, CSS alpha scale, GNOME ext uuid
+- refactor(settings): debounce the font-row page-reload storms
+- perf(store): defer read-clock index writes behind a debounced flush
+- perf(labels): static-label raster cache — record/replay the draw.text mask blits
+- perf(gif): cap the KeyGIF working set — opaque GIFs via the mp4 tile registry, budgeted alpha path
+- fix(media): GIF transparency + per-frame timing outside KeyGIF
+- fix: upstream-derived small fixes — store tag refs, corrupt-asset gate, Gio data-path open
+- feat(lockscreen): systemd-logind fallback lock detector (Niri/Sway/river)
+- perf: key/touchscreen mirror PIL→pixbuf off the GTK loop; batch set_main_error
+- fix(app): skip destroying a never-realized main window at quit (GTK unrealized-dispose abort)
+- fix: subprocess hygiene — list-argv backend launch, de-forked run_command, Gio URL opening
+- perf(store): shared requests.Session with 429 retry/backoff + unified download helper
+- fix(app): route SIGTERM/SIGHUP through on_quit so logout TERM terminates plugin backends
+- refactor: concurrency-idiom cleanups -- sync StoreBackend, join waits, timer-wheel stragglers
+- fix(store): transactional installs -- stage, validate, swap, delete old last
+- perf: frame-identity native tile cache for background video
+- perf: fair FIFO transport lock; retire 20Hz write cap defaults
+- fix(ui): page change refreshes the sidebar again
+- fix(logging): scrub faulthandler.log in place to keep live fds valid
+- fix(ui): bind deck-stack child to its controller by identity, not serial name
+- fix(app): never rebuild MainWindow on remote activation
+- fix(boot): claim the single-instance lock atomically before touching decks
 
 ## [0.1.0] - 2026-07-14
 
