@@ -25,6 +25,32 @@ The CSV lands at `<DataPath>/logs/mem_telemetry.csv` (query `DataPath`
 over the DBus API, or check `~/.var/app/io.github.nazbert.Deckard/data`
 for a source run without `--data`).
 
+## Diagnostic env vars
+
+All are read once at startup, so they are set on the launch, never mid-run.
+
+| var | effect |
+|---|---|
+| `SC_MEM_TELEMETRY=1` | write `<DataPath>/logs/mem_telemetry.csv` -- everything above depends on it |
+| `SC_MALLOC_TRIM=0` | turn OFF the default-on idle `malloc_trim` (with `SC_MEM_TELEMETRY` unset too, the sampler thread never starts) |
+| `DECKARD_IMAGE_CACHE_MB=<n>` | image-cache ceiling (#142); `0` disables global eviction |
+| `DECKARD_MEDIA_PROFILE=1` | media-loop fps/stage accounting |
+| `SC_STRONG_CALLBACKS=1` | store event callbacks strong instead of weak -- for bisecting a dropped-observer regression against `src/Signals/weak_callbacks.py` |
+| `SC_NO_ERROR_HOOKS=1` | **turn the issue-#80 exception hooks off** (`sys`/`threading`/`unraisable` hooks, the asyncio handler and the `logs/faulthandler.log` redirection), restoring pre-#80 behavior for an A/B of a suspected hook-induced anomaly. Strictly `1`; anything else leaves them installed. A flagged run says so in `logs.log` at startup. Log redaction is NOT disabled by it. |
+
+### Reading a soak log with the rate limiter in it
+
+Uncaught exceptions are rate-limited **per failing site** (issue #91): one
+record per (exception type, `file:line`) per 5 s, and everything else that
+site produced is reported as a count -- `N further failures at <site> since
+the last record` -- riding on its next record, on its eviction from the
+guard's state, or at process exit. So a repeating failure across an overnight
+soak appears as a handful of records carrying large counts, **not** one
+traceback per occurrence: read the counts, not the number of tracebacks. Grep
+`Uncaught exception` to catch both shapes at once. The window is
+`log_hooks.RATE_LIMIT_WINDOW_S` (a module constant, deliberately not an env
+var -- it is a design bound, not a knob).
+
 ## Automated driving: `soak_driver.py`
 
 Cycles every connected controller through its configured pages over the

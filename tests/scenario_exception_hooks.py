@@ -31,7 +31,10 @@ why run_all.py's per-scenario interpreter matters):
      is evicted is reported rather than discarded, and the TERMINAL shape of
      sys.excepthook bypasses suppression while its callback shape does not;
  10. atexit flush (issue #91) -- a storm that stops still reports its last
-     window's count, in a child process that exits after storming.
+     window's count, in a child process that exits after storming;
+ 11. lock re-entrancy (issue #91) -- a raising __del__ collected INSIDE the
+     guarded region re-enters the guard on the same thread and must not
+     deadlock, which is the only thing pinning the RLock.
 
 Out of harness scope (manual QA): the real PyGObject-callback -> excepthook
 path under a live GTK loop, and the config_logger()/main() ordering.
@@ -491,6 +494,50 @@ def main() -> None:
         f"the trailing count must be flushed at exit, got: {at_exit.stderr[-400:]!r}"
     )
     assert "process exiting" in at_exit.stderr
+
+    # 11. the guard's lock must be RE-ENTRANT. GC can fire on an allocation
+    # inside the guarded region, and a raising __del__ collected there
+    # re-enters _log_exc on the SAME thread -- with a plain Lock that is a
+    # self-deadlock inside the crash handler, and no other leg notices (a
+    # Lock swap passes the entire rest of the suite). Driven on a worker with
+    # a bounded join, so a regression fails loudly instead of hanging.
+    #
+    # Two assertions, because the acquire timeout that keeps a wedged guard
+    # from hanging a hook ALSO softens a Lock swap from a deadlock into a
+    # 0.5s stall: the wait pins "no deadlock", and the state check pins that
+    # the re-entrant call actually did its work under the lock rather than
+    # bailing out on the timeout.
+    records.clear()
+    log_hooks._rate_state.clear()
+
+    class BoomOnDelReentrant:
+        def __del__(self):
+            raise RuntimeError("boom-reentrant-del")
+
+    reentered = threading.Event()
+
+    def hold_and_collect() -> None:
+        with log_hooks._rate_lock:
+            obj = BoomOnDelReentrant()
+            del obj  # refcount hits zero HERE, inside the guarded region
+            gc.collect()
+        reentered.set()
+
+    worker = threading.Thread(target=hold_and_collect, name="reentrancy", daemon=True)
+    worker.start()
+    assert reentered.wait(10.0), (
+        "a re-entrant hook deadlocked on the rate-limit lock: it must stay an "
+        "RLock -- a raising __del__ collected inside the guarded region "
+        "re-enters _log_exc on the same thread"
+    )
+    assert "boom-reentrant-del" in joined(), (
+        "the re-entrant unraisable must still be logged, not just survive"
+    )
+    assert [k for k in log_hooks._rate_state if k[0] == "RuntimeError"], (
+        "the re-entrant call must have completed its work under the lock: an "
+        "empty guard state means it bailed on the acquire timeout, i.e. the "
+        "lock is no longer re-entrant"
+    )
 
     print("PASS: scenario_exception_hooks")
 

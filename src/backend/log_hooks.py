@@ -134,6 +134,14 @@ _RATE_LIMIT_MAX_KEYS = 256
 # -- a plain Lock would self-deadlock inside the crash handler. The lock is
 # never held across the loguru call.
 _rate_lock = threading.RLock()
+# Every acquire in the hook path is bounded. The critical section is a few
+# microseconds, so this can only expire when something is genuinely wedged --
+# and then the answer is to log the occurrence unthrottled, never to park a
+# failing thread on a lock inside its own crash handler. Found by the
+# Lock-swap mutation of the re-entrancy scenario: with an unbounded acquire,
+# one deadlocked holder silently hung every later hook, including the one
+# reporting the deadlock.
+_RATE_LOCK_TIMEOUT_S = 0.5
 # site key -> [window start, suppressed, last hit]. The window start is
 # refreshed only when a record is ALLOWED; the last hit on every occurrence.
 # Eviction needs the second one -- see _prune_locked.
@@ -258,13 +266,17 @@ def _rate_limit_bypass(key: tuple) -> int:
     The terminal path's entry point: that record is the last one this site
     will ever get, so anything its window swallowed has to ride along on it
     instead of waiting for a next record that is not coming."""
-    with _rate_lock:
+    if not _rate_lock.acquire(timeout=_RATE_LOCK_TIMEOUT_S):
+        return 0
+    try:
         entry = _rate_state.get(key)
         if entry is None:
             return 0
         pending, entry[1] = entry[1], 0
         entry[2] = time.monotonic()
         return pending
+    finally:
+        _rate_lock.release()
 
 
 def _rate_limit(key: tuple) -> tuple[bool, int]:
@@ -274,7 +286,13 @@ def _rate_limit(key: tuple) -> tuple[bool, int]:
     never delay the record that says the failure exists; only what follows."""
     now = time.monotonic()
     dropped: list[tuple[tuple, int]] = []
-    with _rate_lock:
+    if not _rate_lock.acquire(timeout=_RATE_LOCK_TIMEOUT_S):
+        # Never wait unboundedly inside a crash handler. If the guard's state
+        # is wedged, the right answer is to log this occurrence, not to park
+        # the failing thread on a lock: throttling is an optimization, and a
+        # hook that can hang is worse than a log that repeats itself.
+        return False, 0
+    try:
         entry = _rate_state.get(key)
         if entry is not None and now - entry[0] < RATE_LIMIT_WINDOW_S:
             entry[1] += 1
@@ -286,6 +304,8 @@ def _rate_limit(key: tuple) -> tuple[bool, int]:
             _rate_state[key] = [now, 0, now]
             if len(_rate_state) > _RATE_LIMIT_MAX_KEYS:
                 dropped = _prune_locked(now)
+    finally:
+        _rate_lock.release()
     # Outside the lock: reporting is I/O, and a sink must never be able to
     # stall every other thread's hook.
     for dropped_key, count in dropped:
