@@ -71,7 +71,7 @@ class IconPackChooserStack(Gtk.Stack):
             for icon in icons:
                 if icon.path == path:
                     self.icon_chooser.load_for_pack(pack)
-                    self.icon_chooser.select_icon(path=path)
+                    self.icon_chooser.select_asset(path=path)
                     self.set_visible_child(self.icon_chooser)
                     self.asset_manager.asset_chooser.set_visible_child_name("icon-packs")
                     self.asset_manager.back_button.set_visible(True)

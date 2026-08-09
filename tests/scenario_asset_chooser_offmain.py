@@ -413,6 +413,151 @@ def check_tripwire_self_test() -> int:
 
 
 # --------------------------------------------------------------------- #
+# 3. Real-widget check: the actual window, when a display is available
+# --------------------------------------------------------------------- #
+
+def check_real_window() -> int:
+    """Builds the REAL AssetManager -- real Gtk stacks, real *FlowBoxes, real
+    Previews -- and asserts every one of the six choosers constructed its flow
+    box on the main thread and attached it. The stubbed check above proves the
+    marshal is wired; this proves the marshalled construction actually works
+    against live GTK (the widget tree the field check would exercise by hand).
+
+    SKIPs without a display, like a headless CI box."""
+    import importlib
+    import os
+
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw, Gtk
+
+    if not Gtk.init_check():
+        print("SKIP(real-window): no display; the stubbed checks above still ran")
+        return 0
+    Adw.init()
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    image = os.path.join(repo_root, "Assets", "Onboarding", "icon.png")
+
+    class FakeAsset:
+        def __init__(self, name):
+            self.path = image
+            self.name = name
+
+        def get_attribution(self): return {}
+
+    class RealFakePack:
+        name = "fake-pack"
+
+        def __init__(self):
+            self._assets = [FakeAsset(f"asset-{i}") for i in range(3)]
+
+        def get_thumbnail_path(self): return image
+        def get_pack_attribution(self): return {}
+        def get_icons(self): return list(self._assets)
+        def get_wallpapers(self): return list(self._assets)
+
+    class RealFakeManager:
+        def __init__(self):
+            self._packs = {f"pack-{i}": RealFakePack() for i in range(2)}
+
+        def get_icon_packs(self): return dict(self._packs)
+        def get_wallpaper_packs(self): return dict(self._packs)
+
+    class EmptyBackend:
+        def get_all(self): return []
+        def has_by_internal_path(self, path): return True
+        def remove_asset_by_id(self, asset_id): pass
+        def add_custom_media_set_by_ui(self, *a, **k): pass
+
+    gl.icon_pack_manager = RealFakeManager()
+    gl.wallpaper_pack_manager = RealFakeManager()
+    gl.sd_plus_bar_wallpaper_pack_manager = RealFakeManager()
+    gl.asset_manager_backend = EmptyBackend()
+    gl.lm = types.SimpleNamespace(get=lambda key, *a, **k: key)
+    gl.app = None
+    if getattr(gl, "settings_manager", None) is None:
+        from src.backend.SettingsManager import SettingsManager
+        gl.settings_manager = SettingsManager()
+
+    recorder = Recorder()
+    undo: list = []
+    for _, module_path, class_name, _ in CASES:
+        cls = getattr(importlib.import_module(module_path), class_name)
+        for attr in WIDGET_CLASS_ATTRS:
+            real = cls.__dict__.get(attr)
+            if real is None or "FLOW_BOX" not in attr:
+                continue
+
+            # A real flow box that also records its construction thread.
+            class Recording(real):
+                def __init__(self, *a, **k):
+                    recorder.note()
+                    super().__init__(*a, **k)
+
+            undo.append((cls, attr, real))
+            setattr(cls, attr, Recording)
+
+    from src.windows.AssetManager.AssetManager import AssetManager
+
+    try:
+        window = AssetManager(main_window=Gtk.Window())
+        chooser = window.asset_chooser
+        pages = [
+            chooser.icon_pack_chooser.pack_chooser,
+            chooser.icon_pack_chooser.icon_chooser,
+            chooser.wallpaper_pack_chooser.pack_chooser,
+            chooser.wallpaper_pack_chooser.wallpaper_chooser,
+            chooser.sd_plus_bar_wallpaper_pack_chooser.pack_chooser,
+            chooser.sd_plus_bar_wallpaper_pack_chooser.wallpaper_chooser,
+        ]
+        pump_until(lambda: all(getattr(p, "build_finished", False) for p in pages),
+                   20, "the six real chooser builds never finished")
+    finally:
+        for cls, attr, real in undo:
+            setattr(cls, attr, real)
+
+    if len(recorder.threads) != len(pages):
+        print(f"FAIL(real-window): {len(recorder.threads)} flow boxes built, "
+              f"expected {len(pages)}")
+        return 1
+    if recorder.off_main():
+        print(f"FAIL(real-window): {len(recorder.off_main())} real flow boxes "
+              f"were constructed off the main thread")
+        return 1
+
+    for page in pages:
+        flow = getattr(page, "pack_flow", None) or getattr(page, "asset_flow", None)
+        if flow is None or flow.get_parent() is None:
+            print(f"FAIL(real-window): {type(page).__name__} never attached its "
+                  f"flow box to the page")
+            return 1
+
+    # Drill into a pack the way clicking one does, then let the recycler bind:
+    # a rendered child must be visible and carry the pack's asset.
+    leaf_pages = [p for p in pages if getattr(p, "asset_flow", None) is not None]
+    pack = RealFakePack()
+    for page in leaf_pages:
+        page.load_for_pack(pack)
+    pump_until(
+        lambda: all(p.asset_flow.flow_box.get_child_at_index(0).get_visible()
+                    for p in leaf_pages),
+        10, "the recycler never rendered the pack's assets")
+
+    for page in leaf_pages:
+        child = page.asset_flow.flow_box.get_child_at_index(0)
+        if page.get_child_asset(child) is None:
+            print(f"FAIL(real-window): {type(page).__name__} rendered a child "
+                  f"with no asset bound")
+            return 1
+
+    print(f"PASS: the real AssetManager builds all {len(pages)} chooser flow "
+          f"boxes on the main thread and renders a pack's assets")
+    return 0
+
+
+# --------------------------------------------------------------------- #
 # Cases
 # --------------------------------------------------------------------- #
 
@@ -450,6 +595,8 @@ def main() -> int:
     for label, module_path, class_name, minimum in CASES:
         rc |= check_runtime(label, module_path, class_name, minimum)
         rc |= check_static(label, module_path, class_name)
+    # Last: it installs a real window and real gl.* collaborators.
+    rc |= check_real_window()
 
     if rc == 0:
         print("ALL PASS: scenario_asset_chooser_offmain")
