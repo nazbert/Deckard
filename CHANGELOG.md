@@ -7,6 +7,8 @@ bundle as a release asset.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-09
+
 ### Fixed
 
 - Remote decks no longer misreport touch capability; touchscreen strip frames
