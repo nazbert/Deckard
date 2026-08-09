@@ -20,6 +20,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
 # Import own modules
+from GtkHelper.GtkHelper import run_on_main
 from src.windows.AssetManager.ChooserPage import ChooserPage
 from src.windows.AssetManager.WallpaperPacks.Wallpapers.WallpaperFlowBox import WallpaperFlowBox
 from src.windows.AssetManager.WallpaperPacks.Wallpapers.WallpaperPreview import WallpaperPreview
@@ -42,13 +43,27 @@ class WallpaperChooserPage(ChooserPage):
 
         self.selected_wallpaper: str = None
 
+        # Only bound once _build_ui has run on the main loop, so everything
+        # that touches it must tolerate None (see load_for_pack).
+        self.wallpaper_flow: WallpaperFlowBox = None
+        self._pending_pack: "WallpaperPack" = None
+
         # self.build()
         threading.Thread(target=self.build).start()
 
     @log.catch
     def build(self):
         self.set_loading(True)
-        
+
+        # The flow box constructs a page's worth of WallpaperPreviews in its
+        # constructor -- GTK widgets, so the whole construction runs on the
+        # main loop. Building it on this worker thread was the off-main GTK
+        # construction crash class (#136, same class as #10).
+        run_on_main(self._build_ui)
+
+        self.set_loading(False)
+
+    def _build_ui(self) -> None:
         self.type_box.set_visible(False)
 
         self.wallpaper_flow = WallpaperFlowBox(WallpaperPreview, self)
@@ -63,9 +78,18 @@ class WallpaperChooserPage(ChooserPage):
         # Connect flow box select signal
         self.wallpaper_flow.flow_box.connect("child-activated", self.on_child_activated)
 
-        self.set_loading(False)
+        # A pack requested while the construction was still queued (the
+        # window is up before this callback runs) renders now.
+        if self._pending_pack is not None:
+            pack, self._pending_pack = self._pending_pack, None
+            self.load_for_pack(pack)
 
     def load_for_pack(self, pack: "WallpaperPack"):
+        if self.wallpaper_flow is None:
+            # Build still queued on the main loop -- remember the request
+            # instead of dropping it (or raising AttributeError).
+            self._pending_pack = pack
+            return
         self.wallpaper_flow.set_item_list(pack.get_wallpapers())
         self.wallpaper_flow.show_range(0, 50)
 
@@ -113,4 +137,8 @@ class WallpaperChooserPage(ChooserPage):
         return 0
     
     def on_search_changed(self, entry):
+        if self.wallpaper_flow is None:
+            # Nothing rendered yet (build still queued on the main loop);
+            # the first render already reads the current search text.
+            return
         self.wallpaper_flow.show_range(0, 50)

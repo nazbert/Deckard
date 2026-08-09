@@ -24,6 +24,7 @@ from gi.repository import Gtk
 from loguru import logger as log
 
 # Import own modules
+from GtkHelper.GtkHelper import run_on_main
 from src.windows.AssetManager.ChooserPage import ChooserPage
 from src.windows.AssetManager.SDPlusBarWallpaperPacks.FlowBox import SDPlusBarWallpaperPackFlowBox
 from src.windows.AssetManager.SDPlusBarWallpaperPacks.Preview import SDPlusBarWallpaperPackPreview
@@ -46,6 +47,17 @@ class SDPlusBarWallpaperPackChooser(ChooserPage):
         
     @log.catch
     def build(self):
+        # Pack discovery hits the disk -- that stays on this worker thread.
+        # Every widget below is built and appended on the main loop: building
+        # the flow box and a SDPlusBarWallpaperPackPreview per pack HERE was
+        # the off-main GTK construction crash class (#136, same class as #10).
+        packs = list(gl.sd_plus_bar_wallpaper_pack_manager.get_wallpaper_packs().values())
+
+        run_on_main(self._build_ui, packs)
+
+        self.set_loading(False)
+
+    def _build_ui(self, packs: list) -> None:
         self.type_box.set_visible(False)
 
         self.wallpaper_pack_chooser = SDPlusBarWallpaperPackFlowBox(self, orientation=Gtk.Orientation.HORIZONTAL, hexpand=True)
@@ -53,14 +65,8 @@ class SDPlusBarWallpaperPackChooser(ChooserPage):
 
         self.wallpaper_pack_chooser.flow_box.connect("child-activated", self.on_child_activated)
 
-        self.load()
-
-        self.set_loading(False)
-
-    def load(self):
         flow_box = self.wallpaper_pack_chooser.flow_box
-
-        for name, pack in gl.sd_plus_bar_wallpaper_pack_manager.get_wallpaper_packs().items():
+        for pack in packs:
             preview = SDPlusBarWallpaperPackPreview(self, pack)
             flow_box.append(preview)
 

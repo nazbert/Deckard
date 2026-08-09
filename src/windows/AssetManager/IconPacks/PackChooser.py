@@ -24,6 +24,7 @@ from gi.repository import Gtk
 # Import python modules
 
 # Import own modules
+from GtkHelper.GtkHelper import run_on_main
 from src.windows.AssetManager.ChooserPage import ChooserPage
 from src.windows.AssetManager.IconPacks.FlowBox import IconPackFlowBox
 from src.windows.AssetManager.IconPacks.Preview import IconPackPreview
@@ -53,6 +54,21 @@ class IconPackChooser(ChooserPage):
     @log.catch
     def build(self):
         self.build_finished = False
+
+        # Pack discovery hits the disk -- that stays on this worker thread.
+        # Every widget below is built and appended on the main loop: building
+        # the flow box and a IconPackPreview per pack HERE was the off-main
+        # GTK construction crash class (#136, same class as #10).
+        packs = list(gl.icon_pack_manager.get_icon_packs().values())
+
+        run_on_main(self._build_ui, packs)
+
+        self.set_loading(False)
+
+        self.build_finished = True
+        self.stack.on_load_finished()
+
+    def _build_ui(self, packs: list) -> None:
         self.type_box.set_visible(False)
 
         self.icon_pack_chooser = IconPackFlowBox(self, orientation=Gtk.Orientation.HORIZONTAL, hexpand=True)
@@ -60,17 +76,8 @@ class IconPackChooser(ChooserPage):
 
         self.icon_pack_chooser.flow_box.connect("child-activated", self.on_child_activated)
 
-        self.load()
-
-        self.set_loading(False)
-
-        self.build_finished = True
-        self.stack.on_load_finished()
-
-    def load(self):
         flow_box = self.icon_pack_chooser.flow_box
-
-        for name, pack in gl.icon_pack_manager.get_icon_packs().items():
+        for pack in packs:
             preview = IconPackPreview(self, pack)
             flow_box.append(preview)
 

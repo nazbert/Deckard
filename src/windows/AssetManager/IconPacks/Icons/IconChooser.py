@@ -18,9 +18,9 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import GLib
 
 # Import own modules
+from GtkHelper.GtkHelper import run_on_main
 from src.windows.AssetManager.ChooserPage import ChooserPage
 from src.windows.AssetManager.IconPacks.Icons.IconFlowBox import WallpaperFlowBox
 from src.windows.AssetManager.IconPacks.Icons.IconPreview import IconPreview
@@ -45,6 +45,11 @@ class IconChooserPage(ChooserPage):
 
         self.selected_icon: str = None
 
+        # Only bound once _build_ui has run on the main loop, so everything
+        # that touches it must tolerate None (see load_for_pack).
+        self.icon_flow: WallpaperFlowBox = None
+        self._pending_pack: "IconPack" = None
+
         self.build_finished = False
         threading.Thread(target=self.build).start()
 
@@ -52,7 +57,19 @@ class IconChooserPage(ChooserPage):
     def build(self):
         self.build_finished = False
         self.set_loading(True)
-        
+
+        # The flow box constructs a page's worth of IconPreviews in its
+        # constructor -- GTK widgets, so the whole construction runs on the
+        # main loop. Building it on this worker thread was the off-main GTK
+        # construction crash class (#136, same class as #10).
+        run_on_main(self._build_ui)
+
+        self.set_loading(False)
+
+        self.build_finished = True
+        self.stack.on_load_finished()
+
+    def _build_ui(self) -> None:
         self.type_box.set_visible(False)
 
         self.icon_flow = WallpaperFlowBox(IconPreview, self)
@@ -60,19 +77,25 @@ class IconChooserPage(ChooserPage):
         self.icon_flow.set_filter_func(self.filter_func)
         self.icon_flow.set_sort_func(self.sort_func)
         # Remove default scrolled window
-        GLib.idle_add(self.main_box.remove, self.scrolled_window)
+        self.main_box.remove(self.scrolled_window)
         # Add dynamic flow box
-        GLib.idle_add(self.main_box.append, self.icon_flow)
+        self.main_box.append(self.icon_flow)
 
         # Connect flow box select signal
         self.icon_flow.flow_box.connect("child-activated", self.on_child_activated)
 
-        self.set_loading(False)
-        
-        self.build_finished = True
-        self.stack.on_load_finished()
+        # A pack requested while the construction was still queued (the
+        # window is up before this callback runs) renders now.
+        if self._pending_pack is not None:
+            pack, self._pending_pack = self._pending_pack, None
+            self.load_for_pack(pack)
 
     def load_for_pack(self, pack: "IconPack"):
+        if self.icon_flow is None:
+            # Build still queued on the main loop -- remember the request
+            # instead of dropping it (or raising AttributeError).
+            self._pending_pack = pack
+            return
         self.icon_flow.set_item_list(pack.get_icons())
         self.icon_flow.show_range(0, 50)
 
@@ -120,4 +143,8 @@ class IconChooserPage(ChooserPage):
         return 0
     
     def on_search_changed(self, entry):
+        if self.icon_flow is None:
+            # Nothing rendered yet (build still queued on the main loop);
+            # the first render already reads the current search text.
+            return
         self.icon_flow.show_range(0, 50)
