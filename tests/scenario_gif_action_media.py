@@ -19,7 +19,13 @@ scenario pins the set_media parity fix:
       without raising -- KeyGIF decodes eagerly (PIL raises on bad media)
       where InputVideo's detached cv2 builder fails soft, and set_media
       never raised into plugin code for bad media before the KeyGIF route
-      existed.
+      existed;
+  (d) the same corrupt GIF as PAGE media (ControllerKey.load_from_input_dict)
+      also fails soft (issue #199): that route never got (c)'s try/except, so
+      the raise escaped mid-load and took the rest of the key's state load
+      with it -- layout, page background color and the final set_state()
+      repaint all skipped. Pins the fallback video AND that the load ran to
+      completion past the media block.
 
 Drives the REAL DeckController/Page/ActionCore machinery with a LatchAction
 injected via the stub plugin_manager (fixtures helpers), against a GIF
@@ -74,6 +80,29 @@ def seed_gif_action_page(page_name: str, key_ident: str, dial_ident: str) -> str
         json.dump({
             "keys": {key_ident: action_state},
             "dials": {dial_ident: json.loads(json.dumps(action_state))},
+        }, f)
+    return path
+
+
+PAGE_MEDIA_BG_COLOR = [10, 200, 30, 255]  # applied AFTER the media block in the loader
+
+
+def seed_gif_page_media_page(page_name: str, key_ident: str, media_path: str) -> str:
+    """A page whose key carries `media_path` as plain PAGE media (no actions)
+    plus a state background color -- the color is set after the media block
+    in ControllerKey.load_from_input_dict, so it only lands if the media
+    branch returned instead of raising."""
+    pages_dir = os.path.join(gl.DATA_PATH, "pages")
+    os.makedirs(pages_dir, exist_ok=True)
+    path = os.path.join(pages_dir, f"{page_name}.json")
+    with open(path, "w") as f:
+        json.dump({
+            "keys": {key_ident: {"states": {"0": {
+                "media": {"path": media_path, "loop": True, "fps": 30},
+                "background": {"color": list(PAGE_MEDIA_BG_COLOR)},
+            }}}},
+            "dials": {},
+            "touchscreens": {},
         }, f)
     return path
 
@@ -176,6 +205,34 @@ def main() -> None:
         assert type(fallback_video).__name__ == "InputVideo", (
             f"a corrupt plugin-set GIF must fall back to InputVideo "
             f"(fail-soft), got {type(fallback_video).__name__}"
+        )
+
+        # (d) the same corrupt GIF as PAGE media: loading the page must not
+        # leave the key half-loaded. Before the #199 fix KeyGIF's raise
+        # escaped load_from_input_dict's media branch, so the state's page
+        # layout, its background color and the closing set_state() repaint
+        # were all skipped (the exception died in the load pool's future).
+        page_media_page = gl.page_manager.get_page(
+            seed_gif_page_media_page("GifPageMediaCorrupt", key.identifier.json_identifier, corrupt_path),
+            controller,
+        )
+        controller.load_page(page_media_page, allow_reload=True)
+        # The load runs on the controller's input pool; the page color is set
+        # at the END of the state load (after the media block), so waiting on
+        # it IS the "the load ran to completion" seam.
+        assert wait_until(
+            lambda: key.get_active_state().background_manager.page_color == PAGE_MEDIA_BG_COLOR,
+            timeout=5,
+        ), (
+            f"the state load must run PAST the media block -- expected page color "
+            f"{PAGE_MEDIA_BG_COLOR}, got "
+            f"{key.get_active_state().background_manager.page_color!r} (the loader "
+            f"raised out of the media branch, issue #199)"
+        )
+        page_media_video = key.get_active_state().key_video
+        assert type(page_media_video).__name__ == "InputVideo", (
+            f"a corrupt page-media GIF must fall back to InputVideo (fail-soft), "
+            f"got {type(page_media_video).__name__}"
         )
 
         print("PASS: scenario_gif_action_media")

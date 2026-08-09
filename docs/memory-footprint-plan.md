@@ -58,7 +58,7 @@ The app's memory story has three distinct problems, and they need three differen
 | Structure | Behavior | Scale |
 |---|---|---|
 | `VideoFrameCache.cache` (`key_video_cache.py:35`) | one raw PIL RGB per frame, no eviction, eager full decode at page load; **opt-out dead** (`:60` overwrites the setting) | 14MB (72px/30s) → 155MB (120px/2min) per key video |
-| `KeyGIF.frames` (`DeckController.py:1861-1873`) | all frames, **source resolution**, RGBA | 41–200MB per GIF key |
+| `KeyGIF` frames (post-fix, #201) | a GIF that renders no transparency plays off the shared mp4 tile cache -- written from PIL-composited frames, never demuxed by FFmpeg -- at O(1) frame (`video_readers` census); one that does keeps an RGBA frame list, fitted to 2× tile (P2.3) and capped per GIF by `DECKARD_GIF_KEY_BUDGET_MB` (default 32, over-budget streams into a bounded alpha-dropped cache variant). With `performance.cache-videos` off there is no cache to route to, so every GIF keeps its frame list | ≤32MB per alpha GIF key; ~0 for the rest *(was 41–200MB per GIF key, all frames at source resolution)* |
 | `InputImage.image` (`KeyImage.py:36-49`) | source-res RGBA retained per key/state forever | tens of MB for photos |
 | `BackgroundImage.image` (`DeckController.py:1701-1716`) | source-res retained for page lifetime | 33MB for 4K |
 | `EncodedImageCache` (`encoded_image_cache.py`) | correct 32MB LRU per deck; **thrashes at 0% hit** on high-entropy bg video | ≤32MB × decks |

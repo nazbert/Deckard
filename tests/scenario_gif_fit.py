@@ -11,9 +11,12 @@ wall-clock frame-picking arithmetic in isolation).
 Covers:
   (a) a GIF much larger than the tile size ends up with every retained
       frame at or below 2x the tile size in both dimensions.
-  (b) alpha survives the decode+fit round trip (the reason this stays a PIL
-      frame list instead of routing through Mp4FrameCache -- cv2's GIF
-      demuxer drops alpha; see the design doc's alpha-probe note).
+  (b) alpha survives the decode+fit round trip (the reason an ALPHA GIF
+      stays a PIL frame list instead of routing through the mp4 tile cache
+      like an opaque one does since #201 -- an mp4 has no alpha channel).
+      Every fixture here RENDERS transparency, which is the criterion that
+      keeps them on the frame-list route: what the header declares is not
+      the question (scenario_gif_opaque_route pins that).
   (c) a GIF already smaller than the 2x budget keeps its source dimensions
       (shrink-only, same policy as P2.4's static images: upscaling a small
       GIF to the budget would multiply its retained memory -- 40px -> 144px
@@ -293,6 +296,10 @@ def check_small_gif_keeps_source_size() -> None:
 
 
 def main() -> None:
+    # KeyGIF reads performance.cache-videos at construction (issue #201).
+    # Every fixture here renders alpha, so they all keep the frame list this
+    # scenario is about -- the stub tier just has to exist to be read.
+    fixtures.install_stub_globals({"performance": {"cache-videos": True}})
     fixtures.start_watchdog(60, label="scenario_gif_fit")
     check_large_gif_is_fit()
     check_small_gif_keeps_source_size()

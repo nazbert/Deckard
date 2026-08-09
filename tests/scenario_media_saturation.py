@@ -287,6 +287,11 @@ def check_read_saturation_validates() -> None:
 
 
 def main() -> None:
+    # KeyGIF reads performance.cache-videos at construction (issue #201).
+    # This fixture renders alpha, so it keeps the frame list these
+    # assertions read either way -- the stub tier just has to exist for the
+    # setting to be readable.
+    fixtures.install_stub_globals({"performance": {"cache-videos": True}})
     fixtures.start_watchdog(60, label="scenario_media_saturation")
     check_keygif_saturation()
     check_touchscreen_background_saturation()
