@@ -60,8 +60,8 @@ class ActionHolderGroup:
             # falls through to UNSUPPORTED. Left as-is here because the honest
             # fix needs an InputIdentifier this method never receives, i.e. a
             # signature change on plugin-visible API; the method has no caller
-            # in-tree. Tracked for follow-up (#223).
-            if action_holder.get_input_compatibility(action_holder.action_id) >= action_input_support:  # type: ignore[arg-type]
+            # in-tree. Tracked for follow-up (#231).
+            if action_holder.get_input_compatibility(action_holder.action_id) >= action_input_support:  # type: ignore[arg-type]  # root cause: get_input_compatibility passed action_id, not an InputIdentifier (ActionHolderGroup.py, #231)
                 action_holders.add(action_holder)
 
         return action_holders
