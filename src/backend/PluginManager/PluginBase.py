@@ -585,10 +585,16 @@ class PluginBase(rpyc.Service):
             try:
                 with open(self.settings_path, "r") as f:
                     settings = json.load(f)
-            except json.JSONDecodeError as e:
+            except ValueError as e:
                 # Corrupt, not merely unreadable: move it aside so the next
                 # set_settings() cannot overwrite the only copy that is left
                 # (plugin settings have no backup to heal from -- #152).
+                # ValueError rather than JSONDecodeError: a file of garbage
+                # bytes raises UnicodeDecodeError while decoding, which is a
+                # ValueError but NOT a JSON error, so it used to escape every
+                # one of these handlers -- the loudest corruption was the one
+                # kind that bypassed quarantine. JSONDecodeError is a
+                # ValueError subclass, so one clause covers both.
                 _quarantine_corrupt_json(
                     self.settings_path,
                     f"Plugin {self.plugin_name or self.PATH}: settings file",
@@ -644,7 +650,7 @@ class PluginBase(rpyc.Service):
             try:
                 with open(manifest_path, "r") as f:
                     manifest = json.load(f)
-            except json.JSONDecodeError as e:
+            except ValueError as e:
                 # NOT quarantined, deliberately: manifest.json lives in the
                 # plugin's SOURCE tree, which the app never writes. There is no
                 # later save to overwrite it, so moving it aside protects
@@ -693,7 +699,7 @@ class PluginBase(rpyc.Service):
             try:
                 with open(about_path, "r") as f:
                     about = json.load(f)
-            except json.JSONDecodeError as e:
+            except ValueError as e:
                 # Degrade to the missing-file result instead of raising into
                 # the about window. NOT quarantined: about.json is a plugin
                 # SOURCE file the app never writes -- see
@@ -732,7 +738,7 @@ class PluginBase(rpyc.Service):
                 try:
                     with open(self.settings_path, "r") as f:
                         content = json.load(f)
-                except json.JSONDecodeError as e:
+                except ValueError as e:
                     # THE data-loss moment: the atomic write below replaces the
                     # corrupt file wholesale. Preserve it first (#152).
                     _quarantine_corrupt_json(

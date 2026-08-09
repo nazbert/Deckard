@@ -42,6 +42,13 @@ Pins, all against the real load path (no GTK, no hardware):
    primary with an OLD mtime (backup restore, settings-dir rename) hands that
    mtime to the sidecar os.replace creates, which made the prune delete the
    forensic copy the loader had just logged as "preserved at".
+9. UNDECODABLE BYTES ARE CORRUPTION -- garbage raises UnicodeDecodeError,
+   a ValueError but not a JSONDecodeError, so it bypassed quarantine at every
+   site and still aborted startup in the Migrator (the exact failure that
+   loader's comment claims to have fixed).
+10. THE MIGRATOR DOES NOT QUARANTINE ON OSError -- it used to catch it in the
+   same tuple as the decode error, renaming a healthy but momentarily
+   unreadable migrations.json away and re-running every migrator.
 """
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 
@@ -227,6 +234,61 @@ def check_fresh_sidecar_survives_prune(plugin) -> None:
     print("PASS(8): the sidecar just created is never pruned by its own retention call")
 
 
+def check_garbage_bytes_are_corruption(plugin, migrator) -> None:
+    """Undecodable BYTES raise UnicodeDecodeError -- a ValueError, but not a
+    JSONDecodeError. Handlers that named the JSON error let the crudest
+    corruption of all straight through."""
+    path = plugin.settings_path
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(b"\xff\xfe\x00\x80garbage\xc3\x28")
+
+    got = plugin.get_settings()  # used to raise UnicodeDecodeError out of register()
+    assert got == {}, f"garbage bytes must fall back to empty, got {got}"
+    assert len(sidecars(path)) == 1, (
+        f"garbage bytes are corruption and must be quarantined, got {sidecars(path)}"
+    )
+
+    # Same class of file, the startup-critical reader: this is precisely what
+    # the Migrator's own comment claims it fixed.
+    with open(migrator.SETTINGS_DIR, "wb") as f:
+        f.write(b"\xff\xfe\x00\x80garbage\xc3\x28")
+    try:
+        assert migrator.get_settings() == {}
+    except UnicodeDecodeError as e:
+        raise AssertionError(f"garbage migrations.json still aborts startup: {e}") from None
+    assert len(sidecars(migrator.SETTINGS_DIR)) >= 1, "garbage migrations.json not preserved"
+    print("PASS(9): undecodable bytes are treated as corruption, not raised")
+
+
+def check_migrator_oserror_is_not_corruption(migrator) -> None:
+    """The Migrator quarantined on OSError too -- renaming away a HEALTHY but
+    momentarily unreadable migrations.json, which then reports every migrator
+    as pending and re-runs the lot."""
+    path = migrator.SETTINGS_DIR
+    migrator.set_migrated(True)
+    before = read(path)
+    n_before = len(sidecars(path))
+
+    real_open = open
+
+    def failing_open(file, *args, **kwargs):
+        if str(file) == path:
+            raise PermissionError(13, "simulated EACCES")
+        return real_open(file, *args, **kwargs)
+
+    with mock.patch("builtins.open", side_effect=failing_open):
+        got = migrator.get_settings()
+
+    assert got == {}, f"an unreadable migrations.json still reports pending, got {got}"
+    assert len(sidecars(path)) == n_before, (
+        "an unreadable migrations.json was quarantined -- a healthy state file renamed "
+        "away over a transient EACCES re-runs every migrator"
+    )
+    assert os.path.isfile(path) and read(path) == before, "the healthy state file was disturbed"
+    print("PASS(10): the Migrator no longer quarantines on OSError")
+
+
 def check_oserror_is_not_corruption(plugin) -> None:
     path = plugin.settings_path
     plugin.set_settings({"marker": "healthy"})
@@ -328,6 +390,7 @@ def main() -> None:
     write_plugin("com_test_q_retention", "QRetentionPlugin", manifest_json("com_test_q_retention"))
     write_plugin("com_test_q_oserror", "QOsErrorPlugin", manifest_json("com_test_q_oserror"))
     write_plugin("com_test_q_prune", "QPrunePlugin", manifest_json("com_test_q_prune"))
+    write_plugin("com_test_q_garbage", "QGarbagePlugin", manifest_json("com_test_q_garbage"))
     # Corrupt manifest vs. no manifest at all -- the two must be indistinguishable.
     corrupt_dir = write_plugin("com_test_q_manifest_corrupt", "QCorruptManifestPlugin",
                                '{"name": "x", "id": ')
@@ -360,6 +423,10 @@ def main() -> None:
     migrator = Migrator("1.5.0")
     check_retention(Migrator.SETTINGS_DIR, migrator.get_settings,
                     "migrations.json (Migrator loader)")
+
+    check_garbage_bytes_are_corruption(
+        PluginBase.plugins["com_test_q_garbage"]["object"], migrator)
+    check_migrator_oserror_is_not_corruption(migrator)
 
     print("PASS: scenario_plugin_settings_quarantine")
 

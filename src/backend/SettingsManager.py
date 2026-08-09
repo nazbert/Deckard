@@ -390,7 +390,12 @@ class SettingsManager:
             # Raced a concurrent quarantine between the exists() check and
             # the open.
             return {}, False
-        except json.decoder.JSONDecodeError as e:
+        except ValueError as e:
+            # ValueError, not JSONDecodeError: garbage bytes raise
+            # UnicodeDecodeError while decoding, which is a ValueError but not
+            # a JSON error -- it used to escape this handler and propagate out
+            # of every page/settings load. JSONDecodeError is itself a
+            # ValueError subclass, so one clause covers both.
             # Quarantine instead of leaving the corrupt file in place: the
             # caller gets {} either way, but the next save would overwrite
             # the only remaining copy of the user's data. Renamed aside it

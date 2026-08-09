@@ -51,7 +51,14 @@ class Migrator:
         try:
             with open(self.SETTINGS_DIR, "r") as f:
                 return json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
+        except ValueError as e:
+            # ValueError, not JSONDecodeError: a file of garbage bytes raises
+            # UnicodeDecodeError (a ValueError, not a JSON error) while
+            # decoding, which used to escape this handler and abort startup --
+            # exactly what the comment below claims was fixed. json's own
+            # JSONDecodeError is a ValueError subclass, so one clause covers
+            # both (StoreBackend.py:945 is the in-repo precedent).
+            #
             # A torn migrations.json used to abort startup here (raised
             # straight out of run_migrators). Quarantine and treat as "no
             # migrations recorded": re-running the migrators is safe --
@@ -73,9 +80,21 @@ class Migrator:
                     log.info(f"Pruned old quarantined copy {pruned}")
             else:
                 log.error(
-                    f"Could not read {self.SETTINGS_DIR} ({e}) -- could NOT move it "
-                    f"aside (left in place), treating all migrations as pending"
+                    f"Could not read {self.SETTINGS_DIR} ({e}) -- it was NOT moved aside "
+                    f"here (rename failed, or another reader quarantined it first), "
+                    f"treating all migrations as pending"
                 )
+            return {}
+        except OSError as e:
+            # Unreadable is not corrupt. Quarantining here would rename a
+            # perfectly healthy migrations.json away over a transient EACCES/
+            # EIO and re-run every migrator against a state file that now
+            # claims nothing has run. Report pending (which is what an
+            # unreadable state file means) and leave the file alone.
+            log.error(
+                f"Could not read {self.SETTINGS_DIR} ({e}) -- leaving it in place "
+                f"(unreadable, not corrupt), treating all migrations as pending"
+            )
             return {}
         
     def set_settings(self, settings: dict) -> None:
