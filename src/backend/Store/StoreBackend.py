@@ -1118,9 +1118,27 @@ class StoreBackend:
             # `os.system("cd '<dir>' && git pull")` which built a shell command line.
             self.subp_call(["git", "-C", staging, "pull"])
 
-            # Set repository to the given commit_sha
+            # Set repository to the given commit_sha. The rc is checked for
+            # the same reason as the checkout below (#200): an unreachable
+            # catalog sha (upstream force-push, GC'd commit) otherwise leaves
+            # staging on the default-branch tip, which then passes the tree
+            # validation, gets VERSION-stamped with the sha it is NOT, and
+            # installs as a success -- a silently wrong tree.
+            #
+            # Fail hard rather than fall back to the default tip: that is
+            # what every other git failure in this function does (clone rc,
+            # checkout rc, missing git -> 404), and, decisively, it is
+            # already what the NON-devel path does for this exact failure --
+            # download_repo builds ".../<sha>.zip", which 404s on an
+            # unreachable sha and returns NoConnectionError. A fallback here
+            # would make the devel clone path the only place in the store
+            # where an unreachable sha still installs something.
             if commit_sha is not None:
-                self.subp_call(["git", "-C", staging, "reset", "--hard", commit_sha])
+                rc = self.subp_call(["git", "-C", staging, "reset", "--hard", commit_sha])
+                if rc != 0:
+                    log.error(f"git reset --hard {commit_sha!r} failed with exit code {rc} for {repo_url} "
+                              f"(commit unreachable?) -- refusing to install the default-branch tip")
+                    return 404
             elif branch_name is not None:
                 # checkout, not switch: custom plugins may pin a TAG (or any
                 # detachable ref), which `git switch` refuses without
