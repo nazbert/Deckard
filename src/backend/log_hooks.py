@@ -76,11 +76,16 @@ from loguru import logger as _LOG
 from src.backend.log_redaction import install_log_redaction, scrub
 
 # Issue #92 bisect switch, read once at import -- like SC_STRONG_CALLBACKS
-# this is a debugging knob, not something that may change behavior mid-run
-# (the hooks are process-global; a mid-run flip would leave half of them
-# installed). Any value except "" and "0" enables it, so the documented
-# SC_NO_ERROR_HOOKS=1 and the reflexive =true both work.
-_HOOKS_DISABLED = os.environ.get("SC_NO_ERROR_HOOKS", "").strip() not in ("", "0")
+# (src/Signals/weak_callbacks.py) this is a debugging knob, not something that
+# may change behavior mid-run (the hooks are process-global; a mid-run flip
+# would leave half of them installed).
+#
+# STRICTLY "1", matching that precedent and #92's spec. A truthiness test
+# would read SC_NO_ERROR_HOOKS=false / no / off -- what an operator writes to
+# turn a switch OFF -- as "on", silently dropping the entire #80 safety net
+# on the run that was trying to keep it.
+_HOOKS_DISABLED = os.environ.get("SC_NO_ERROR_HOOKS") == "1"
+_announced_disabled = False
 
 _installed = False
 _prev_sys_hook = None
@@ -176,6 +181,32 @@ def _rate_limit(key: tuple) -> tuple[bool, int]:
         if len(_rate_state) > _RATE_LIMIT_MAX_KEYS:
             _prune_locked(now)
         return False, suppressed
+
+
+def _announce_disabled() -> None:
+    """Emit exactly one line so a flagged run self-identifies in the logs --
+    an incident switch nobody can tell was on is half a switch.
+
+    Deliberately announced from redirect_faulthandler() rather than from
+    install_exception_hooks(): main() installs the hooks BEFORE
+    config_logger() opens logs.log and the About-dialog ring, so a line
+    emitted there would be stderr-only -- lost on exactly the detached
+    (autostart/flatpak) runs this flag exists to debug. redirect_faulthandler()
+    is called right after the sinks come up, so the line lands where an
+    incident reader will actually find it."""
+    global _announced_disabled
+    if _announced_disabled:
+        return
+    _announced_disabled = True
+    try:
+        _LOG.warning(
+            "SC_NO_ERROR_HOOKS=1: the issue-#80 exception hooks and the "
+            "faulthandler redirection are DISABLED for this run -- uncaught "
+            "exceptions reach stderr only, and native crash dumps are not "
+            "written to logs/faulthandler.log (log redaction is unaffected)"
+        )
+    except Exception:
+        pass
 
 
 def _log_exc(kind: str, exc_type, exc_value, exc_tb, extra: str = "") -> None:
@@ -380,9 +411,14 @@ def redirect_faulthandler(directory: str) -> None:
 
     SC_NO_ERROR_HOOKS=1 (issue #92) skips the redirection entirely, leaving
     main.py's import-time faulthandler.enable() pointed at stderr: the
-    pre-#80 arrangement, and no logs/faulthandler.log is opened or scrubbed."""
+    pre-#80 arrangement, and no logs/faulthandler.log is opened or scrubbed.
+    This is also where the flag announces itself -- see _announce_disabled()
+    for why the announcement is here and not at install time."""
     global _fault_file
-    if _HOOKS_DISABLED or _fault_file is not None:
+    if _HOOKS_DISABLED:
+        _announce_disabled()
+        return
+    if _fault_file is not None:
         return
     try:
         os.makedirs(directory, exist_ok=True)

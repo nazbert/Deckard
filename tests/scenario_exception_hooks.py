@@ -209,9 +209,14 @@ def main() -> None:
         "assert not log_hooks._installed, 'a flagged install must not latch _installed'\n"
         "assert logger._core.patcher is redact_record, "
         "'the flag is a hook switch, not a privacy switch: redaction must survive it'\n"
+        "lines = []\n"
+        "logger.add(lambda m: lines.append(str(m)), level='TRACE')\n"
+        "log_hooks.redirect_faulthandler(sys.argv[1])\n"
         "log_hooks.redirect_faulthandler(sys.argv[1])\n"
         "assert log_hooks._fault_file is None, 'no dump file may be opened under the flag'\n"
         "assert not os.path.exists(sys.argv[1]), 'the log dir must not even be created'\n"
+        "assert sum('SC_NO_ERROR_HOOKS=1' in ln for ln in lines) == 1, "
+        "'a flagged run must self-identify in the log exactly once'\n"
         "class FakeLoop:\n"
         "    seen = []\n"
         "    def default_exception_handler(self, context): FakeLoop.seen.append(context)\n"
@@ -227,6 +232,29 @@ def main() -> None:
     )
     assert flagged.returncode == 0, f"flagged child failed: {flagged.stderr}"
     assert "flagged-ok" in flagged.stdout
+
+    # ...and ONLY "1" disables them. "false"/"off"/"0" is what an operator
+    # writes to keep the safety net ON; a truthiness test would read those as
+    # "on" and silently drop the whole of #80 on that run.
+    off_code = (
+        "import sys\n"
+        f"sys.path.insert(0, {REPO_ROOT!r})\n"
+        "from src.backend import log_hooks\n"
+        "assert not log_hooks._HOOKS_DISABLED, 'only SC_NO_ERROR_HOOKS=1 may disable the hooks'\n"
+        "log_hooks.install_exception_hooks()\n"
+        "assert sys.excepthook is not sys.__excepthook__, 'the hooks must be installed'\n"
+        "print('hooks-on')\n"
+    )
+    for value in ("0", "false", "off", "no", ""):
+        off = subprocess.run(
+            [sys.executable, "-c", off_code],
+            capture_output=True, text=True, timeout=60,
+            env={**os.environ, "SC_NO_ERROR_HOOKS": value},
+        )
+        assert off.returncode == 0, (
+            f"SC_NO_ERROR_HOOKS={value!r} must NOT disable the hooks: {off.stderr}"
+        )
+        assert "hooks-on" in off.stdout
 
     # 9. per-site rate limiting (issue #91). Every leg above fires each site
     # exactly once, which is why they are unaffected by the guard.
