@@ -39,7 +39,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk
+from gi.repository import GLib, Gtk
 
 # Import python modules
 import os
@@ -52,6 +52,9 @@ from loguru import logger as log
 from GtkHelper.GtkHelper import run_on_main
 from src.windows.AssetManager.ChooserPage import ChooserPage
 from src.windows.AssetManager.Preview import Preview
+
+# Import globals
+import globals as gl
 
 # Import typing
 from typing import TYPE_CHECKING
@@ -108,7 +111,72 @@ def compare_assets(item1, item2, search: str, attr: str = "path") -> int:
     return 0
 
 
-class GenericPackChooserPage(ChooserPage):
+class _ChooserBuildPage(ChooserPage):
+    """Build bookkeeping and failure recovery shared by both chooser bases.
+
+    `run_on_main` raises RuntimeError when the main loop does not service its
+    idle within RUN_ON_MAIN_TIMEOUT_S (30 s) -- reachable app-wide whenever
+    anything stalls the loop. Unhandled, `@log.catch` swallowed that raise
+    and left the page permanently stuck: spinner spinning forever,
+    build_finished never set, any deferred show_for_path stranded, no retry
+    and no message (#136 review M2).
+    """
+
+    build_finished = False
+    build_failed = False
+    _build_running = False
+
+    def start_build(self) -> bool:
+        """Starts the build worker unless one is already in flight. Called
+        from the main thread only (constructor, retry_build), so the flag
+        needs no lock."""
+        if self._build_running:
+            return False
+        self._build_running = True
+        threading.Thread(target=self._run_build,
+                         name=f"{type(self).__name__}.build").start()
+        return True
+
+    def _run_build(self) -> None:
+        try:
+            self.build()
+        finally:
+            self._build_running = False
+
+    def retry_build(self) -> bool:
+        """Rebuilds a page whose build failed -- AssetManager calls this when
+        the window is reopened. No-op on a healthy page."""
+        if not self.build_failed:
+            return False
+        self.build_failed = False
+        self.set_loading(True)
+        return self.start_build()
+
+    def _handle_build_failure(self, error: BaseException) -> None:
+        log.opt(exception=error).error(
+            f"{type(self).__name__}: the main loop did not service this page's "
+            f"build; showing an error -- it rebuilds when the window is reopened")
+        self.build_finished = False
+        self.build_failed = True
+        self._reset_build_state()
+        # Fire-and-forget: run_on_main is the very thing that just failed, and
+        # waiting on it again would park this worker for another full timeout.
+        GLib.idle_add(self._show_build_error)
+
+    def _show_build_error(self) -> bool:
+        """Turns ChooserPage's loading page into an error panel: a stopped
+        spinner beats one that spins forever."""
+        self.spinner.stop()
+        self.loading_label.set_label(gl.lm.get("error"))
+        self.set_visible_child_name("loading")
+        return False  # one-shot idle
+
+    def _reset_build_state(self) -> None:
+        """Drops whatever the failed build would have consumed, so nothing is
+        left pointing at a page that never got built."""
+
+
+class GenericPackChooserPage(_ChooserBuildPage):
     """The pack grid of one asset type.
 
     Subclasses supply the two widget classes, the stack child to drill into,
@@ -134,7 +202,7 @@ class GenericPackChooserPage(ChooserPage):
 
         self.build_finished = False
 
-        threading.Thread(target=self.build, name=f"{type(self).__name__}.build").start()
+        self.start_build()
 
     @log.catch
     def build(self):
@@ -150,16 +218,20 @@ class GenericPackChooserPage(ChooserPage):
         thumbnails = [Preview.decode_pixbuf(self.get_pack_thumbnail_path(pack))
                       for pack in packs]
 
-        # Widgets are GTK, so they are built on the main loop (#136).
-        run_on_main(self._build_ui)
+        try:
+            # Widgets are GTK, so they are built on the main loop (#136).
+            run_on_main(self._build_ui)
 
-        # One batch per main-loop callback: constructing every preview in a
-        # single callback would hand the loop back only after the last one,
-        # so a big pack set would still stutter even with the decode gone.
-        for start in range(0, len(packs), self.PACK_APPEND_BATCH):
-            stop = start + self.PACK_APPEND_BATCH
-            run_on_main(self._append_packs, list(zip(packs[start:stop],
-                                                     thumbnails[start:stop])))
+            # One batch per main-loop callback: constructing every preview in
+            # a single callback would hand the loop back only after the last
+            # one, so a big pack set would still stutter even without decodes.
+            for start in range(0, len(packs), self.PACK_APPEND_BATCH):
+                stop = start + self.PACK_APPEND_BATCH
+                run_on_main(self._append_packs, list(zip(packs[start:stop],
+                                                         thumbnails[start:stop])))
+        except Exception as e:
+            self._handle_build_failure(e)
+            return
 
         self.set_loading(False)
 
@@ -210,7 +282,7 @@ class GenericPackChooserPage(ChooserPage):
         gates deferred work on it."""
 
 
-class GenericAssetChooserPage(ChooserPage):
+class GenericAssetChooserPage(_ChooserBuildPage):
     """The asset grid of one pack: a recycling DynamicFlowBox plus the shared
     fuzzy search/sort."""
 
@@ -240,16 +312,20 @@ class GenericAssetChooserPage(ChooserPage):
 
         self.build_finished = False
 
-        threading.Thread(target=self.build, name=f"{type(self).__name__}.build").start()
+        self.start_build()
 
     @log.catch
     def build(self):
         self.build_finished = False
         self.set_loading(True)
 
-        # The flow box builds a page's worth of previews in its constructor,
-        # so the whole construction runs on the main loop (#136).
-        run_on_main(self._build_ui)
+        try:
+            # The flow box builds a page's worth of previews in its
+            # constructor, so the whole construction runs on the main loop.
+            run_on_main(self._build_ui)
+        except Exception as e:
+            self._handle_build_failure(e)
+            return
 
         self.set_loading(False)
 
@@ -290,6 +366,11 @@ class GenericAssetChooserPage(ChooserPage):
     def select_asset(self, path: str) -> None:
         """Pre-selects the asset at `path` once it is rendered."""
         self.selected_path = path
+
+    def _reset_build_state(self) -> None:
+        # There is no grid to render it into and no build left to consume it;
+        # holding it would strand the request silently.
+        self._pending_pack = None
 
     def on_child_activated(self, flow_box, child):
         asset = self.get_child_asset(child)

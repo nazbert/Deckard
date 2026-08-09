@@ -352,9 +352,11 @@ def check_static(label: str, module_path: str, class_name: str) -> int:
             print(f"FAIL({label}): {v} [{source_file}]")
         return 1
 
-    # The check is only meaningful while build() really is a thread body.
+    # The check is only meaningful while build() really is a thread body --
+    # directly, or through the one-hop _run_build wrapper that clears the
+    # in-flight flag around it.
     owner_src = open(source_file, encoding="utf-8").read()
-    if "threading.Thread(target=self.build" not in owner_src:
+    if not re.search(r"threading\.Thread\(target=self\.(build|_run_build)\b", owner_src):
         print(f"FAIL({label}): build() is no longer started on a worker thread "
               f"in {source_file} -- re-point this tripwire at the new loader")
         return 1
@@ -409,6 +411,118 @@ def check_tripwire_self_test() -> int:
 
     print("PASS: the off-main tripwire flags the pre-fix shape and clears the "
           "marshalled one")
+    return 0
+
+
+# --------------------------------------------------------------------- #
+# 2b. A marshal that times out must not strand the page
+# --------------------------------------------------------------------- #
+
+def check_marshal_timeout(label: str, module_path: str, class_name: str) -> int:
+    """`run_on_main` raises RuntimeError when the main loop does not service
+    its idle in time -- reachable app-wide whenever something stalls the loop.
+    Unhandled, `@log.catch` ate it and the page was stuck forever: spinner
+    spinning, build_finished never set, a requested pack held for a grid that
+    would never exist, and readers hitting AttributeError on the flow box.
+
+    Driven by shrinking RUN_ON_MAIN_TIMEOUT_S and simply NOT pumping the loop
+    while the build runs."""
+    import importlib
+
+    import src.backend.main_loop as main_loop
+
+    module = importlib.import_module(module_path)
+    cls = getattr(module, class_name)
+
+    recorder = Recorder()
+    stub_flow_box, stub_preview = make_stubs(recorder)
+    undo, _ = patch_widget_factories(cls, module, stub_flow_box, stub_preview)
+
+    page = make_page(cls)
+    ui = {"spinner_stopped": False, "label": None, "loading": []}
+    page.spinner = types.SimpleNamespace(
+        stop=lambda: ui.__setitem__("spinner_stopped", True), start=lambda: None)
+    page.loading_label = types.SimpleNamespace(
+        set_label=lambda text: ui.__setitem__("label", text))
+    page.set_visible_child_name = lambda name: None
+    page.set_loading = lambda value: ui["loading"].append(value)
+
+    # Only the leaf pages hold a drill-in request across the build, and each
+    # base owns exactly one flow-box attribute -- assert what this page has.
+    holds_pending = hasattr(cls, "load_for_pack")
+    flow_attr = "pack_flow" if hasattr(cls, "PACK_FLOW_BOX_CLASS") else "asset_flow"
+    if holds_pending:
+        # A drill-in requested while the build was still queued.
+        page._pending_pack = FakePack()
+
+    real_timeout = main_loop.RUN_ON_MAIN_TIMEOUT_S
+    main_loop.RUN_ON_MAIN_TIMEOUT_S = 0.2
+    try:
+        done = threading.Event()
+
+        def _drive():
+            try:
+                page.build()
+            finally:
+                done.set()
+
+        # Deliberately NOT pumping: this is what a stalled main loop is.
+        worker = threading.Thread(target=_drive, daemon=True, name=f"{label}-stall")
+        worker.start()
+        if not done.wait(timeout=15):
+            print(f"FAIL({label} timeout): build() never returned after the "
+                  f"marshal deadline -- the worker is stuck too")
+            return 1
+    finally:
+        main_loop.RUN_ON_MAIN_TIMEOUT_S = real_timeout
+
+    if not getattr(page, "build_failed", False):
+        print(f"FAIL({label} timeout): the page does not know its build failed "
+              f"(@log.catch swallowed the RuntimeError)")
+        undo()
+        return 1
+    if getattr(page, "build_finished", False):
+        print(f"FAIL({label} timeout): build_finished set despite the failure")
+        undo()
+        return 1
+    if holds_pending and page._pending_pack is not None:
+        print(f"FAIL({label} timeout): a pending pack is still held for a grid "
+              f"that was never built -- stranded")
+        undo()
+        return 1
+    flow_value = getattr(page, flow_attr, "<AttributeError>")
+    if flow_value is not None:
+        print(f"FAIL({label} timeout): {flow_attr} after a failed build is "
+              f"{flow_value!r}, not None -- readers get an AttributeError "
+              f"instead of a clean 'not built'")
+        undo()
+        return 1
+
+    # The queued error panel: fire-and-forget, so it lands once we pump.
+    pump_until(lambda: ui["spinner_stopped"], 5,
+               "the spinner was never stopped after the failure")
+    if ui["label"] is None:
+        print(f"FAIL({label} timeout): the page shows no error message")
+        undo()
+        return 1
+
+    # Recovery: reopening the window retries, and the retry must succeed.
+    try:
+        started = page.retry_build()
+        if not started:
+            print(f"FAIL({label} timeout): retry_build() refused to rebuild a "
+                  f"failed page")
+            return 1
+        pump_until(lambda: getattr(page, "build_finished", False), 10,
+                   "the retried build never finished")
+    finally:
+        undo()
+
+    if not recorder.threads or recorder.off_main():
+        print(f"FAIL({label} timeout): the retried build did not construct its "
+              f"widgets on the main loop")
+        return 1
+    print(f"PASS: {label} survives a marshal timeout and rebuilds on retry")
     return 0
 
 
@@ -590,11 +704,15 @@ def main() -> int:
     gl.icon_pack_manager = FakePackManager()
     gl.wallpaper_pack_manager = FakePackManager()
     gl.sd_plus_bar_wallpaper_pack_manager = FakePackManager()
+    gl.lm = types.SimpleNamespace(get=lambda key, *a, **k: key)
 
     rc = check_tripwire_self_test()
     for label, module_path, class_name, minimum in CASES:
         rc |= check_runtime(label, module_path, class_name, minimum)
         rc |= check_static(label, module_path, class_name)
+    # One pack page and one leaf page: the two build() bodies that marshal.
+    for label, module_path, class_name, _ in (CASES[0], CASES[1]):
+        rc |= check_marshal_timeout(label, module_path, class_name)
     # Last: it installs a real window and real gl.* collaborators.
     rc |= check_real_window()
 
