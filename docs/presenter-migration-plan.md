@@ -1,4 +1,14 @@
-# Single-Writer Migration — Implementation Plan (Steps 2+3 + Step 5)
+# Single-Writer Migration — Implementation Plan (Steps 2+3 + Step 5) — LANDED
+
+**Status: LANDED. This is a finished migration's record, not pending work.** Every milestone (M0–M4) shipped and was hardware-verified; the work reached `main` as `9bd8b8c5` ("refactor(media): single-writer render pipeline + canvas-res video cache"), which is also the commit that added this file. The per-milestone SHAs cited throughout the body (`53183dc`, `70af541`, `6e0e6bb`, …) are pre-squash and **no longer resolve** — they name history that was collapsed into `9bd8b8c5`, not work still to do. Nothing below is waiting to be built; do not re-plan it.
+
+**On the filename.** "presenter" names the design this plan's own v2 *rejected*: there is no presenter thread and no presenter module — `MediaPlayerThread` became the sole device writer (§2, §6.1). The file keeps its name anyway because 31 references across 24 tracked files cite this path (the `tests/scenario_*.py` headers, `tests/run_all.py`, `tests/fixtures.py`, `tests/faulty_fake_deck.py`, `DeckController.py`, `ScreenSaver.py`, `KeyVideo.py`, `docs/render-pipeline-design.md`, `docs/deep-audit-2026-07-10.md`), as do notes on issues #163/#165/#174 and MRs !74/!81 — a rename would break all of them for no reader gain. Read "presenter" as "the single device writer".
+
+**The only live part of this document is §6.1's re-open triggers.** The separate-thread split was re-opened once, as #165 / MR !74, and **parked 2026-07-26**: the hardware gate measured `usb_write` at 17–24 % of the loop, short of the ≥ ~25 % share the overlap needs to pay for itself (full disposition on #165). The standing triggers are an XL-scale deck, or field captures showing a work-bound loop. §9.3's `MediaPlayerThread` → `DeckWriterThread` rename also remains deliberately undone (log-grep continuity).
+
+---
+
+*The plan follows unchanged, with its 2026-07-05 as-built annotations, as the implementation record.*
 
 **Status: v2 — EXECUTED 2026-07-05 (M0–M4 on `refactor/single-writer`).** v1 was reviewed by four adversarial passes (coverage gaps, concurrency, over-engineering, internal consistency/feasibility); v2 integrates their findings. §10 carries the finding-by-finding disposition; the headline change is architectural: **no new presenter thread** — the media thread becomes the sole device writer.
 
