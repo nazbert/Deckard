@@ -835,7 +835,7 @@ class Page:
 
     def set_label_font_family(self, identifier: InputIdentifier, state: int, label_position: str, font_family: str, update: bool = True) -> None:
         for input_state in self.get_controller_input_states(identifier, state):
-            input_state.label_manager.page_labels[label_position].font_family = font_family
+            input_state.label_manager.page_labels[label_position].font_name = font_family
             input_state.label_manager.invalidate_scroll_caches()
 
         self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "labels", label_position, "font-family"], font_family)

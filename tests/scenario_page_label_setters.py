@@ -21,6 +21,17 @@ What this pins, end-to-end on a real headless DeckController:
 
 Delete `LabelManager.update_label_editor` again and this fails on the first
 setter.
+
+Second regression, #208: `set_label_font_family` wrote the family to
+`page_labels[pos].font_family`, a field `KeyLabel` does not have -- on a
+plain dataclass that silently grows a stray attribute instead of raising,
+and the intended `font_name` keeps its old value. The setter's own
+controller was covered by the second (`get_label_manager`) block, which
+writes `font_name` correctly, so the drop only showed on the OTHER
+controllers the first block exists for: a second deck displaying the same
+page kept rendering the old family until a page reload. `check_font_family_
+reaches_every_controller` below drives exactly that, plus the state-switch
+leg (a family set on a non-active state must survive switching to it).
 """
 import fixtures
 
@@ -50,6 +61,56 @@ class RecordingPort(ui_port.UIPort):
 
     def on_input_visuals_changed(self, controller, identifier, state, aspect):
         self.journal.append(("port", controller, identifier, state, aspect))
+
+
+def check_font_family_reaches_every_controller(page, identifier, state) -> None:
+    """#208: the family must land on every controller showing the page, and
+    must survive a state switch."""
+    second = fixtures.make_headless_controller(serial="label-setters-2")
+    try:
+        covered = page.get_controller_input_states(identifier, state)
+        serials = [s.controller_input.deck_controller.serial_number() for s in covered]
+        assert "label-setters-2" in serials, (
+            "the second deck's input state is not in the set the setter "
+            f"writes to (got {serials}) -- this leg would prove nothing"
+        )
+
+        page.set_label_font_family(identifier, state, LABEL_POSITION, "Family Two")
+
+        for input_state in covered:
+            serial = input_state.controller_input.deck_controller.serial_number()
+            label = input_state.label_manager.page_labels[LABEL_POSITION]
+            assert label.font_name == "Family Two", (
+                f"deck {serial} kept font_name {label.font_name!r} -- the "
+                "family write went somewhere KeyLabel does not read (#208)"
+            )
+
+        for input_state in covered:
+            serial = input_state.controller_input.deck_controller.serial_number()
+            label = input_state.label_manager.page_labels[LABEL_POSITION]
+            assert not hasattr(label, "font_family"), (
+                f"deck {serial}'s KeyLabel grew a stray 'font_family' "
+                "attribute -- the setter is writing the wrong field name"
+            )
+
+        # State switch: a family set while state 1 is NOT active must be what
+        # state 1 renders once it becomes active.
+        c_input = second.get_input(identifier)
+        c_input.add_new_state(switch=False)
+        assert 1 in c_input.states, "could not create a second input state"
+        assert c_input.state == 0, "add_new_state(switch=False) switched anyway"
+
+        page.set_label_font_family(identifier, 1, LABEL_POSITION, "Family Switched")
+        c_input.set_state(1)
+        label = c_input.states[1].label_manager.page_labels[LABEL_POSITION]
+        assert label.font_name == "Family Switched", (
+            f"after switching to state 1 the label reports {label.font_name!r} "
+            "-- the family set while the state was inactive was dropped"
+        )
+
+        print("PASS: font-family reaches every controller and survives a state switch")
+    finally:
+        fixtures.teardown(second)
 
 
 def main() -> None:
@@ -129,6 +190,8 @@ def main() -> None:
         )
 
         print(f"PASS: {len(SETTERS)} label setters reach the port then repaint")
+
+        check_font_family_reaches_every_controller(page, identifier, state)
     finally:
         ui_port.install(None)
         fixtures.teardown(controller)
