@@ -12,6 +12,7 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
+from collections.abc import Sequence
 from datetime import datetime
 from functools import wraps
 import hashlib
@@ -309,7 +310,12 @@ def _load_pango():
     return Pango
 
 
-def color_values_to_gdk(color_values: tuple[int, int, int] | tuple[int, int, int, int]) -> "Gdk.RGBA":
+def color_values_to_gdk(color_values: Sequence[int]) -> "Gdk.RGBA":
+    # Sequence, not a tuple union: the persisted label/font colors are JSON
+    # lists, and that is what most callers hand over -- the body already
+    # copies into a list and works off the length, so any 3- or 4-element
+    # sequence of channel values is accepted (scenario_helper_methods pins
+    # exactly that contract).
     Gdk = _load_gdk()
     # Copy before normalizing: callers pass tuples (which .append would
     # crash on) and reuse the sequence they passed in afterwards.
