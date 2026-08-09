@@ -74,7 +74,7 @@ def main() -> None:
         assert definitions.get(name) == 1, (
             f"MainWindow.{name} is defined {definitions.get(name)} times -- a "
             f"shadowed duplicate makes the live behaviour depend on definition "
-            f"order (#182)"
+            f"order"
         )
 
     fake_win = FakeWindowSelf()

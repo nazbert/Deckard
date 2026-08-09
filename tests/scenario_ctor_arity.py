@@ -208,7 +208,7 @@ def check_generic_permission_request() -> None:
         f"{PERMISSION_WINDOW}.__init__ requires {unmet}, which the generic "
         f"(command-less) permission request in app.show_permissions() has no "
         f"value for -- give them defaults, or that path raises TypeError "
-        f"under flatpak again (#190)"
+        f"under flatpak again"
     )
 
     print(f"PASS: {PERMISSION_WINDOW} stays constructible from "

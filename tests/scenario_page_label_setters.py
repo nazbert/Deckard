@@ -87,7 +87,7 @@ def check_font_family_reaches_every_controller(page, identifier, state) -> None:
             label = input_state.label_manager.page_labels[LABEL_POSITION]
             assert label.font_name == "Family Two", (
                 f"deck {serial} kept font_name {label.font_name!r} -- the "
-                "family write went somewhere KeyLabel does not read (#208)"
+                "family write went somewhere KeyLabel does not read"
             )
 
         for input_state in covered:

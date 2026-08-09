@@ -124,13 +124,13 @@ def check_callback_always_fires_after_any_trigger() -> None:
     for _ in range(3):
         debouncer.trigger()
     scheduler.advance()
-    assert len(fires) == 1, "identical repeated triggers must still produce a fire (!100: never elide)"
+    assert len(fires) == 1, "identical repeated triggers must still produce a fire (never elide)"
 
     # 2. A second, independent cycle after one completed still fires -- the
     #    pending handle is cleared on fire, so the debouncer is re-usable.
     debouncer.trigger()
     scheduler.advance()
-    assert len(fires) == 2, "a trigger after a completed cycle was swallowed (!100: never elide)"
+    assert len(fires) == 2, "a trigger after a completed cycle was swallowed (never elide)"
 
     # 3. A trigger raised from *inside* the callback (the reentrant shape:
     #    the user changes another font row while the reload is being
@@ -150,7 +150,7 @@ def check_callback_always_fires_after_any_trigger() -> None:
     assert len(reentrant) == 1, "first fire did not happen"
     assert len(scheduler.armed) == 1, "a trigger from inside the callback did not arm a new timer"
     scheduler.advance()
-    assert len(reentrant) == 2, "the trigger raised from inside the callback never fired (!100: never elide)"
+    assert len(reentrant) == 2, "the trigger raised from inside the callback never fired (never elide)"
 
     # 4. Sweep: for any burst length, draining always yields a fire.
     for burst in range(1, 8):
@@ -162,7 +162,7 @@ def check_callback_always_fires_after_any_trigger() -> None:
         scheduler.advance()
         assert len(fires) == 1, f"a burst of {burst} triggers ended with {len(fires)} fires, expected exactly 1"
 
-    print("PASS: !100 constraint -- every trigger is eventually followed by exactly one fire, never zero")
+    print("PASS: debounce constraint -- every trigger is eventually followed by exactly one fire, never zero")
 
 
 def check_glib_scheduler_coalesces_and_is_one_shot() -> None:
@@ -252,7 +252,7 @@ def check_font_rows_route_through_the_group() -> None:
         calls = _called_names(on_set)
         assert "threading.Thread" not in calls, (
             f"{class_name}.on_set spawns its own reload thread again -- every font row must go "
-            f"through FontPageGroup.request_page_reload so the reloads coalesce (#78)"
+            f"through FontPageGroup.request_page_reload so the reloads coalesce"
         )
         assert "self.font_page_group.request_page_reload" in calls, (
             f"{class_name}.on_set no longer requests a page reload -- font changes would stop "
@@ -281,7 +281,7 @@ def check_font_rows_route_through_the_group() -> None:
         "FontPageGroup.request_page_reload grew conditional logic "
         f"({[type(n).__name__ for n in conditional]}) -- the trigger must be "
         "unconditional: font_defaults -> reload_all_pages -> create_n_states "
-        "is a pixel-correctness dependency of the label memos (!100); the "
+        "is a pixel-correctness dependency of the label memos; the "
         "reload may be DELAYED, never ELIDED"
     )
     spawn_calls = _called_names(_func_def(group, "_reload_all_pages"))

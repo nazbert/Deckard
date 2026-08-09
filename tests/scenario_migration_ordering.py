@@ -79,7 +79,7 @@ def _assert_rewrites_applied(state: dict, where: str) -> None:
     assert state["media"]["path"] == NEW_ICON_PATH, (
         f"{where}: media path was NOT renamed to the id system -- still "
         f"{state['media']['path']!r}; the icon-pack path dangles and the key "
-        "renders blank (gl#31)"
+        "renders blank"
     )
     label = state["labels"]["bottom"]
     assert label["text"] is None, f"{where}: empty label text not normalized to None"
@@ -184,7 +184,7 @@ def check_non_label_media_state_fields_untouched() -> None:
     # Fix 4: stray top-level media on a states-shaped key is also renamed
     assert key["media"]["path"] == "com_core447_MaterialIcons/stray.png", (
         f"stray top-level media on a states-shaped key was not renamed -- "
-        f"still {key['media']['path']!r}; it would dangle (MR !11 review Fix 4)"
+        f"still {key['media']['path']!r}; it would dangle"
     )
     print("PASS: rename pass leaves non-label/media state fields intact; "
           "stray top-level media also renamed")

@@ -102,7 +102,7 @@ def main() -> None:
         )
         assert fixtures.wait_until(lambda: legacy.down_count == 1, timeout=3.0), (
             "DRAG_LEFT never reached the legacy action's on_key_down -- "
-            "ActionBase.event_callback compat mapping drops touchscreen drags (#108)"
+            "ActionBase.event_callback compat mapping drops touchscreen drags"
         )
 
         # 2: right swipe (x < x_out) -> legacy on_key_down again
@@ -111,7 +111,7 @@ def main() -> None:
             {"x": 120, "y": 50, "x_out": 620, "y_out": 50},
         )
         assert fixtures.wait_until(lambda: legacy.down_count == 2, timeout=3.0), (
-            "DRAG_RIGHT never reached the legacy action's on_key_down (#108)"
+            "DRAG_RIGHT never reached the legacy action's on_key_down"
         )
 
         # 3: control -- the overriding action saw both raw drag events, so

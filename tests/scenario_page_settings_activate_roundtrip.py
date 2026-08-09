@@ -78,7 +78,7 @@ def check_edit_survives_activation_then_save(controller) -> None:
     after = read_settings(target_path)
     assert after.get("auto-change", {}).get("wm-class") == "firefox", (
         f"save() after activation erased the auto-change settings: {after} "
-        f"(revert-on-save, gl#64/#28)"
+        f"(revert-on-save)"
     )
     assert after.get("brightness", {}).get("value") == 42, (
         f"save() after activation erased the brightness override: {after}"

@@ -145,7 +145,7 @@ def check_action_holder_default_icon_marshals() -> None:
     )
     assert _RecordingImage.threads[0] is threading.main_thread(), (
         "ActionHolder built its default Gtk.Image on the installer thread -- "
-        "issue #35's off-main GTK construction"
+        "GTK objects must only be constructed on the main thread"
     )
     assert isinstance(box["holder"].icon, _RecordingImage), "holder.icon is not the constructed image"
     print("PASS: ActionHolder default icon constructs on the main thread from a worker")
@@ -173,8 +173,8 @@ def check_add_css_stylesheet_marshals() -> None:
 
     assert "exc" not in box, f"add_css_stylesheet raised: {box['exc']!r}"
     assert _RecordingCssProvider.threads == [threading.main_thread()], (
-        "Gtk.CssProvider was constructed off the main thread -- issue #35's "
-        "off-main GTK construction"
+        "Gtk.CssProvider was constructed off the main thread -- GTK objects "
+        "must only be constructed on the main thread"
     )
     assert _RecordingStyleContext.add_threads == [threading.main_thread()], (
         "style-context mutation ran off the main thread"
@@ -201,8 +201,8 @@ def check_get_selector_icon_marshals() -> None:
 
     assert "exc" not in box, f"get_selector_icon raised: {box['exc']!r}"
     assert _RecordingImage.threads == [threading.main_thread()], (
-        "get_selector_icon built its Gtk.Image off the main thread -- "
-        "issue #35's off-main GTK construction"
+        "get_selector_icon built its Gtk.Image off the main thread -- GTK "
+        "objects must only be constructed on the main thread"
     )
     assert isinstance(box["icon"], _RecordingImage), "get_selector_icon did not return the constructed image"
     print("PASS: get_selector_icon constructs its Gtk.Image on the main thread from a worker")

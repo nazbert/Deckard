@@ -479,7 +479,7 @@ class App(Adw.Application):
         if not main_win.get_realized():
             log.debug("Main window was never realized (background mode); "
                       "skipping destroy to avoid the GTK unrealized-dispose "
-                      "abort (#193)")
+                      "abort")
             return
         try:
             main_win.destroy()

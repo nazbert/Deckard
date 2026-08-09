@@ -87,7 +87,7 @@ def check_rolling_disabled_idles() -> None:
             assert not lm.get_has_scroll_labels(), (
                 "rolling labels are disabled, but get_has_scroll_labels() still "
                 "flags the over-wide label -- this is what held the media loop "
-                "at full FPS on a static deck (#115)")
+                "at full FPS on a static deck")
 
         counts = {}
         orig_update = ControllerKey.update
@@ -151,7 +151,7 @@ def check_multiline_no_phantom_scroll() -> None:
 
         assert not lm.get_has_scroll_labels(), (
             "multiline label whose lines fit is scroll-flagged: detection is "
-            "measuring with single-line getbbox again (#116) -- the render "
+            "measuring with single-line getbbox again -- the render "
             "path never scrolls this, so the loop burns full-FPS renders of "
             "identical frames")
         rate = _tick_rate(controller, 2.0)

@@ -96,7 +96,7 @@ def main() -> None:  # noqa: C901 -- linear scenario script
     elapsed = time.monotonic() - start
     assert elapsed < 0.5, (
         f"on_disconnect blocked its caller for {elapsed:.2f}s -- teardown is "
-        f"still inline (issue #40); with a real backend that is up to ~5s of "
+        f"still inline; with a real backend that is up to ~5s of "
         f"frozen UI on the uninstall path"
     )
     print(f"PASS: on_disconnect returned in {elapsed*1000:.0f}ms with slow closes pending")

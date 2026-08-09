@@ -256,10 +256,10 @@ def check_mutation_proof() -> int:
         prober.join(timeout=5)
 
         if not reentered:
-            print("FAIL(d): the pre-#179 on_update did NOT re-enter on_ready -- leg (a) proves nothing")
+            print("FAIL(d): the pre-fix on_update did NOT re-enter on_ready -- leg (a) proves nothing")
             return 1
         if concurrent_max < 2:
-            print("FAIL(d): the pre-#179 on_update did NOT run on_ready concurrently -- leg (a) proves nothing")
+            print("FAIL(d): the pre-fix on_update did NOT run on_ready concurrently -- leg (a) proves nothing")
             return 1
 
         print("PASS: restoring the pre-fix on_update flips leg (a) -- the guard is load-bearing")

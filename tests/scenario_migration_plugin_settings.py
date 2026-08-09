@@ -76,7 +76,7 @@ def check_settings_survive_fresh_migration() -> None:
 
     assert os.path.exists(_new_settings_path()), (
         "plugin settings were NOT written to the new location -- with the old "
-        "file removed below, they would be permanently lost (gl#30)"
+        "file removed below, they would be permanently lost"
     )
     assert _read_json(_new_settings_path()) == old_settings, (
         "migrated settings content differs from the original"
@@ -99,7 +99,7 @@ def check_existing_settings_not_clobbered() -> None:
 
     assert _read_json(_new_settings_path()) == current_settings, (
         "current settings at the new path were clobbered with the stale "
-        "pre-beta.5 copy (gl#30)"
+        "pre-beta.5 copy"
     )
     assert not os.path.exists(_old_settings_path()), (
         "stale old settings file should still be cleaned up"

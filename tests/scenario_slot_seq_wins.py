@@ -100,7 +100,7 @@ def _run_rounds(media_player, submit_fn, read_slot_seq, label: str) -> int:
         if slot_seq != max(recorded):
             print(f"FAIL({label}): round {rnd} slot holds seq {slot_seq}, but "
                   f"seq {max(recorded)} was allocated this round -- an older "
-                  f"frame overwrote a newer one (last-assigner-wins, #130)")
+                  f"frame overwrote a newer one (last-assigner-wins)")
             return 1
     return 0
 
@@ -159,7 +159,7 @@ def check_key_slot() -> int:
 def main() -> None:
     start_watchdog(WATCHDOG_SECONDS, label="scenario_slot_seq_wins")
     failures = check_touchscreen_slot() + check_key_slot()
-    assert failures == 0, f"{failures} slot-seq check(s) failed (issue #130)"
+    assert failures == 0, f"{failures} slot-seq check(s) failed"
     print("PASS: scenario_slot_seq_wins")
 
 

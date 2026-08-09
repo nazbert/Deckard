@@ -461,7 +461,7 @@ def check_quit_drains_the_store_cache_index() -> None:
         "drain of the deferred index in the real app (os._exit(0) skips the "
         "atexit hook, the debounce timer is a daemon), so without it every "
         "quit inside the debounce window loses the last browse's last-use "
-        "clock renewals (issue #180)"
+        "clock renewals"
     )
     assert probe.flushes == [True], (
         f"the index flush must run AFTER timer_wheel.schedule(6, force_quit) "

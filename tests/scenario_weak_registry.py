@@ -212,7 +212,7 @@ def check_prune_logs_debug():
 
         assert registry.snapshot() == []
         prune_lines = [r for r in records if "pruning dead callback" in r]
-        assert prune_lines, "snapshot() pruned a dead entry without logging it (issue #38)"
+        assert prune_lines, "snapshot() pruned a dead entry without logging it"
         assert any("_Owner.method" in line for line in prune_lines), (
             f"prune log does not name the dropped callback: {prune_lines!r}"
         )

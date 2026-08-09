@@ -151,7 +151,7 @@ def main() -> None:
         deck.fire_key_event(0, False)
         assert fixtures.wait_until(lambda: UP in run_action.received), (
             "UP was not delivered to the DOWN-time actions: the page flip "
-            "redirected the gesture tail to the new page (issue #107) -- "
+            "redirected the gesture tail to the new page -- "
             f"run_action saw {run_action.received}"
         )
         assert SHORT_UP in run_action.received, \
@@ -174,7 +174,7 @@ def main() -> None:
             "second DOWN never reached the RunCommand-alike"
         assert run_action.run_count == 2, (
             "the command did not run on the second press -- the latch from "
-            "press 1 was never cleared (upstream #475's 'fires only once')"
+            "press 1 was never cleared (the classic 'fires only once' latch)"
         )
         assert fixtures.wait_until(lambda: controller.active_page is page_b)
         deck.fire_key_event(0, False)

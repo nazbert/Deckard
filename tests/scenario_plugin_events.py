@@ -78,7 +78,7 @@ def check_raising_sync_observer_logs_traceback():
     assert "test::SyncEvent" in text, text
     assert "RuntimeError" in text, f"exception type missing from log: {text!r}"
     assert "sync-boom-marker" in text, f"exception message missing from log: {text!r}"
-    assert "Traceback" in text, f"no traceback in log -- #33 regressed: {text!r}"
+    assert "Traceback" in text, f"no traceback in log -- observer exceptions must log one: {text!r}"
 
 
 def check_raising_async_observer_logs_traceback():
@@ -97,7 +97,7 @@ def check_raising_async_observer_logs_traceback():
     assert "exploding_coroutine_observer" in text, text
     assert "ValueError" in text, f"exception type missing from log: {text!r}"
     assert "async-boom-marker" in text, f"exception message missing from log: {text!r}"
-    assert "Traceback" in text, f"no traceback in log -- #33 regressed: {text!r}"
+    assert "Traceback" in text, f"no traceback in log -- observer exceptions must log one: {text!r}"
 
 
 def check_raising_observer_does_not_stop_batch():

@@ -101,7 +101,7 @@ def check_timeout_cancels_idle() -> None:
     _pump(0.3)
     assert runs == [], (
         f"cancelled idle still executed func ({len(runs)} run(s)) after the "
-        f"caller timed out -- issue #39's double-execution window"
+        f"caller timed out -- the double-execution window"
     )
     print("PASS: timed-out call is cancelled; resuming the loop runs it zero times")
 
@@ -124,7 +124,7 @@ def check_timeout_then_retry_runs_once() -> None:
     _pump_until_dead(worker)
     assert box.get("result") == "built", f"retry did not return the result: {box!r}"
     assert len(runs) == 1, (
-        f"func executed {len(runs)} times across timeout+retry -- pre-#39 this "
+        f"func executed {len(runs)} times across timeout+retry -- pre-fix this "
         f"was 2 (the abandoned idle plus the retry)"
     )
     print("PASS: timeout followed by retry executes func exactly once")

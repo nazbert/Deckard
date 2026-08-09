@@ -63,7 +63,7 @@ def main() -> None:
                     offenders.append((rel_path, lineno, line.rstrip()))
 
     assert not offenders, (
-        f"{MODULE}-python usage found (the dep swap of #168-#172/#175 "
+        f"{MODULE}-python usage found (the dep swap "
         f"removed it; use Gio or dasbus instead):\n"
         + "\n".join(f"  {p}:{n}: {text}" for p, n, text in offenders)
     )

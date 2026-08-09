@@ -59,10 +59,10 @@ def main() -> None:
 
     detector = select_with_env("ubuntu:GNOME")
     assert isinstance(detector, GnomeLockScreenDetector), (
-        f"ubuntu:GNOME must still select the Gnome detector (#55), "
+        f"ubuntu:GNOME must still select the Gnome detector, "
         f"got {type(detector).__name__}"
     )
-    print("PASS: ubuntu:GNOME still selects the Gnome detector (#55 guard)")
+    print("PASS: ubuntu:GNOME still selects the Gnome detector (regression guard)")
 
     detector = select_with_env(None)
     assert isinstance(detector, LogindLockScreenDetector), (

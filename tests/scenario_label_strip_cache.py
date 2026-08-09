@@ -372,7 +372,7 @@ def check_draw_count_contract() -> None:
     assert steady_rasters == 0, (
         f"{steady_rasters} label rasterizations across {steady_labelings} "
         f"composites of unchanged static labels -- draw.text is back in the "
-        f"per-frame path (#207)")
+        f"per-frame path")
     print(f"PASS: {steady_labelings} steady-state label composites in 3s cost "
           f"{steady_rasters} rasterizations ({warm_rasters} during warm-up)")
 

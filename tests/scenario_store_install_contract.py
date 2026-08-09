@@ -100,7 +100,7 @@ def test_update_all_plugins_counts_only_successes_and_never_predeletes() -> None
     assert n == 1, f"only the ONE successful update may be counted, got {n!r}"
     assert uninstalled == [], (
         "update_all_plugins must never deregister a plugin itself -- "
-        "install_plugin deregisters only after a good download (gl#82), "
+        "install_plugin deregisters only after a good download, "
         f"got {uninstalled}"
     )
     assert not hasattr(sb, "reload_installed_plugins"), (

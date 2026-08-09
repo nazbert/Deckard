@@ -1037,7 +1037,7 @@ class Page:
 
     def set_media_path(self, identifier: InputIdentifier, state: int, path: str, update: bool = True) -> None:
         for key_state in self.get_controller_input_states(identifier, state):
-            key_state.layout_manager.page_layout.path = path  # type: ignore[attr-defined]  # cross-MR: ImageLayout (Subclasses/KeyLayout.py) declares no `path` field; nothing reads this write (owner: MR 5)
+            key_state.layout_manager.page_layout.path = path  # type: ignore[attr-defined]  # ImageLayout (Subclasses/KeyLayout.py) declares no `path` field; nothing reads this write
 
         self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "media", "path"], path)
 

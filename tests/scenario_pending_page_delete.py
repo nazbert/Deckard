@@ -61,7 +61,7 @@ def main() -> None:
         assert not os.path.exists(b_path), "remove_page must delete the file"
         assert controller._screensaver_pending_page is None, (
             "deleting a controller's pending page left the request dangling "
-            "at a deleted file (issue #129) -- hide() would load a page whose "
+            "at a deleted file -- hide() would load a page whose "
             "json is gone and the first save would resurrect it"
         )
         cached = gl.page_manager.pages.get(controller, {})

@@ -55,7 +55,7 @@ def main() -> None:
         # compose this key as pressed.
         assert key.press_state is False, (
             "press_state survived load_page -- the new page's key renders "
-            "shrunk/'pressed' (issue #103)"
+            "shrunk/'pressed'"
         )
         assert key.is_pressed() is False
         # The physical gesture itself must NOT be cancelled by the reset:
