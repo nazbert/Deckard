@@ -70,6 +70,7 @@ follows the same stdlib+loguru-only contract, and install_exception_hooks()
 installs its scrubbing patcher (issue #105) so these hooks can never route
 an unredacted traceback into the sinks.
 """
+import atexit
 import faulthandler
 import fcntl
 import os
@@ -119,9 +120,9 @@ _fault_file = None
 # counted and reported as a summary riding on the NEXT record from that same
 # site. Deliberately per-SITE, never global: a storm on one signal handler
 # must never mask a different, one-shot failure somewhere else. A count that
-# will never get a next record -- its entry evicted by the prune -- is
-# flushed at that moment instead (_emit_pending), never dropped: the guard
-# may make a flood quiet, never invisible.
+# will never get a next record is flushed instead of dropped -- when its
+# entry is evicted by the prune, when the process exits (atexit), or onto the
+# terminal record itself: the guard may make a flood quiet, never invisible.
 RATE_LIMIT_WINDOW_S = 5.0  # module-level so scenarios can shrink the window
 _RATE_LIMIT_MAX_KEYS = 256
 # _log_exc runs on whatever thread failed: any worker (threading.excepthook),
@@ -222,6 +223,50 @@ def _prune_locked(now: float) -> list[tuple[tuple, int]]:
     return dropped
 
 
+def _flush_pending_counts() -> None:
+    """atexit: report every count still waiting for a next record to ride on.
+
+    Without this, a storm that simply STOPS -- the handler was disconnected,
+    the page changed, the process is quitting mid-window -- takes its last
+    window's failures to the grave, which is the one outcome this guard must
+    never produce. atexit needs no thread of its own: it runs on the thread
+    already shutting the interpreter down.
+
+    The lock is taken with a bounded wait and skipped on failure: process exit
+    must never hang on a wedged holder. Same reasoning as the non-blocking
+    flock in _scrub_fault_log -- a diagnostic must not be able to stop a
+    shutdown."""
+    if not _rate_state:
+        return
+    if not _rate_lock.acquire(timeout=2.0):
+        return
+    try:
+        pending = [(key, entry[1]) for key, entry in list(_rate_state.items()) if entry[1]]
+        _rate_state.clear()
+    finally:
+        _rate_lock.release()
+    for key, count in pending:
+        _emit_pending(key, count, "process exiting")
+
+
+atexit.register(_flush_pending_counts)
+
+
+def _rate_limit_bypass(key: tuple) -> int:
+    """Take (and clear) a site's pending count WITHOUT throttling it.
+
+    The terminal path's entry point: that record is the last one this site
+    will ever get, so anything its window swallowed has to ride along on it
+    instead of waiting for a next record that is not coming."""
+    with _rate_lock:
+        entry = _rate_state.get(key)
+        if entry is None:
+            return 0
+        pending, entry[1] = entry[1], 0
+        entry[2] = time.monotonic()
+        return pending
+
+
 def _rate_limit(key: tuple) -> tuple[bool, int]:
     """(suppress this occurrence?, failures suppressed since the last record).
 
@@ -274,15 +319,48 @@ def _announce_disabled() -> None:
         pass
 
 
-def _log_exc(kind: str, exc_type, exc_value, exc_tb, extra: str = "") -> None:
+def _is_terminal(exc_tb) -> bool:
+    """True when sys.excepthook was called by the interpreter for an exception
+    that unwound the whole program, rather than by PyGObject's PyErr_Print for
+    a GLib/GTK callback.
+
+    The distinction is load-bearing: in THIS app sys.excepthook is not
+    primarily a terminal path. PyGObject routes every uncaught callback
+    exception through it (see the module docstring), which is the 20-30Hz
+    storm vector issue #91 exists for -- so exempting the whole surface from
+    the rate limit would reopen exactly that vector. Exempting only the
+    terminal SHAPE gives the guarantee that matters (a fatal exception is
+    never swallowed by a window some hot handler opened) at no such cost.
+
+    Shape test: a terminal exception has unwound through the entry script's
+    module frame, so the OUTERMOST traceback frame is <module> in __main__. A
+    callback invoked from C has its own function frame there instead,
+    whatever module defined it."""
+    frame = getattr(exc_tb, "tb_frame", None)
+    if frame is None:
+        return False
+    try:
+        return (
+            frame.f_code.co_name == "<module>"
+            and frame.f_globals.get("__name__") == "__main__"
+        )
+    except Exception:
+        return False
+
+
+def _log_exc(kind: str, exc_type, exc_value, exc_tb, extra: str = "",
+             rate_limit: bool = True) -> None:
     # Rate limiting sits HERE rather than in the individual hooks, so all four
     # #80 surfaces inherit it (issue #91). Any failure inside the guard falls
     # through to logging: it may drop repeats, never an original.
     try:
         key, label = _exc_site(exc_type, exc_value, exc_tb)
-        suppress, suppressed = _rate_limit(key)
-        if suppress:
-            return
+        if rate_limit:
+            suppress, suppressed = _rate_limit(key)
+            if suppress:
+                return
+        else:
+            suppressed = _rate_limit_bypass(key)
         if suppressed:
             # "since the last record", not "in the last 5s": the gap between
             # two records from one site is unbounded (a site that goes quiet
@@ -316,7 +394,12 @@ def _sys_hook(exc_type, exc_value, exc_tb) -> None:
         # Stock quiet Ctrl-C: delegate to whatever hook was installed before us.
         _prev_sys_hook(exc_type, exc_value, exc_tb)
         return
-    _log_exc("main", exc_type, exc_value, exc_tb)
+    # A terminal exception is never rate-limited -- it cannot flood (the
+    # process is on its way out) and it is the one record nobody can afford
+    # to lose to a window a hot callback opened. Callback-shaped invocations
+    # of this same hook stay throttled; see _is_terminal.
+    _log_exc("main", exc_type, exc_value, exc_tb,
+             rate_limit=not _is_terminal(exc_tb))
 
 
 def _thread_hook(args) -> None:

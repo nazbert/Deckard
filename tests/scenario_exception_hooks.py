@@ -27,8 +27,11 @@ why run_all.py's per-scenario interpreter matters):
      distinct sites never mask each other; non-repeating failures are
      untouched (no throttling, no summary noise); the state dict stays
      bounded under a broad storm, suppression SURVIVES past that bound
-     (eviction by last hit, not by window start), and a pending count whose
-     entry is evicted is reported rather than discarded.
+     (eviction by last hit, not by window start), a pending count whose entry
+     is evicted is reported rather than discarded, and the TERMINAL shape of
+     sys.excepthook bypasses suppression while its callback shape does not;
+ 10. atexit flush (issue #91) -- a storm that stops still reports its last
+     window's count, in a child process that exits after storming.
 
 Out of harness scope (manual QA): the real PyGObject-callback -> excepthook
 path under a live GTK loop, and the config_logger()/main() ordering.
@@ -415,9 +418,79 @@ def main() -> None:
             f"an evicted pending count must be reported, got: {joined()[-400:]!r}"
         )
         log_hooks.RATE_LIMIT_WINDOW_S = original_window
+
+        # 9g. the TERMINAL shape of sys.excepthook is never throttled: a fatal
+        # exception must not die inside a window some hot callback opened. The
+        # callback shape of the SAME hook (and the same site) stays throttled,
+        # because PyGObject routes every uncaught GTK/GLib callback exception
+        # through sys.excepthook -- exempting the whole surface would reopen
+        # the 20-30Hz storm vector this guard exists for.
+        log_hooks._rate_state.clear()
+        records.clear()
+
+        def shared_raise() -> None:
+            raise SystemError("boom-shared")  # one site, reached two ways
+
+        for _ in range(4):  # callback shape: outermost frame is main()
+            try:
+                shared_raise()
+            except SystemError:
+                sys.excepthook(*sys.exc_info())
+        assert sum("boom-shared" in r for r in records) == 1, (
+            "the callback shape must stay rate-limited"
+        )
+
+        # <module>-framed code in a __main__ namespace is the shape the
+        # interpreter hands to excepthook when an exception unwinds the
+        # program.
+        terminal_ns = {"__name__": "__main__", "sys": sys, "shared_raise": shared_raise}
+        terminal_code = compile(
+            "try:\n"
+            "    shared_raise()\n"
+            "except SystemError:\n"
+            "    sys.excepthook(*sys.exc_info())\n",
+            "fake_main.py", "exec",
+        )
+        for _ in range(3):
+            exec(terminal_code, terminal_ns)
+        assert sum("boom-shared" in r for r in records) == 4, (
+            f"every terminal invocation must be logged, got "
+            f"{sum('boom-shared' in r for r in records)} records"
+        )
+        assert "3 further failures at" in joined(), (
+            "the terminal record must carry what the window swallowed -- "
+            "there is no next record to carry it"
+        )
     finally:
         log_hooks.RATE_LIMIT_WINDOW_S = original_window
         log_hooks._rate_state.clear()
+
+    # 10. a storm that simply STOPS must not take its last window's failures
+    # to the grave: atexit flushes every pending count. Needs a child process
+    # -- the flush fires at interpreter shutdown, and loguru's default sink
+    # puts it on stderr.
+    atexit_code = (
+        "import sys, threading\n"
+        f"sys.path.insert(0, {REPO_ROOT!r})\n"
+        "from src.backend import log_hooks\n"
+        "log_hooks.install_exception_hooks()\n"
+        "def boom():\n"
+        "    raise ValueError('boom-atexit')\n"
+        "for _ in range(5):\n"
+        "    t = threading.Thread(target=boom, name='atexit-storm')\n"
+        "    t.start(); t.join()\n"
+        "print('storm-done')\n"
+    )
+    at_exit = subprocess.run(
+        [sys.executable, "-c", atexit_code],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert at_exit.returncode == 0, f"atexit child failed: {at_exit.stderr}"
+    assert "storm-done" in at_exit.stdout
+    assert "4 further failures at" in at_exit.stderr, (
+        f"the trailing count must be flushed at exit, got: {at_exit.stderr[-400:]!r}"
+    )
+    assert "process exiting" in at_exit.stderr
 
     print("PASS: scenario_exception_hooks")
 
