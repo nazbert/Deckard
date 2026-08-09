@@ -1,7 +1,8 @@
 from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
 
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from GtkHelper.GtkHelper import better_disconnect, on_main
 
@@ -39,7 +40,7 @@ class ScaleRow(GenerativeUI[float]):
                  round_digits: bool = True,
                  add_text_entry: bool = False,
                  text_entry_max_length: int = 6,
-                 on_change: callable = None,
+                 on_change: Callable[..., Any] | None = None,
                  can_reset: bool = True,
                  auto_add: bool = True,
                  complex_var_name: bool = False

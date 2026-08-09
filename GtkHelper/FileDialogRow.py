@@ -35,7 +35,7 @@ class FileDialogRow(Adw.ActionRow):
                  filters: list[FileDialogFilter] = None,
                  file_change_callback: Callable[[Gio.File], None] = None
                  ):
-        super().__init__(title=title, subtitle=subtitle)
+        super().__init__(title=title, subtitle=subtitle)  # type: ignore[arg-type]  # gi stub: Adw string props accept None (PyGObject maps it to NULL, i.e. empty string)
 
         self._dialog_title = dialog_title
         self._initial_path = initial_path
@@ -44,7 +44,7 @@ class FileDialogRow(Adw.ActionRow):
         self._filters = filters or []
         self._callback = file_change_callback
 
-        self.selected_file: Gio.File = None
+        self.selected_file: Gio.File | None = None
 
         self.open_dialog_button = Gtk.Button(icon_name="folder-symbolic", valign=Gtk.Align.CENTER)
 

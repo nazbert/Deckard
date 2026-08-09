@@ -1,7 +1,8 @@
 import functools
 import threading
 from abc import ABC, abstractmethod
-from typing import TypeVar, Callable
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 from gi.repository import Gtk
 
@@ -31,18 +32,23 @@ class GenerativeUI[T](ABC):
     _action_core: "ActionCore"
     _var_name: str # name of the key in the actions settings
     _default_value: T # default value of the key
-    on_change: Callable[[Gtk.Widget, T, T], None] # method that gets called when the value changes    _widget: Gtk.Widget # The actual widget of the UI Element
+    # Called when the value changes. First argument is the row widget the
+    # subclass built -- a concrete Adw row type, or None while the widget is
+    # still unbuilt (see _handle_value_changed) -- hence Any, not Gtk.Widget.
+    on_change: Callable[[Any, T, T], None] | None
+    _widget: Gtk.Widget | None # The actual widget of the UI Element; None until built and after destroy()
     _can_reset: bool
     _auto_add: bool
     _complex_var_name: bool
 
     # Classes that have already logged the off-main forced-build deprecation
     # note (see _ensure_built) -- one log line per class, not per instance.
-    _logged_forced_build_classes: set = set()
+    _logged_forced_build_classes: set[str] = set()
 
     def __init__(self, action_core: "ActionCore", var_name: str, default_value: T, can_reset: bool = True,
-                 auto_add: bool = True, complex_var_name: bool = False, on_change: Callable[[Gtk.Widget, T, T], None] = None,
-                 build: Callable[[], None] = None):
+                 auto_add: bool = True, complex_var_name: bool = False,
+                 on_change: Callable[[Any, T, T], None] | None = None,
+                 build: Callable[[], None] | None = None):
         """
         Initializes the UI element. The widget itself is NOT built here --
         construction is deferred to the first `.widget` access (typically
@@ -68,7 +74,7 @@ class GenerativeUI[T](ABC):
         self._can_reset = can_reset
         self._auto_add = auto_add
         self._complex_var_name = complex_var_name
-        self._widget: Gtk.Widget = None
+        self._widget = None
         self._built = False
         self._build_flag_lock = threading.Lock()
         self._build_fn = build
@@ -270,7 +276,9 @@ class GenerativeUI[T](ABC):
         Args:
             value (T): The value to set.
         """
-        settings = self._action_core.get_settings()
+        # Local annotation, not a cast: ActionCore.get_settings is declared
+        # `-> dir` (typo for dict) upstream of this file -- see #223.
+        settings: dict = self._action_core.get_settings()
 
         keys = self.resolve_var_name()
 
@@ -295,11 +303,11 @@ class GenerativeUI[T](ABC):
         Returns:
             T: The retrieved value.
         """
-        settings = self._action_core.get_settings()
+        settings: dict = self._action_core.get_settings()
 
         keys = self.resolve_var_name()
 
-        d = settings
+        d: Any = settings
         for key in keys:
             if not isinstance(d, dict) or key not in d:
                 return fallback if fallback is not None else self._default_value

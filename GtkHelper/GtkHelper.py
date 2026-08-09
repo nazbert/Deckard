@@ -12,6 +12,9 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
+from collections.abc import Callable
+from typing import Any
+
 from typing_extensions import deprecated
 
 # Import gtk modules
@@ -46,7 +49,7 @@ from src.backend.main_loop import (  # noqa: F401  (re-export for plugins)
 
 # Helper Functions
 def get_focused_widgets(start: Gtk.Widget) -> list[Gtk.Widget]:
-    widgets = []
+    widgets: list[Gtk.Widget] = []
     while True:
         child = start.get_focus_child()
         if child is None:
@@ -57,12 +60,13 @@ def get_focused_widgets(start: Gtk.Widget) -> list[Gtk.Widget]:
 def get_deepest_focused_widget(start: Gtk.Widget) -> Gtk.Widget:
     return get_focused_widgets(start)[-1]
 
-def get_deepest_focused_widget_with_attr(start: Gtk.Widget, attr:str) -> Gtk.Widget:
+def get_deepest_focused_widget_with_attr(start: Gtk.Widget, attr:str) -> Gtk.Widget | None:
     for widget in reversed(get_focused_widgets(start)):
         if hasattr(widget, attr):
             return widget
+    return None
 
-def better_disconnect(widget: Gtk.Widget, handler: callable):
+def better_disconnect(widget: Gtk.Widget, handler: Callable[..., Any]):
     try:
         widget.disconnect_by_func(handler)
     except Exception:
@@ -106,17 +110,22 @@ class BetterExpander(Adw.ExpanderRow):
 
         return rows
 
-    def get_list_box(self) -> Gtk.ListBox:
+    def get_list_box(self) -> Gtk.ListBox | None:
         expander_box = self.get_first_child()
         if expander_box is None:
-            return
+            return None
 
         expander_list_box = expander_box.get_first_child()
         if expander_list_box is None:
-            return
+            return None
 
         revealer = expander_list_box.get_next_sibling()
+        if revealer is None:
+            return None
+
         revealer_list_box = revealer.get_first_child()
+        if not isinstance(revealer_list_box, Gtk.ListBox):
+            return None
 
         return revealer_list_box
 
@@ -146,7 +155,10 @@ class BetterExpander(Adw.ExpanderRow):
             self.add_row(child)
 
     def remove_child(self, child:Gtk.Widget) -> None:
-        self.get_list_box().remove(child)
+        list_box = self.get_list_box()
+        if list_box is None:
+            return
+        list_box.remove(child)
 
     def get_index_of_child(self, child):
         for i, action in enumerate(self.actions):
@@ -155,17 +167,29 @@ class BetterExpander(Adw.ExpanderRow):
 
         raise ValueError("Child not found")
 
-    def get_arrow_image(self) -> Gtk.Image:
-        box: Gtk.Box = self.get_child()
-        list_box: Gtk.ListBox = box.get_first_child()
+    def get_arrow_image(self) -> Gtk.Image | None:
+        box = self.get_child()
+        if box is None:
+            return None
 
-        adw_action_row: Adw.ActionRow = list_box.get_first_child()
-        box: Gtk.Box = adw_action_row.get_child()
+        list_box = box.get_first_child()
+        if list_box is None:
+            return None
 
-        box: Gtk.Box = box.get_last_child()
-        image: Gtk.Image = box.get_last_child()
+        adw_action_row = list_box.get_first_child()
+        if not isinstance(adw_action_row, Gtk.ListBoxRow):
+            return None
 
-        return image
+        row_box = adw_action_row.get_child()
+        if row_box is None:
+            return None
+
+        suffix_box = row_box.get_last_child()
+        if suffix_box is None:
+            return None
+
+        image = suffix_box.get_last_child()
+        return image if isinstance(image, Gtk.Image) else None
 
 class BetterPreferencesGroup(Adw.PreferencesGroup):
     def __init__(self, *args, **kwargs):
@@ -343,7 +367,7 @@ class EntryDialog(Gtk.ApplicationWindow):
         self.destroy()
 
 class ErrorPage(Gtk.Box):
-    def __init__(self, reload_func: callable = None,
+    def __init__(self, reload_func: Callable[..., Any] | None = None,
                  error_text:str = "Error",
                  reload_args = None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL,

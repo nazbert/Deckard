@@ -58,7 +58,7 @@ class ToggleRow(Adw.ActionRow):
 
     def add_toggle(self, label = None, tooltip: str = None, icon_name: str = None, name: str = None, enabled: bool = True):
         self.toggle_group.add(
-            Adw.Toggle(label=label, tooltip=tooltip, icon_name=icon_name, name=name, enabled=enabled)
+            Adw.Toggle(label=label, tooltip=tooltip, icon_name=icon_name, name=name, enabled=enabled)  # type: ignore[arg-type]  # gi stub: Adw string props accept None (PyGObject maps it to NULL)
         )
 
     def add_toggles(self, toggles: list[Adw.Toggle]):
@@ -82,6 +82,10 @@ class ToggleRow(Adw.ActionRow):
 
     def remove_with_name(self, name: str):
         toggle = self.toggle_group.get_toggle_by_name(name)
+        if toggle is None:
+            # get_toggle_by_name returns NULL for an unknown name, and
+            # ToggleGroup.remove rejects None ("does not allow None as a value").
+            return
         self.toggle_group.remove(toggle)
 
     def remove_all(self):

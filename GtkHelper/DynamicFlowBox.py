@@ -20,6 +20,9 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk
 
 # Import python modules
+from collections.abc import Callable
+from typing import Any
+
 from loguru import logger as log
 from functools import cmp_to_key
 
@@ -35,9 +38,9 @@ class DynamicFlowBox(Gtk.Box):
         self.filtered_items: list = []
         self.sorted_items: list = []
 
-        self.factory:callable = None
-        self.filter:callable = None
-        self.sort:callable = None
+        self.factory: Callable[[Any], Gtk.Widget | None] | None = None
+        self.filter: Callable[[Any], bool] | None = None
+        self.sort: Callable[[Any, Any], int] | None = None
         
         self.build()
 
@@ -101,11 +104,12 @@ class DynamicFlowBox(Gtk.Box):
                 continue
             self.flow_box.append(widget)
 
-    def get_item_widget(self, item) -> Gtk.Widget:
+    def get_item_widget(self, item) -> Gtk.Widget | None:
         if callable(self.factory):
             return self.factory(item)
-        
-    def set_factory(self, factory: callable):
+        return None
+
+    def set_factory(self, factory: Callable[[Any], Gtk.Widget | None]):
         if not callable(factory):
             log.warning("Chosen factory is not callable")
             return
@@ -145,14 +149,14 @@ class DynamicFlowBox(Gtk.Box):
         self.sorted_items = sorted(self.filtered_items, key=cmp_to_key(self.sort))
         self.load_items()
 
-    def set_filter_func(self, filter: callable) -> None:
+    def set_filter_func(self, filter: Callable[[Any], bool]) -> None:
         if not callable(filter):
             log.warning("Chosen filter is not callable")
             return
         self.filter = filter
         self.invalidate_filter()
 
-    def set_sort_func(self, sort: callable) -> None:
+    def set_sort_func(self, sort: Callable[[Any, Any], int]) -> None:
         if not callable(sort):
             log.warning("Chosen sort function is not callable")
             return

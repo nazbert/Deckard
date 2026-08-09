@@ -2,17 +2,21 @@ from GtkHelper.ComboRow import ComboRow as Combo, BaseComboRowItem
 from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
 
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from src.backend.PluginManager.ActionCore import ActionCore
 
 from GtkHelper.GtkHelper import better_disconnect, on_main
 
 
-class ComboRow(GenerativeUI[BaseComboRowItem]):
+class ComboRow(GenerativeUI[BaseComboRowItem | str | None]):
     """
     A UI element representing a combo box (drop-down menu) with selectable items,
-    linked to an `ActionCore` instance.
+    linked to an `ActionCore` instance. Values cross this class as either a
+    `BaseComboRowItem` (what the widget deals in), the plain `str` the value
+    layer persists, or None when nothing is selected -- hence the union type
+    parameter.
 
     Attributes:
         _widget (Combo): The ComboRow widget instance.
@@ -26,7 +30,7 @@ class ComboRow(GenerativeUI[BaseComboRowItem]):
                  title: str = None,
                  subtitle: str = None,
                  enable_search: bool = False,
-                 on_change: callable = None,
+                 on_change: Callable[..., Any] | None = None,
                  can_reset: bool = True,
                  auto_add: bool = True,
                  complex_var_name: bool = False
@@ -78,7 +82,7 @@ class ComboRow(GenerativeUI[BaseComboRowItem]):
         item = combo_row.get_selected_item()
         self._handle_value_changed(item)
 
-    def _handle_value_changed(self, item: BaseComboRowItem, update_settings: bool = True, trigger_callback: bool = True):
+    def _handle_value_changed(self, item: BaseComboRowItem | str | None, update_settings: bool = True, trigger_callback: bool = True):
         """Handles updating the stored value and triggering the change callback."""
         old_value = self.get_value(self._default_value)
 
@@ -113,11 +117,11 @@ class ComboRow(GenerativeUI[BaseComboRowItem]):
         self._handle_value_changed(selected_item, False)
 
     @GenerativeUI.signal_manager
-    def set_ui_value(self, value: BaseComboRowItem | str):
+    def set_ui_value(self, value: BaseComboRowItem | str | None):
         """Sets the selected item in the UI."""
         self.widget.set_selected_item(value)
 
-    def set_value(self, item: BaseComboRowItem | str):
+    def set_value(self, item: BaseComboRowItem | str | None):
         """Sets the selected item in the UI."""
 
         if isinstance(item, BaseComboRowItem):
@@ -167,11 +171,11 @@ class ComboRow(GenerativeUI[BaseComboRowItem]):
         """Clears all items from the combo box."""
         self.widget.remove_all_items()
 
-    def get_item_at(self, index: int) -> BaseComboRowItem:
+    def get_item_at(self, index: int) -> BaseComboRowItem | None:
         """Retrieves an item at a specific index."""
         return self.widget.get_item_at(index)
 
-    def get_item(self, name: str) -> BaseComboRowItem:
+    def get_item(self, name: BaseComboRowItem | str | None) -> BaseComboRowItem | None:
         """Retrieves an item by its name."""
         return self.widget.get_item(name)
 

@@ -3,7 +3,8 @@ from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
 import base64
 from gi.repository import Adw
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from GtkHelper.GtkHelper import better_disconnect
 
@@ -26,7 +27,7 @@ class PasswordEntryRow(GenerativeUI[str]):
                  var_name: str,
                  default_value: str,
                  title: str = None,
-                 on_change: callable = None,
+                 on_change: Callable[..., Any] | None = None,
                  can_reset: bool = True,
                  auto_add: bool = True,
                  complex_var_name: bool = False
@@ -134,7 +135,9 @@ class PasswordEntryRow(GenerativeUI[str]):
         Args:
             new_value (str): The new password to store, encoded in base64.
         """
-        settings = self._action_core.get_settings()
+        # Local annotation, not a cast: ActionCore.get_settings is declared
+        # `-> dir` (typo for dict) upstream of this file -- see #223.
+        settings: dict = self._action_core.get_settings()
 
         encoded = base64.b64encode(new_value.encode("utf-8")).decode("utf-8")
         settings[self._var_name] = encoded

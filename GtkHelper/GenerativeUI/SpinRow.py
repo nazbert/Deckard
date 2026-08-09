@@ -2,7 +2,8 @@ from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
 
 from gi.repository import Gtk, Adw
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from GtkHelper.GtkHelper import better_disconnect, on_main
 
@@ -34,7 +35,7 @@ class SpinRow(GenerativeUI[float]):
                  subtitle: str = None,
                  step: float = 0.1,
                  digits: int = 2,
-                 on_change: callable = None,
+                 on_change: Callable[..., Any] | None = None,
                  can_reset: bool = True,
                  auto_add: bool = True,
                  complex_var_name: bool = False
