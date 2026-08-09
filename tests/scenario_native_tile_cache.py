@@ -24,6 +24,7 @@ import fixtures  # noqa: F401  (isolated data dir + sys.path, house convention)
 
 import hashlib
 import os
+import threading
 import time
 
 import src.backend.DeckManagement.DeckController as deck_controller_module
@@ -248,7 +249,21 @@ def _settle(controller) -> None:
         lambda: not controller.media_player.tasks and not controller.media_player.image_tasks,
         timeout=15), \
         "fixture sanity: the media player never drained its page-load tasks"
-    time.sleep(0.5)
+
+    # Empty queues mean DEQUEUED, not done: perform_media_player_tasks pops
+    # the whole batch and only then runs it, so load_all_inputs can still be
+    # executing while `tasks` reads empty. Wait for a marker instead. It is
+    # submitted through the same path, and tasks run in order within a batch
+    # and across batches, so the marker having RUN means everything queued
+    # ahead of it has finished -- a real completion signal rather than a
+    # sleep long enough to usually cover one (which is exactly the
+    # loaded-runner assumption #202 is about).
+    ran = threading.Event()
+    controller.media_player.add_task(ran.set)
+    assert ran.wait(timeout=15), (
+        "fixture sanity: the media player never ran the settle marker -- the "
+        "page-load tasks queued ahead of it have not completed"
+    )
 
 
 def _start_video(controller, path: str) -> "BackgroundVideo":
