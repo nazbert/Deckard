@@ -349,18 +349,6 @@ class App(Adw.Application):
 
         gl.threads_running = False
 
-        # Drain the store cache's deferred index writes (issue #180). This
-        # process ends in os._exit(0), which skips StoreCache's atexit hook,
-        # and the flush timer is a daemon -- without this call the last
-        # browse's last-use clock renewals are lost on every quit. Guarded:
-        # gl.store_backend is None until the store is first constructed, and
-        # a failure here must never abort teardown.
-        try:
-            if gl.store_backend is not None:
-                gl.store_backend.store_cache.flush_index()
-        except Exception as e:
-            log.warning(f"Could not flush the store cache index during shutdown: {e}")
-
         # Stop a pending boot re-enumeration (issue #106) before close_all()
         # below: the stop event wakes a rescan parked in backoff immediately,
         # and the bounded join covers an in-flight enumeration -- so the
@@ -371,6 +359,23 @@ class App(Adw.Application):
 
         # Force quit if normal quit is not possible
         timer_wheel.schedule(6, self.force_quit, name="force_quit_timer")
+
+        # Drain the store cache's deferred index writes (issue #180). This
+        # process ends in os._exit(0), which skips StoreCache's atexit hook,
+        # and the flush timer is a daemon -- without this call the last
+        # browse's last-use clock renewals are lost on every quit. Guarded:
+        # gl.store_backend is None until the store is first constructed, and
+        # a failure here must never abort teardown.
+        # Deliberately placed AFTER the watchdog above rather than earlier in
+        # the teardown: the flush is an atomic_write_json, i.e. two fsyncs
+        # with no timeout of their own, so on a wedged filesystem it can block
+        # indefinitely. Behind the watchdog that costs 6s and a force_quit;
+        # ahead of it the quit would hang with nothing armed to end it.
+        try:
+            if gl.store_backend is not None:
+                gl.store_backend.store_cache.flush_index()
+        except Exception as e:
+            log.warning(f"Could not flush the store cache index during shutdown: {e}")
 
         # Detach the async (enqueue=True) log sinks now, before the slow
         # teardown below. Each owns a multiprocessing writer queue whose POSIX

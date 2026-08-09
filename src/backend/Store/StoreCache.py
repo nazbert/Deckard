@@ -159,8 +159,16 @@ class StoreCache:
         look FLUSH_DEBOUNCE_S older against a DAYS_TO_KEEP (3 day) eviction
         bound, and the next read renews it again.
 
-    Entry mutations and the index write both happen under write_lock, so the
-    flush's files.copy() can never run against a half-applied mutation.
+    Entry mutations and the index write both happen under write_lock. The
+    hazard that closes is NOT the top-level files.copy() -- dict.copy() is a
+    single atomic operation -- but what the write does with the result:
+    files.copy() is SHALLOW, so json.dump then iterates the very same per-
+    entry dicts the read/commit paths mutate, and a thread adding "fetched"
+    to an entry mid-dump raises "dictionary changed size during iteration"
+    (and can truncate the index to whatever atomic_write_json had buffered).
+    The one exception is remove_old_cache_files, which pops entries without
+    the lock: it runs only from __init__, before the instance is reachable by
+    any other thread and before a flush timer can exist.
     """
 
     DAYS_TO_KEEP = 3
@@ -217,7 +225,13 @@ class StoreCache:
 
     def set_files(self, files: dict):
         """Persist the index NOW -- the synchronous half of the split
-        documented on the class (content commits + eviction)."""
+        documented on the class (content commits + eviction).
+
+        Passing a FOREIGN dict (anything that is not self.files) is not
+        durable: it lands on disk, but it leaves the deferred renewals marked
+        dirty, so the next flush overwrites the file with the live index. In
+        production every caller passes self.files; the foreign-dict form
+        exists only for tests poking the writer directly."""
         with self.write_lock:
             self._write_index_locked(files)
 
@@ -228,27 +242,44 @@ class StoreCache:
         going to flush, so the dirty flag clears and the armed timer becomes
         a no-op (it is not cancelled: a Timer cancel from an arbitrary
         caller thread buys nothing over a no-op wake-up in <=
-        FLUSH_DEBOUNCE_S). A caller that passes some OTHER dict -- only the
-        harness does -- has not persisted the live index, so the flag
-        stands."""
+        FLUSH_DEBOUNCE_S). The flag is cleared only AFTER the write returns:
+        a raising write (ENOSPC, read-only FS) must leave the index dirty so
+        the next flush -- timer, quit or exit hook -- retries the renewals
+        instead of dropping them. A caller that passes some OTHER dict --
+        only the harness does -- has not persisted the live index, so the
+        flag stands regardless."""
         if files is None:
             files = self.files
+        atomic_write_json(self.files_json, files.copy())
         if files is self.files:
             self._index_dirty = False
-        atomic_write_json(self.files_json, files.copy())
 
     def _mark_index_dirty_locked(self) -> None:
         """Note a deferred read-clock change and arm the trailing flush.
-        Caller must hold write_lock (which the flush also takes, so the
-        snapshot it writes can never catch a half-applied mutation)."""
+        Caller must hold write_lock (which the flush also takes, so json.dump
+        can never iterate an entry dict while it is being mutated)."""
         self._index_dirty = True
         if self._flush_timer is not None:
             return  # a flush is already pending; it will pick this up
         timer = threading.Timer(self.FLUSH_DEBOUNCE_S, self.flush_index)
         timer.name = "store-cache-index-flush"
         timer.daemon = True
+        try:
+            timer.start()
+        except Exception as e:
+            # Thread exhaustion (RuntimeError: can't start new thread) must
+            # not park a dead Timer in the slot: that would look like "a
+            # flush is already pending" to every later mark and kill the
+            # debounce for the rest of the process. Leaving _flush_timer None
+            # means the next dirty mark arms again; the dirt is still
+            # recorded, so nothing is lost even if every arm fails -- the
+            # quit path and the atexit hook still drain it.
+            log.warning(f"Could not arm the store cache index flush: {e}")
+            return
+        # Assigned only once the thread is really running. Safe despite the
+        # timer being live: flush_index's body needs write_lock, which this
+        # caller holds until after this assignment.
         self._flush_timer = timer
-        timer.start()
 
     def flush_index(self) -> None:
         """Write out any deferred read-clock renewals now.
