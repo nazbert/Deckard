@@ -3570,6 +3570,34 @@ class KeyGIF(SingleKeyAsset):
 _label_measure_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
 
 
+class _BitmapRecorder:
+    """Captures the bitmap blits ImageDraw.text() would issue, instead of
+    running them.
+
+    ImageDraw.text() is two steps: rasterize the (stroked) glyph run into a
+    coverage mask via FreeType -- expensive -- and blit that mask onto the
+    target with a solid ink -- cheap. A static label re-runs both on every
+    media tick even though only the pixels UNDER it changed. Standing in for
+    the draw core while text() runs records step 2's arguments, so later
+    frames can replay the blit with the mask already rasterized (#207).
+
+    Everything else is delegated to the real core object -- notably
+    draw_ink(), which ImageDraw._getink() calls to resolve the fill colors,
+    so the recorded ink is exactly the one a direct draw would have used."""
+    __slots__ = ("_core", "ops")
+
+    def __init__(self, core):
+        self._core = core
+        self.ops: list[tuple] = []
+
+    def __getattr__(self, name):
+        return getattr(self._core, name)
+
+    def draw_bitmap(self, coord, mask, ink) -> int:
+        self.ops.append((tuple(coord), mask, ink))
+        return 0
+
+
 class LabelManager:
     def __init__(self, controller_input: "ControllerInput"):
         self.controller_input = controller_input
@@ -3589,10 +3617,19 @@ class LabelManager:
         # composite a window of it instead of re-running draw.text
         # (issue #115/#116 -- the per-tick raster was ~2.5ms per key).
         self._scroll_strips: dict[str, tuple] = {}
+        # position -> (cache key, blit ops | None): the STATIC label's glyph
+        # masks, rasterized once and replayed per frame (issue #207 -- the
+        # per-tick draw.text with stroke was ~820us per key, ~50% of the tick
+        # on a populated animated page). None ops = this position is pinned
+        # to the direct draw (see _draw_static_label).
+        self._static_ops: dict[str, tuple] = {}
         # position -> (cache key, (w, h)): textbbox measurement of the
         # composed label; the freetype layout pass is the second-biggest
         # per-frame cost after the raster itself.
         self._bbox_cache: dict[str, tuple] = {}
+        # The merged page+action+defaults labels (None = needs recompute).
+        # See get_composed_labels() for the invalidation contract.
+        self._composed_labels_cache: dict[str, "KeyLabel"] = None
 
         self.init_labels()
         # Rolling-label animation state per position: the current scroll
@@ -3620,18 +3657,22 @@ class LabelManager:
         overflow set and the render composites a stale strip: a shortened
         label keeps scrolling forever and a lengthened one never starts until
         a page reload (#115 through the editor, review round 1). Cheap: the
-        widths/visible flags are recomputed lazily and the strip/bbox dicts
-        are re-keyed on demand."""
+        widths/visible flags are recomputed lazily and the strip/bbox/static
+        dicts are re-keyed on demand."""
         self._scroll_widths_cache = None
         self._has_visible_labels_cache = None
+        self._composed_labels_cache = None
         self._bbox_cache.clear()
         self._scroll_strips.clear()
+        self._static_ops.clear()
 
     def clear_labels(self):
         self.init_labels()
         self._scroll_widths_cache = None
         self._has_visible_labels_cache = None
+        self._composed_labels_cache = None
         self._scroll_strips.clear()
+        self._static_ops.clear()
         self._bbox_cache.clear()
 
     def set_page_label(self, position: str, label: "KeyLabel", update: bool = True):
@@ -3643,6 +3684,8 @@ class LabelManager:
 
         self._scroll_widths_cache = None
         self._has_visible_labels_cache = None
+        self._composed_labels_cache = None
+        self._static_ops.clear()
         if update:
             self.update_label(position)
 
@@ -3667,6 +3710,8 @@ class LabelManager:
 
         self._scroll_widths_cache = None
         self._has_visible_labels_cache = None
+        self._composed_labels_cache = None
+        self._static_ops.clear()
         self.update_label_editor()
         if update:
             self.update_label(position)
@@ -3738,10 +3783,32 @@ class LabelManager:
         return self.fix_invalid(injected)
     
     def get_composed_labels(self) -> dict[str, "KeyLabel"]:
-        composed_labels = {}
-        for position in ["top", "center", "bottom"]:
-            composed_labels[position] = self.get_composed_label(position)
-        return composed_labels
+        """The merged page+action+defaults labels for all three positions,
+        memoized.
+
+        The merge itself is not free: three KeyLabel copies plus
+        inject_defaults' nine settings reads measured ~60us per key per media
+        tick, paid on every frame of an animated background even though the
+        labels only change when something sets one (#207).
+
+        Invalidation: every label mutation goes through set_page_label /
+        set_action_label / clear_labels, or -- for the in-place editor path --
+        Page.set_label_*, which calls invalidate_scroll_caches(); all of them
+        drop this memo. A change to the app-wide FONT DEFAULTS is not a label
+        mutation, but the Settings font rows spawn a full page reload (#78)
+        which rebuilds these managers, so it needs no separate channel; that
+        is the same lifecycle assumption get_scroll_label_widths() documents
+        for the rolling-labels toggle.
+
+        The returned KeyLabels are SHARED, so treat them as read-only.
+        get_composed_label() still returns a fresh object per call for
+        callers that want to mutate one (e.g. the label editor)."""
+        if self._composed_labels_cache is None:
+            self._composed_labels_cache = {
+                position: self.get_composed_label(position)
+                for position in ("top", "center", "bottom")
+            }
+        return self._composed_labels_cache
 
     
     def inject_defaults(self, label: "KeyLabel"):
@@ -3976,8 +4043,114 @@ class LabelManager:
         else:
             image.paste(window, (px + crop_left, py + crop_top), window)
 
+    def _draw_static_label(self, image: Image.Image, draw: ImageDraw.ImageDraw,
+                           position: str, label: "KeyLabel", w: int, h: int,
+                           x_position: float, y_position: float, anchor: str) -> None:
+        """Draws a non-scrolling label by replaying its cached glyph blits.
+
+        A static label's pixels are a pure function of (text, font, colors,
+        outline, alignment, image geometry) -- none of which change between
+        media ticks -- yet draw.text() re-rasterized the stroked glyph run
+        every frame: ~820us per key, ~50% of the whole tick on a populated
+        page over an animated background (#207). The rasterization is
+        recorded ONCE here (via _BitmapRecorder standing in for the draw
+        core) and later frames replay only the mask blits, ~11us.
+
+        Pixel-exact by construction, not by approximation: the replay issues
+        the identical C blits, with the identical masks, inks and absolute
+        coordinates that draw.text() itself would have issued, in the same
+        order. That is why this path -- unlike the scroll strip, whose
+        straight-alpha OVER only matches for opaque ink -- needs no
+        semi-transparent-ink carve-out. (A precomposed RGBA strip cannot be
+        exact here: where a partially covered stroke pixel is overdrawn by a
+        partially covered fill pixel, the strip has to collapse two coverage
+        blends into one straight-alpha value, which measured up to 19/255 off
+        a direct draw.)
+
+        Falls back to the direct draw -- today's behavior, no cache retained
+        -- for non-RGB(A) targets (the recorded ink is mode-derived), for
+        pathological labels past the strip-width cap, and if PIL's text()
+        internals ever stop routing through draw_bitmap."""
+        if image.mode not in ("RGB", "RGBA") or \
+                int(w) + 2 * (label.outline_width + 6) + 1 > self._MAX_STRIP_WIDTH:
+            self._static_ops.pop(position, None)
+            draw.text((x_position, y_position), text=label.text, font=label.get_font(),
+                      anchor=anchor, align=label.alignment, fill=tuple(label.color),
+                      stroke_width=label.outline_width,
+                      stroke_fill=tuple(label.outline_color))
+            return
+
+        font = label.get_font()
+        # The geometry (x/y/anchor) is derived from the image size and the
+        # measured text, but keying on it directly means a resized deck image
+        # or a re-measured label can never replay blits at stale coordinates.
+        key = (label.text, getattr(font, "path", None), label.font_size,
+               tuple(label.color), label.outline_width, tuple(label.outline_color),
+               label.alignment, anchor, x_position, y_position,
+               image.size, image.mode, w, h)
+        cached = self._static_ops.get(position)
+        if cached is None or cached[0] != key:
+            cached = (key, self._record_label_blits(
+                image, label, font, (x_position, y_position), anchor))
+            self._static_ops[position] = cached
+            if media_prof:
+                media_prof.count("label_ops_miss")
+        elif media_prof:
+            media_prof.count("label_ops_hit")
+
+        ops = cached[1]
+        if ops is None:
+            # Recording is not available for this label (see above): keep
+            # drawing it the old way, without re-attempting the recording
+            # every frame.
+            draw.text((x_position, y_position), text=label.text, font=font,
+                      anchor=anchor, align=label.alignment, fill=tuple(label.color),
+                      stroke_width=label.outline_width,
+                      stroke_fill=tuple(label.outline_color))
+            return
+
+        core = draw.draw
+        for coord, mask, ink in ops:
+            core.draw_bitmap(coord, mask, ink)
+
+    def _record_label_blits(self, image: Image.Image, label: "KeyLabel", font,
+                            xy: tuple, anchor: str) -> tuple:
+        """Runs draw.text() against a throwaway target whose draw core only
+        RECORDS the mask blits, and returns them (None = not recordable, draw
+        directly instead). The probe target must match the real image's mode
+        and size: the ink is resolved for the mode, and the blit coordinates
+        text() computes are absolute."""
+        try:
+            probe = ImageDraw.Draw(Image.new(image.mode, image.size))
+            recorder = _BitmapRecorder(probe.draw)
+            probe.draw = recorder
+            probe.text(xy, text=label.text, font=font, anchor=anchor,
+                       align=label.alignment, fill=tuple(label.color),
+                       stroke_width=label.outline_width,
+                       stroke_fill=tuple(label.outline_color))
+            ops = tuple(recorder.ops)
+        except Exception:
+            log.warning("Label blit recording failed; falling back to the "
+                        "per-frame draw for this label", exc_info=True)
+            return None
+        if not ops:
+            # Non-empty text that produced no blit: PIL took a path this
+            # recorder does not model (e.g. embedded-color glyphs). Replaying
+            # nothing would silently erase the label.
+            log.warning("Label blit recording produced no draw operations; "
+                        "falling back to the per-frame draw for this label")
+            return None
+        return ops
+
     def add_labels_to_image(self, image: Image.Image) -> Image.Image:
         # image = image.rotate(self.deck.get_rotation()*-1)
+        if not self.get_has_visible_labels():
+            # Nothing to draw: hand the caller back its own image rather than
+            # a key-sized RGBA copy per frame. ControllerKey.get_current_image
+            # knows the result can BE its input and skips the matching
+            # close()es; every other caller returns it straight through.
+            return image
+
         draw = ImageDraw.Draw(image)
 
         labels = self.get_composed_labels()
@@ -3987,10 +4160,6 @@ class LabelManager:
             if text in [None, ""]:
                 continue
 
-            color = tuple(labels[label].color)
-            font = labels[label].get_font()
-            outline_width = labels[label].outline_width
-            outline_color = tuple(labels[label].outline_color)
             alignment = labels[label].alignment
 
             w, h = self._measure_text(label, labels[label])
@@ -4029,13 +4198,13 @@ class LabelManager:
             # Use appropriate anchor based on alignment (x-anchor + "m" for vertical middle)
             anchor = anchor_x + "m"
 
-            draw.text((x_position, y_position),
-                      text=text, font=font, anchor=anchor, align=alignment,
-                      fill=color, stroke_width=outline_width,
-                      stroke_fill=outline_color)
+            self._draw_static_label(image, draw, label, labels[label], w, h,
+                                    x_position, y_position, anchor)
 
         del draw
 
+        # The copy stays: this method draws IN PLACE, and both callers pass a
+        # buffer they still own (and close) afterwards.
         return image.copy()
         # return image.copy().rotate(self.deck.get_rotation())
 
@@ -5091,10 +5260,15 @@ class ControllerKey(ControllerInput):
         if self.has_unavailable_action() and not self.deck_controller.screen_saver.showing:
             labeled_image = self.add_warning_point(labeled_image)
 
-        if background is not None:
+        # A key with no visible label gets its own composite handed straight
+        # back (add_labels_to_image skips the copy), and with no media
+        # key_image IS background -- so closing either unconditionally would
+        # hand the media thread an image whose buffer is already released.
+        if background is not None and background is not labeled_image:
             background.close()
 
-        key_image.close()
+        if key_image is not labeled_image:
+            key_image.close()
 
         return labeled_image
     
