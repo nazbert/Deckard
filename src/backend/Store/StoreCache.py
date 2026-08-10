@@ -9,6 +9,7 @@ from loguru import logger as log
 
 import globals as gl
 from src.backend.atomic_json import atomic_write_json
+from src.backend.Store.StoreURL import parse_repo_url
 
 
 # Every live StoreCache, weakly held so the exit hook below can drain
@@ -345,21 +346,17 @@ class StoreCache:
                 atomic_write_json(file, {})
 
     def get_user_name(self, repo_url:str) -> str:
-        splitted =  repo_url.split("/")
-        domain = "github.com"
-        if domain not in splitted:
-            domain = "raw.githubusercontent.com"
-
-        return splitted[splitted.index(domain)+1]
+        ref = parse_repo_url(repo_url)
+        if ref is None:
+            # Callers reach the cache only after their entry passed
+            # parse_repo_url, so this is a broken caller rather than bad
+            # user input -- say which url, because "x not in list" did not.
+            raise ValueError(f"Not a store repository url: {repo_url!r}")
+        return ref.user
 
     def get_repo_name(self, repo_url:str) -> str | None:
-        github_split = repo_url.split("github")
-        if len(github_split) < 2:
-            return None
-        split = github_split[1].split("/")
-        if len(split) < 3:
-            return None
-        return split[2]
+        ref = parse_repo_url(repo_url)
+        return None if ref is None else ref.repo
 
     def generate_cache_string(self, url: str, path: str, branch: str = "main", data_type: str = "text") -> str:
         user = self.get_user_name(url)
