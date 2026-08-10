@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 import os
 import socket
 import threading
-from src.backend.WindowGrabber.Integration import Integration
+from src.backend.WindowGrabber.Integration import Integration, WATCHER_STOP_TIMEOUT_S
 from src.backend.WindowGrabber.Window import Window
 
 import subprocess
@@ -46,7 +46,7 @@ class Hyprland(Integration):
             self.command_prefix = ["flatpak-spawn", "--host"]
 
         self._socket_path = self._find_socket2_path()
-        self.start_active_window_change_thread()
+        self.active_window_change_thread: "WatchForActiveWindowChange | None" = None
 
     def _find_socket2_path(self) -> str | None:
         """Find the Hyprland IPC event socket (socket2).
@@ -71,9 +71,41 @@ class Hyprland(Integration):
 
         return None
 
-    def start_active_window_change_thread(self):
-        self.active_window_change_thread = WatchForActiveWindowChange(self)
-        self.active_window_change_thread.start()
+    @log.catch
+    def start_watching(self) -> None:
+        thread = self.active_window_change_thread
+        if thread is not None and thread.is_alive():
+            return
+
+        # A Thread object cannot be restarted, so each start builds a fresh
+        # one, which reconnects the event socket from scratch.
+        thread = WatchForActiveWindowChange(self)
+        self.active_window_change_thread = thread
+        thread.start()
+
+    @log.catch
+    def stop_watching(self) -> None:
+        thread = self.active_window_change_thread
+        self.active_window_change_thread = None
+        if thread is None:
+            return
+
+        thread.stop()
+        if thread is threading.current_thread():
+            # Never join the calling thread to itself: routing a window
+            # change can reach a page write, and a page write re-gates. The
+            # loop ends at its next stop check instead -- and returning here
+            # keeps the timeout warning below for real timeouts, rather than
+            # firing on a liveness check that is trivially true because the
+            # join was skipped.
+            return
+
+        thread.join(timeout=WATCHER_STOP_TIMEOUT_S)
+        if thread.is_alive():
+            # The thread is a daemon and stop() shuts its socket down, so a
+            # listener parked in recv unwinds on its own; the reference is
+            # dropped either way so a later start builds a clean one.
+            log.warning("The Hyprland active window watcher did not stop within the timeout")
 
     def get_all_windows(self) -> list[Window]:
         windows: list[Window] = []
@@ -131,6 +163,29 @@ class WatchForActiveWindowChange(threading.Thread):
     def __init__(self, hyprland: Hyprland):
         super().__init__(name="WatchForActiveWindowChange", daemon=True)
         self.hyprland = hyprland
+        self._stop_event = threading.Event()
+        # Published for stop() so it can break a listener parked in recv;
+        # only ever assigned by this thread, only ever read by stop().
+        self._sock: socket.socket | None = None
+
+    def stop(self) -> None:
+        """Asks the loop to end. Returns immediately -- the caller joins.
+
+        The event alone would leave a listener parked in recv for up to the
+        socket timeout, so the connection is shut down as well: that makes
+        the pending recv return at once and the loop reach its next stop
+        check. Shutting down (rather than closing) a socket the listener may
+        still be using keeps its own close() well-defined.
+        """
+        self._stop_event.set()
+        sock = self._sock
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            # Already closed or never connected -- nothing to wake.
+            pass
 
     @log.catch
     def run(self) -> None:
@@ -145,16 +200,15 @@ class WatchForActiveWindowChange(threading.Thread):
 
     def _run_socket(self, socket_path: str) -> None:
         """Event-driven: listen on Hyprland's socket2 for activewindow>> events."""
-        import time
-
-        while gl.threads_running:
+        while gl.threads_running and not self._stop_event.is_set():
             try:
                 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 sock.settimeout(5.0)
                 sock.connect(socket_path)
+                self._sock = sock
 
                 buffer = ""
-                while gl.threads_running:
+                while gl.threads_running and not self._stop_event.is_set():
                     try:
                         data = sock.recv(4096)
                     except socket.timeout:
@@ -181,17 +235,24 @@ class WatchForActiveWindowChange(threading.Thread):
                 log.warning(f"Hyprland socket error: {e}, retrying in 2s")
             except Exception as e:
                 log.error(f"Unexpected error in Hyprland socket listener: {e}")
+            finally:
+                self._sock = None
 
-            # Brief delay before reconnecting
-            time.sleep(2)
+            # Brief delay before reconnecting -- on the stop event, so a stop
+            # arriving mid-backoff is not held for the full delay.
+            if self._stop_event.wait(2):
+                break
 
     def _run_polling(self) -> None:
         """Fallback: poll hyprctl every 200 ms (legacy behavior)."""
-        import time
-
         last_active_window = self.hyprland.get_active_window()
-        while gl.threads_running:
-            time.sleep(0.2)
+        while gl.threads_running and not self._stop_event.is_set():
+            # Waiting on the stop event rather than sleeping cuts the stop
+            # short instead of running out the poll interval. One already-
+            # elapsed wait can still dispatch after a stop; harmless, since
+            # routing re-reads the rules and finds none.
+            if self._stop_event.wait(0.2):
+                break
             new_active_window = self.hyprland.get_active_window()
             if new_active_window is None:
                 continue

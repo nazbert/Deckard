@@ -335,6 +335,14 @@ def notify_foreground_window_changed(name: str, wm_class: str) -> None:
 
     Call this from WindowGrabber.on_active_window_changed() so that
     DBus clients see foreground window changes.
+
+    The active-window watcher is the only thing that calls this, and the
+    watcher runs only while some page has a window auto-change rule. So
+    ForegroundWindow tracks the desktop only while window rules are in use,
+    and otherwise stays at its initial empty value. That is deliberate:
+    feeding the property regardless would mean polling the desktop for the
+    property alone, which is exactly the background cost the gating removes.
+    NotifyForegroundWindow still updates it from outside at any time.
     """
     if _api_instance is not None:
         _api_instance.ForegroundWindow = WindowInfo(name, wm_class)

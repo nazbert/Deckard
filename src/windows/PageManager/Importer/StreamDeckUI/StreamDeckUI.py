@@ -31,6 +31,11 @@ class StreamDeckUIImporter:
         return f"{x}x{y}"
     
     def save_json(self, json_path: str, data: dict, _retries: int = 3):
+        # Writes a page file wholesale, bypassing the page-settings setters.
+        # Safe today only because a StreamDeck-UI profile carries no window
+        # auto-change rules: the moment this importer can emit one, it must
+        # also call page_manager.refresh_window_watch_state() after its
+        # import loop, or the imported rules will not be watched for.
         atomic_write_json(json_path, data)
 
         loaded = None

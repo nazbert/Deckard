@@ -14,8 +14,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
 import threading
-import time
-from src.backend.WindowGrabber.Integration import Integration
+from src.backend.WindowGrabber.Integration import Integration, WATCHER_STOP_TIMEOUT_S
 from src.backend.WindowGrabber.Window import Window
 
 import subprocess
@@ -44,11 +43,45 @@ class Sway(Integration):
         if portal.running_under_flatpak():
             self.command_prefix = ["flatpak-spawn", "--host"]
 
-        self.start_active_window_change_thread()
+        self.active_window_change_thread: "WatchForActiveWindowChange | None" = None
 
-    def start_active_window_change_thread(self):
-        self.active_window_change_thread = WatchForActiveWindowChange(self)
-        self.active_window_change_thread.start()
+    @log.catch
+    def start_watching(self) -> None:
+        thread = self.active_window_change_thread
+        if thread is not None and thread.is_alive():
+            return
+
+        # A Thread object cannot be restarted, so each start builds a fresh
+        # one -- which also re-primes the "last seen window" against whatever
+        # is focused now rather than against a stale pre-stop reading.
+        thread = WatchForActiveWindowChange(self)
+        self.active_window_change_thread = thread
+        thread.start()
+
+    @log.catch
+    def stop_watching(self) -> None:
+        thread = self.active_window_change_thread
+        self.active_window_change_thread = None
+        if thread is None:
+            return
+
+        thread.stop()
+        if thread is threading.current_thread():
+            # Never join the calling thread to itself: routing a window
+            # change can reach a page write, and a page write re-gates. The
+            # loop ends at its next stop check instead -- and returning here
+            # keeps the timeout warning below for real timeouts, rather than
+            # firing on a liveness check that is trivially true because the
+            # join was skipped.
+            return
+
+        thread.join(timeout=WATCHER_STOP_TIMEOUT_S)
+        if thread.is_alive():
+            # Parked in a swaymsg read that outlived the timeout. The thread
+            # is a daemon and its loop rechecks the stop flag as soon as the
+            # read returns, so it unwinds on its own; the reference is dropped
+            # either way so a later start builds a clean one.
+            log.warning("The Sway active window watcher did not stop within the timeout")
 
     def get_all_windows(self) -> list[Window]:
         return [self._parse_window(client) for client in self._get_windows()]
@@ -107,13 +140,23 @@ class WatchForActiveWindowChange(threading.Thread):
     def __init__(self, sway: Sway):
         super().__init__(name="WatchForActiveWindowChange", daemon=True)
         self.sway = sway
+        self._stop_event = threading.Event()
 
         self.last_active_window = sway.get_active_window()
 
+    def stop(self) -> None:
+        """Asks the loop to end. Returns immediately -- the caller joins."""
+        self._stop_event.set()
+
     @log.catch
     def run(self) -> None:
-        while gl.threads_running:
-            time.sleep(0.2)
+        while gl.threads_running and not self._stop_event.is_set():
+            # Waiting on the stop event rather than sleeping cuts the stop
+            # short instead of running out the poll interval. One already-
+            # elapsed wait can still dispatch after a stop; harmless, since
+            # routing re-reads the rules and finds none.
+            if self._stop_event.wait(0.2):
+                break
             new_active_window = self.sway.get_active_window()
             if new_active_window is None:
                 continue

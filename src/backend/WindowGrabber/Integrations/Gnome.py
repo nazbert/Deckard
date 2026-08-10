@@ -34,6 +34,10 @@ class Gnome(Integration):
         super().__init__(window_grabber=window_grabber)
 
         self.proxy: Gio.DBusProxy | None = None
+        # 0 is GObject's "no handler" id, so it doubles as the not-watching
+        # flag: this integration has no thread of its own -- watching IS the
+        # FocusedWindowChanged subscription.
+        self._signal_handler_id: int = 0
         self.connect_dbus()
 
     def install_extension(self) -> None:
@@ -72,10 +76,38 @@ class Gnome(Integration):
             if self.proxy.get_name_owner() is None:
                 self.proxy = None
                 raise RuntimeError("nothing owns org.gnome.Shell on the session bus")
-            self.proxy.connect("g-signal", self.on_dbus_signal)
         except Exception as e:
             log.error(f"Failed to connect to D-Bus: {e}")
             pass
+
+    @log.catch
+    def start_watching(self) -> None:
+        proxy = self.proxy
+        if proxy is None or self._signal_handler_id:
+            return
+        self._signal_handler_id = proxy.connect("g-signal", self.on_dbus_signal)
+
+    @log.catch
+    def stop_watching(self) -> None:
+        """Drops the shell's window-change subscription.
+
+        Bounded by definition -- there is no thread to join.
+
+        The proxy itself stays, because the page editor's matching-window
+        list still queries through it while no rule is enabled. Honest
+        limitation: a GDBusProxy that has been built keeps its match rule on
+        the session bus, so the shell's FocusedWindowChanged signals are
+        still delivered to this process and dropped here rather than never
+        being sent. That is a message on an existing connection, not a
+        process spawn or a poll, and it only applies once something has
+        built the proxy -- a session with no rules never does.
+        """
+        proxy = self.proxy
+        handler_id = self._signal_handler_id
+        self._signal_handler_id = 0
+        if proxy is None or not handler_id:
+            return
+        proxy.disconnect(handler_id)
 
 
     def on_dbus_signal(self, proxy, sender_name: str, signal_name: str, parameters) -> None:

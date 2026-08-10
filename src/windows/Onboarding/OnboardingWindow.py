@@ -275,7 +275,11 @@ class ExtensionOnboardingScreen(Gtk.Box):
             self.set_button_status("installed")
         else:
             self.set_button_status("failed")
-        gl.window_grabber.init_integration()
+        # The window grabber's D-Bus proxy was built against a session with
+        # no such extension, so it has to be rebuilt to see the one just
+        # installed.
+        if gl.window_grabber is not None:
+            gl.window_grabber.reset_integration()
 
 
 class UdevOnboardingScreen(Gtk.Box):
