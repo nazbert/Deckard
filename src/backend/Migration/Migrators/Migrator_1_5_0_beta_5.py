@@ -13,9 +13,9 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 from src.backend.Migration.Migrator import Migrator
+from src.backend.atomic_json import atomic_write_json
 import json
 import os
-import tempfile
 
 import globals as gl
 
@@ -54,8 +54,7 @@ class Migrator_1_5_0_beta_5(Migrator):
                 page["keys"][key]["states"]["0"].setdefault("image-control-action", 0)
                 page["keys"][key]["states"]["0"].setdefault("label-control-actions", [0, 0, 0])
 
-            with open(page_path, "w") as f:
-                json.dump(page, f, indent=4)
+            atomic_write_json(page_path, page)
 
     def migrate_plugin_settings(self):
         if not os.path.exists(gl.PLUGIN_DIR):
@@ -80,33 +79,15 @@ class Migrator_1_5_0_beta_5(Migrator):
             # CURRENT settings; leave it untouched rather than clobbering it
             # with the stale pre-beta.5 copy.
             if not os.path.exists(new_settings_path):
-                os.makedirs(os.path.dirname(new_settings_path), exist_ok=True)
-                # Crash-safe write: a plain open('w')+dump truncated in place on
+                # Crash-safe write: a plain open('w')+dump truncates in place on
                 # a mid-write crash, and with the old file removed just below
-                # the settings would be gone. Write to a same-dir temp, fsync,
-                # os.replace (atomic on POSIX) -- so a crash leaves either the
-                # old file intact (temp discarded) or the complete new file.
-                # NOTE: duplicates src/backend/atomic_json.py::atomic_write_json
-                # kept self-contained so this migrator has no dependency on the
-                # app's own helpers; de-dupe to that helper if that ever changes.
-                self._atomic_write_json(new_settings_path, settings)
+                # the settings would be gone. atomic_write_json commits via a
+                # same-dir temp + fsync + os.replace, so a crash leaves either
+                # the old file intact (temp discarded, never renamed) or the
+                # complete new file. It creates the parent directory itself.
+                # A write failure propagates, which is what keeps os.remove
+                # below unreachable until the copy is durably in place.
+                atomic_write_json(new_settings_path, settings)
 
             # Remove old settings -- a complete copy now exists at the new path.
             os.remove(old_settings_path)
-
-    @staticmethod
-    def _atomic_write_json(path: str, data) -> None:
-        dir_name = os.path.dirname(path)
-        fd, tmp_path = tempfile.mkstemp(prefix=".migrate-", suffix=".tmp", dir=dir_name)
-        try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(data, f, indent=4)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, path)
-        except BaseException:
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-            raise

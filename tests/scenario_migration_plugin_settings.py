@@ -179,15 +179,22 @@ def check_atomic_write_survives_death_before_replace() -> None:
             "new settings path exists though the write died before os.replace -- "
             "the write was not atomic"
         )
-        # An orphaned .migrate-*.tmp under the target dir is the EXPECTED residue
-        # of a pre-replace death (the temp file itself, never renamed). It is a
-        # distinct name, so it never masquerades as the live settings.json. The
-        # migrator runs once and lacks a temp-reaper (unlike atomic_json's helper);
-        # this is a known, tolerated trade-off documented in the source comment.
+        # An orphaned temp under the target dir is the EXPECTED residue of a
+        # pre-replace death (the temp file itself, never renamed), and its
+        # presence under the shared writer's own ".save-<basename>." prefix is
+        # the observable proof this went through atomic_write_json rather than
+        # a bare open('w') -- which would have left a truncated settings.json
+        # under the real name instead. Nothing accumulates: the next
+        # atomic_write_json for the same target reaps stale siblings.
+        # realpath because atomic_write_json resolves the destination before
+        # choosing the temp's directory.
         import glob
-        orphans = glob.glob(os.path.join(os.path.dirname(new), ".migrate-*.tmp"))
-        for orphan in orphans:
-            assert os.path.basename(orphan) != "settings.json"
+        target_dir = os.path.realpath(os.path.dirname(new))
+        orphans = glob.glob(os.path.join(target_dir, ".save-settings.json.*.tmp"))
+        assert orphans, (
+            f"no .save-settings.json.*.tmp residue in {target_dir} -- the "
+            "migrated write did not go through the shared atomic writer"
+        )
     finally:
         # data_path IS the child's isolated temp data dir (fixtures mkdtemp);
         # the child died via os._exit so its atexit cleanup never ran.
