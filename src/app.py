@@ -99,6 +99,10 @@ class App(Adw.Application):
         # registered below so the very first signal already sees it.
         self._quit_started = False
 
+        # Ctrl+C deliveries so far, for _on_sigint's escalation. Same
+        # reason for living here: the first signal must already find it.
+        self._sigint_count = 0
+
         # The live engine->UI adapter, so on_quit can detach it. None
         # until on_activate builds the window -- a TERM before that must not
         # raise here.
@@ -333,17 +337,28 @@ class App(Adw.Application):
         # App exists, or is internally guarded.
         self._destroy_main_window()
 
+        # Force quit if normal quit is not possible.
+        # Deliberately armed BEFORE the AppQuit fan-out below rather than after
+        # the deck teardown: that fan-out runs third-party quit hooks inline
+        # and nothing bounds how long one of them takes, so a hook that BLOCKS
+        # (a plugin waiting on a dead socket, say -- no exception for the
+        # fan-out to contain) parks the quit for good if the watchdog is not up
+        # yet. Behind it that costs 6s and a force_quit; ahead of it the quit
+        # hangs with nothing armed to end the process. Everything between here
+        # and the deck teardown is therefore on the watchdog's clock, which is
+        # the intent.
+        timer_wheel.schedule(6, self.force_quit, name="force_quit_timer")
+
         # Synchronous on purpose: this process ends in os._exit a few
         # statements below, so AppQuit handlers queued on the main loop would
         # never run. trigger_signal_sync isolates them from each other -- one
         # third-party plugin raising in its quit hook is logged and the fan-out
         # moves on, rather than aborting on_quit here -- before close_all() (a
-        # deck left open fails the next startup with TransportError(-1)),
-        # before terminate_all_backends() (orphaned plugin backends) and before
-        # the force_quit watchdog below is even armed. An abort here is also
-        # unrecoverable: the _quit_started latch above sends every later quit
-        # route (tray, Gio "quit" action, Ctrl+C, TERM) straight to the early
-        # return instead of retrying the teardown.
+        # deck left open fails the next startup with TransportError(-1)) and
+        # before terminate_all_backends() (orphaned plugin backends). An abort
+        # here is also unrecoverable: the _quit_started latch above sends every
+        # later quit route (tray, Gio "quit" action, Ctrl+C, TERM) straight to
+        # the early return instead of retrying the teardown.
         gl.signal_manager.trigger_signal_sync(Signals.AppQuit)
 
         gl.threads_running = False
@@ -355,9 +370,6 @@ class App(Adw.Application):
         # the existing ones down (same residual window as a hotplug event
         # arriving mid-quit, which the USB monitor has always had).
         gl.deck_manager.stop_boot_rescan()
-
-        # Force quit if normal quit is not possible
-        timer_wheel.schedule(6, self.force_quit, name="force_quit_timer")
 
         # Drain the store cache's deferred index writes. This
         # process ends in os._exit(0), which skips StoreCache's atexit hook,
@@ -532,7 +544,8 @@ class App(Adw.Application):
         return GLib.SOURCE_CONTINUE
 
     def _on_sigint(self, signum, frame):
-        """SIGINT (Ctrl+C) entry point. Queues the teardown, runs none of it.
+        """SIGINT (Ctrl+C) entry point. Queues the teardown; escalates on the
+        second press if the first one never got dispatched.
 
         A Python-level handler runs between bytecodes on the main thread, so
         it can interrupt any statement in the app -- mid-render, inside a
@@ -550,10 +563,26 @@ class App(Adw.Application):
         wants -- unlike the unix-signal sources, whose sigaction dies with them
         (see _on_unix_signal).
 
-        A Ctrl+C landing before the loop is up is not lost either: the source
-        goes on the default main context and dispatches as soon as
-        Gio.Application.run starts iterating it.
+        Everything dispatched is dispatched by the main loop, so a queued
+        Ctrl+C only arrives once that loop iterates: a press landing before
+        Gio.Application.run starts is held, not lost, but a press landing on a
+        WEDGED loop would never arrive at all. Since TERM and HUP are loop
+        sources too, that would leave no signal able to end the process short
+        of SIGKILL -- which orphans the plugin backends (own session, so no
+        killpg reaches them) and skips the force_quit watchdog, armed only
+        inside on_quit. Hence the escalation: a second press with no teardown
+        yet started means the loop is not dispatching, and force_quit runs
+        right here. It is the one thing safe to call from handler context --
+        terminate_all_backends() and os._exit(1), no GTK, no teardown ordering.
+        Gated on _quit_started so a second press during a teardown that IS
+        running stays a no-op rather than cutting it short.
         """
+        self._sigint_count += 1
+        if self._sigint_count >= 2 and not self._quit_started:
+            log.warning("Second interrupt with no teardown in flight (the main "
+                        "loop is not dispatching); forcing quit")
+            self.force_quit()
+            return
         GLib.idle_add(self.on_quit, priority=GLib.PRIORITY_DEFAULT)
 
     def register_signal_handlers(self):

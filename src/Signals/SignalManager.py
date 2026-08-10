@@ -44,6 +44,27 @@ def _invoke_signal_callback(callback: Callable[..., Any], args: tuple[Any, ...],
     return False
 
 
+def _safe_describe(callback: Callable[..., Any]) -> str:
+    """Name a callback for a log line, without being able to raise.
+
+    describe_callback() reads the callback's __qualname__/__module__, which is
+    an attribute access like any other -- and an observer can be a proxy whose
+    attribute accesses go over a socket (an rpyc netref held by a plugin
+    backend). Once that connection is gone, naming the handler raises EOFError:
+    during shutdown, precisely when the synchronous fan-out is trying to report
+    that the handler failed. An error path that can raise its own error is no
+    error path, hence the fallbacks -- object.__repr__ reads no attribute of
+    the object itself, and the literal covers even that going wrong.
+    """
+    try:
+        return describe_callback(callback)
+    except BaseException:
+        try:
+            return object.__repr__(callback)
+        except BaseException:
+            return "<unnameable callback>"
+
+
 class SignalManager:
     def __init__(self):
         # signal -> CallbackRegistry. Values are CallbackRegistry instances
@@ -128,14 +149,23 @@ class SignalManager:
         """Dispatch `signal` on the calling thread, one observer after another,
         returning only once all of them have run.
 
-        This is the shutdown fan-out (AppQuit): the process ends in os._exit a
-        few statements later, so observers queued on the main loop would never
-        run at all -- they have to complete inline. Which also means the
-        observers are strangers to each other's failure modes, so each one is
-        invoked inside its own try/except: a third-party plugin raising in its
-        quit hook cannot deny its peers the notification, and cannot abort the
-        caller's teardown either. Each failure is logged with the handler's
-        identity; the fan-out continues.
+        This exists for the shutdown fan-out (AppQuit): the process ends in
+        os._exit a few statements later, so observers queued on the main loop
+        would never run at all -- they have to complete inline. Observers run
+        on whatever thread calls this, with no marshalling of any kind; a
+        caller reaching it from a worker thread hands its observers that
+        thread, GTK-touching ones included.
+
+        The observers are strangers to each other's failure modes, so each one
+        is invoked inside its own except-BaseException: a third-party plugin
+        raising in its quit hook -- or calling sys.exit() in it, which is
+        SystemExit and would otherwise unwind the caller just the same --
+        cannot deny its peers the notification, and cannot abort the caller's
+        teardown either. Swallowing that much is defensible only because this
+        path ends in os._exit regardless. Each failure is logged with the
+        handler's identity (itself failure-tolerant: naming a handler must not
+        be able to raise a second time from inside the error path), and the
+        fan-out continues.
 
         Observers are otherwise treated exactly as trigger_signal treats them:
         one locked snapshot taken up front, and dead weak references skipped
@@ -152,8 +182,9 @@ class SignalManager:
         for callback in registry.snapshot():
             try:
                 callback(*args, **kwargs)
-            except Exception:
+            except BaseException:
                 log.opt(exception=True).warning(
-                    f"{signal.__name__} handler {describe_callback(callback)} "
+                    f"{signal.__name__} handler {_safe_describe(callback)} "
                     f"failed; continuing with the remaining handlers"
                 )
+

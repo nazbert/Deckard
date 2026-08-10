@@ -30,6 +30,12 @@ already covered by scenario_plugin_backend_teardown.py; the end-to-end
      already use. Checked both directly (handler returns without on_quit
      having run; the next main-loop dispatch runs it exactly once) and
      end-to-end with a real SIGINT raised at ourselves.
+ 1c. Deferring is only as good as the loop, so a SECOND Ctrl+C with no
+     teardown started forces the quit from handler context. Otherwise a
+     wedged loop swallows every signal -- TERM and HUP are loop sources too
+     -- leaving SIGKILL, which orphans the backends and skips the force_quit
+     watchdog. Gated on the quit-started latch: a press during a teardown
+     that is running must not cut it short.
   2. A real SIGTERM raised at ourselves reaches on_quit exactly once via the
      GLib main loop (pre-fix this killed the interpreter -> non-zero exit),
      and it is still armed for a *second* delivery. A unix-signal source
@@ -47,6 +53,7 @@ already covered by scenario_plugin_backend_teardown.py; the end-to-end
  4b. The AppQuit fan-out isolates its handlers: one raising quit hook (a
      third-party plugin) is logged and the fan-out continues, instead of
      aborting the teardown before close_all() and terminate_all_backends().
+     Weak-stored (bound-method) and strong-stored observers alike.
   5. on_quit tolerates a quit that lands before on_activate built the window;
      the old unguarded self.main_win.destroy() raised AttributeError and
      aborted teardown *before* terminate_all_backends.
@@ -160,6 +167,18 @@ class QuitRecorder:
     def __init__(self):
         self.calls = []
         self.loop = None
+        self.force_quits = 0
+        # The two pieces of App state _on_sigint reads. This stub's on_quit
+        # deliberately does NOT latch _quit_started the way the real one does
+        # (it has to stay re-runnable across checks), so every check that
+        # delivers a SIGINT resets _sigint_count itself -- otherwise the
+        # escalation, which fires on the second delivery with no teardown in
+        # flight, would trip on a later check's first press.
+        self._quit_started = False
+        self._sigint_count = 0
+
+    def force_quit(self):
+        self.force_quits += 1
 
     def on_quit(self, *args):
         self.calls.append(args)
@@ -208,6 +227,7 @@ def check_sigint_defers_the_teardown_to_the_main_loop(recorder: QuitRecorder) ->
     main loop, the same dispatch context the TERM/HUP unix-signal sources
     already run it in.
     """
+    recorder._sigint_count = 0
     before = len(recorder.calls)
     recorder._on_sigint(signal.SIGINT, None)
 
@@ -223,6 +243,54 @@ def check_sigint_defers_the_teardown_to_the_main_loop(recorder: QuitRecorder) ->
         f"loop next dispatches, got {fired!r}"
     )
     print("  PASS: SIGINT queues the teardown onto the main loop")
+
+
+def check_second_sigint_escalates_on_a_wedged_loop(recorder: QuitRecorder) -> None:
+    """A second Ctrl+C with nothing torn down yet must force the quit.
+
+    Deferring the teardown to the main loop means a Ctrl+C is only as good as
+    that loop: on a wedged one the idle never dispatches, and since TERM/HUP
+    are loop sources too, no signal short of SIGKILL could end the process --
+    which orphans the plugin backends (own session, so no killpg reaches them)
+    and skips the force_quit watchdog, armed only inside on_quit. The second
+    press is therefore the escape hatch, gated on the quit not having started:
+    a second press during a teardown that IS running must stay a no-op rather
+    than cutting the ordered shutdown short.
+    """
+    recorder._sigint_count = 0
+    recorder._quit_started = False
+    before_quits = recorder.force_quits
+    before_calls = len(recorder.calls)
+
+    recorder._on_sigint(signal.SIGINT, None)
+    assert recorder.force_quits == before_quits, (
+        "the first Ctrl+C must defer to the main loop, not force the quit"
+    )
+    recorder._on_sigint(signal.SIGINT, None)
+    assert recorder.force_quits == before_quits + 1, (
+        "a second Ctrl+C with no teardown in flight must force the quit -- "
+        "otherwise a wedged main loop leaves no signal able to end the process "
+        "and SIGKILL orphans the plugin backends"
+    )
+    assert len(recorder.calls) == before_calls, (
+        f"the escalation must not run on_quit in signal-handler context, got "
+        f"{recorder.calls[before_calls:]!r}"
+    )
+
+    # ... and once a teardown is in flight, a further press stays a no-op.
+    recorder._quit_started = True
+    recorder._on_sigint(signal.SIGINT, None)
+    assert recorder.force_quits == before_quits + 1, (
+        "a Ctrl+C during a running teardown must not force-quit on top of it "
+        "-- that cuts the ordered shutdown short with os._exit(1)"
+    )
+    recorder._quit_started = False
+
+    # Drain the idle the first press queued so it can't land in a later check.
+    pump_main_context()
+    recorder.calls[before_calls:] = []
+    recorder._sigint_count = 0
+    print("  PASS: a second Ctrl+C escalates only while nothing is tearing down")
 
 
 def report_signal_path(signum: int, name: str) -> None:
@@ -265,6 +333,10 @@ def check_unix_signal_callback_keeps_source_armed() -> None:
 
 
 def check_signal_reaches_on_quit(recorder: QuitRecorder, signum: int, name: str) -> None:
+    # A SIGINT delivery has to start from a clean count: this stub's on_quit
+    # never latches _quit_started, so a carried-over count would take the
+    # second-press escalation instead of the deferred path under test.
+    recorder._sigint_count = 0
     loop = GLib.MainLoop()
     recorder.loop = loop
     before = len(recorder.calls)
@@ -394,11 +466,17 @@ def check_quit_tolerates_missing_main_win() -> None:
     # method now (App._destroy_main_window), so bind the real one to
     # the stub rather than stubbing it out -- its missing-attribute branch is
     # exactly what this check exercises.
-    stub = Obj(_quit_started=False)
+    # force_quit and the timer wheel are stubbed because the force_quit
+    # watchdog is armed on the way to the AppQuit fan-out, ahead of the
+    # sentinel this check stops at -- a real schedule() here would leave a live
+    # 6s timer running for the rest of the scenario.
+    stub = Obj(_quit_started=False, force_quit=Recorder())
     stub._destroy_main_window = lambda: App._destroy_main_window(stub)
     saved_dbus = app_mod.stop_dbus_service
+    saved_timer_wheel = app_mod.timer_wheel
     saved_sm = getattr(gl, "signal_manager", None)
     app_mod.stop_dbus_service = Recorder()
+    app_mod.timer_wheel = Obj(schedule=Recorder())
     gl.signal_manager = Obj(trigger_signal_sync=_trigger_signal)
     reached = False
     try:
@@ -416,6 +494,7 @@ def check_quit_tolerates_missing_main_win() -> None:
                 )
     finally:
         app_mod.stop_dbus_service = saved_dbus
+        app_mod.timer_wheel = saved_timer_wheel
         gl.signal_manager = saved_sm
 
     assert reached, (
@@ -453,10 +532,11 @@ def drive_on_quit(signal_manager, store_cache=None, watchdog=None) -> Obj:
     """Run the real App.on_quit unbound on a stub, down to the log-sink loop.
 
     The idiom the checks above use, with the whole teardown environment
-    on_quit touches before that cut stubbed out. Returns the stub and the
-    Recorder standing in for timer_wheel.schedule, so a caller can assert on
-    ordering relative to the force_quit watchdog -- pass that Recorder in when
-    another stub has to read it while the teardown is still running.
+    on_quit touches before that cut stubbed out. Returns the stub, the
+    Recorder standing in for timer_wheel.schedule (pass that Recorder in when
+    another stub has to read it while the teardown is still running) and the
+    one standing in for stop_boot_rescan -- the first step after the AppQuit
+    fan-out, so it dates how far the teardown got past it.
     """
     import src.app as app_mod
     from src.backend import ui_port
@@ -475,10 +555,11 @@ def drive_on_quit(signal_manager, store_cache=None, watchdog=None) -> Obj:
         "loggers": gl.loggers,
         "threads_running": gl.threads_running,
     }
+    stop_boot_rescan = Recorder()
     app_mod.stop_dbus_service = Recorder()
     app_mod.timer_wheel = Obj(schedule=watchdog)
     gl.signal_manager = signal_manager
-    gl.deck_manager = Obj(stop_boot_rescan=Recorder())
+    gl.deck_manager = Obj(stop_boot_rescan=stop_boot_rescan)
     gl.store_backend = None if store_cache is None else Obj(store_cache=store_cache)
     gl.loggers = _RaisingLoggers()
     reached = False
@@ -503,7 +584,7 @@ def drive_on_quit(signal_manager, store_cache=None, watchdog=None) -> Obj:
         "that follow cannot be trusted; something on the teardown path raised "
         "before the cut"
     )
-    return Obj(stub=stub, watchdog=watchdog)
+    return Obj(stub=stub, watchdog=watchdog, stop_boot_rescan=stop_boot_rescan)
 
 
 def check_appquit_handlers_are_isolated_from_each_other() -> None:
@@ -517,11 +598,51 @@ def check_appquit_handlers_are_isolated_from_each_other() -> None:
     was skipped. Driven through the real on_quit against a real SignalManager
     so both halves are covered: the isolation itself, and the quit path
     actually using the isolating call.
+
+    Three failure shapes, because they leave a handler by different routes: a
+    plain exception, a sys.exit() (SystemExit is a BaseException and unwinds
+    an `except Exception` fan-out just as fatally), and a handler whose
+    failure cannot even be NAMED -- an rpyc netref into a plugin backend
+    raises EOFError on attribute access once its connection is gone, so
+    describing it for the log line raises a second time from inside the error
+    path.
+
+    A bound method sits behind them on purpose. Every AppQuit observer in the
+    app is one, and CallbackRegistry stores bound methods WEAKLY -- a
+    different retrieval path through snapshot() than the plain functions
+    around it, and the one the real observers take.
     """
+    import sys
+    import weakref
+
     from src.Signals.Signals import AppQuit
     from src.Signals.SignalManager import SignalManager
 
     ran = []
+
+    class _QuitObserver:
+        """Owner of a weak-stored (bound-method) AppQuit observer."""
+
+        def on_app_quit(self):
+            ran.append("bound")
+
+    class _NetrefLikeHandler:
+        """Nameable while its (simulated) connection is up, unnameable once
+        its hook has run -- the shutdown ordering of a real netref, which is
+        alive at connect_signal time and dead by the time the fan-out tries to
+        report that it failed."""
+
+        connected = True
+
+        def __getattr__(self, name):
+            if type(self).connected:
+                raise AttributeError(name)
+            raise EOFError("connection closed")
+
+        def __call__(self):
+            ran.append("netref")
+            type(self).connected = False
+            raise RuntimeError("hook failed as its connection dropped")
 
     def first_handler():
         ran.append("first")
@@ -530,22 +651,35 @@ def check_appquit_handlers_are_isolated_from_each_other() -> None:
         ran.append("raiser")
         raise RuntimeError("simulated plugin quit hook failure")
 
+    def exiting_handler():
+        ran.append("exiting")
+        sys.exit("simulated plugin quit hook calling sys.exit()")
+
     def last_handler():
         ran.append("last")
 
+    # Strongly held for the duration: the registry's reference to its method
+    # is weak, so letting this go would legitimately drop the subscription.
+    observer = _QuitObserver()
+    # Fixture sanity: this really does take the weak path.
+    weakref.WeakMethod(observer.on_app_quit)
+
     signal_manager = SignalManager()
-    for handler in (first_handler, raising_handler, last_handler):
+    for handler in (first_handler, raising_handler, exiting_handler,
+                    _NetrefLikeHandler(), observer.on_app_quit, last_handler):
         signal_manager.connect_signal(AppQuit, handler)
 
     result = drive_on_quit(signal_manager)
 
-    assert ran == ["first", "raiser", "last"], (
-        f"every AppQuit handler must run even when one of them raises, in "
-        f"connect order, got {ran!r}"
+    assert ran == ["first", "raiser", "exiting", "netref", "bound", "last"], (
+        f"every AppQuit handler must run whatever the one before it did -- "
+        f"raise, sys.exit(), or fail unnameably -- in connect order and "
+        f"whether stored weakly or strongly, got {ran!r}"
     )
-    assert result.watchdog.calls, (
-        "the driven on_quit never armed the force_quit watchdog -- a failing "
-        "AppQuit handler aborted the teardown instead of being contained"
+    assert result.stop_boot_rescan.calls, (
+        "the driven on_quit never got past the AppQuit fan-out -- a failing "
+        "handler aborted the teardown instead of being contained (the watchdog "
+        "is armed before the fan-out, so it cannot answer this)"
     )
     print("  PASS: a raising AppQuit handler does not deny its peers or the teardown")
 
@@ -640,6 +774,7 @@ def main() -> None:
     fixtures.start_watchdog(60, label="scenario_sigterm_quit")
     recorder = check_sigint_stays_a_python_handler()
     check_sigint_defers_the_teardown_to_the_main_loop(recorder)
+    check_second_sigint_escalates_on_a_wedged_loop(recorder)
     check_signal_reaches_on_quit(recorder, signal.SIGINT, "SIGINT")
     report_signal_path(signal.SIGTERM, "SIGTERM")
     report_signal_path(signal.SIGHUP, "SIGHUP")
