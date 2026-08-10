@@ -7,7 +7,7 @@ ChangePage handler would serialize every other load_page()/hide()/show()
 caller behind it -- the exact run_on_main/pulsectl-style deadlock shape this
 codebase already froze on once (see docs/presenter-migration-plan.md §10).
 
-SignalManager.trigger_signal() dispatches non-AppQuit signals via
+SignalManager.trigger_signal() dispatches every signal via
 `GLib.idle_add(callback, ...)` -- fire-and-forget, not a synchronous call.
 That means a slow handler registered the normal way can never be observed
 holding up its *caller* in this headless harness (there is no real GTK main
