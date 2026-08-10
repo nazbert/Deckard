@@ -36,7 +36,8 @@ from src.backend.DeckManagement.ImageHelpers import *
 # The noqa'd names below are re-exports, not local dependencies: the code that
 # used them moved into deck_controller/, but importers have always reached them
 # through this module (the label editor takes KeyLabel from here) and keep
-# doing so.
+# doing so -- except Input/InputIdentifier, which this file still uses
+# (CONTROLLER_CLASSES below among others) and re-exports as well.
 from src.backend.DeckManagement.InputIdentifier import Input, InputEvent, InputIdentifier  # noqa: F401
 from src.backend.DeckManagement.Media.MediaConfig import MediaConfig  # noqa: F401
 from src.backend.DeckManagement.Subclasses.ActionPermissionManager import ActionPermissionManager  # noqa: F401
