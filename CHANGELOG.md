@@ -13,6 +13,11 @@ bundle as a release asset.
   colon-joined `XDG_CURRENT_DESKTOP`, such as `ubuntu:GNOME` — window
   grabbing matched only single-name desktops and stayed silently disabled
   everywhere else.
+- An idle deck showing the screensaver no longer repaints every key, dial and
+  touchscreen once a second; a still screensaver now costs no per-second work
+  at all. Recovering the picture after a dropped device write is handled by
+  the existing repaint retry instead, which also covers a rare blank deck on
+  screensaver entry that the per-second repaint had been masking.
 
 ### Changed
 

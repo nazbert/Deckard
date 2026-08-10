@@ -274,8 +274,18 @@ class ClearMsg:
     (MediaPlayerThread.next_submit_seq()) -- executing this wipes only
     image/touchscreen tasks stamped with a lower submit_seq, so frames
     submitted after this Clear was requested survive and paint afterward
-    (plan §2.1, preserves the caller's clear-then-paint order)."""
+    (plan §2.1, preserves the caller's clear-then-paint order).
+
+    `expects_repaint` records the submitter's intent, which the writer
+    cannot infer once the message is on the queue: True means "I am about to
+    repaint this deck, these blanks are a transition" (the screensaver's
+    entry and exit), False means "leave it blank, that IS the result"
+    (load_page's page-is-None branch). Only the former may be recovered from
+    when it executes late -- see _exec_clear. Stamped at submission rather
+    than read off live state at execution, because live state has already
+    moved on by then."""
     seq: int
+    expects_repaint: bool = False
 
 
 @dataclass
@@ -492,6 +502,13 @@ class MediaPlayerThread(threading.Thread):
         # so it can tell which already-queued frames predate it (plan
         # §2.1/§2.2).
         self._submit_seq = itertools.count()
+        # Highest submit_seq whose frame actually reached the device, as
+        # opposed to merely being queued or dropped at the present boundary.
+        # Advanced only right after a task's own run() returns, so it means
+        # "this content is on the deck now". Compared against a Clear's seq
+        # in _exec_clear to tell the two Clear interleaves apart -- see
+        # there. Media-thread-only, like the rest of the drain state.
+        self._max_executed_seq: int = -1
 
         # Wall-clock gap detection (plan §4 M2): a gap much larger than the
         # loop's own wait interval means the process was suspended (system
@@ -926,6 +943,56 @@ class MediaPlayerThread(threading.Thread):
         except Exception as e:
             log.error(f"Failed to write blank frames for Clear: {e}")
 
+        # A transition's Clear can execute AFTER the very frames it was
+        # submitted to precede. Its caller submits it here on the control
+        # queue and only then enqueues the paints onto the task slots, so a
+        # tick that has already drained control writes those paints and pops
+        # this Clear on its NEXT pass. The seq filter above cannot help --
+        # it wipes queued tasks, and these already ran -- so the blanks land
+        # last on a deck with nothing left to repaint it. Behind a showing
+        # screensaver that is terminal: a still image animates nothing and
+        # no other producer is running, so the deck stays blank until the
+        # screensaver is dismissed. Arm the repaint retry, the same "content
+        # written into a lost window" recovery this already provides after a
+        # failed device write, and let _run_pending_repaint restore the
+        # imagery. Media-thread state written from the media thread -- the
+        # no-lock single-writer contract holds; never arm this from the
+        # submitting thread.
+        #
+        # Both terms are load-bearing.
+        #
+        # _max_executed_seq is exactly "a frame stamped after this Clear has
+        # already reached the device", and nothing weaker will do. Arming on
+        # an ORDINARY transition would be actively harmful, not merely
+        # wasteful: _run_pending_repaint composites and encodes the whole
+        # deck from the media thread with no lock, at the top of a tick and
+        # therefore ahead of the task drain, while the transition's own
+        # update_all_inputs() is still running under _load_page_lock on its
+        # own thread. ControllerKey.update() has no synchronisation around
+        # its _last_enqueued_hash/add_image_task pair, so a repaint
+        # composited against the pre-swap background can land last and
+        # stick, leaving the OLD page's imagery on the deck with both dedup
+        # hashes agreeing on it. Queue occupancy cannot express the
+        # difference: the screensaver calls clear_media_player_tasks()
+        # between submitting its Clear and enqueueing its paints, and that
+        # empties the image_tasks dict and nulls the touchscreen slot (the
+        # generic `tasks` list it also clears is not what this would be
+        # reading), so the slots are empty at Clear time on every ordinary
+        # transition too. This counter moves only when a frame actually goes
+        # out, so it exceeds this Clear's seq only in the interleave where
+        # the paints already went out and these blanks just overwrote them.
+        #
+        # expects_repaint keeps the recovery to callers who were going to
+        # repaint anyway. DeckController.clear() has three: the screensaver's
+        # entry and exit, which stamp it True, and load_page's page-is-None
+        # branch, which does not -- there a blank deck is the requested end
+        # state, and repainting it would undo the request. It is the
+        # submitter's stamp rather than a screen_saver.showing read here
+        # because that flag has already moved by the time this executes:
+        # hide() submits its Clear one statement before clearing it.
+        if msg.expects_repaint and self._max_executed_seq > msg.seq:
+            self.deck_controller._schedule_full_repaint()
+
     def _exec_clear_and_close(self) -> None:
         # Set before doing any of the work below (not just relying on the
         # external stop() call that follows submitting this message): the
@@ -1137,6 +1204,7 @@ class MediaPlayerThread(threading.Thread):
                     time.sleep(self._inter_write_yield)
                     writes_since_yield = 0
                 task.run()
+                self._note_executed(task)
                 writes_since_yield += 1
 
         if touch_task is not None and _is_current(touch_task):
@@ -1171,6 +1239,26 @@ class MediaPlayerThread(threading.Thread):
                 if bulk and writes_since_yield >= self.YIELD_STRIDE and self._inter_write_yield > 0:
                     time.sleep(self._inter_write_yield)
                 touch_task.run()
+                self._note_executed(touch_task)
+
+    def _note_executed(self, task) -> None:
+        """Records that `task`'s device write was attempted and did not
+        raise. Called only after the task's own run() returns, never for one
+        dropped as stale or deferred by the touchscreen write budget -- a
+        frame that was never sent must not advance this.
+
+        Not quite "reached the device": the task classes swallow
+        StreamDeck.TransportError, so a write that failed at the transport
+        still returns normally and advances this. That is safe rather than
+        merely tolerable -- every such failure runs _on_write_result(False),
+        which arms the very same pending repaint this counter exists to
+        trigger, so the recovery happens either way.
+
+        Writer thread only, so the read-compare-write needs no lock."""
+        seq = task.submit_seq
+        if seq is not None and seq > self._max_executed_seq:
+            self._max_executed_seq = seq
+
 
 class DeckController:
     # Bound on close() step 6's wait for plugin teardown hooks;
@@ -2274,14 +2362,29 @@ class DeckController:
         while self.keep_actions_ticking:
             start = time.time()
             ticked_page = self.mark_page_ready_to_clear(False)
-            if not self.screen_saver.showing and True:
+            # A showing screensaver gets no per-input work from this loop.
+            # Its imagery lives in `background`: a video advances on the
+            # media thread (update_tiles() plus the per-key
+            # on_media_player_tick()), a still image is composited and
+            # encoded by whichever thread called apply_prebuilt()/
+            # set_from_path() and written once by the media thread. The
+            # input set ScreenSaver.show() swaps in is freshly built by
+            # init_inputs(): no action, no media, no label on any of it, and
+            # ActionCore.get_is_present() refuses plugin writes for the
+            # duration, so nothing here has state of its own to advance.
+            #
+            # Repainting every input once a second regardless is not free
+            # and is not this loop's job. Recovery from a lost device write
+            # -- including the blank a late-executing Clear leaves behind on
+            # screensaver entry, which this repaint used to be the only cure
+            # for -- belongs to the media loop's pending-full-repaint retry,
+            # armed at the sites that lose the write (_on_write_result,
+            # _exec_clear). Restoring the page on wake is hide()'s
+            # load_page().
+            if not self.screen_saver.showing:
                 for t in self.inputs:
                     for i in self.inputs[t]:
                         i.get_active_state().own_actions_tick_threaded()
-            else:
-                for t in self.inputs:
-                    for i in self.inputs[t]:
-                        i.update()
 
             # Reset the SAME page the False-call marked.
             self.mark_page_ready_to_clear(True, ticked_page)
@@ -2426,16 +2529,22 @@ class DeckController:
         after this runs (plan §2.3). Do not call this from anywhere else."""
         self._write_blank_frames()
 
-    def clear(self) -> None:
+    def clear(self, expects_repaint: bool = False) -> None:
         """Gen-agnostic async clear: submits a seq-stamped ClearMsg to the
         media thread's control queue instead of writing directly (plan
         §2.1). The seq stamp orders this against in-flight/future frame
         submissions: tasks already queued with a lower submit_seq are wiped,
         tasks submitted after this call (even same tick) survive and paint
         afterward -- preserving the caller's clear-then-paint order as
-        blank-then-content on the device."""
+        blank-then-content on the device.
+
+        Pass expects_repaint=True when this clear is the blank half of a
+        blank-then-paint transition, so that a Clear which executes after
+        its own paints already landed can be recovered from instead of
+        leaving the deck blank (see MediaPlayerThread._exec_clear). Leave it
+        False when a blank deck is the intended end state."""
         seq = self.media_player.next_submit_seq()
-        self.media_player.submit_control(ClearMsg(seq=seq))
+        self.media_player.submit_control(ClearMsg(seq=seq, expects_repaint=expects_repaint))
 
     def get_own_key_grid(self):
         """Deprecated in-process shim -- see get_own_deck_stack_child."""

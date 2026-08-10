@@ -204,7 +204,10 @@ class ScreenSaver:
 
             self.deck_controller.set_brightness(self.brightness)
 
-            self.deck_controller.clear()
+            # expects_repaint: the paints installing the screensaver's own
+            # background follow immediately below, so these blanks are a
+            # transition, not the intended end state.
+            self.deck_controller.clear(expects_repaint=True)
             # The seq-stamped ClearMsg (just submitted) wipes image/
             # touchscreen slots; it does not touch the generic `tasks` list
             # (e.g. a straggling load_all_inputs/
@@ -313,7 +316,9 @@ class ScreenSaver:
             self.original_inputs.clear()
             # Ensures that the first image visable is from the page not the
             # screensaver if the brightness on the saver is 0.
-            self.deck_controller.clear()
+            # expects_repaint: phase 3's load_page repaints the restored
+            # page, so these blanks are a transition too.
+            self.deck_controller.clear(expects_repaint=True)
             self.showing = False
 
             # A page change requested while the screensaver was showing sits in
