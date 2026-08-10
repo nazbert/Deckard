@@ -2,11 +2,12 @@
 Regression test for atomic JSON writes.
 
 Page.save() got the tmp-file + fsync + os.replace + dir-fsync treatment in
-4faa8ea3, but SettingsManager.save_settings_to_file, PluginBase.set_settings
-and PageManagerBackend.add_page still wrote with plain open("w") +
-json.dump -- a crash/SIGKILL/OOM mid-write truncated the destination file in
-place and the config was gone on the next launch. All of them now route
-through src/backend/atomic_json.py::atomic_write_json.
+4faa8ea3, but SettingsManager.save_settings_to_file, PluginBase.set_settings,
+PageManagerBackend.add_page and the 1.5.0-beta.5 migrator's page rewrite still
+wrote with plain open("w") + json.dump -- a crash/SIGKILL/OOM mid-write
+truncated the destination file in place and the config was gone on the next
+launch. All of them now route through
+src/backend/atomic_json.py::atomic_write_json.
 
 Two fault models are exercised:
 
@@ -296,6 +297,64 @@ def check_kill_before_replace() -> None:
     print("PASS: destination survives process death between write and rename")
 
 
+def check_migrator_page_write() -> None:
+    """The 1.5.0-beta.5 migrator rewrites every page in place to nest each
+    key under states.0. That rewrite used a plain open('w') + json.dump, so a
+    death mid-dump left a truncated page the loader then had to quarantine --
+    on the very first launch after an upgrade, with only the pre-migration
+    backup zip to fall back on. It now routes through atomic_write_json.
+
+    Runs entirely in a child with its own data dir (a live controller owns the
+    pages/ of this process): the child dies at fsync, so the write never
+    commits and the ORIGINAL page must still be complete on disk."""
+    child_code = (
+        "import fixtures, os, json\n"
+        "import globals as gl\n"
+        "from src.backend.Migration.Migrators.Migrator_1_5_0_beta_5 import Migrator_1_5_0_beta_5\n"
+        "pages = os.path.join(gl.DATA_PATH, 'pages')\n"
+        "os.makedirs(pages, exist_ok=True)\n"
+        "with open(os.path.join(pages, 'Flat.json'), 'w') as f:\n"
+        "    json.dump({'keys': {'0x0': {'labels': {'top': {'text': 'keep-me'}}}}}, f, indent=4)\n"
+        "print(gl.DATA_PATH, flush=True)\n"
+        "real_fsync = os.fsync\n"
+        "def dying_fsync(fd):\n"
+        "    real_fsync(fd)\n"
+        "    os._exit(9)\n"
+        "os.fsync = dying_fsync\n"
+        "Migrator_1_5_0_beta_5().migrate_pages()\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", child_code],
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    # A bare open('w') + json.dump never fsyncs, so it would not even reach the
+    # trap: rc 0 here means the migrator stopped writing atomically.
+    assert proc.returncode == 9, (
+        f"child should have died at fsync, rc={proc.returncode}: {proc.stderr}"
+    )
+    data_path = proc.stdout.strip().splitlines()[-1]
+    pages_dir = os.path.realpath(os.path.join(data_path, "pages"))
+    page_path = os.path.join(pages_dir, "Flat.json")
+    try:
+        assert read_json(page_path) == {"keys": {"0x0": {"labels": {"top": {"text": "keep-me"}}}}}, (
+            "page json is no longer the complete pre-migration content after a "
+            "mid-rewrite process death"
+        )
+        # Same residue rule as every other atomic write: the never-renamed temp
+        # under the writer's own prefix, never a partial file under the real name.
+        assert glob.glob(os.path.join(pages_dir, ".save-Flat.json.*.tmp")), (
+            f"no .save-Flat.json.*.tmp residue in {pages_dir} -- the page "
+            "rewrite did not go through the shared atomic writer"
+        )
+    finally:
+        import shutil
+        shutil.rmtree(data_path, ignore_errors=True)
+    print("PASS: migrator page rewrite survives process death between write and rename")
+
+
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_atomic_settings")
     controller = fixtures.make_headless_controller(serial="atomic-1")
@@ -309,6 +368,7 @@ def main() -> None:
         check_symlinked_target()
         check_stale_tmp_reaped()
         check_kill_before_replace()
+        check_migrator_page_write()
     finally:
         fixtures.teardown(controller)
 
