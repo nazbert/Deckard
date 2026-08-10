@@ -973,12 +973,14 @@ class MediaPlayerThread(threading.Thread):
         # composited against the pre-swap background can land last and
         # stick, leaving the OLD page's imagery on the deck with both dedup
         # hashes agreeing on it. Queue occupancy cannot express the
-        # difference: the screensaver wipes the generic task list before
-        # enqueueing anything, so the slots are empty at Clear time on every
-        # ordinary transition too. This counter moves only when a frame
-        # actually lands, so it exceeds this Clear's seq only in the
-        # interleave where the paints already went out and these blanks just
-        # overwrote them.
+        # difference: the screensaver calls clear_media_player_tasks()
+        # between submitting its Clear and enqueueing its paints, and that
+        # empties the image_tasks dict and nulls the touchscreen slot (the
+        # generic `tasks` list it also clears is not what this would be
+        # reading), so the slots are empty at Clear time on every ordinary
+        # transition too. This counter moves only when a frame actually goes
+        # out, so it exceeds this Clear's seq only in the interleave where
+        # the paints already went out and these blanks just overwrote them.
         #
         # expects_repaint keeps the recovery to callers who were going to
         # repaint anyway. DeckController.clear() has three: the screensaver's
@@ -1240,11 +1242,19 @@ class MediaPlayerThread(threading.Thread):
                 self._note_executed(touch_task)
 
     def _note_executed(self, task) -> None:
-        """Records that `task`'s frame reached the device. Called only after
-        a successful return from the task's own run(), never for one dropped
-        as stale or deferred by the touchscreen write budget -- a frame that
-        did not land must not advance this. Writer thread only, so the
-        read-compare-write needs no lock."""
+        """Records that `task`'s device write was attempted and did not
+        raise. Called only after the task's own run() returns, never for one
+        dropped as stale or deferred by the touchscreen write budget -- a
+        frame that was never sent must not advance this.
+
+        Not quite "reached the device": the task classes swallow
+        StreamDeck.TransportError, so a write that failed at the transport
+        still returns normally and advances this. That is safe rather than
+        merely tolerable -- every such failure runs _on_write_result(False),
+        which arms the very same pending repaint this counter exists to
+        trigger, so the recovery happens either way.
+
+        Writer thread only, so the read-compare-write needs no lock."""
         seq = task.submit_seq
         if seq is not None and seq > self._max_executed_seq:
             self._max_executed_seq = seq
