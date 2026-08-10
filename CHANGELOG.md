@@ -29,6 +29,11 @@ bundle as a release asset.
   Consequently the D-Bus `ForegroundWindow` property now tracks the desktop
   only while window rules are in use; it can still be set from outside at any
   time via `NotifyForegroundWindow`.
+- Startup is faster and much quieter on the network: the automatic store
+  update check now reads the store catalogue plus what is already installed,
+  instead of downloading a thumbnail, a manifest and an attribution file for
+  every asset in the store — including the ones you never installed. Opening
+  the store window still loads the full listing with images.
 - Log files are now pruned automatically (the ten most recent rotations are
   kept) and default verbosity is lower — files record debug level and up, the
   console info and up. Set `SC_LOG_TRACE=1` to restore full trace logging on

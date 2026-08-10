@@ -68,7 +68,7 @@ def test_get_icons_to_update_skips_incompatible() -> None:
     fixtures.install_stub_globals()
     sb = _make_backend()
 
-    def fake_get_all_icons():
+    def fake_get_all_icons(include_images: bool = True):
         return _icon_catalog()
 
     sb.get_all_icons = fake_get_all_icons
@@ -85,7 +85,7 @@ def test_update_all_icons_never_installs_incompatible() -> None:
     fixtures.install_stub_globals()
     sb = _make_backend()
 
-    def fake_get_all_icons():
+    def fake_get_all_icons(include_images: bool = True):
         return _icon_catalog()
 
     installed: list[str] = []
@@ -108,7 +108,7 @@ def test_get_wallpapers_to_update_skips_incompatible() -> None:
     fixtures.install_stub_globals()
     sb = _make_backend()
 
-    def fake_get_all_wallpapers():
+    def fake_get_all_wallpapers(include_images: bool = True):
         return _wallpaper_catalog()
 
     sb.get_all_wallpapers = fake_get_all_wallpapers
@@ -125,7 +125,7 @@ def test_get_sd_plus_bar_wallpapers_to_update_skips_incompatible() -> None:
     fixtures.install_stub_globals()
     sb = _make_backend()
 
-    def fake_get_all_sd_plus():
+    def fake_get_all_sd_plus(include_images: bool = True):
         return _sd_plus_catalog()
 
     sb.get_all_sd_plus_bar_wallpapers = fake_get_all_sd_plus

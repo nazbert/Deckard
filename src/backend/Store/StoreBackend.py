@@ -18,9 +18,9 @@ import sys
 import zipfile
 import requests
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, TypeGuard
+from typing import Any, NamedTuple, TypeGuard
 from PIL import Image
 from io import BytesIO
 from loguru import logger as log
@@ -55,11 +55,72 @@ class NoConnectionError:
     def __bool__(self) -> bool:
         return False
 
+
+def same_repository(a: RepoRef | None, b: RepoRef | None) -> bool:
+    """Whether two parsed store urls name the same GitHub repository.
+
+    Applied at the comparison sites only, never inside parse_repo_url:
+    GitHub treats owner and repository names case-insensitively, so a tree
+    stamped from acme/Widget must still match a catalog entry spelled
+    Acme/Widget -- but the cache keys built from those same helpers are
+    byte-compatible with what is already on disk and must stay so.
+    """
+    if a is None or b is None:
+        return False
+    return (a.user.casefold(), a.repo.casefold()) == (b.user.casefold(), b.repo.casefold())
+
+
+def repository_key(ref: RepoRef) -> tuple[str, str]:
+    """The case-insensitive identity of a repository, for set membership."""
+    return (ref.user.casefold(), ref.repo.casefold())
+
+
+class InstalledAsset(NamedTuple):
+    """One directory under an asset directory, read locally.
+
+    asset_id is the directory NAME, which is what install_* installs over
+    and what download_repo validates the staged tree against; manifest_id is
+    what the tree on disk claims to be. They agree for a canonical install
+    and differ for a copy kept aside under another name.
+    """
+    asset_id: str
+    path: str
+    sha: str                  # "" when neither .git nor VERSION can be read
+    origin: RepoRef | None    # from the ORIGIN stamp; None for a legacy install
+    manifest_id: str | None   # None when the tree has no readable manifest
+    is_symlink: bool
+
+
+class UpdateCheck(NamedTuple):
+    """What deciding "does this catalog entry need updating" actually needs:
+    the installed asset the entry names (if any), the sha that asset is at,
+    and the sha it should be at.
+
+    Everything else a store entry carries -- name, descriptions, tags,
+    licence, thumbnail -- exists to DISPLAY it, and each of those costs a
+    request. Keeping the update check to this tuple is what keeps a launch
+    off the network for entries the user never installed.
+    """
+    url: str
+    ref: RepoRef
+    asset_id: str | None      # None: the entry is not installed
+    local_sha: str | None     # the installed asset's sha, None when not installed
+    commit_sha: str | None    # the sha the entry should be installed at
+    branch: str | None
+    compatible: bool
+
+
 class StoreBackend:
     STORE_REPO_URL = "https://github.com/StreamController/StreamController-Store" #"https://github.com/StreamController/StreamController-Store"
     STORE_CACHE_PATH = "Store/cache"
     # STORE_CACHE_PATH = os.path.join(gl.DATA_PATH, STORE_CACHE_PATH)
     STORE_BRANCH = "1.5.0"
+
+    # Written into every installed tree next to VERSION: the repository the
+    # tree was downloaded from. The catalog names repositories and install
+    # directories are named after manifest ids, so without this the two can
+    # only be connected by fetching the remote manifest of every entry.
+    ORIGIN_FILE = "ORIGIN"
 
     WALLPAPERS_FILE = "Wallpapers.json"
     PLUGIN_FILE = "Plugins.json"
@@ -103,6 +164,21 @@ class StoreBackend:
     # enough for real ref names (slashes, dots, dashes-in-the-middle) but no
     # whitespace or shell-significant characters.
     SAFE_REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
+
+    # What is installed on disk, per asset directory, scanned once for the
+    # duration of an update-check pass (process_store_data with
+    # include_images False) instead of once per catalog entry. None outside
+    # such a pass -- prepare_* then scans for itself, so nothing depends on
+    # the snapshot existing, and a whole-dict assignment is atomic, so a
+    # worker sees either this pass's snapshot or no snapshot at all.
+    # Declared on the class so instances built without __init__ (the test
+    # harness) read the same default.
+    _installed_index: "dict[str, dict[str, InstalledAsset]] | None" = None
+
+    # Install directories no catalog entry claimed this session, so the
+    # legacy walk stops re-visiting them. Rebound rather than mutated, so
+    # the class-level default is never shared state between instances.
+    _unresolvable_installs: "frozenset[str]" = frozenset()
 
     @classmethod
     def is_safe_commit_sha(cls, commit_sha) -> TypeGuard[str]:
@@ -419,54 +495,85 @@ class StoreBackend:
             log.error(e)
             return None, n_stores_with_errors
 
-    def process_store_data(self, filename: str, process_func: Callable[..., Any], get_custom_func: Callable[..., Any] | None, data_class, include_images=True):
+    def process_store_data(self, filename: str, process_func: Callable[..., Any], get_custom_func: Callable[..., Any] | None, data_class, include_images=True, base_dir: str | None = None):
+        """Fetches the catalog file from every configured store and prepares
+        each entry on the fan-out pool.
+
+        include_images picks WHICH VIEW of an entry is built, not just
+        whether a thumbnail is attached:
+
+          * True -- the store window's view: every entry is described in
+            full (manifest, attribution, thumbnail), because every entry is
+            about to be shown.
+          * False -- the update check's view: only what decides "is this
+            installed, and is it out of date". Entries that are not
+            installed cost no request of their own, and no image is fetched
+            or decoded at all. The objects it returns are NOT complete store
+            entries -- their display fields are unset.
+
+        base_dir names the asset directory this catalog installs into. The
+        update-check view needs it to identify installs made before the
+        origin stamp existed; the store window's view does not use it.
+        """
         n_stores_with_errors = 0
         data_list = []
 
-        stores = self.get_stores()
+        if not include_images:
+            # Opens an update-check pass: the fan-out below then scans each
+            # asset directory once for the whole pass instead of once per
+            # catalog entry.
+            self._installed_index = {}
+        try:
+            stores = self.get_stores()
 
-        for url, branch in stores:
-            store_file_json, n_stores_with_errors = self.fetch_and_parse_store_json(url, filename, branch, n_stores_with_errors)
-            if store_file_json is not None:
-                data_list.extend(store_file_json)
+            for url, branch in stores:
+                store_file_json, n_stores_with_errors = self.fetch_and_parse_store_json(url, filename, branch, n_stores_with_errors)
+                if store_file_json is not None:
+                    data_list.extend(store_file_json)
 
-        if n_stores_with_errors >= len(stores):
-            return NoConnectionError()
+            if n_stores_with_errors >= len(stores):
+                return NoConnectionError()
 
-        futures = [self._prepare_pool.submit(process_func, data, include_images, True) for data in data_list]
+            custom_entries = [{"url": url, "branch": branch}
+                              for url, branch in (get_custom_func() if get_custom_func is not None else [])]
 
-        if get_custom_func is not None:
-            for url, branch in get_custom_func():
-                asset = {
-                    "url": url,
-                    "branch": branch
-                }
-                futures.append(self._prepare_pool.submit(process_func, asset, include_images, False))
+            if not include_images and base_dir is not None:
+                # Before the fan-out, so every entry below decides locally.
+                self.resolve_unstamped_installs(base_dir, data_list + custom_entries)
 
-        # Collect per-future: one misbehaving store entry must not raise out
-        # of the fan-out and blank the whole page (the page's @log.catch
-        # load() would swallow it and leave the spinner up forever).
-        results = []
-        for future in futures:
-            try:
-                results.append(future.result())
-            except Exception as e:
-                log.error(f"Store item preparation failed: {e!r}")
-        results = [result for result in results if isinstance(result, data_class)]
+            futures = [self._prepare_pool.submit(process_func, data, include_images, True) for data in data_list]
+            futures += [self._prepare_pool.submit(process_func, asset, include_images, False)
+                        for asset in custom_entries]
 
-        return results
+            # Collect per-future: one misbehaving store entry must not raise out
+            # of the fan-out and blank the whole page (the page's @log.catch
+            # load() would swallow it and leave the spinner up forever).
+            results = []
+            for future in futures:
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    log.error(f"Store item preparation failed: {e!r}")
+            results = [result for result in results if isinstance(result, data_class)]
+
+            return results
+        finally:
+            if not include_images:
+                # Dropped with the pass that took it: a later prepare_* must
+                # never decide against a snapshot from an earlier one.
+                self._installed_index = None
 
     def get_all_plugins(self, include_images: bool = True) -> list[PluginData]:
-        return self.process_store_data(self.PLUGIN_FILE, self.prepare_plugin, self.get_custom_plugins, PluginData, include_images)
+        return self.process_store_data(self.PLUGIN_FILE, self.prepare_plugin, self.get_custom_plugins, PluginData, include_images, gl.PLUGIN_DIR)
 
-    def get_all_icons(self) -> int:
-        return self.process_store_data(self.ICON_FILE, self.prepare_icon, None, IconData)
+    def get_all_icons(self, include_images: bool = True) -> list[IconData]:
+        return self.process_store_data(self.ICON_FILE, self.prepare_icon, None, IconData, include_images, self.icons_dir())
 
-    def get_all_wallpapers(self) -> int:
-        return self.process_store_data(self.WALLPAPERS_FILE, self.prepare_wallpaper, None, WallpaperData)
-    
-    def get_all_sd_plus_bar_wallpapers(self) -> int:
-        return self.process_store_data(self.SDPLUSWALLPAPERS_FILE, self.prepare_sd_plus_bar_wallpaper, None, SDPlusBarWallpaperData)
+    def get_all_wallpapers(self, include_images: bool = True) -> list[WallpaperData]:
+        return self.process_store_data(self.WALLPAPERS_FILE, self.prepare_wallpaper, None, WallpaperData, include_images, self.wallpapers_dir())
+
+    def get_all_sd_plus_bar_wallpapers(self, include_images: bool = True) -> list[SDPlusBarWallpaperData]:
+        return self.process_store_data(self.SDPLUSWALLPAPERS_FILE, self.prepare_sd_plus_bar_wallpaper, None, SDPlusBarWallpaperData, include_images, self.sd_plus_bar_wallpapers_dir())
     
     def get_manifest(self, url:str, commit:str) -> "dict | NoConnectionError | None":
         # url = self.build_url(url, "manifest.json", commit)
@@ -488,6 +595,26 @@ class StoreBackend:
             return {}
 
     def prepare_plugin(self, plugin, include_image: bool = True, verified: bool = False):
+        if not include_image:
+            checked = self.check_entry_for_update(plugin, gl.PLUGIN_DIR)
+            if not isinstance(checked, UpdateCheck):
+                return checked
+            # The update-check view: only the fields get_plugins_to_update
+            # reads and install_plugin needs. Every field left unset here
+            # (name, descriptions, tags, licence, thumbnail) would cost a
+            # request and is only ever displayed.
+            return PluginData(
+                github=checked.url,
+                author=checked.ref.user,
+                repository_name=checked.ref.repo,
+                commit_sha=checked.commit_sha,
+                branch=checked.branch,
+                local_sha=checked.local_sha,
+                plugin_id=checked.asset_id,
+                is_compatible=checked.compatible,
+                verified=verified,
+            )
+
         url = plugin["url"]
         ref = self.repo_ref_for_entry(url)
         if ref is None:
@@ -552,6 +679,11 @@ class StoreBackend:
         tags: Any = manifest.get("tags") or None
         license_descriptions: Any = attribution.get("licence-descriptions", attribution.get("descriptions")) or None
 
+        # This entry was identified the expensive way -- its remote
+        # manifest -- so record the link while it is known: the update
+        # check then identifies the same install without any fetch.
+        self.note_installed_origin(gl.PLUGIN_DIR, manifest.get("id"), url)
+
         return PluginData(
             descriptions=descriptions,
             short_descriptions=short_descriptions,
@@ -604,6 +736,363 @@ class StoreBackend:
         except Exception as e:
             raise RuntimeError(f"Unable to retrieve git commit hash: {e}")
     
+    def icons_dir(self) -> str:
+        return os.path.join(gl.DATA_PATH, "icons")
+
+    def wallpapers_dir(self) -> str:
+        return os.path.join(gl.DATA_PATH, "wallpapers")
+
+    def sd_plus_bar_wallpapers_dir(self) -> str:
+        return os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers")
+
+    def scan_installed_assets(self, base_dir: str) -> dict[str, InstalledAsset]:
+        """{install directory name: InstalledAsset} for everything under
+        base_dir -- the whole local half of the update check, read without a
+        single request.
+
+        Every field is what identity or the verdict needs: the ORIGIN stamp
+        says which repository the tree came from, the local manifest id says
+        whether the directory is the canonical install of that tree (a
+        renamed copy answers with the id it was copied from), the sha says
+        which commit it sits on, and islink marks a checkout the user
+        manages rather than an install this app owns.
+
+        Unsafe names are skipped, which also skips the dot-prefixed swap
+        leftovers _swap_into_place may have left behind.
+        """
+        index: dict[str, InstalledAsset] = {}
+        try:
+            names = os.listdir(base_dir)
+        except OSError:
+            # A store asset class the user has never installed from has no
+            # directory at all; that is "nothing installed", not an error.
+            return index
+        for asset_id in names:
+            if not self.is_safe_asset_id(asset_id):
+                continue
+            asset_path = os.path.join(base_dir, asset_id)
+            if not os.path.isdir(asset_path):
+                continue
+            index[asset_id] = InstalledAsset(
+                asset_id=asset_id,
+                path=asset_path,
+                sha=self.get_local_sha(asset_path) or "",
+                origin=self.read_origin(asset_path),
+                manifest_id=self.read_local_manifest_id(asset_path),
+                is_symlink=os.path.islink(asset_path),
+            )
+        return index
+
+    def installed_assets(self, base_dir: str) -> dict[str, InstalledAsset]:
+        """The current pass's snapshot for base_dir, scanning once on first
+        use; a fresh scan every time outside a pass (a prepare_* called on
+        its own).
+
+        Two workers reaching an unscanned directory together both scan and
+        both store -- the results are equivalent snapshots taken moments
+        apart, so the race costs one extra listing and nothing else. Two
+        overlapping passes clearing each other's snapshot costs the same
+        way: the snapshot is a cache, never the source of truth.
+        """
+        snapshot = self._installed_index
+        if snapshot is None:
+            return self.scan_installed_assets(base_dir)
+        index = snapshot.get(base_dir)
+        if index is None:
+            index = self.scan_installed_assets(base_dir)
+            snapshot[base_dir] = index
+        return index
+
+    def read_origin(self, asset_path: str) -> RepoRef | None:
+        """The repository an installed tree was downloaded from, as stamped
+        by download_repo/clone_repo. Reduced to a RepoRef so a url written
+        in one spelling still matches a catalog entry written in another."""
+        try:
+            with open(os.path.join(asset_path, self.ORIGIN_FILE)) as f:
+                return parse_repo_url(f.readline().strip())
+        except OSError:
+            return None
+
+    @staticmethod
+    def read_local_manifest_id(asset_path: str) -> str | None:
+        """The id an installed tree claims for itself. Equal to the
+        directory name for a canonical install -- that is the invariant
+        install_* creates and _staged_tree_id_matches enforces -- and
+        different for a renamed or copied-aside directory."""
+        try:
+            with open(os.path.join(asset_path, "manifest.json")) as f:
+                asset_id = json.load(f).get("id")
+        except (OSError, ValueError):
+            return None
+        return asset_id if isinstance(asset_id, str) else None
+
+    def stamp_origin(self, asset_path: str, repo_url: str) -> None:
+        """Record which repository an installed tree came from.
+
+        This is the link the catalog cannot supply: a catalog entry names a
+        repository, an install directory is named after a manifest id, and
+        nothing on disk used to connect the two without fetching the remote
+        manifest. Written for every install, and backfilled the first time
+        an existing install is identified, so the update check can answer
+        "is this entry installed" from local state alone.
+
+        Never written into a symlinked directory: that is a checkout the
+        user manages, and this app does not write into it.
+        """
+        if os.path.islink(asset_path):
+            return
+        try:
+            with open(os.path.join(asset_path, self.ORIGIN_FILE), "w") as f:
+                f.write(f"{repo_url}\n")
+        except OSError as e:
+            # Nothing breaks without the stamp: identity falls back to the
+            # manifest lookup that wrote it in the first place.
+            log.warning(f"Could not stamp the origin of {asset_path}: {e}")
+
+    def note_installed_origin(self, base_dir: str, asset_id, repo_url: str) -> None:
+        """Backfill the origin stamp of an install that was identified some
+        other way -- a full prepare, which fetches the manifest anyway -- so
+        the identification happens once rather than once per launch.
+
+        A stamp that DISAGREES with the url that just identified the tree is
+        overwritten: a repository that was renamed or transferred otherwise
+        keeps a stamp no catalog entry claims, and the install silently
+        stops being updated. Where a broken catalog lists one asset id under
+        two urls, the last prepare to identify the tree wins; the sweep
+        resolves the same collision in catalog order.
+        """
+        if not self.is_safe_asset_id(asset_id) or not isinstance(repo_url, str):
+            return
+        ref = parse_repo_url(repo_url)
+        if ref is None:
+            return
+        asset_path = os.path.join(base_dir, asset_id)
+        if not os.path.isdir(asset_path) or os.path.islink(asset_path):
+            return
+        if same_repository(self.read_origin(asset_path), ref):
+            return
+        self.stamp_origin(asset_path, repo_url)
+
+    def match_installed_asset(self, ref: RepoRef, installed: dict) -> "InstalledAsset | None":
+        """The install a catalog entry refers to, out of everything stamped
+        with its repository.
+
+        Only a CANONICAL directory can be the answer -- one whose name is
+        the id its own manifest claims. A copy kept aside
+        (com_x_Alpha_backup) carries the same origin stamp and would
+        otherwise claim the entry, and installing over it is doomed by
+        construction: download_repo refuses a staged tree whose manifest id
+        is not the directory name, so it would download an archive on every
+        launch only to throw it away. An install with no readable manifest
+        is still eligible -- it is broken, not misnamed, and reinstalling it
+        is the repair.
+        """
+        candidates = [asset for asset in installed.values() if same_repository(asset.origin, ref)]
+        if not candidates:
+            return None
+        canonical = [asset for asset in candidates
+                     if asset.manifest_id is None or asset.manifest_id == asset.asset_id]
+        if len(canonical) == 1:
+            return canonical[0]
+        if not canonical:
+            log.warning(
+                f"Not updating {ref.user}/{ref.repo}: the only directories stamped with it "
+                f"({[asset.asset_id for asset in candidates]}) are not named after the id "
+                f"their manifest claims"
+            )
+            return None
+        log.warning(
+            f"Not updating {ref.user}/{ref.repo}: more than one install claims it "
+            f"({[asset.asset_id for asset in canonical]})"
+        )
+        return None
+
+    def resolve_unstamped_installs(self, base_dir: str, entries: list) -> None:
+        """Identity for installs the origin stamp cannot answer for: fetch a
+        candidate entry's manifest and match its id against the directory
+        names, which is how identity worked before the stamp existed, then
+        stamp what it identifies so it is never looked up again.
+
+        A directory is pending when it carries no stamp (installed before
+        the stamp existed) OR when its stamp names a repository no entry in
+        this catalog claims -- a repository that was renamed or transferred
+        otherwise keeps a stamp nothing matches, and the install silently
+        stops being updated, which is the very failure the stamp exists to
+        prevent.
+
+        Runs once per update-check pass, before the fan-out, and only while
+        something is actually pending. Entries whose repository name appears
+        in a pending directory's id are tried first -- an asset id
+        conventionally ends in its repository name -- and the walk stops as
+        soon as every pending directory is claimed, so the usual cost is one
+        fetch per unresolved install rather than one per catalog entry.
+        Where a broken catalog lists one asset id under two urls, the first
+        entry in catalog order wins (the sort is stable and a claimed
+        directory is removed from pending).
+
+        A directory nothing claims costs one full walk -- one small fetch
+        per entry, no image work -- and is then remembered as unresolvable
+        for the rest of the session, so the walk is not repeated on every
+        later pass. That memory is deliberately not persisted: a store that
+        was merely unreachable gets another chance at the next launch.
+
+        Symlinked directories are never pending: they are never
+        auto-updated, so there is nothing to identify them for, and this app
+        does not write into a tree it does not own.
+        """
+        installed = self.installed_assets(base_dir)
+        claimed = set()
+        for entry in entries:
+            entry_ref = parse_repo_url(entry.get("url"))
+            if entry_ref is not None:
+                claimed.add(repository_key(entry_ref))
+
+        pending = {
+            asset.asset_id: asset for asset in installed.values()
+            if not asset.is_symlink
+            and asset.path not in self._unresolvable_installs
+            and (asset.origin is None or repository_key(asset.origin) not in claimed)
+        }
+        if not pending:
+            return
+
+        def plausible_first(entry) -> int:
+            entry_ref = parse_repo_url(entry.get("url"))
+            if entry_ref is None:
+                return 2
+            return 0 if any(entry_ref.repo.lower() in asset_id.lower() for asset_id in pending) else 1
+
+        for entry in sorted(entries, key=plausible_first):
+            if not pending:
+                return
+            try:
+                self._claim_pending_install(entry, pending, installed)
+            except Exception as e:
+                # Same contract as the prepare fan-out's collect loop: one
+                # misbehaving entry must not raise out of the pass. Remote
+                # data reaches both a json parse (a truncated manifest, an
+                # error page) and a version parse (a catalog key like
+                # "latest"), and this pre-pass runs before every leg of
+                # update_everything -- a raise here left ALL FOUR legs
+                # silently doing nothing.
+                log.error(f"Could not identify installs from store entry {entry.get('url')!r}: {e!r}")
+
+        if pending:
+            # Walked the whole catalog and nothing claimed these.
+            self._unresolvable_installs = frozenset(
+                self._unresolvable_installs | {asset.path for asset in pending.values()}
+            )
+
+    def _claim_pending_install(self, entry: dict, pending: dict, installed: dict) -> None:
+        """One entry's turn at the pending directories: fetch its manifest
+        and, if the id names a pending directory, stamp it. Raises whatever
+        the remote data raises -- the caller owns the per-entry catch."""
+        ref = parse_repo_url(entry.get("url"))
+        if ref is None:
+            return
+        url = entry["url"]
+        # The manifest is read at the revision the entry points at; for a
+        # branch-pinned entry the branch NAME is revision enough, so
+        # identifying it costs no tip lookup.
+        revision = entry.get("branch")
+        if revision is None:
+            commits = entry.get("commits")
+            if not isinstance(commits, dict) or not commits:
+                return
+            newest = self.get_newest_compatible_version(commits) or self.get_newest_version(list(commits.keys()))
+            revision = commits[newest]
+        manifest = self.get_manifest(url, revision)
+        if isinstance(manifest, NoConnectionError) or not manifest:
+            return
+        asset_id = manifest.get("id")
+        if not self.is_safe_asset_id(asset_id):
+            return
+        asset = pending.pop(asset_id, None)
+        if asset is None:
+            return
+        if asset.manifest_id is not None and asset.manifest_id != asset.asset_id:
+            # A directory whose name is not the id it claims cannot be
+            # installed over anyway -- the staged-id check refuses it.
+            return
+        self.stamp_origin(asset.path, url)
+        # Keep the pass snapshot honest: the entries checked after this one
+        # must see the directory as stamped.
+        installed[asset_id] = asset._replace(origin=ref)
+
+    def check_entry_for_update(self, entry: dict, base_dir: str) -> "UpdateCheck | NoConnectionError | None":
+        """Resolves one catalog entry against what is installed under
+        base_dir, fetching nothing the update decision does not need.
+
+        Identity comes from the ORIGIN stamp every install carries: the
+        entry names a repository, the stamp says which directory came from
+        that repository, and the directory's VERSION says which commit it
+        sits on. All local, so an entry the user never installed costs
+        nothing beyond the catalog that named it -- its manifest,
+        attribution and thumbnail only ever mattered for displaying it.
+
+        Identity deliberately does NOT come from matching the catalog's
+        commit shas against what is installed: the store rewrites an entry's
+        sha in place under the same version key, so the sha an install sits
+        on stops being listed at exactly the moment an update exists.
+
+        What still costs a request: a branch-pinned entry (custom plugins
+        name a branch, not a version map) must resolve its tip.
+
+        This answers from stamps ALONE, so it is only complete inside a pass
+        that ran resolve_unstamped_installs first (process_store_data does,
+        for the update-check view). Called directly, an install whose stamp
+        is missing or stale reads as not installed.
+        """
+        ref = self.repo_ref_for_entry(entry.get("url"))
+        if ref is None:
+            return None
+        url = entry["url"]
+        installed = self.installed_assets(base_dir)
+
+        branch = entry.get("branch")
+        compatible = True
+        if branch is not None:
+            commit = self.get_last_commit(url, branch)
+            if isinstance(commit, NoConnectionError):
+                # NoConnectionError is falsy: letting it fall through would
+                # store the error object as the entry's commit_sha and
+                # poison the sha comparison.
+                log.error(f"Could not resolve the last commit of {url}@{branch} due to NoConnectionError")
+                return commit
+            target = commit
+        else:
+            commits = entry.get("commits")
+            if not isinstance(commits, dict) or not commits:
+                log.error(f"Skipping store entry {url!r}: it pins no version")
+                return None
+            newest = self.get_newest_compatible_version(commits)
+            if newest is None:
+                # No version for this app major: pin the newest one anyway,
+                # the way prepare_* does, and let the caller refuse to
+                # install it.
+                compatible = False
+                newest = self.get_newest_version(list(commits.keys()))
+            target = commits[newest]
+
+        asset = self.match_installed_asset(ref, installed)
+        if asset is None:
+            return UpdateCheck(url, ref, None, None, target, branch, compatible)
+
+        if asset.is_symlink:
+            # A symlinked install is a checkout the user manages -- a dev
+            # workflow points one at a working tree. Installing over it
+            # replaces the link with a downloaded copy and takes the working
+            # tree out of the plugin directory, so auto-update leaves it be;
+            # the store window still offers the update explicitly.
+            log.info(f"Skipping auto-update of {asset.asset_id}: it is a symlink to a tree this app does not own")
+            return UpdateCheck(url, ref, None, None, target, branch, compatible)
+
+        # An empty sha means neither .git nor VERSION could be read -- a
+        # half-written or hand-copied tree. It compares unequal to every
+        # commit, so the entry reads as outdated and the install is
+        # repaired by reinstalling it.
+        return UpdateCheck(url, ref, asset.asset_id, asset.sha, target, branch, compatible)
+
     def get_local_sha_for_id(self, base_dir: str, asset_id) -> str | None:
         """get_local_sha guarded by the asset-id whitelist: an unsafe or
         missing manifest id never probes the filesystem and simply reads as
@@ -633,7 +1122,20 @@ class StoreBackend:
     
     def prepare_icon(self, icon, include_image: bool = True, verified: bool = False):
         if not include_image:
-            raise NotImplementedError("Not yet implemented") #TODO
+            # The update-check view -- see prepare_plugin.
+            checked = self.check_entry_for_update(icon, self.icons_dir())
+            if not isinstance(checked, UpdateCheck):
+                return checked
+            return IconData(
+                github=checked.url,
+                author=checked.ref.user,
+                repository_name=checked.ref.repo,
+                commit_sha=checked.commit_sha,
+                local_sha=checked.local_sha,
+                icon_id=checked.asset_id,
+                is_compatible=checked.compatible,
+                verified=verified,
+            )
         if "url" not in icon:
             return None
 
@@ -687,6 +1189,11 @@ class StoreBackend:
         tags: Any = manifest.get("tags") or None
         license_descriptions: Any = attribution.get("licence-descriptions", attribution.get("descriptions")) or None
 
+        # This entry was identified the expensive way -- its remote
+        # manifest -- so record the link while it is known: the update
+        # check then identifies the same install without any fetch.
+        self.note_installed_origin(self.icons_dir(), manifest.get("id"), url)
+
         return IconData(
             description=translated_description or manifest.get("description"),
             short_description=translated_short_description or manifest.get("short-description"),
@@ -697,7 +1204,7 @@ class StoreBackend:
             author=author or None,  # Formerly: user_name
             official=author in self.official_authors or False,
             commit_sha=commit,
-            local_sha=self.get_local_sha_for_id(os.path.join(gl.DATA_PATH, "icons"), manifest.get("id")),
+            local_sha=self.get_local_sha_for_id(self.icons_dir(), manifest.get("id")),
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
             repository_name=ref.repo,
@@ -722,7 +1229,20 @@ class StoreBackend:
     
     def prepare_wallpaper(self, wallpaper, include_image: bool = True, verified: bool = False):
         if not include_image:
-            raise NotImplementedError("Not yet implemented") #TODO
+            # The update-check view -- see prepare_plugin.
+            checked = self.check_entry_for_update(wallpaper, self.wallpapers_dir())
+            if not isinstance(checked, UpdateCheck):
+                return checked
+            return WallpaperData(
+                github=checked.url,
+                author=checked.ref.user,
+                repository_name=checked.ref.repo,
+                commit_sha=checked.commit_sha,
+                local_sha=checked.local_sha,
+                wallpaper_id=checked.asset_id,
+                is_compatible=checked.compatible,
+                verified=verified,
+            )
         if "url" not in wallpaper:
             return None
 
@@ -773,6 +1293,11 @@ class StoreBackend:
         tags: Any = manifest.get("tags") or None
         license_descriptions: Any = attribution.get("licence-descriptions", attribution.get("descriptions")) or None
 
+        # This entry was identified the expensive way -- its remote
+        # manifest -- so record the link while it is known: the update
+        # check then identifies the same install without any fetch.
+        self.note_installed_origin(self.wallpapers_dir(), manifest.get("id"), url)
+
         return WallpaperData(
             description=translated_description or manifest.get("description"),
             short_description=translated_short_description or manifest.get("short-description"),
@@ -783,7 +1308,7 @@ class StoreBackend:
             author=author or None,  # Formerly: user_name
             official=author in self.official_authors or False,
             commit_sha=commit,
-            local_sha=self.get_local_sha_for_id(os.path.join(gl.DATA_PATH, "wallpapers"), manifest.get("id")),
+            local_sha=self.get_local_sha_for_id(self.wallpapers_dir(), manifest.get("id")),
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
             repository_name=ref.repo,
@@ -807,7 +1332,20 @@ class StoreBackend:
 
     def prepare_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper, include_image: bool = True, verified: bool = False):
         if not include_image:
-            raise NotImplementedError("Not yet implemented") #TODO
+            # The update-check view -- see prepare_plugin.
+            checked = self.check_entry_for_update(sd_plus_bar_wallpaper, self.sd_plus_bar_wallpapers_dir())
+            if not isinstance(checked, UpdateCheck):
+                return checked
+            return SDPlusBarWallpaperData(
+                github=checked.url,
+                author=checked.ref.user,
+                repository_name=checked.ref.repo,
+                commit_sha=checked.commit_sha,
+                local_sha=checked.local_sha,
+                id=checked.asset_id,
+                is_compatible=checked.compatible,
+                verified=verified,
+            )
         if "url" not in sd_plus_bar_wallpaper:
             return None
 
@@ -857,6 +1395,11 @@ class StoreBackend:
         tags: Any = manifest.get("tags") or None
         license_descriptions: Any = attribution.get("licence-descriptions", attribution.get("descriptions")) or None
 
+        # This entry was identified the expensive way -- its remote
+        # manifest -- so record the link while it is known: the update
+        # check then identifies the same install without any fetch.
+        self.note_installed_origin(self.sd_plus_bar_wallpapers_dir(), manifest.get("id"), url)
+
         return SDPlusBarWallpaperData(
             description=translated_description or manifest.get("description"),
             short_description=translated_short_description or manifest.get("short-description"),
@@ -867,7 +1410,7 @@ class StoreBackend:
             author=author or None,  # Formerly: user_name
             official=author in self.official_authors or False,
             commit_sha=commit,
-            local_sha=self.get_local_sha_for_id(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers"), manifest.get("id")),
+            local_sha=self.get_local_sha_for_id(self.sd_plus_bar_wallpapers_dir(), manifest.get("id")),
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
             repository_name=ref.repo,
@@ -932,7 +1475,7 @@ class StoreBackend:
             log.error(f"Skipping store entry {url!r}: not a store repository url")
         return ref
 
-    def get_newest_compatible_version(self, available_versions: list[str]) -> str | None:
+    def get_newest_compatible_version(self, available_versions: Collection[str]) -> str | None:
         if gl.exact_app_version_check:
             if gl.app_version in available_versions:
                 return gl.app_version
@@ -1152,6 +1695,9 @@ class StoreBackend:
                 return 400
             with open(os.path.join(extracted_folder, "VERSION"), "w") as f:
                 f.write(sha)
+            # Stamped in the staging tree like VERSION, so the swap
+            # publishes the install and its origin together.
+            self.stamp_origin(extracted_folder, repo_url)
 
             self._swap_into_place(extracted_folder, directory)
         except Exception as e:
@@ -1263,6 +1809,7 @@ class StoreBackend:
                 return 400
             with open(os.path.join(staging, "VERSION"), "w") as f:
                 f.write(version_stamp)
+            self.stamp_origin(staging, repo_url)
 
             self._swap_into_place(staging, local_path)
         except Exception as e:
@@ -1535,7 +2082,9 @@ class StoreBackend:
             
     ## Updates
     def get_plugins_to_update(self):
-        plugins =  self.get_all_plugins()
+        # The update-check view: no thumbnails, and no request at all for a
+        # catalog entry the user never installed.
+        plugins = self.get_all_plugins(include_images=False)
         if isinstance(plugins, NoConnectionError):
             return plugins
 
@@ -1590,7 +2139,7 @@ class StoreBackend:
         return n_updated
 
     def get_icons_to_update(self):
-        icons = self.get_all_icons()
+        icons = self.get_all_icons(include_images=False)
         if isinstance(icons, NoConnectionError):
             return icons
 
@@ -1636,7 +2185,7 @@ class StoreBackend:
         return n_updated
     
     def get_wallpapers_to_update(self):
-        wallpapers = self.get_all_wallpapers()
+        wallpapers = self.get_all_wallpapers(include_images=False)
         if isinstance(wallpapers, NoConnectionError):
             return wallpapers
 
@@ -1682,7 +2231,7 @@ class StoreBackend:
         return n_updated
 
     def get_sd_plus_bar_wallpapers_to_update(self):
-        wallpapers = self.get_all_sd_plus_bar_wallpapers()
+        wallpapers = self.get_all_sd_plus_bar_wallpapers(include_images=False)
         if isinstance(wallpapers, NoConnectionError):
             return wallpapers
 
