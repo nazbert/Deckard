@@ -58,6 +58,11 @@ variables:
 # how long any module under src/ or GtkHelper/ may grow and holds the deck
 # controller shim to a re-export surface; the rules and the per-file caps live
 # in the script.
+#
+# The gl slot freeze is the same shape again: it pins the set of process-wide
+# slots globals.py declares, and checks that nothing assigns a slot outside it,
+# so growing the shared namespace is a deliberate two-file edit rather than a
+# line nobody notices. The inventory and the rules live in that script.
 test:compile:
   stage: test
   image: python:3.13-slim   # 3.13 = the runtime python req2flatpak targets
@@ -66,6 +71,7 @@ test:compile:
   script:
     - python -m compileall -q *.py src GtkHelper tests scripts
     - python scripts/check_module_sizes.py
+    - python scripts/check_gl_slots.py
 
 # Lint gate. Rule selection lives in pyproject.toml and is an explicit
 # allowlist -- no rule is enabled until its population is clean, so this job
