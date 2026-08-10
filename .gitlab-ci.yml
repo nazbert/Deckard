@@ -52,13 +52,20 @@ variables:
 # importing it (imports need GTK4/PyGObject, which no slim CI image has). The
 # scenario harness (tests/run_all.py) stays a local tool for now — running it
 # in CI is follow-up work, not part of this pipeline.
+#
+# The module-size ratchet rides along here because it has the same shape: pure
+# stdlib, no imports of the tree, so it needs nothing this image lacks. It caps
+# how long any module under src/ or GtkHelper/ may grow and holds the deck
+# controller shim to a re-export surface; the rules and the per-file caps live
+# in the script.
 test:compile:
   stage: test
   image: python:3.13-slim   # 3.13 = the runtime python req2flatpak targets
   interruptible: true
   needs: []
   script:
-    - python -m compileall -q *.py src GtkHelper tests
+    - python -m compileall -q *.py src GtkHelper tests scripts
+    - python scripts/check_module_sizes.py
 
 # Lint gate. Rule selection lives in pyproject.toml and is an explicit
 # allowlist -- no rule is enabled until its population is clean, so this job
