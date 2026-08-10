@@ -40,8 +40,9 @@ THE RULES
   alias (`gl.X = ...`, augmented, `for gl.X in ...`, `with ... as gl.X`) must
   name a FROZEN_SLOTS entry. Stores to IMPORTED/INCIDENTAL/MACHINERY names are
   as much a failure as stores to undeclared ones: those are not API. The one
-  exception is MODULE_TYPE_STORES, which reaches the module's type rather than
-  its inventory.
+  exception is MODULE_TYPE_STORES, granted per file and per attribute, for
+  stores that reach the module object's own machinery rather than its
+  inventory.
 * `setattr(gl, ...)` and `delattr(gl, ...)` fail outright -- a computed slot
   name is invisible to this check, which is the whole reason to reject it. So
   does `del gl.X`: it makes the frozen inventory false at runtime.
@@ -97,6 +98,14 @@ nearest surface, and every such arrival in this tree's history has been a plain
 `gl.name = value`. A check that chased every indirection would have to
 approximate the interpreter, and would still lose. This one makes the ordinary
 path visible and leaves the exotic ones to review.
+
+Nor does it see what a class installed through a MODULE_TYPE_STORES exemption
+goes on to do. A swapped `__class__` decides how every read of the module
+behaves, and a `__getattr__` on it that caches its answer into the module
+namespace mints a name that outlives the restore -- a slot arriving by
+behaviour rather than by assignment. That is why the exemption names one file
+and one attribute at a time: the trust is granted in review, to a specific
+class somebody has read, not to a shape.
 
 Stdlib only, no imports beyond it: this runs in CI's bare python:3.13-slim
 image alongside compileall, with nothing installed.
@@ -222,15 +231,20 @@ MACHINERY: frozenset[str] = frozenset({
     "__getattr__",   # serves and caches fallback_font on first read
 })
 
-# Attribute stores that reach the module's TYPE rather than its inventory.
-# Rebinding `__class__` to a ModuleType subclass is the documented way to give
-# a module custom attribute behaviour: it changes how reads behave and leaves
-# the set of declared names exactly as it found it, so it cannot mint a slot.
-# The engine read-surface scenario installs a recording module this way and
-# restores the original class in a finally. Nothing else is exempt -- notably
-# `gl.__dict__ = {}` would replace the whole inventory, which is precisely the
-# kind of arrival this check exists to notice.
-MODULE_TYPE_STORES: frozenset[str] = frozenset({"__class__"})
+# Attribute stores that reach the module OBJECT's own machinery rather than the
+# inventory globals.py declares, listed per file that makes one. Rebinding
+# `__class__` to a ModuleType subclass is the documented way to give a module
+# custom attribute behaviour, and the store does not by itself add a name to
+# globals.py's declared inventory -- the declaration pin reads that source and
+# is unaffected. What the installed class then DOES is outside this check's
+# reach; see WHAT THIS DOES NOT SEE. Which is why the exemption is granted by
+# file and by attribute, in review, rather than to a shape: `gl.__dict__ = {}`
+# in the same file would still fail, and so would `gl.__class__` anywhere else.
+MODULE_TYPE_STORES: dict[str, frozenset[str]] = {
+    # Installs a recording module to pin which slots the render engine reads,
+    # and restores the original class in a finally.
+    "tests/scenario_engine_gl_surface.py": frozenset({"__class__"}),
+}
 
 TABLES: tuple[tuple[str, frozenset[str]], ...] = (
     ("FROZEN_SLOTS", frozenset(FROZEN_SLOTS)),
@@ -399,7 +413,33 @@ def declared_names(tree: ast.Module) -> set[str]:
 
 
 def check_tables(failures: list[str]) -> None:
-    """Reject tables that overlap or that have emptied out."""
+    """Reject tables that overlap or that have emptied out, and hold
+    MODULE_TYPE_STORES to the two properties that keep it from becoming a way
+    to exempt slots.
+
+    MODULE_TYPE_STORES is not one of TABLES: those answer what a name globals.py
+    declares IS, and this one names attributes of the module object, which
+    globals.py does not declare at all. So the overlap check above never reaches
+    it, and without the two below, widening it by one plain name would quietly
+    excuse every store of a real slot.
+    """
+    exempted = {name for names in MODULE_TYPE_STORES.values() for name in names}
+    for name in sorted(exempted):
+        if not (name.startswith("__") and name.endswith("__")):
+            failures.append(
+                f"{THIS_SCRIPT}: MODULE_TYPE_STORES lists `{name}`, which is not a "
+                "dunder. This table is only for attributes that reach the module "
+                "object's own machinery; any other name here exempts a slot store "
+                "from the freeze, which is the one thing it must never do."
+            )
+    for table_name, entries in TABLES:
+        for shared in sorted(exempted & entries):
+            failures.append(
+                f"{THIS_SCRIPT}: `{shared}` is listed in both MODULE_TYPE_STORES and "
+                f"{table_name}. A name globals.py declares is part of the inventory, "
+                "and pinning who assigns the inventory is the whole check."
+            )
+
     for index, (name, entries) in enumerate(TABLES):
         if not entries:
             failures.append(
@@ -554,9 +594,12 @@ def module_aliases(
     return aliases
 
 
-def check_stores(path: Path, failures: list[str]) -> int:
-    """Pin every `gl` attribute store in one file to FROZEN_SLOTS. Returns the count."""
+def check_stores(path: Path, failures: list[str], type_stores_used: set) -> int:
+    """Pin every `gl` attribute store in one file to FROZEN_SLOTS. Returns the
+    count, and records into `type_stores_used` which MODULE_TYPE_STORES
+    exemptions this file actually needed."""
     where = relative(path)
+    type_stores = MODULE_TYPE_STORES.get(where, frozenset())
     tree = parse(path, failures)
     if tree is None:
         return 0
@@ -581,7 +624,8 @@ def check_stores(path: Path, failures: list[str]) -> int:
         nonlocal stores
         name = alias_attribute(node)
         if name is not None:
-            if name in MODULE_TYPE_STORES:
+            if name in type_stores:
+                type_stores_used.add((where, name))
                 return
             stores += 1
             if name not in FROZEN_SLOTS:
@@ -638,6 +682,25 @@ def check_stores(path: Path, failures: list[str]) -> int:
     return stores
 
 
+def check_type_store_use(type_stores_used: set, failures: list[str]) -> None:
+    """Drop a MODULE_TYPE_STORES entry once the store it excuses is gone.
+
+    An exemption that outlives its store is a standing permission nobody is
+    using, and a standing permission is how the next one arrives unremarked --
+    the same staleness pressure the read-surface scenario puts on its own
+    per-file exemption.
+    """
+    for where, names in sorted(MODULE_TYPE_STORES.items()):
+        for name in sorted(names):
+            if (where, name) not in type_stores_used:
+                failures.append(
+                    f"{THIS_SCRIPT}: MODULE_TYPE_STORES exempts `gl.{name}` in {where}, "
+                    "which no longer stores it (or is no longer governed). Drop the "
+                    "entry rather than leaving an exemption standing for a write "
+                    "nothing makes."
+                )
+
+
 def main() -> int:
     failures: list[str] = []
 
@@ -645,7 +708,9 @@ def main() -> int:
     declared = check_declarations(failures)
 
     files = governed_files(failures)
-    stores = sum(check_stores(path, failures) for path in files)
+    type_stores_used: set = set()
+    stores = sum(check_stores(path, failures, type_stores_used) for path in files)
+    check_type_store_use(type_stores_used, failures)
 
     if failures:
         print(

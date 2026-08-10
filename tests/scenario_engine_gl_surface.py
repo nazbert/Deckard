@@ -159,6 +159,13 @@ REQUIRED_ABSENT = frozenset({
 # Slots the workload cannot fail to read. If the recorder does not install, or
 # the drive does not run, every subset and disjointness claim above holds
 # trivially -- these turn that silent pass into a failure.
+#
+# They are not all equally strong witnesses, and the api_* pair is the weak
+# one: the drive parks its own requests through the queue, so those two are
+# read whether or not the controller ever claims anything. What actually
+# defends legs B and C is the drive's own assertions that the parked page
+# request was claimed and the parked state request resolved; these entries
+# only witness that the recorder was watching while it happened.
 REQUIRED_OBSERVED = frozenset({
     "page_manager",
     "settings_manager",
