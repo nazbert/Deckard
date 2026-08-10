@@ -66,10 +66,16 @@ class Sway(Integration):
             return
 
         thread.stop()
-        # Never join the calling thread to itself: routing a window change
-        # can reach a page write, and a page write re-gates.
-        if thread is not threading.current_thread():
-            thread.join(timeout=WATCHER_STOP_TIMEOUT_S)
+        if thread is threading.current_thread():
+            # Never join the calling thread to itself: routing a window
+            # change can reach a page write, and a page write re-gates. The
+            # loop ends at its next stop check instead -- and returning here
+            # keeps the timeout warning below for real timeouts, rather than
+            # firing on a liveness check that is trivially true because the
+            # join was skipped.
+            return
+
+        thread.join(timeout=WATCHER_STOP_TIMEOUT_S)
         if thread.is_alive():
             # Parked in a swaymsg read that outlived the timeout. The thread
             # is a daemon and its loop rechecks the stop flag as soon as the

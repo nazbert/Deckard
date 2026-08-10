@@ -733,6 +733,10 @@ class MatchingWindowExpander(BetterExpander):
 
         self.auto_change_group = auto_change_group
 
+        # Stamps each query so a slow earlier one cannot overwrite the list
+        # a later one produced. Only ever touched on the main thread.
+        self._query_generation = 0
+
         self.update_button = Gtk.Button(icon_name="view-refresh-symbolic", valign=Gtk.Align.CENTER,
                                         css_classes=["flat"])
         self.update_button.connect("clicked", self.update_matching_windows)
@@ -753,11 +757,24 @@ class MatchingWindowExpander(BetterExpander):
         class_regex = self.auto_change_group.wm_class_entry.get_text()
         title_regex = self.auto_change_group.title_entry.get_text()
 
-        run_in_background(self._load_matching_windows, class_regex, title_regex)
+        # Each refresh click and each regex apply queues its own query, and
+        # they can finish out of order -- so the list is only replaced by the
+        # newest one. Nothing serialized them before; nothing had to, while
+        # the query ran inline.
+        self._query_generation += 1
+        run_in_background(self._load_matching_windows, class_regex, title_regex,
+                          self._query_generation)
 
-    def _load_matching_windows(self, class_regex: str, title_regex: str):
+    def _load_matching_windows(self, class_regex: str, title_regex: str, generation: int):
         window_grabber = gl.window_grabber
         if window_grabber is None:
             return
         matching_windows = window_grabber.get_all_matching_windows(class_regex=class_regex, title_regex=title_regex)
-        GLib.idle_add(self.load_windows, matching_windows)
+        GLib.idle_add(self._show_matching_windows, matching_windows, generation)
+
+    def _show_matching_windows(self, windows: list[Window], generation: int):
+        if generation != self._query_generation:
+            # A newer query has been issued since: this list is already out
+            # of date, and showing it would undo the newer answer.
+            return
+        self.load_windows(windows=windows)

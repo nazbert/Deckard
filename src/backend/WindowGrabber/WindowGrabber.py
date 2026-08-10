@@ -180,8 +180,12 @@ class WindowGrabber:
                 integration.stop_watching()
             log.info("Stopped watching the active window: no page has a window auto-change rule")
 
-            # After the reap, not before: a watcher still mid-switch would
-            # otherwise load a page on top of the restore below.
+            # After the reap rather than before, so a watcher still mid-
+            # switch does not load a page on top of the restore below. That
+            # holds as long as the join succeeded; a watcher abandoned at
+            # the timeout while inside a page load can still land after the
+            # restore and re-strand that deck. One-shot and rare -- nothing
+            # feeds it further window changes once it unwinds.
             self._restore_auto_loaded_decks()
 
     def _restore_auto_loaded_decks(self) -> None:
@@ -244,7 +248,22 @@ class WindowGrabber:
                 return
             self._gate_running = True
 
-        run_in_background(self._drain_gate_requests)
+        try:
+            run_in_background(self._drain_gate_requests)
+        except Exception:
+            # Nothing will drain the request, so the "a pass is running"
+            # claim above must be taken back: leaving it set would make
+            # every later re-gate a silent no-op for the rest of the
+            # session, with no way back. Dropping this request instead
+            # costs one stale decision until the next page write asks
+            # again. Reachable once the background pool is shut down,
+            # which is part of quit -- but self-healing beats depending on
+            # that staying true.
+            with self._lock:
+                self._gate_running = False
+                self._gate_pending = False
+                self._gate_idle.set()
+            log.opt(exception=True).warning("Could not schedule a window watcher gate pass")
 
     def wait_for_gate(self, timeout: float = 10.0) -> bool:
         """Blocks until no gate pass is queued or running; False on timeout.

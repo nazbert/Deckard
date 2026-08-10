@@ -13,7 +13,7 @@ integration injected through the pure `select_integration_class` selector. The
 five real integrations' stop paths (xprop/kdotool/swaymsg polls, the Hyprland
 socket, the GNOME subscription) need a live desktop and are NOT covered here;
 what is covered is that WindowGrabber asks for a stop at the right moments and
-does not return until the integration has finished stopping.
+that the watcher thread does then end, within a bounded wait.
 
 Asserts:
 
