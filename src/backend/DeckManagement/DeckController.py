@@ -2274,14 +2274,23 @@ class DeckController:
         while self.keep_actions_ticking:
             start = time.time()
             ticked_page = self.mark_page_ready_to_clear(False)
-            if not self.screen_saver.showing and True:
+            # A showing screensaver gets no work from this loop at all. Its
+            # imagery lives in `background` and is driven entirely by the
+            # media thread -- video frames through update_tiles() plus the
+            # per-key on_media_player_tick(), a still image painted once by
+            # the apply_prebuilt()/set_from_path() that installed it. The
+            # input set ScreenSaver.show() swaps in is freshly built by
+            # init_inputs(): no action, no media, no label on any of it, and
+            # ActionCore.get_is_present() refuses plugin writes for the
+            # duration, so nothing here has state to advance. Re-compositing
+            # and re-hashing every input once a second only produced frames
+            # the dedup guard discarded. Repaint after a failed device write
+            # stays with the media loop's pending-full-repaint retry, and
+            # hide() repaints through load_page().
+            if not self.screen_saver.showing:
                 for t in self.inputs:
                     for i in self.inputs[t]:
                         i.get_active_state().own_actions_tick_threaded()
-            else:
-                for t in self.inputs:
-                    for i in self.inputs[t]:
-                        i.update()
 
             # Reset the SAME page the False-call marked.
             self.mark_page_ready_to_clear(True, ticked_page)

@@ -13,6 +13,10 @@ bundle as a release asset.
   colon-joined `XDG_CURRENT_DESKTOP`, such as `ubuntu:GNOME` — window
   grabbing matched only single-name desktops and stayed silently disabled
   everywhere else.
+- An idle deck showing the screensaver no longer repaints every key, dial and
+  touchscreen once a second. The screensaver's own imagery is unaffected — it
+  is drawn by the media thread — so the repaints only burned CPU producing
+  frames that were then discarded as unchanged.
 
 ### Changed
 
