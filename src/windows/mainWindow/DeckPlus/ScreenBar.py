@@ -340,6 +340,11 @@ class ScreenBarImage(Gtk.Picture):
         icon_selector = gl.app.main_win.sidebar.key_editor.icon_selector
         dial_image = image.crop(touch_screen.get_dial_image_area(identifier))
         pixbuf = image2pixbuf(dial_image.convert("RGBA"), force_transparency=True)
+        # Same benign read-modify-write as the screenbar's own stamp: the id
+        # this frame carries is re-read after the store, so with two producers
+        # it can come back as a newer frame's and this one drops in
+        # set_pixbuf_and_del. The next frame corrects it, and one producer per
+        # screenbar is the normal case.
         icon_selector.latest_task_id = icon_selector.get_new_task_id()
         return icon_selector, pixbuf, icon_selector.latest_task_id
 

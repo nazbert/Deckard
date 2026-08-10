@@ -354,6 +354,66 @@ def check_mirror_pushes_coalesce() -> None:
     print("PASS: mirror pushes coalesce to one paint of the newest frame per input")
 
 
+def check_unbind_tolerates_a_concurrent_drain() -> None:
+    """unbind() must survive its slots being deleted underneath it.
+
+    It is not the only writer and it does not run on the main loop: deck
+    removal arrives on the USB monitor / boot rescan / flatpak poll threads,
+    while the GTK loop runs the drains still armed for that deck -- and each
+    of those pops its own slot the moment the child is gone. An unlucky
+    interleave used to raise KeyError out of unbind, i.e. out of
+    on_deck_removed, so the caller never reached the controller's close() and
+    the deck's media thread and USB handle were left running with nothing
+    holding them.
+
+    Deterministic stand-in for the thread race: a registry that runs the
+    adapter's REAL drains while unbind is snapshotting its keys, which is
+    exactly the window the race lands in.
+    """
+    from src.windows.ui_adapter import GtkUIAdapter, _MirrorSlot
+
+    class _DrainDuringScan(dict):
+        def __init__(self, adapter):
+            super().__init__()
+            self._adapter = adapter
+            self._fired = False
+
+        def __iter__(self):
+            keys = list(dict.keys(self))
+            if not self._fired:
+                # The GTK loop, landing between unbind's snapshot and its
+                # deletes.
+                self._fired = True
+                for controller, identifier in keys:
+                    self._adapter._drain_mirror(controller, identifier)
+            return iter(keys)
+
+    controller = _FakeController()
+    adapter = GtkUIAdapter()
+    adapter.bind(controller, SimpleNamespace())
+    adapter._window_mapped = True
+
+    slots = _DrainDuringScan(adapter)
+    identifiers = [Input.Key(f"{i}x0") for i in range(8)]
+    for identifier in identifiers:
+        slot = _MirrorSlot()
+        slot.offer(f"frame for {identifier}")
+        slots[(controller, identifier)] = slot
+    adapter._mirror_slots = slots
+
+    try:
+        adapter.unbind(controller)
+    except Exception as e:
+        raise AssertionError(
+            f"unbind raised {e!r} because a drain had already removed one of "
+            "its slots -- on_deck_removed would abort before close(), leaving "
+            "the deck's media thread and USB handle running"
+        )
+    assert slots._fired, "the drains never ran inside unbind's scan window"
+    assert dict(slots) == {}, f"unbind left slots behind: {list(slots)!r}"
+    print("PASS: unbind tolerates slots a concurrent drain already removed")
+
+
 def check_dial_preview_rides_the_strip_payload() -> None:
     """The sidebar's dial preview is a crop of the strip frame, so it travels
     IN that frame's payload: converted on the producer, painted by the same
@@ -593,6 +653,7 @@ def main() -> None:
     check_page_change_follows_action_init()
     check_every_port_method_is_headless_safe()
     check_mirror_pushes_coalesce()
+    check_unbind_tolerates_a_concurrent_drain()
     check_dial_preview_rides_the_strip_payload()
 
     print("PASS: scenario_ui_port_events")

@@ -221,12 +221,18 @@ class GtkUIAdapter(ui_port.UIPort):
     def unbind(self, controller) -> None:
         self._children.pop(controller, None)
         self._page_sync_queued.pop(controller, None)
-        # list() first: the media thread creates a slot the first time it
-        # mirrors an input, and a size change under the comprehension would
-        # raise straight through on_deck_removed -- which would skip the
-        # controller's close() and strand its media thread and USB handle.
+        # Snapshot, then delete TOLERANTLY: this runs off the main loop (deck
+        # removal arrives on the USB monitor, boot rescan and flatpak poll
+        # threads) and is not the only writer. The media thread creates a slot
+        # the first time it mirrors an input, so scanning the live dict can
+        # see it change size; and every armed drain for this controller --
+        # precisely what is pending at unplug -- pops its own slot from the
+        # GTK loop as soon as the child is gone, so an entry in the snapshot
+        # can already be deleted by the time we get to it. Either one raising
+        # here would come out of on_deck_removed, skipping the controller's
+        # close() and stranding its media thread and USB handle.
         for key in [k for k in list(self._mirror_slots) if k[0] is controller]:
-            del self._mirror_slots[key]
+            self._mirror_slots.pop(key, None)
 
     def _on_window_map(self, *args) -> None:
         self._window_mapped = True
