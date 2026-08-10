@@ -14,7 +14,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 import os
 import json
-import sys
 import threading
 import time
 
@@ -161,10 +160,14 @@ class Page:
         self.save()
 
     def load_action_objects(self):
+        # Function-scoped: DeckController imports this module, so a
+        # module-level import here would close an import cycle.
+        from src.backend.DeckManagement.DeckController import CONTROLLER_CLASSES
+
         new_action_objects = {}
 
         for input_type in Input.All:
-            input_class = getattr(sys.modules["src.backend.DeckManagement.DeckController"], input_type.controller_class_name)
+            input_class = CONTROLLER_CLASSES[input_type]
             input_type_name = input_type.input_type
             for key in input_class.Available_Identifiers(self.deck_controller.deck):
                 input_ident = Input.FromTypeIdentifier(input_type_name, key)

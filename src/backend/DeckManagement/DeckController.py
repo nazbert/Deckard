@@ -1502,7 +1502,7 @@ class DeckController:
         new_inputs = {}
         for i in Input.All:
             new_inputs[i] = []
-            input_class = getattr(sys.modules[__name__], i.controller_class_name)
+            input_class = CONTROLLER_CLASSES[i]
 
             for k in input_class.Available_Identifiers(self.deck):
                 controller_input = input_class(self, Input.FromTypeIdentifier(i.input_type, k))
@@ -7503,3 +7503,15 @@ class ControllerKeyState(ControllerInputState):
         self.label_manager.clear_labels()
         self.layout_manager.clear()
         self.background_manager.set_page_color(None)
+
+
+# Every input identifier class paired with the controller class that drives it.
+# Lives below those classes because the values are the class objects themselves;
+# init_inputs and Page.load_action_objects both read it at call time. The value
+# type names the three concretes, not their ControllerInput base: only they take
+# the (controller, identifier) constructor both call sites use.
+CONTROLLER_CLASSES: dict[type[InputIdentifier], type[ControllerKey | ControllerDial | ControllerTouchScreen]] = {
+    Input.Key: ControllerKey,
+    Input.Dial: ControllerDial,
+    Input.Touchscreen: ControllerTouchScreen,
+}
