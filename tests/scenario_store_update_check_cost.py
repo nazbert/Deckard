@@ -86,10 +86,20 @@ class _Entry:
     def __init__(self, repo: str, asset_id: str, installed: str | None = None,
                  lists_old_sha: bool = False, stamped: bool = True,
                  symlink: bool = False, readable_sha: bool = True,
-                 shared_sha: str | None = None, branch: str | None = None):
+                 shared_sha: str | None = None, branch: str | None = None,
+                 stamped_url: str | None = None, bad_manifest: bool = False,
+                 versions: dict | None = None):
         self.repo = repo
         self.asset_id = asset_id
         self.url = f"https://github.com/acme/{repo}"
+        # What the ORIGIN file says, when that is not the entry's own url:
+        # a repository that was renamed or transferred leaves the tree
+        # stamped with the name it was installed under.
+        self.stamped_url = stamped_url
+        # Serves something that is not json where the manifest should be.
+        self.bad_manifest = bad_manifest
+        # A catalog whose version keys are not versions.
+        self.versions = versions
         self.old_sha = _sha(repo + "old")
         self.new_sha = shared_sha or _sha(repo + "new")
         self.installed = installed
@@ -108,6 +118,8 @@ class _Entry:
     def catalog_json(self) -> dict:
         if self.branch is not None:
             return {"url": self.url, "branch": self.branch}
+        if self.versions is not None:
+            return {"url": self.url, "commits": dict(self.versions)}
         commits = {NEW_VERSION: self.new_sha}
         if self.lists_old_sha:
             commits = {OLD_VERSION: self.old_sha, NEW_VERSION: self.new_sha}
@@ -126,14 +138,16 @@ class _Entry:
             target = os.path.join(gl.DATA_PATH, "checkouts", self.asset_id)
             os.makedirs(target, exist_ok=True)
             _write_asset_files(target, self.asset_id, self.local_sha,
-                               self.url if self.stamped else None, self.readable_sha)
+                               (self.stamped_url or self.url) if self.stamped else None,
+                               self.readable_sha)
             if os.path.islink(path):
                 os.remove(path)
             os.symlink(target, path)
             return path
         os.makedirs(path, exist_ok=True)
         _write_asset_files(path, self.asset_id, self.local_sha,
-                           self.url if self.stamped else None, self.readable_sha)
+                           (self.stamped_url or self.url) if self.stamped else None,
+                           self.readable_sha)
         return path
 
 
@@ -194,6 +208,12 @@ class _FakeStore:
             entry = self._entry_for(url)
             if entry is None:
                 return NoConnectionError()
+            if entry.bad_manifest:
+                # What a truncated write or a proxy error page serves where
+                # json is expected.
+                with self._lock:
+                    self.manifest_fetches += 1
+                return _Answer(text="<html>504 Gateway Timeout</html>")
             with self._lock:
                 self.manifest_fetches += 1
             return _Answer(text=json.dumps({
@@ -726,6 +746,111 @@ def test_store_window_still_gets_the_full_prepare() -> None:
     )
 
 
+def test_one_bad_entry_does_not_abort_the_identification_pass() -> None:
+    """The pre-pass walks REMOTE data: a manifest that is not json (a
+    truncated write, a proxy error page) and a catalog whose version keys
+    are not versions both raise. It runs before the fan-out and outside its
+    collect loop, so a raise there used to abort update_everything with all
+    four legs silently doing nothing -- and every existing install is
+    unresolved on the first launch after the stamp ships, so the pass runs
+    for everyone.
+    """
+    _stub_globals()
+    _reset_local_state()
+
+    legacy = _Entry("Legacy", "com_acme_Legacy", installed="old", stamped=False)
+    # Claimed by nothing, so the walk covers the whole catalog including the
+    # entries that raise.
+    orphan = _Entry("Orphan", "com_acme_Orphan", installed="old", stamped=False)
+    broken_manifest = _Entry("BrokenManifest", "com_acme_BrokenManifest", bad_manifest=True)
+    broken_versions = _Entry("BrokenVersions", "com_acme_BrokenVersions",
+                             versions={"latest": _sha("brokenversions")})
+    healthy = _Entry("Healthy", "com_acme_Healthy", installed="old")
+    catalogs = _catalogs(plugins=[broken_manifest, broken_versions, legacy, healthy])
+    store = _FakeStore(catalogs)
+    sb = _make_backend(store)
+    _install_catalogs(sb, catalogs)
+    orphan.install(gl.PLUGIN_DIR)
+    installed = _recording_installs(sb)
+
+    with _Offline():
+        n = sb.update_all_plugins()
+
+    assert n == 2, f"a raising entry must not stop the pass, got {n!r}"
+    assert sorted(installed) == sorted([
+        ("com_acme_Legacy", legacy.new_sha),
+        ("com_acme_Healthy", healthy.new_sha),
+    ]), (
+        f"every healthy entry must still be processed, got {installed}"
+    )
+    assert sb._installed_index is None, (
+        "the pass state must be cleared however the pass ends"
+    )
+
+    # And the orphan nothing claimed is not walked for again this session.
+    fetches_after_first_walk = store.manifest_fetches
+    with _Offline():
+        sb.update_all_plugins()
+    assert store.manifest_fetches == fetches_after_first_walk, (
+        f"a directory nothing claims must not be walked for again this "
+        f"session, got {store.manifest_fetches - fetches_after_first_walk} more fetches"
+    )
+
+
+def test_stamp_naming_a_repository_the_catalog_dropped_is_re_resolved() -> None:
+    """A repository that was renamed or transferred leaves the tree stamped
+    with a name no entry claims. That is the original silent-no-update shape
+    again, so such a stamp is not trusted: the install is identified through
+    the manifest like an unstamped one, and the stamp is rewritten."""
+    _stub_globals()
+    _reset_local_state()
+
+    renamed = _Entry("NewName", "com_acme_Widget", installed="old",
+                     stamped_url="https://github.com/acme/OldName")
+    catalogs = _catalogs(plugins=[renamed])
+    store = _FakeStore(catalogs)
+    sb = _make_backend(store)
+    renamed.install(gl.PLUGIN_DIR)
+    installed = _recording_installs(sb)
+
+    with _Offline():
+        n = sb.update_all_plugins()
+
+    assert (n, installed) == (1, [("com_acme_Widget", renamed.new_sha)]), (
+        f"an install whose repository was renamed must still be updated, got {n}, {installed}"
+    )
+    origin = os.path.join(gl.PLUGIN_DIR, "com_acme_Widget", StoreBackend.ORIGIN_FILE)
+    with open(origin) as f:
+        assert f.read().strip() == renamed.url, (
+            "the stamp must be rewritten to the repository that actually claims the install"
+        )
+
+
+def test_stamp_matches_the_catalog_case_insensitively() -> None:
+    """GitHub owner and repository names are case-insensitive, so a tree
+    stamped Acme/Widget is the same install the catalog spells acme/Widget
+    -- and must not be identified all over again."""
+    _stub_globals()
+    _reset_local_state()
+
+    entry = _Entry("Widget", "com_acme_Widget", installed="old",
+                   stamped_url="https://github.com/ACME/Widget")
+    store = _FakeStore(_catalogs(plugins=[entry]))
+    sb = _make_backend(store)
+    entry.install(gl.PLUGIN_DIR)
+    installed = _recording_installs(sb)
+
+    with _Offline():
+        n = sb.update_all_plugins()
+
+    assert (n, installed) == (1, [("com_acme_Widget", entry.new_sha)]), (
+        f"a differently cased stamp names the same repository, got {n}, {installed}"
+    )
+    assert store.manifest_fetches == 0, (
+        f"a differently cased stamp must not need re-identifying, got {store.manifest_fetches}"
+    )
+
+
 def main() -> None:
     fixtures.start_watchdog(90, label="scenario_store_update_check_cost")
     test_update_everything_stays_off_the_network_for_uninstalled_entries()
@@ -736,6 +861,9 @@ def main() -> None:
     test_install_with_unreadable_sha_is_repaired()
     test_branch_pinned_entry_resolves_its_tip_but_not_its_manifest()
     test_store_window_still_gets_the_full_prepare()
+    test_one_bad_entry_does_not_abort_the_identification_pass()
+    test_stamp_naming_a_repository_the_catalog_dropped_is_re_resolved()
+    test_stamp_matches_the_catalog_case_insensitively()
     print("scenario_store_update_check_cost: PASS")
 
 

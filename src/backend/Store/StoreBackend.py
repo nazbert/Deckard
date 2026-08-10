@@ -56,6 +56,25 @@ class NoConnectionError:
         return False
 
 
+def same_repository(a: RepoRef | None, b: RepoRef | None) -> bool:
+    """Whether two parsed store urls name the same GitHub repository.
+
+    Applied at the comparison sites only, never inside parse_repo_url:
+    GitHub treats owner and repository names case-insensitively, so a tree
+    stamped from acme/Widget must still match a catalog entry spelled
+    Acme/Widget -- but the cache keys built from those same helpers are
+    byte-compatible with what is already on disk and must stay so.
+    """
+    if a is None or b is None:
+        return False
+    return (a.user.casefold(), a.repo.casefold()) == (b.user.casefold(), b.repo.casefold())
+
+
+def repository_key(ref: RepoRef) -> tuple[str, str]:
+    """The case-insensitive identity of a repository, for set membership."""
+    return (ref.user.casefold(), ref.repo.casefold())
+
+
 class InstalledAsset(NamedTuple):
     """One directory under an asset directory, read locally.
 
@@ -155,6 +174,11 @@ class StoreBackend:
     # Declared on the class so instances built without __init__ (the test
     # harness) read the same default.
     _installed_index: "dict[str, dict[str, InstalledAsset]] | None" = None
+
+    # Install directories no catalog entry claimed this session, so the
+    # legacy walk stops re-visiting them. Rebound rather than mutated, so
+    # the class-level default is never shared state between instances.
+    _unresolvable_installs: "frozenset[str]" = frozenset()
 
     @classmethod
     def is_safe_commit_sha(cls, commit_sha) -> TypeGuard[str]:
@@ -827,14 +851,25 @@ class StoreBackend:
 
     def note_installed_origin(self, base_dir: str, asset_id, repo_url: str) -> None:
         """Backfill the origin stamp of an install that was identified some
-        other way (a full prepare, or the update check's legacy lookup), so
-        the identification happens once rather than once per launch."""
+        other way -- a full prepare, which fetches the manifest anyway -- so
+        the identification happens once rather than once per launch.
+
+        A stamp that DISAGREES with the url that just identified the tree is
+        overwritten: a repository that was renamed or transferred otherwise
+        keeps a stamp no catalog entry claims, and the install silently
+        stops being updated. Where a broken catalog lists one asset id under
+        two urls, the last prepare to identify the tree wins; the sweep
+        resolves the same collision in catalog order.
+        """
         if not self.is_safe_asset_id(asset_id) or not isinstance(repo_url, str):
+            return
+        ref = parse_repo_url(repo_url)
+        if ref is None:
             return
         asset_path = os.path.join(base_dir, asset_id)
         if not os.path.isdir(asset_path) or os.path.islink(asset_path):
             return
-        if os.path.exists(os.path.join(asset_path, self.ORIGIN_FILE)):
+        if same_repository(self.read_origin(asset_path), ref):
             return
         self.stamp_origin(asset_path, repo_url)
 
@@ -852,7 +887,7 @@ class StoreBackend:
         is still eligible -- it is broken, not misnamed, and reinstalling it
         is the repair.
         """
-        candidates = [asset for asset in installed.values() if asset.origin is not None and asset.origin == ref]
+        candidates = [asset for asset in installed.values() if same_repository(asset.origin, ref)]
         if not candidates:
             return None
         canonical = [asset for asset in candidates
@@ -873,70 +908,116 @@ class StoreBackend:
         return None
 
     def resolve_unstamped_installs(self, base_dir: str, entries: list) -> None:
-        """Identity for installs that predate the origin stamp: fetch a
+        """Identity for installs the origin stamp cannot answer for: fetch a
         candidate entry's manifest and match its id against the directory
         names, which is how identity worked before the stamp existed, then
         stamp what it identifies so it is never looked up again.
 
-        Runs once per update-check pass, before the fan-out, and only while
-        unstamped installs are actually present. Entries whose repository
-        name appears in a pending directory's id are tried first -- an asset
-        id conventionally ends in its repository name -- and the walk stops
-        as soon as every pending directory is claimed, so the usual cost is
-        one fetch per legacy install rather than one per catalog entry. A
-        directory nothing in the catalog claims costs a full walk, which is
-        still one small fetch per entry and no image work at all.
+        A directory is pending when it carries no stamp (installed before
+        the stamp existed) OR when its stamp names a repository no entry in
+        this catalog claims -- a repository that was renamed or transferred
+        otherwise keeps a stamp nothing matches, and the install silently
+        stops being updated, which is the very failure the stamp exists to
+        prevent.
 
-        Symlinked directories are not pending: they are never auto-updated,
-        so there is nothing to identify them for, and this app does not
-        write into a tree it does not own.
+        Runs once per update-check pass, before the fan-out, and only while
+        something is actually pending. Entries whose repository name appears
+        in a pending directory's id are tried first -- an asset id
+        conventionally ends in its repository name -- and the walk stops as
+        soon as every pending directory is claimed, so the usual cost is one
+        fetch per unresolved install rather than one per catalog entry.
+        Where a broken catalog lists one asset id under two urls, the first
+        entry in catalog order wins (the sort is stable and a claimed
+        directory is removed from pending).
+
+        A directory nothing claims costs one full walk -- one small fetch
+        per entry, no image work -- and is then remembered as unresolvable
+        for the rest of the session, so the walk is not repeated on every
+        later pass. That memory is deliberately not persisted: a store that
+        was merely unreachable gets another chance at the next launch.
+
+        Symlinked directories are never pending: they are never
+        auto-updated, so there is nothing to identify them for, and this app
+        does not write into a tree it does not own.
         """
         installed = self.installed_assets(base_dir)
-        pending = {asset.asset_id: asset for asset in installed.values()
-                   if asset.origin is None and not asset.is_symlink}
+        claimed = set()
+        for entry in entries:
+            entry_ref = parse_repo_url(entry.get("url"))
+            if entry_ref is not None:
+                claimed.add(repository_key(entry_ref))
+
+        pending = {
+            asset.asset_id: asset for asset in installed.values()
+            if not asset.is_symlink
+            and asset.path not in self._unresolvable_installs
+            and (asset.origin is None or repository_key(asset.origin) not in claimed)
+        }
         if not pending:
             return
 
         def plausible_first(entry) -> int:
-            ref = parse_repo_url(entry.get("url"))
-            if ref is None:
+            entry_ref = parse_repo_url(entry.get("url"))
+            if entry_ref is None:
                 return 2
-            return 0 if any(ref.repo.lower() in asset_id.lower() for asset_id in pending) else 1
+            return 0 if any(entry_ref.repo.lower() in asset_id.lower() for asset_id in pending) else 1
 
         for entry in sorted(entries, key=plausible_first):
             if not pending:
                 return
-            ref = parse_repo_url(entry.get("url"))
-            if ref is None:
-                continue
-            url = entry["url"]
-            # The manifest is read at the revision the entry points at; for
-            # a branch-pinned entry the branch NAME is revision enough, so
-            # identifying it costs no tip lookup.
-            revision = entry.get("branch")
-            if revision is None:
-                commits = entry.get("commits")
-                if not isinstance(commits, dict) or not commits:
-                    continue
-                newest = self.get_newest_compatible_version(commits) or self.get_newest_version(list(commits.keys()))
-                revision = commits[newest]
-            manifest = self.get_manifest(url, revision)
-            if isinstance(manifest, NoConnectionError) or not manifest:
-                continue
-            asset_id = manifest.get("id")
-            if not self.is_safe_asset_id(asset_id):
-                continue
-            asset = pending.pop(asset_id, None)
-            if asset is None:
-                continue
-            if asset.manifest_id is not None and asset.manifest_id != asset.asset_id:
-                # A directory whose name is not the id it claims cannot be
-                # installed over anyway -- the staged-id check refuses it.
-                continue
-            self.stamp_origin(asset.path, url)
-            # Keep the pass snapshot honest: the entries checked after this
-            # one must see the directory as stamped.
-            installed[asset_id] = asset._replace(origin=ref)
+            try:
+                self._claim_pending_install(entry, pending, installed)
+            except Exception as e:
+                # Same contract as the prepare fan-out's collect loop: one
+                # misbehaving entry must not raise out of the pass. Remote
+                # data reaches both a json parse (a truncated manifest, an
+                # error page) and a version parse (a catalog key like
+                # "latest"), and this pre-pass runs before every leg of
+                # update_everything -- a raise here left ALL FOUR legs
+                # silently doing nothing.
+                log.error(f"Could not identify installs from store entry {entry.get('url')!r}: {e!r}")
+
+        if pending:
+            # Walked the whole catalog and nothing claimed these.
+            self._unresolvable_installs = frozenset(
+                self._unresolvable_installs | {asset.path for asset in pending.values()}
+            )
+
+    def _claim_pending_install(self, entry: dict, pending: dict, installed: dict) -> None:
+        """One entry's turn at the pending directories: fetch its manifest
+        and, if the id names a pending directory, stamp it. Raises whatever
+        the remote data raises -- the caller owns the per-entry catch."""
+        ref = parse_repo_url(entry.get("url"))
+        if ref is None:
+            return
+        url = entry["url"]
+        # The manifest is read at the revision the entry points at; for a
+        # branch-pinned entry the branch NAME is revision enough, so
+        # identifying it costs no tip lookup.
+        revision = entry.get("branch")
+        if revision is None:
+            commits = entry.get("commits")
+            if not isinstance(commits, dict) or not commits:
+                return
+            newest = self.get_newest_compatible_version(commits) or self.get_newest_version(list(commits.keys()))
+            revision = commits[newest]
+        manifest = self.get_manifest(url, revision)
+        if isinstance(manifest, NoConnectionError) or not manifest:
+            return
+        asset_id = manifest.get("id")
+        if not self.is_safe_asset_id(asset_id):
+            return
+        asset = pending.pop(asset_id, None)
+        if asset is None:
+            return
+        if asset.manifest_id is not None and asset.manifest_id != asset.asset_id:
+            # A directory whose name is not the id it claims cannot be
+            # installed over anyway -- the staged-id check refuses it.
+            return
+        self.stamp_origin(asset.path, url)
+        # Keep the pass snapshot honest: the entries checked after this one
+        # must see the directory as stamped.
+        installed[asset_id] = asset._replace(origin=ref)
 
     def check_entry_for_update(self, entry: dict, base_dir: str) -> "UpdateCheck | NoConnectionError | None":
         """Resolves one catalog entry against what is installed under
@@ -955,9 +1036,12 @@ class StoreBackend:
         on stops being listed at exactly the moment an update exists.
 
         What still costs a request: a branch-pinned entry (custom plugins
-        name a branch, not a version map) must resolve its tip. Installs
-        that predate the stamp are identified once, before the fan-out, by
-        resolve_unstamped_installs.
+        name a branch, not a version map) must resolve its tip.
+
+        This answers from stamps ALONE, so it is only complete inside a pass
+        that ran resolve_unstamped_installs first (process_store_data does,
+        for the update-check view). Called directly, an install whose stamp
+        is missing or stale reads as not installed.
         """
         ref = self.repo_ref_for_entry(entry.get("url"))
         if ref is None:
