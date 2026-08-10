@@ -7515,3 +7515,7 @@ CONTROLLER_CLASSES: dict[type[InputIdentifier], type[ControllerKey | ControllerD
     Input.Dial: ControllerDial,
     Input.Touchscreen: ControllerTouchScreen,
 }
+
+# An input type missing here fails at import instead of raising a KeyError deep
+# inside DeckController.__init__, where it reads as a silently skipped device.
+assert set(CONTROLLER_CLASSES) == set(Input.All)
