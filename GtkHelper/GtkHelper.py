@@ -29,8 +29,8 @@ from gi.repository import Gtk, Adw, GLib
 # Import Python modules
 from loguru import logger as log
 
-# Import globals
-import globals as gl
+# Import the translation accessor
+from src.backend.services import tr
 
 # The thread kit lives in the toolkit-free src/backend/main_loop.py so engine
 # code can marshal to the main loop without importing the widget stack.
@@ -457,7 +457,7 @@ class BackButton(Gtk.Button):
         self.set_child(self.box)
 
         self.box.append(Gtk.Image(icon_name="go-previous-symbolic"))
-        self.box.append(Gtk.Label(label=gl.lm.get("go-back")))
+        self.box.append(Gtk.Label(label=tr("go-back")))
 
 class RevertButton(Gtk.Button):
     def __init__(self, **kwargs):
