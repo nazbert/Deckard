@@ -108,7 +108,7 @@ from src.backend.PresenceMonitor.PresenceMonitor import PresenceMonitor
 from src.tray import TrayIcon
 from src.backend.Logger import Logger, LoggerConfig, Loglevel
 from src.backend.log_hooks import install_exception_hooks, redirect_faulthandler
-from src.backend import single_instance
+from src.backend import single_instance, startup_queue
 
 # Migration
 from src.backend.Migration.MigrationManager import MigrationManager
@@ -696,7 +696,7 @@ def make_api_calls():
     if has_page_requests:
         for serial_number, page_name in args.change_page:
             if not running or args.close_running:
-                gl.api_page_requests[serial_number] = page_name
+                startup_queue.get().park_page_request(serial_number, page_name)
             else:
                 # Other instance is running - call dbus interfaces
                 activate_action(session_bus, appinfo.APP_ID, appinfo.DBUS_OBJECT_PATH,
@@ -709,11 +709,11 @@ def make_api_calls():
             if not running or args.close_running:
                 try:
                     state_num = int(state_number)
-                    gl.api_state_requests[serial_number] = {
+                    startup_queue.get().park_state_request(serial_number, {
                         "page_name": page_name,
                         "coords": coords,
                         "state": state_num
-                    }
+                    })
                 except ValueError:
                     print(f"Error: Invalid state number '{state_number}'. Must be an integer.", file=sys.stderr)
                     sys.exit(1)
