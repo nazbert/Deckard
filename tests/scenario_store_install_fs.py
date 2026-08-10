@@ -168,6 +168,13 @@ def test_successful_install_cleans_cache_and_writes_version() -> None:
     assert os.path.isfile(os.path.join(dest, "VERSION")), "VERSION file not written"
     with open(os.path.join(dest, "VERSION")) as f:
         assert f.read() == SHA
+    # The origin stamp is written in the staging tree alongside VERSION, so
+    # the swap publishes the install and the repository it came from
+    # together -- the update check identifies the install by this file.
+    origin_path = os.path.join(dest, store_mod.StoreBackend.ORIGIN_FILE)
+    assert os.path.isfile(origin_path), "ORIGIN stamp not written"
+    with open(origin_path) as f:
+        assert f.read().strip() == REPO_URL, "ORIGIN must name the repository installed from"
     # No temp zip / extracted folder litter left in the cache.
     assert _cache_zips() == [], f"downloaded zip left in cache: {_cache_zips()}"
     assert not _extract_folder_left("repo-abc"), "extracted temp folder left in cache"
