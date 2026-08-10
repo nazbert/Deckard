@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from typing import Any
 
-import globals as gl
+from src.backend.services import tr
 from gi.repository import Adw
 
 class ConfirmationDialog(Adw.MessageDialog):
@@ -16,7 +16,7 @@ class ConfirmationDialog(Adw.MessageDialog):
         self.set_transient_for(transient_for)
         self.set_modal(True)
         self.set_title(title)
-        self.add_response("cancel", gl.lm.get("page-manager.page-editor.delete-page-confirm.cancel"))
+        self.add_response("cancel", tr("page-manager.page-editor.delete-page-confirm.cancel"))
         self.add_response("confirm", confirm)
         self.set_default_response("cancel")
         self.set_close_response("cancel")
