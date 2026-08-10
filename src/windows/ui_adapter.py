@@ -29,18 +29,21 @@ from src.backend.DeckManagement.HelperMethods import recursive_hasattr
 from src.backend.DeckManagement.InputIdentifier import Input
 
 # Seconds between on-screen touchscreen previews. The physical touchscreen
-# still gets every frame; only the mirror is throttled.
+# still gets every frame; only the mirror is rate-limited, because one strip
+# frame repaints a preview as wide as the whole deck.
 TOUCHSCREEN_UI_INTERVAL_S = 0.1
-TOUCHSCREEN_UI_FLUSH_MS = 100
+# Key previews paint as fast as the main loop drains them; the slot below is
+# what keeps that bounded.
+KEY_UI_INTERVAL_S = 0.0
 
 
 def mark_dirty(controller, identifier) -> None:
     """Late-failure channel for an ACCEPTED-then-dropped frame.
 
-    `push_input_image` answers True as soon as a frame is handed to the
-    throttle or to a widget's idle -- but the window can unmap (or a rebuild
-    orphan the widget) before that paint runs, and by then there is no engine
-    call left to return False through. Every such drop routes here instead, so
+    `push_input_image` answers True as soon as a frame is in the input's
+    mirror slot -- but the window can unmap (or a rebuild orphan the widget)
+    before that paint runs, and by then there is no engine call left to
+    return False through. Every such drop routes here instead, so
     `load_from_changes` still has something to replay on remap.
 
     The markers dict stays engine-side on purpose: it is what a future
@@ -53,13 +56,69 @@ def mark_dirty(controller, identifier) -> None:
         log.opt(exception=True).debug("Could not record a dropped preview frame")
 
 
-class _TouchscreenThrottle:
-    __slots__ = ("last_push", "pending", "flush_scheduled")
+class _MirrorSlot:
+    """Latest-wins hand-off of ONE input's preview frames to the main loop.
 
-    def __init__(self):
-        self.last_push: float = 0.0
-        self.pending = None
-        self.flush_scheduled: bool = False
+    A producer leaves a paint-ready payload here and arms at most ONE
+    main-loop callback; that callback paints whatever is in the slot when it
+    runs. A backlogged loop therefore costs one queued callback and one
+    retained payload per input instead of one of each per frame -- and the
+    frame that lands is always the newest one, so nothing is gained by
+    painting the ones it superseded.
+
+    `interval` is a floor on how often the slot drains, for previews whose
+    repaint is worth rate-limiting on its own. 0 means "as fast as the loop
+    drains". A frame held by the interval is still flushed by its own
+    delayed callback, so the last frame of a burst (a scroll that stops)
+    lands instead of being held forever.
+
+    Thread-safe: `offer` runs on producers (the media thread), `take` on the
+    main loop.
+    """
+
+    __slots__ = ("_interval", "_lock", "_pending", "_armed", "_last_drain")
+
+    def __init__(self, interval: float = 0.0) -> None:
+        self._interval = interval
+        self._lock = threading.Lock()
+        self._pending: object | None = None
+        self._armed: bool = False
+        # Deliberately infinitely far in the past: the first frame paints
+        # immediately, however long the process has been up.
+        self._last_drain: float = float("-inf")
+
+    def offer(self, payload: object) -> float | None:
+        """Producer side, any thread. Makes `payload` the frame to paint,
+        replacing one that has not been painted yet.
+
+        Returns the seconds to wait before draining, or None when a drain is
+        already armed -- that callback picks this payload up instead of the
+        one it was armed for, which is what keeps the callback count at one.
+        """
+        with self._lock:
+            self._pending = payload
+            if self._armed:
+                return None
+            self._armed = True
+            return max(0.0, self._interval - (time.monotonic() - self._last_drain))
+
+    def take(self) -> object | None:
+        """Main loop. The frame to paint, disarming the slot. None when the
+        slot is empty -- a producer that armed a second callback in the gap
+        between this call and the paint finds nothing left to do."""
+        with self._lock:
+            payload, self._pending = self._pending, None
+            self._armed = False
+            if payload is not None:
+                self._last_drain = time.monotonic()
+            return payload
+
+    def disarm(self) -> None:
+        """Undo an `offer` whose callback never got scheduled. The payload
+        stays: without this the slot looks armed forever and the input's
+        preview freezes with a frame pinned behind it."""
+        with self._lock:
+            self._armed = False
 
 
 class GtkUIAdapter(ui_port.UIPort):
@@ -74,8 +133,9 @@ class GtkUIAdapter(ui_port.UIPort):
         # lock-free from the media thread. This replaces the off-main
         # `main_win.get_mapped()` widget reads the engine used to do.
         self._window_mapped: bool = False
-        self._ts_lock = threading.Lock()
-        self._ts_state: dict = {}
+        # (controller, identifier) -> _MirrorSlot. One slot per input, so a
+        # stalled main loop holds one frame per input, not a queue per input.
+        self._mirror_slots: dict = {}
         # controller -> bool; the page-sync coalescer.
         self._page_sync_queued: dict = {}
 
@@ -135,7 +195,7 @@ class GtkUIAdapter(ui_port.UIPort):
         self._window = None
         self._window_mapped = False
         self._children.clear()
-        self._ts_state.clear()
+        self._mirror_slots.clear()
         self._page_sync_queued.clear()
 
     def rescan_children(self) -> None:
@@ -161,9 +221,18 @@ class GtkUIAdapter(ui_port.UIPort):
     def unbind(self, controller) -> None:
         self._children.pop(controller, None)
         self._page_sync_queued.pop(controller, None)
-        with self._ts_lock:
-            for key in [k for k in self._ts_state if k[0] is controller]:
-                del self._ts_state[key]
+        # Snapshot, then delete TOLERANTLY: this runs off the main loop (deck
+        # removal arrives on the USB monitor, boot rescan and flatpak poll
+        # threads) and is not the only writer. The media thread creates a slot
+        # the first time it mirrors an input, so scanning the live dict can
+        # see it change size; and every armed drain for this controller --
+        # precisely what is pending at unplug -- pops its own slot from the
+        # GTK loop as soon as the child is gone, so an entry in the snapshot
+        # can already be deleted by the time we get to it. Either one raising
+        # here would come out of on_deck_removed, skipping the controller's
+        # close() and stranding its media thread and USB handle.
+        for key in [k for k in list(self._mirror_slots) if k[0] is controller]:
+            self._mirror_slots.pop(key, None)
 
     def _on_window_map(self, *args) -> None:
         self._window_mapped = True
@@ -183,6 +252,24 @@ class GtkUIAdapter(ui_port.UIPort):
             return None
         return child.page_settings.deck_config.screenbar
 
+    def _mirror_widget(self, child, identifier):
+        """The widget that mirrors `identifier`, or None when this input has
+        no preview widget (yet).
+
+        Raises through a grid rebuild -- buttons[x][y] can be short of these
+        coords mid-rebuild -- so every caller contains that.
+        """
+        if isinstance(identifier, Input.Key):
+            grid = self._grid(child)
+            if grid is None:
+                return None
+            x, y = identifier.coords
+            return grid.buttons[x][y]
+        if isinstance(identifier, Input.Touchscreen):
+            screenbar = self._screenbar(child)
+            return None if screenbar is None else screenbar.image
+        return None
+
     # --------------------------------------------------------- render mirror
 
     def push_input_image(self, controller, identifier, image) -> bool:
@@ -192,88 +279,85 @@ class GtkUIAdapter(ui_port.UIPort):
             child = self._children.get(controller)
             if child is None:
                 return False
+            widget = self._mirror_widget(child, identifier)
+            if widget is None:
+                return False
 
-            if isinstance(identifier, Input.Key):
-                grid = self._grid(child)
-                if grid is None:
-                    return False
-                x, y = identifier.coords
-                # set_image converts on THIS thread and idles only the paint.
-                # The lookup races a grid rebuild and the button grid
-                # can be smaller than these coords mid-rebuild -- contained by
-                # the except below.
-                grid.buttons[x][y].set_image(image)
+            # Convert on THIS thread -- the media thread for live frames.
+            # prepare_mirror_frame is pure PIL + GdkPixbuf, so the main loop
+            # only ever gets handed the finished payload.
+            payload = widget.prepare_mirror_frame(image)
+
+            key = (controller, identifier)
+            slot = self._mirror_slots.get(key)
+            if slot is None:
+                interval = (TOUCHSCREEN_UI_INTERVAL_S
+                            if isinstance(identifier, Input.Touchscreen)
+                            else KEY_UI_INTERVAL_S)
+                slot = self._mirror_slots.setdefault(key, _MirrorSlot(interval))
+
+            delay_s = slot.offer(payload)
+            if delay_s is None:
+                # A drain is already armed and now carries this frame.
                 return True
-
-            if isinstance(identifier, Input.Touchscreen):
-                return self._push_touchscreen(controller, child, identifier, image)
-
-            return False
+            try:
+                # Idle priority on BOTH arms: pixbuf updates that outrank
+                # GTK's layout/draw (priority 120) starve the very redraw
+                # they are feeding. timeout_add defaults to priority 0, so
+                # the delayed arm has to say so explicitly.
+                if delay_s <= 0:
+                    GLib.idle_add(self._drain_mirror, controller, identifier)
+                else:
+                    GLib.timeout_add(int(delay_s * 1000) + 1, self._drain_mirror,
+                                     controller, identifier,
+                                     priority=GLib.PRIORITY_DEFAULT_IDLE)
+            except BaseException:
+                # Nothing will drain this slot now; leaving it armed would
+                # freeze the input for good.
+                slot.disarm()
+                raise
+            return True
         except Exception:
             # Open failure set: widget lookups race window teardown, and
-            # set_image runs PIL convert/tobytes plus GdkPixbuf.new_from_bytes.
-            # Contain all of it -- the mirror is best-effort and we run under
-            # the media tick, whose catch-all backs off 0.25s per exception. A
-            # failing preview must never throttle the deck writer loop.
+            # prepare_mirror_frame runs PIL convert/tobytes plus
+            # GdkPixbuf.new_from_bytes. Contain all of it -- the mirror is
+            # best-effort and we run under the media tick, whose catch-all
+            # backs off 0.25s per exception. A failing preview must never
+            # throttle the deck writer loop.
             log.opt(exception=True).warning(f"Failed to mirror {identifier} into the UI")
             return False
 
-    def _push_touchscreen(self, controller, child, identifier, image) -> bool:
-        screenbar = self._screenbar(child)
-        if screenbar is None:
+    def _drain_mirror(self, controller, identifier) -> bool:
+        # Main loop: paint the newest frame this input has produced. Returns
+        # False -- a GLib idle/timeout callback that returns truthy re-arms
+        # forever.
+        slot = self._mirror_slots.get((controller, identifier))
+        if slot is None:
             return False
-
-        key = (controller, identifier)
-        state = self._ts_state.get(key)
-        if state is None:
-            state = self._ts_state.setdefault(key, _TouchscreenThrottle())
-
-        now = time.time()
-        with self._ts_lock:
-            if now - state.last_push < TOUCHSCREEN_UI_INTERVAL_S:
-                # Within the throttle window: keep the latest frame and flush
-                # it after the window, so the final frame (when a scroll stops)
-                # isn't lost.
-                state.pending = image
-                if not state.flush_scheduled:
-                    state.flush_scheduled = True
-                    GLib.timeout_add(TOUCHSCREEN_UI_FLUSH_MS, self._flush_touchscreen,
-                                     controller, identifier)
-                return True
-            state.last_push = now
-            state.pending = None
-
-        screenbar.image.set_image(image)
-        return True
-
-    def _flush_touchscreen(self, controller, identifier) -> bool:
-        # Main loop: push the last throttled frame so the preview doesn't
-        # freeze mid-scroll. Skipped if a fresh frame already superseded it.
-        state = self._ts_state.get((controller, identifier))
-        if state is None:
-            return False
-        with self._ts_lock:
-            state.flush_scheduled = False
-            image = state.pending
-            state.pending = None
-        if image is None:
-            return False
-
-        child = self._children.get(controller)
-        screenbar = self._screenbar(child) if child is not None else None
-        if not self._window_mapped or screenbar is None:
-            # Unmapped mid-throttle: the frame we accepted never landed.
-            mark_dirty(controller, identifier)
+        payload = slot.take()
+        if payload is None:
             return False
         try:
-            # last_push is read+written by the media thread in
-            # _push_touchscreen; every other access is under the lock, so
-            # this one must be too.
-            with self._ts_lock:
-                state.last_push = time.time()
-            screenbar.image.set_image(image)
+            # Resolved again here rather than captured at push time: the
+            # binding is by deck-stack-child identity, and a grid rebuilt in
+            # the gap would otherwise be handed a frame for its orphaned
+            # predecessor.
+            child = self._children.get(controller)
+            if child is None:
+                # Unbound between the push and this paint: drop the slot too.
+                # A push that raced unbind() re-creates one, and leaving it
+                # keyed by a dead controller pins that controller's whole
+                # graph -- one leak per replug.
+                self._mirror_slots.pop((controller, identifier), None)
+            widget = None if child is None else self._mirror_widget(child, identifier)
+            if not self._window_mapped or widget is None:
+                # Accepted then dropped: push_input_image already answered
+                # True for this frame, so nothing else will record it.
+                mark_dirty(controller, identifier)
+                return False
+            widget.paint_mirror_frame(payload)
         except Exception:
-            log.opt(exception=True).warning("Touchscreen mirror flush failed")
+            log.opt(exception=True).warning(f"Failed to paint the {identifier} mirror")
             mark_dirty(controller, identifier)
         return False
 
@@ -417,15 +501,7 @@ class GtkUIAdapter(ui_port.UIPort):
         if child is None:
             return None
         try:
-            if isinstance(identifier, Input.Key):
-                grid = self._grid(child)
-                if grid is None:
-                    return None
-                x, y = identifier.coords
-                return grid.buttons[x][y]
-            if isinstance(identifier, Input.Touchscreen):
-                screenbar = self._screenbar(child)
-                return None if screenbar is None else screenbar.image
+            return self._mirror_widget(child, identifier)
         except Exception:
             log.opt(exception=True).warning(f"Could not resolve the widget for {identifier}")
         return None
