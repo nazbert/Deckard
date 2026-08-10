@@ -21,6 +21,11 @@ bundle as a release asset.
 
 ### Changed
 
+- The active window is no longer watched in the background unless a page
+  actually uses a window auto-change rule. Previously every session polled
+  the foreground window continuously — several helper processes a second on
+  X11 and KDE — whether or not any page asked for it. The watcher now starts
+  the moment the first rule is enabled and stops when the last one is removed.
 - Log files are now pruned automatically (the ten most recent rotations are
   kept) and default verbosity is lower — files record debug level and up, the
   console info and up. Set `SC_LOG_TRACE=1` to restore full trace logging on

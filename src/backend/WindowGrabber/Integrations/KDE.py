@@ -14,8 +14,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
 import threading
-import time
-from src.backend.WindowGrabber.Integration import Integration
+from src.backend.WindowGrabber.Integration import Integration, WATCHER_STOP_TIMEOUT_S
 from src.backend.WindowGrabber.Window import Window
 
 from subprocess import Popen, CalledProcessError, PIPE
@@ -43,9 +42,7 @@ class KDE(Integration):
         self.flatpak = portal.running_under_flatpak()
 
         self.is_kdotool_installed = self.get_is_kdotool_installed()
-
-        if self.is_kdotool_installed:
-            self.start_active_window_change_thread()
+        self.active_window_change_thread: "WatchForActiveWindowChange | None" = None
 
     @log.catch
     def _run_command(self, command: list[str]) -> Optional[Popen[bytes]]:
@@ -71,9 +68,36 @@ class KDE(Integration):
             return False
 
     @log.catch
-    def start_active_window_change_thread(self):
-        self.active_window_change_thread = WatchForActiveWindowChange(self)
-        self.active_window_change_thread.start()
+    def start_watching(self) -> None:
+        if not self.is_kdotool_installed:
+            return
+
+        thread = self.active_window_change_thread
+        if thread is not None and thread.is_alive():
+            return
+
+        # A Thread object cannot be restarted, so each start builds a fresh
+        # one -- which also re-primes the "last seen window" against whatever
+        # is focused now rather than against a stale pre-stop reading.
+        thread = WatchForActiveWindowChange(self)
+        self.active_window_change_thread = thread
+        thread.start()
+
+    @log.catch
+    def stop_watching(self) -> None:
+        thread = self.active_window_change_thread
+        self.active_window_change_thread = None
+        if thread is None:
+            return
+
+        thread.stop()
+        thread.join(timeout=WATCHER_STOP_TIMEOUT_S)
+        if thread.is_alive():
+            # Parked in a kdotool read that outlived the timeout. The thread
+            # is a daemon and its loop rechecks the stop flag as soon as the
+            # read returns, so it unwinds on its own; the reference is dropped
+            # either way so a later start builds a clean one.
+            log.warning("The KDE active window watcher did not stop within the timeout")
 
     @log.catch
     def get_all_windows(self) -> list[Window]:
@@ -162,6 +186,7 @@ class WatchForActiveWindowChange(threading.Thread):
     def __init__(self, kde: KDE):
         super().__init__(name="WatchForActiveWindowChange", daemon=True)
         self.kde = kde
+        self._stop_event = threading.Event()
 
         self.last_window_id: Optional[str] = None
         self.last_active_window: Optional[Window] = None
@@ -171,10 +196,17 @@ class WatchForActiveWindowChange(threading.Thread):
             self.last_window_id = window_id
             self.last_active_window = self.kde.get_window(window_id)
 
+    def stop(self) -> None:
+        """Asks the loop to end. Returns immediately -- the caller joins."""
+        self._stop_event.set()
+
     @log.catch
     def run(self) -> None:
-        while gl.threads_running:
-            time.sleep(0.2)
+        while gl.threads_running and not self._stop_event.is_set():
+            # Waiting on the stop event instead of sleeping is what makes a
+            # stop take ~0 ms rather than up to a full poll interval.
+            if self._stop_event.wait(0.2):
+                break
             window_id = self.kde.get_active_window_id()
             if window_id is None:
                 continue

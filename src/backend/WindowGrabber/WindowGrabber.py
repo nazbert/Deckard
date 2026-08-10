@@ -14,6 +14,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
 import re
+import threading
 from loguru import logger as log
 
 import globals as gl
@@ -59,35 +60,141 @@ def select_integration_class(environment_components: list[str], server: str | No
 
 
 class WindowGrabber:
+    """Routes active-window changes onto the pages that ask for them.
+
+    Watching the active window is never free -- the X11 and KDE integrations
+    poll their helper binary five subprocesses at a time every 200 ms, the
+    Sway one shells out to swaymsg just as often -- and it is useful only
+    while some page carries an enabled window auto-change rule. So the
+    watcher is gated on exactly that: it starts when the first rule appears
+    and stops when the last one goes, and a session that never uses the
+    feature pays nothing on any desktop.
+
+    The integration itself is built lazily rather than at construction,
+    because it is not free either (a helper-binary probe, or a D-Bus proxy),
+    and because a one-shot window query -- the page editor's matching-window
+    list, which the user reaches *before* the first rule exists -- must still
+    work while the watcher is off.
+    """
+
     def __init__(self):
-        self.environment_components: list[str] = []
-        self.server: str | None = None
+        self.environment_components: list[str] = desktop_components()
+        self.server: str | None = session_type()
 
-        self.integration: Integration | None = None
-        self.init_integration()
-
-    @log.catch
-    def init_integration(self) -> None:
-        self.environment_components = desktop_components()
-        self.server = session_type()
-
-        integration_class = select_integration_class(self.environment_components, self.server)
-        if integration_class is None:
+        self._integration_class = select_integration_class(self.environment_components, self.server)
+        if self._integration_class is None:
             log.error(f"Unsupported environment: {self.environment_components} with server: {self.server} for window grabber.")
+        else:
+            log.info(f"Window grabber environment: {self.environment_components} under server: {self.server}")
+
+        # Guards the integration instance and the watching flag against the
+        # threads that reach them: boot, the GTK main thread on a page edit,
+        # and any plugin thread writing page settings. Reentrant because the
+        # start/stop paths call each other's helpers.
+        self._lock = threading.RLock()
+        self.integration: Integration | None = None
+        self._watching = False
+
+        self.refresh_watch_state()
+
+    def _ensure_integration(self) -> Integration | None:
+        """The integration for this session, built on first use.
+
+        Construction failures are contained: an integration that cannot be
+        built leaves window grabbing inert rather than aborting whatever
+        asked for it (boot, or a page-settings write).
+        """
+        with self._lock:
+            if self.integration is None and self._integration_class is not None:
+                try:
+                    self.integration = self._integration_class(self)
+                except Exception:
+                    log.opt(exception=True).error("Could not initialize the window grabber integration")
+                    return None
+            return self.integration
+
+    @property
+    def is_watching(self) -> bool:
+        with self._lock:
+            return self._watching
+
+    def start_watching(self) -> None:
+        """Begins watching the active window. Idempotent."""
+        with self._lock:
+            if self._watching:
+                return
+            integration = self._ensure_integration()
+            if integration is None:
+                return
+            integration.start_watching()
+            self._watching = True
+            log.info("Watching the active window: a page has a window auto-change rule")
+
+    def stop_watching(self) -> None:
+        """Stops watching and reaps the watcher. Idempotent, and bounded --
+        see WATCHER_STOP_TIMEOUT_S -- because it runs on whichever thread
+        edited the rule, up to and including the GTK main thread."""
+        with self._lock:
+            if not self._watching:
+                return
+            self._watching = False
+            integration = self.integration
+            if integration is None:
+                return
+            integration.stop_watching()
+            log.info("Stopped watching the active window: no page has a window auto-change rule")
+
+    def reset_integration(self) -> None:
+        """Discards the integration so the next use builds a fresh one
+        against the session as it stands now.
+
+        The live case is the GNOME shell extension being installed
+        mid-session: the existing integration's D-Bus proxy was built while
+        nothing owned that interface, and it cannot start reporting on its
+        own. Re-gating afterwards keeps the rules the single source of truth
+        for whether anything is watching.
+        """
+        with self._lock:
+            self.stop_watching()
+            self.integration = None
+
+        self.refresh_watch_state()
+
+    def refresh_watch_state(self) -> None:
+        """Matches the watcher to the rules that exist right now.
+
+        Called at boot and again after anything that can add or remove a
+        rule. A failure to read the rules leaves the current state alone --
+        guessing either way would either resurrect the polling this gating
+        exists to avoid, or silently kill a working auto-change.
+        """
+        page_manager = gl.page_manager
+        if page_manager is None:
             return
 
-        log.info(f"Initializing window grabber for environment: {self.environment_components} under server: {self.server}")
-        self.integration = integration_class(self)
+        try:
+            wanted = page_manager.any_auto_change_rule_enabled()
+        except Exception:
+            log.opt(exception=True).warning("Could not determine whether any window auto-change rule is enabled")
+            return
+
+        if wanted:
+            self.start_watching()
+        else:
+            self.stop_watching()
 
     @log.catch
     def get_all_windows(self) -> list[Window]:
         """
         returns a list of [wm_class, title] lists
         """
-        if self.integration is None:
+        # Builds the integration if this is the first use: one-shot queries
+        # work whether or not the watcher is gated on.
+        integration = self._ensure_integration()
+        if integration is None:
             return []
 
-        return self.integration.get_all_windows()
+        return integration.get_all_windows()
 
     def get_all_matching_windows(self, class_regex: str, title_regex: str) -> list[Window]:
         all_windows = self.get_all_windows()

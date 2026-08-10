@@ -14,8 +14,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
 import threading
-import time
-from src.backend.WindowGrabber.Integration import Integration
+from src.backend.WindowGrabber.Integration import Integration, WATCHER_STOP_TIMEOUT_S
 from src.backend.WindowGrabber.Window import Window
 
 import subprocess
@@ -42,9 +41,7 @@ class X11(Integration):
         self.flatpak = portal.running_under_flatpak()
 
         self.is_xprop_installed = self.get_is_xprop_installed()
-
-        if self.is_xprop_installed:
-            self.start_active_window_change_thread()
+        self.active_window_change_thread: "WatchForActiveWindowChange | None" = None
 
     @log.catch
     def _run_command(self, command: list[str]) -> subprocess.Popen[bytes] | None:
@@ -70,9 +67,36 @@ class X11(Integration):
             return False
 
     @log.catch
-    def start_active_window_change_thread(self):
-        self.active_window_change_thread = WatchForActiveWindowChange(self)
-        self.active_window_change_thread.start()
+    def start_watching(self) -> None:
+        if not self.is_xprop_installed:
+            return
+
+        thread = self.active_window_change_thread
+        if thread is not None and thread.is_alive():
+            return
+
+        # A Thread object cannot be restarted, so each start builds a fresh
+        # one -- which also re-primes the "last seen window" against whatever
+        # is focused now rather than against a stale pre-stop reading.
+        thread = WatchForActiveWindowChange(self)
+        self.active_window_change_thread = thread
+        thread.start()
+
+    @log.catch
+    def stop_watching(self) -> None:
+        thread = self.active_window_change_thread
+        self.active_window_change_thread = None
+        if thread is None:
+            return
+
+        thread.stop()
+        thread.join(timeout=WATCHER_STOP_TIMEOUT_S)
+        if thread.is_alive():
+            # Parked in an xprop read that outlived the timeout. The thread is
+            # a daemon and its loop rechecks the stop flag the moment the read
+            # returns, so it unwinds on its own; the reference is dropped
+            # either way so a later start builds a clean one.
+            log.warning("The X11 active window watcher did not stop within the timeout")
 
     @log.catch
     def get_all_windows(self) -> list[Window]:
@@ -188,13 +212,21 @@ class WatchForActiveWindowChange(threading.Thread):
     def __init__(self, x11: X11):
         super().__init__(name="WatchForActiveWindowChange", daemon=True)
         self.x11 = x11
+        self._stop_event = threading.Event()
 
         self.last_active_window = x11.get_active_window()
 
+    def stop(self) -> None:
+        """Asks the loop to end. Returns immediately -- the caller joins."""
+        self._stop_event.set()
+
     @log.catch
     def run(self) -> None:
-        while gl.threads_running:
-            time.sleep(0.2)
+        while gl.threads_running and not self._stop_event.is_set():
+            # Waiting on the stop event instead of sleeping is what makes a
+            # stop take ~0 ms rather than up to a full poll interval.
+            if self._stop_event.wait(0.2):
+                break
             # Catch per iteration (like the Hyprland integration's socket
             # listener): one failing poll or page-switch must not end this
             # thread -- an exception escaping to @log.catch would kill

@@ -373,7 +373,7 @@ class PageManagerBackend:
         gl.settings_manager.save_settings_to_file(self.PAGE_SETTINGS_PATH, page_settings)
 
         os.remove(old_path)
-        #self.update_auto_change_info()
+        self._refresh_window_watch_state()
 
     def remove_page(self, page_path: str):
         settings_path = os.path.join(gl.DATA_PATH, "settings", "pages.json")
@@ -465,7 +465,9 @@ class PageManagerBackend:
         settings["default-pages"] = new_default_pages
         gl.settings_manager.save_settings_to_file(settings_path, settings)
 
-        #self.update_auto_change_info()
+        # Deleting the page that carried the only rule takes the rule with
+        # it, so the watcher has to be re-gated here too.
+        self._refresh_window_watch_state()
 
     def add_page(self, page_name: str, page_dict: dict = None) -> str:
         page_dict = page_dict or {}
@@ -478,9 +480,11 @@ class PageManagerBackend:
         if os.path.exists(path):
             raise FileExistsError(f"A page with the name '{page_name}' already exists.")
 
+        # An imported or duplicated page arrives with its settings already in
+        # page_dict, rule included, so this is a rule-adding path.
         atomic_write_json(path, page_dict)
 
-        #self.update_auto_change_info()
+        self._refresh_window_watch_state()
         return path
 
     def register_page(self, path: str):
@@ -493,7 +497,9 @@ class PageManagerBackend:
 
         gl.signal_manager.trigger_signal(Signals.PageAdd, path)
 
-        # self.update_auto_change_info()
+        # A registered custom page is matched like any other, so its rule
+        # counts towards the watcher gate from here on.
+        self._refresh_window_watch_state()
 
     def unregister_page(self, path: str):
         if not self.custom_pages.__contains__(path):
@@ -501,6 +507,7 @@ class PageManagerBackend:
 
         self.custom_pages.remove(path)
         gl.signal_manager.trigger_signal(Signals.PageDelete, path)
+        self._refresh_window_watch_state()
 
     def get_pages_with_path(self, path: str):
         pages_set = set()
@@ -758,6 +765,44 @@ class PageManagerBackend:
         # brightness, background overrides).
         self.update_dict_of_pages_with_path(path)
 
+    def any_auto_change_rule_enabled(self) -> bool:
+        """True when at least one page has its window auto-change switched on.
+
+        Gates the active-window watcher, which is otherwise a permanent
+        background poll for every user who never touches the feature.
+
+        Reads through the same per-page accessor the matcher itself uses, so
+        the gate and the matcher can never disagree about what counts as a
+        rule, and stops at the first hit. Pages are the only place these
+        rules live -- there is no index to consult instead -- but they are
+        small (a fully populated deck's page is ~16 KB) and boot already
+        reads every one of them for the startup backup. The worst case is
+        therefore no rule anywhere, which parses the lot: well under a
+        millisecond for a normal handful of pages, a couple of milliseconds
+        for fifty of them, on a path already touching those bytes.
+        """
+        for page_path in self.get_pages():
+            try:
+                if self.get_auto_change_settings(page_path).get("enable", False):
+                    return True
+            except Exception:
+                # One unreadable page must not decide the gate for the rest.
+                log.opt(exception=True).warning(f"Could not read the auto-change settings of {page_path}")
+        return False
+
+    def _refresh_window_watch_state(self) -> None:
+        """Re-gates the active-window watcher after anything that can add or
+        remove a rule. Never raises into the page operation that triggered
+        it: a watcher left in the wrong state is a wasted poll or a dead
+        auto-switch, but a raise here would abort a page write."""
+        window_grabber = gl.window_grabber
+        if window_grabber is None:
+            return
+        try:
+            window_grabber.refresh_watch_state()
+        except Exception:
+            log.opt(exception=True).warning("Could not update the active window watcher state")
+
     def get_auto_change_settings(self, path: str) -> dict:
         """
         Returns the auto change settings section of the page settings
@@ -781,6 +826,7 @@ class PageManagerBackend:
         }
 
         self.set_page_settings(path, settings)
+        self._refresh_window_watch_state()
 
     def overwrite_auto_change_settings(self, path: str, enable: bool = None, wm_class: str = None, regex_title: str = None, stay_on_page: bool = None, decks: list[str] = None):
         settings = self.get_page_settings(path)
@@ -799,6 +845,7 @@ class PageManagerBackend:
 
         settings["auto-change"] = auto_change_settings
         self.set_page_settings(path, settings)
+        self._refresh_window_watch_state()
 
     def get_screensaver_settings(self, path: str):
         page_settings = self.get_page_settings(path)

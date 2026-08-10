@@ -34,6 +34,10 @@ class Gnome(Integration):
         super().__init__(window_grabber=window_grabber)
 
         self.proxy: Gio.DBusProxy | None = None
+        # 0 is GObject's "no handler" id, so it doubles as the not-watching
+        # flag: this integration has no thread of its own -- watching IS the
+        # FocusedWindowChanged subscription.
+        self._signal_handler_id: int = 0
         self.connect_dbus()
 
     def install_extension(self) -> None:
@@ -72,10 +76,30 @@ class Gnome(Integration):
             if self.proxy.get_name_owner() is None:
                 self.proxy = None
                 raise RuntimeError("nothing owns org.gnome.Shell on the session bus")
-            self.proxy.connect("g-signal", self.on_dbus_signal)
         except Exception as e:
             log.error(f"Failed to connect to D-Bus: {e}")
             pass
+
+    def start_watching(self) -> None:
+        proxy = self.proxy
+        if proxy is None or self._signal_handler_id:
+            return
+        self._signal_handler_id = proxy.connect("g-signal", self.on_dbus_signal)
+
+    def stop_watching(self) -> None:
+        """Drops the shell's window-change subscription.
+
+        The proxy itself stays: it owns no thread and no poll, and the page
+        editor's matching-window list still queries through it while no rule
+        is enabled. Unsubscribing is the whole cost here, and it is bounded
+        by definition -- nothing to join.
+        """
+        proxy = self.proxy
+        handler_id = self._signal_handler_id
+        self._signal_handler_id = 0
+        if proxy is None or not handler_id:
+            return
+        proxy.disconnect(handler_id)
 
 
     def on_dbus_signal(self, proxy, sender_name: str, signal_name: str, parameters) -> None:
