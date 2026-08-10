@@ -246,9 +246,10 @@ class ActionCore(rpyc.Service):
                 self._stamp_media_owner(input_state)
 
             elif is_video(media_path):
-                # Local import: DeckController imports ActionCore at module
-                # level, so a top-level import here would be circular (same
-                # pattern as ScreenSaver.py's ReleaseStashedInputsMsg import).
+                # Local import: deck_controller/inputs.py imports ActionCore at
+                # module level, and DeckController imports inputs.py in turn, so
+                # a top-level import here would be circular (same pattern as
+                # ScreenSaver.py's ReleaseStashedInputsMsg import).
                 from src.backend.DeckManagement.DeckController import ControllerKey, KeyGIF
                 key_gif = None
                 if os.path.splitext(media_path)[1].lower() == ".gif" and isinstance(controller_input, ControllerKey):
