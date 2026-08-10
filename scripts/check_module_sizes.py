@@ -33,6 +33,19 @@ THE RULES
   is a re-export surface -- imports and __all__ -- and the cap is what stops
   code re-accreting on the old path and quietly unwinding the package split.
 
+A guard that fails open is worse than no guard, because it reads as green while
+covering nothing. So the check also fails when its own footing moves: a root in
+ROOTS that is not a directory, a GRANDFATHER entry naming a file that does not
+exist or that sits outside the roots, a missing shim, and a symlinked directory
+under a root (the walk does not descend into one, so its contents would be
+uncapped). Each of those is a loud failure naming what to fix, never a silent
+skip.
+
+The roots are src/ and GtkHelper/, matching mypy's `files` in pyproject.toml so
+both tools govern the same trees. Root-level modules -- main.py, globals.py and
+their siblings -- are consequently ungoverned; they are small and few, and
+widening the roots is the fix if that stops being true.
+
 CHANGING A CAP
 
 Lowering a GRANDFATHER number, or deleting an entry the check says is obsolete,
@@ -50,13 +63,15 @@ image alongside compileall, with nothing installed.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Trees the cap governs. Application and helper code only -- tests are
-# fixtures and scenarios, where length is inherent rather than a design smell.
+# Trees the cap governs, matching mypy's `files` in pyproject.toml. Application
+# and helper code only -- tests are fixtures and scenarios, where length is
+# inherent rather than a design smell.
 ROOTS = ("src", "GtkHelper")
 
 DEFAULT_CAP = 1200
@@ -90,14 +105,44 @@ def physical_lines(path: Path) -> int:
     return data.count(b"\n") + (0 if data.endswith(b"\n") else 1)
 
 
-def iter_modules() -> list[Path]:
-    """Every .py file under the governed roots, sorted, caches excluded."""
+def iter_modules(failures: list[str]) -> list[Path]:
+    """Every .py file under the governed roots, sorted, caches excluded.
+
+    Walks without following symlinks, and reports anything that would make the
+    walk cover less than it claims to: a root that is not a directory, or a
+    symlinked directory whose contents the walk cannot reach.
+    """
     found: list[Path] = []
     for root in ROOTS:
-        for path in (REPO_ROOT / root).rglob("*.py"):
-            if "__pycache__" in path.parts:
-                continue
-            found.append(path)
+        base = REPO_ROOT / root
+        if not base.is_dir():
+            failures.append(
+                f"{root}/: governed root is not a directory. Every module under it "
+                "would go uncapped, so this check refuses to report success. Restore "
+                "the tree, or update ROOTS in the same change that moves it."
+            )
+            continue
+
+        for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+            here = Path(dirpath)
+            keep: list[str] = []
+            for name in sorted(dirnames):
+                if name == "__pycache__":
+                    continue
+                child = here / name
+                if child.is_symlink():
+                    failures.append(
+                        f"{child.relative_to(REPO_ROOT).as_posix()}: symlinked directory "
+                        "under a governed root. The walk does not descend into it, so "
+                        "every module inside it would go uncapped. Replace it with a real "
+                        "directory, or teach this check to follow symlinks."
+                    )
+                    continue
+                keep.append(name)
+            dirnames[:] = keep   # prune in place: os.walk descends into what is left
+
+            found.extend(here / name for name in filenames if name.endswith(".py"))
+
     return sorted(found)
 
 
@@ -121,7 +166,10 @@ def check_shim(failures: list[str]) -> None:
             "import statements and __all__. Code that belongs to a deck controller "
             "belongs in src/backend/DeckManagement/deck_controller/. The cap is what "
             "keeps the split from unwinding one convenience function at a time, so "
-            "raising it is not the fix -- move the code into the package."
+            "for accreted code, moving it into the package is the fix and raising "
+            "the cap is not. A genuinely new compatibility name is the other case: "
+            "the surface tracks what upstream binds at this path, and widening it "
+            "does justify raising the cap -- deliberately, in a change that says so."
         )
 
 
@@ -134,7 +182,15 @@ def check_grandfather_table(failures: list[str]) -> None:
             "the entry."
         )
     for name in sorted(GRANDFATHER):
-        if not (REPO_ROOT / name).is_file():
+        if not any(name.startswith(f"{root}/") for root in ROOTS):
+            # An entry the walk never visits caps nothing, and reads as though it
+            # does -- the one way this table can lie.
+            failures.append(
+                f"{name}: listed in GRANDFATHER but outside the governed roots "
+                f"({', '.join(ROOTS)}). Nothing enforces this entry. Delete it, or add "
+                "the tree it lives in to ROOTS so the file is actually capped."
+            )
+        elif not (REPO_ROOT / name).is_file():
             failures.append(
                 f"{name}: listed in GRANDFATHER but not present in the tree. "
                 "Delete the entry, or point it at the file's new path."
@@ -185,7 +241,7 @@ def main() -> int:
     check_grandfather_table(failures)
     check_shim(failures)
 
-    modules = iter_modules()
+    modules = iter_modules(failures)
     for path in modules:
         check_module(path, failures)
 
