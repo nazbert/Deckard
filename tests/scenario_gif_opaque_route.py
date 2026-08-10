@@ -79,7 +79,7 @@ from PIL import Image, ImageDraw, ImageSequence
 from loguru import logger as log
 
 import globals as gl
-import src.backend.DeckManagement.DeckController as deck_controller
+import src.backend.DeckManagement.deck_controller.gif_pipeline as gif_pipeline
 from src.backend.DeckManagement.DeckController import (
     BOUNDED_TILE_VARIANT, KeyGIF, contained_size, tile_video_size,
 )
@@ -702,7 +702,10 @@ def check_warm_construction_serves_the_promoted_file() -> None:
         "fixture sanity: the registry entry must be gone before the warm load"
     )
 
-    original_walk = deck_controller.gif_frame_walk
+    # Patched on gif_pipeline, the module KeyGIF._composited_walk resolves the
+    # name from: a stand-in installed anywhere else would leave the real
+    # compositor reachable and the tripwire would never fire.
+    original_walk = gif_pipeline.gif_frame_walk
 
     def _no_compositing(*args, **kwargs):
         raise AssertionError(
@@ -710,11 +713,11 @@ def check_warm_construction_serves_the_promoted_file() -> None:
             "decode it is supposed to replace"
         )
 
-    deck_controller.gif_frame_walk = _no_compositing
+    gif_pipeline.gif_frame_walk = _no_compositing
     try:
         warm = _decode(path)
     finally:
-        deck_controller.gif_frame_walk = original_walk
+        gif_pipeline.gif_frame_walk = original_walk
 
     try:
         cache = warm.video_cache
