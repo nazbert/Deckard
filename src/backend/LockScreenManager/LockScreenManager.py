@@ -12,8 +12,8 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
-import os
 import threading
+from src.backend.session_info import desktop_components
 from src.backend.LockScreenManager.Detectors.Gnome import GnomeLockScreenDetector
 from src.backend.LockScreenManager.Detectors.Cinnamon import CinnamonLockScreenDetector
 from src.backend.LockScreenManager.Detectors.KDE import KDELockScreenDetector
@@ -35,7 +35,7 @@ class LockScreenManager:
         # XDG_CURRENT_DESKTOP is a colon-separated list ("ubuntu:GNOME",
         # "GNOME-Classic:GNOME") -- an exact match on the whole string meant
         # lock detection silently never engaged on such setups.
-        env_components = self.get_active_environment_components()
+        env_components = desktop_components()
         if "gnome" in env_components:
             self.detector = GnomeLockScreenDetector(self)
         elif "x-cinnamon" in env_components:
@@ -46,17 +46,6 @@ class LockScreenManager:
             self.detector = HyprlandLockScreenDetector(self)
         else:
             self.detector = LogindLockScreenDetector(self)
-
-    @log.catch
-    def get_active_environment(self) -> str | None:
-        desktop = os.getenv("XDG_CURRENT_DESKTOP")
-        if desktop is None:
-            return None
-        return desktop.lower()
-
-    def get_active_environment_components(self) -> list[str]:
-        env = self.get_active_environment() or ""
-        return [part.strip() for part in env.split(":") if part.strip()]
 
     @log.catch
     def lock(self, active):
