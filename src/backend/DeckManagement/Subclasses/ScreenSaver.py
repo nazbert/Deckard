@@ -273,11 +273,13 @@ class ScreenSaver:
         # -- see ReleaseStashedInputsMsg's docstring in
         # DeckManagement/deck_controller/media_writer.py.
         if stashed_inputs:
-            # Local import: the deck controller package imports this module
-            # at module level (each controller builds a ScreenSaver), so the
-            # screen saver takes its dependency on the package's media writer
-            # at call time -- a module-level import would point an edge back
-            # into the package that imports this one.
+            # Local import, and not because it has to be: hoisting this to
+            # module level works today -- nothing in the media writer's import
+            # closure reaches back here. It stays at call time by design. The
+            # deck controller package imports this module at module level (each
+            # controller builds a ScreenSaver), so keeping the screen saver's
+            # own dependency on that package lazy is what holds the edge
+            # between them one-directional.
             from src.backend.DeckManagement.deck_controller.media_writer import (
                 ReleaseStashedInputsMsg,
             )

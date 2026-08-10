@@ -248,8 +248,10 @@ class ActionCore(rpyc.Service):
             elif is_video(media_path):
                 # Local import: deck_controller/inputs.py imports ActionCore at
                 # module level, so a top-level ControllerKey import here would
-                # be circular; KeyGIF rides along at the same call site (same
-                # pattern as ScreenSaver.py's ReleaseStashedInputsMsg import).
+                # be circular; KeyGIF rides along at the same call site. Same
+                # lazy-import device as ScreenSaver.py's ReleaseStashedInputsMsg
+                # import -- that one is layering-motivated, this one is a real
+                # cycle.
                 from src.backend.DeckManagement.deck_controller.gif_pipeline import KeyGIF
                 from src.backend.DeckManagement.deck_controller.inputs import ControllerKey
                 key_gif = None
