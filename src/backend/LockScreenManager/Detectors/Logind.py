@@ -6,9 +6,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.backend.LockScreenManager.LockScreenManager import LockScreenManager
 
-# Import globals first to get IS_MAC
-import globals as gl
-
 from gi.repository import Gio, GLib
 
 from loguru import logger as log
@@ -25,8 +22,6 @@ class LogindLockScreenDetector(LockScreenDetector):
         self.setup_dbus(bus)
 
     def setup_dbus(self, bus: Gio.DBusConnection | None = None) -> None:
-        if gl.IS_MAC:
-            return
         try:
             # logind lives on the System Bus, unlike the session-bus DE
             # detectors. Kept referenced: the subscription below lives

@@ -47,11 +47,6 @@ try:
 except (AttributeError, ValueError, OSError):
     pass
 
-# "install" patches
-from src.patcher.patcher import Patcher
-patcher = Patcher()
-patcher.patch()
-
 # One-time rename migration (StreamController -> Deckard): move the whole
 # ~/.var/app tree to the new id and leave a compat symlink at the old path.
 # MUST run before `import globals` below -- globals.py os.makedirs()es the
@@ -83,7 +78,7 @@ from StreamDeck.DeviceManager import DeviceManager
 import cv2
 cv2.setNumThreads(2)
 
-# Import globals first to get IS_MAC
+# Import globals
 import globals as gl
 
 from gi.repository import Gio, GLib
@@ -347,9 +342,6 @@ def is_no_reply(error: GLib.Error) -> bool:
 
 
 def quit_running():
-    if gl.IS_MAC:
-        return
-
     log.info("Checking if another instance is running")
     session_bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     running = False
@@ -653,9 +645,6 @@ def validate_state_change_args(args):
     return True, None
 
 def make_api_calls():
-    if gl.IS_MAC:
-        return False
-        
     args = gl.argparser.parse_args()
     has_page_requests = args.change_page
     has_state_requests = args.change_state
@@ -749,17 +738,16 @@ def main():
         log.warning('Should you get an Gtk X11 error preventing the app from starting please add '
                     'GSK_RENDERER=ngl to your "/etc/environment" file')
 
-    if not gl.IS_MAC:
-        # Dbus
-        quit_running()
-        # quit_running() catches a fully-booted instance; two launches booting
-        # at the same moment (login autostart + session restore) both pass its
-        # probe. The lock claim is the atomic tie-breaker, and it must happen
-        # BEFORE reset_all_decks() so a losing launch never USB-resets decks
-        # the winner is initializing (field incident 2026-07-16).
-        closing = gl.argparser.parse_args().close_running
-        if not single_instance.claim(appinfo.APP_ID, wait_seconds=10.0 if closing else 0.0):
-            hand_off_to_lock_owner(closing=closing)
+    # Dbus
+    quit_running()
+    # quit_running() catches a fully-booted instance; two launches booting
+    # at the same moment (login autostart + session restore) both pass its
+    # probe. The lock claim is the atomic tie-breaker, and it must happen
+    # BEFORE reset_all_decks() so a losing launch never USB-resets decks
+    # the winner is initializing (field incident 2026-07-16).
+    closing = gl.argparser.parse_args().close_running
+    if not single_instance.claim(appinfo.APP_ID, wait_seconds=10.0 if closing else 0.0):
+        hand_off_to_lock_owner(closing=closing)
 
     reset_all_decks()
 

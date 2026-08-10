@@ -21,18 +21,15 @@ import gi
 from src.windows.Store.ResponsibleNotesDialog import ResponsibleNotesDialog
 from src.windows.Donate.DonateWindow import DonateWindow
 
-# Import globals first to get IS_MAC
+# Import globals
 import appinfo
 import globals as gl
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-if not gl.IS_MAC:
-    gi.require_version("Xdp", "1.0")
+gi.require_version("Xdp", "1.0")
 
-from gi.repository import Gtk, Adw, Gdk, Gio, GLib
-if not gl.IS_MAC:
-    from gi.repository import Xdp
+from gi.repository import Gtk, Adw, Gdk, Gio, GLib, Xdp
 
 # Import Python modules
 from loguru import logger as log
@@ -226,8 +223,7 @@ class App(Adw.Application):
         self.add_action(change_state_action)
 
         # Start DBus API service
-        if not gl.IS_MAC:
-            start_dbus_service()
+        start_dbus_service()
 
         # Eagerly warm plugin backends: async on its own daemon
         # thread, so backend subprocess launches can never block this GTK
@@ -292,8 +288,6 @@ class App(Adw.Application):
             f.write("")
 
     def show_permissions(self):
-        if gl.IS_MAC:
-            return
         portal = Xdp.Portal.new()
         if not portal.running_under_flatpak():
             return
@@ -336,8 +330,7 @@ class App(Adw.Application):
             self._ui_adapter = None
 
         # Stop DBus API service
-        if not gl.IS_MAC:
-            stop_dbus_service()
+        stop_dbus_service()
 
         # Guarded: a TERM arriving before on_activate built the window
         # (autostart followed by an immediate logout, or a startup crash-loop

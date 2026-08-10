@@ -22,7 +22,7 @@ fontconfig already does this job (better, since it IS the system's font
 database) and every font already goes through it once via Pango/GTK anyway.
 This module talks to fontconfig directly through ctypes (falling back to the
 `fc-match` binary if the shared library can't be loaded, e.g. on a minimal
-container image) so nothing here imports matplotlib on Linux.
+container image) so nothing here imports matplotlib.
 
 Weight scale mismatch (the #1 correctness risk here): the rest of the app
 speaks Pango/CSS weights (numeric, 100-900, e.g. 400 = normal, 700 = bold).
@@ -36,15 +36,9 @@ import ctypes
 import ctypes.util
 import functools
 import subprocess
-import sys
 import threading
 
 from fontTools.ttLib import TTFont
-
-# gl.IS_MAC guards the one spot (fallback_font's caller chain / KeyLabel) that
-# still needs a matplotlib-backed resolver; on Linux nothing below ever
-# imports matplotlib.
-IS_MAC = sys.platform == "darwin"
 
 
 # --------------------------------------------------------------------- #
@@ -290,25 +284,10 @@ def resolve(family: str | None, weight: int | None = 400, style: str | None = "n
     if not family:
         family = "sans"
 
-    if IS_MAC:
-        return _resolve_mac(family, weight, style)
-
     result = _resolve_pattern(family, weight, style)
     if result is None:
         return None
     return result.get("file")
-
-
-def _resolve_mac(family: str, weight: int, style: str) -> str | None:
-    # macOS keeps matplotlib as its font backend (requirement_macos.txt);
-    # imported lazily here so the Linux path never touches it.
-    import matplotlib.font_manager
-    return matplotlib.font_manager.findfont(
-        # style is typed Literal["normal", "italic", "oblique"] upstream; the
-        # app carries font styles as plain strings out of the settings JSON
-        # and matplotlib does its own validation on anything else.
-        matplotlib.font_manager.FontProperties(family=family, weight=weight, style=style)  # type: ignore[arg-type]  # matplotlib stub: Literal style vs the app's str
-    )
 
 
 @functools.lru_cache(maxsize=1)
@@ -318,18 +297,6 @@ def fallback_font() -> str | None:
     role the old `find_fallback_font()` played -- but without the
     import-time full-system-font scan that used to back it. Cached: this is
     still one fontconfig round trip, just deferred to first use."""
-    if IS_MAC:
-        import matplotlib.font_manager
-        for name in ("DejaVu Sans", "Arial"):
-            try:
-                matplotlib.font_manager.findfont(
-                    matplotlib.font_manager.FontProperties(family=name), fallback_to_default=False
-                )
-                return name
-            except Exception:
-                continue
-        return None
-
     result = _resolve_pattern("sans", None, None)
     if result is None:
         return "DejaVu Sans"

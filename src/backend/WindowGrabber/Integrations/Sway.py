@@ -22,14 +22,13 @@ import subprocess
 import json
 from loguru import logger as log
 
-# Import globals first to get IS_MAC
+# Import globals
 import globals as gl
 
 import gi
 
-if not gl.IS_MAC:
-    gi.require_version("Xdp", "1.0")
-    from gi.repository import Xdp
+gi.require_version("Xdp", "1.0")
+from gi.repository import Xdp
 
 # Import typing
 from typing import TYPE_CHECKING, Any
@@ -41,10 +40,9 @@ class Sway(Integration):
         super().__init__(window_grabber=window_grabber)
 
         self.command_prefix: list[str] = []
-        if not gl.IS_MAC:
-            portal = Xdp.Portal.new()
-            if portal.running_under_flatpak():
-                self.command_prefix = ["flatpak-spawn", "--host"]
+        portal = Xdp.Portal.new()
+        if portal.running_under_flatpak():
+            self.command_prefix = ["flatpak-spawn", "--host"]
 
         self.start_active_window_change_thread()
 

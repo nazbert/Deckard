@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 
-# Import globals first to get IS_MAC
+# Import globals
 import globals as gl
 
 from loguru import logger as log

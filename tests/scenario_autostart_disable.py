@@ -66,7 +66,6 @@ def main() -> None:
 
     import autostart
     autostart.Xdp = FakeXdp
-    autostart.IS_MAC = False
 
     home = tempfile.mkdtemp(prefix="sc_autostart_home_")
     os.environ["HOME"] = home  # read at call time by setup_autostart_desktop_entry
