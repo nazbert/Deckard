@@ -81,6 +81,7 @@ if TYPE_CHECKING:
     from src.backend.notify import Notify
     from src.Signals.SignalManager import SignalManager
     from src.backend.WindowGrabber.WindowGrabber import WindowGrabber
+    from src.backend.Wayland.Wayland import Wayland
     from src.backend.GnomeExtensions import GnomeExtensions
     from src.windows.Store.Store import Store
     from src.backend.PermissionManagement.FlatpakPermissionManager import FlatpakPermissionManager
@@ -89,6 +90,11 @@ if TYPE_CHECKING:
     from src.backend.PresenceMonitor.PresenceMonitor import PresenceMonitor
     from src.tray import TrayIcon
     from src.backend.Logger import Logger
+    # Type-time only by necessity: main.py's module body re-execs the process to
+    # cap the glibc arenas, so importing it at runtime would relaunch the app.
+    # TYPE_CHECKING is false at runtime and the annotation naming Main is quoted,
+    # so neither this import nor the reference is ever evaluated.
+    from main import Main
 
 
 top_level_dir:str = os.path.dirname(__file__)
@@ -114,6 +120,11 @@ page_manager:"PageManagerBackend | None" = None # None-checked in DeckController
 gnome_extensions:"GnomeExtensions" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
 settings_manager:"SettingsManager" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
 app:"App | None" = None # Absent until App.on_activate; notify/PluginManager defer onto app_loading_finished_tasks while it is
+# The wrapper that owns gl.app and starts the GTK loop. Its __init__ blocks in
+# app.run(), so the assignment in main.load() only completes once that loop has
+# exited -- this slot is None for the whole running lifetime of the process.
+# Write-only: nothing reads it. Declared for inventory parity, not utility.
+main: "Main | None" = None
 deck_manager:"DeckManager | None" = None # None-checked in the DBus API
 plugin_manager:"PluginManager | None" = None # None-checked in ActionChooser's load-health readout
 video_extensions = ["mp4", "mov", "MP4", "MOV", "mkv", "MKV", "webm", "WEBM", "gif", "GIF"]
@@ -127,6 +138,11 @@ notify: "Notify" = None  # type: ignore[assignment]  # late-init: main.create_gl
 pyro_daemon: "Pyro5.api.Daemon | None" = None  # never actually set/read (P3.2 grep); Pyro5 stays TYPE_CHECKING-only
 signal_manager: "SignalManager" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
 window_grabber: "WindowGrabber | None" = None # None-checked in the DBus API
+# Constructed only when WAYLAND_DISPLAY is set, so None is the ordinary state on
+# X11. Write-only: nothing anywhere reads it -- the Wayland object drives its
+# lock/unlock notifications through signal_manager from its own thread. Declared
+# for inventory parity, not utility.
+wayland: "Wayland | None" = None
 lock_screen_detector: "LockScreenManager" = None  # type: ignore[assignment]  # late-init: main.create_global_objects
 presence_monitor: "PresenceMonitor | None" = None  # quiescence signal; see src/backend/PresenceMonitor
 store: "Store | None" = None # Only if opened
