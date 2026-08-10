@@ -8,7 +8,8 @@ Drives KeyGIF directly with a synthetic `frame_delays` list (variable
 delays, so a single-fps factor would be wrong -- the reason this plan picked
 bisect over a fixed-fps ratio). `get_next_frame` takes an optional `now`
 (mirrors MediaPlayerThread.check_resume_gap's `now: float = None` pattern,
-DeckController.py ~390) so this test is deterministic -- no real sleeping,
+deck_controller/media_writer.py) so this test is deterministic -- no real
+sleeping,
 no thread.
 
 Bypasses KeyGIF.__init__ (which decodes an actual GIF file from disk) via

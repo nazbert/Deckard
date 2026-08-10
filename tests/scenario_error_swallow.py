@@ -13,7 +13,7 @@ failure window may be lost on the device, so recovery must repaint every
 input -- and it must not fire more than once for one failure burst.
 
 Exercises MediaPlayerSetImageTask.run's except-TransportError branch
-(DeckController.py, calls _on_write_result(False)/(True)) via
+(deck_controller/media_writer.py, calls _on_write_result(False)/(True)) via
 FaultyFakeDeck.fail_next().
 """
 import fixtures

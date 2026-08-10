@@ -269,7 +269,8 @@ class ScreenSaver:
         # Control messages (unlike add_task's MediaPlayerTask) have no
         # active-page affinity check, so a hide()-triggered load_page()
         # landing before this drains can't cause it to be silently dropped
-        # -- see ReleaseStashedInputsMsg's docstring in DeckController.py.
+        # -- see ReleaseStashedInputsMsg's docstring in
+        # DeckManagement/deck_controller/media_writer.py.
         if stashed_inputs:
             # Local import: DeckController imports ScreenSaver at module
             # level (for self.screen_saver = ScreenSaver(self)), so a
