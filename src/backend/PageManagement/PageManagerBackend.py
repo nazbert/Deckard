@@ -373,7 +373,7 @@ class PageManagerBackend:
         gl.settings_manager.save_settings_to_file(self.PAGE_SETTINGS_PATH, page_settings)
 
         os.remove(old_path)
-        self._refresh_window_watch_state()
+        self.refresh_window_watch_state()
 
     def remove_page(self, page_path: str):
         settings_path = os.path.join(gl.DATA_PATH, "settings", "pages.json")
@@ -467,7 +467,7 @@ class PageManagerBackend:
 
         # Deleting the page that carried the only rule takes the rule with
         # it, so the watcher has to be re-gated here too.
-        self._refresh_window_watch_state()
+        self.refresh_window_watch_state()
 
     def add_page(self, page_name: str, page_dict: dict = None) -> str:
         page_dict = page_dict or {}
@@ -484,7 +484,7 @@ class PageManagerBackend:
         # page_dict, rule included, so this is a rule-adding path.
         atomic_write_json(path, page_dict)
 
-        self._refresh_window_watch_state()
+        self.refresh_window_watch_state()
         return path
 
     def register_page(self, path: str):
@@ -499,7 +499,7 @@ class PageManagerBackend:
 
         # A registered custom page is matched like any other, so its rule
         # counts towards the watcher gate from here on.
-        self._refresh_window_watch_state()
+        self.refresh_window_watch_state()
 
     def unregister_page(self, path: str):
         if not self.custom_pages.__contains__(path):
@@ -507,7 +507,7 @@ class PageManagerBackend:
 
         self.custom_pages.remove(path)
         gl.signal_manager.trigger_signal(Signals.PageDelete, path)
-        self._refresh_window_watch_state()
+        self.refresh_window_watch_state()
 
     def get_pages_with_path(self, path: str):
         pages_set = set()
@@ -790,11 +790,20 @@ class PageManagerBackend:
                 log.opt(exception=True).warning(f"Could not read the auto-change settings of {page_path}")
         return False
 
-    def _refresh_window_watch_state(self) -> None:
+    def refresh_window_watch_state(self) -> None:
         """Re-gates the active-window watcher after anything that can add or
-        remove a rule. Never raises into the page operation that triggered
-        it: a watcher left in the wrong state is a wasted poll or a dead
-        auto-switch, but a raise here would abort a page write."""
+        remove a rule.
+
+        Public because rules also arrive by routes that bypass every setter
+        here -- an importer writing page files wholesale is the live one --
+        and such a writer must be able to re-gate without reaching into the
+        window grabber itself.
+
+        Never raises into the page operation that triggered it: a watcher
+        left in the wrong state is a wasted poll or a dead auto-switch, but
+        a raise here would abort a page write. Returns immediately; the
+        grabber applies the decision on its own worker.
+        """
         window_grabber = gl.window_grabber
         if window_grabber is None:
             return
@@ -826,7 +835,7 @@ class PageManagerBackend:
         }
 
         self.set_page_settings(path, settings)
-        self._refresh_window_watch_state()
+        self.refresh_window_watch_state()
 
     def overwrite_auto_change_settings(self, path: str, enable: bool = None, wm_class: str = None, regex_title: str = None, stay_on_page: bool = None, decks: list[str] = None):
         settings = self.get_page_settings(path)
@@ -845,7 +854,7 @@ class PageManagerBackend:
 
         settings["auto-change"] = auto_change_settings
         self.set_page_settings(path, settings)
-        self._refresh_window_watch_state()
+        self.refresh_window_watch_state()
 
     def get_screensaver_settings(self, path: str):
         page_settings = self.get_page_settings(path)

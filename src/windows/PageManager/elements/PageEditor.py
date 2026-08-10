@@ -36,6 +36,7 @@ import os
 
 # Import own modules
 from GtkHelper.GtkHelper import BetterExpander, better_disconnect
+from src.backend.main_loop import run_in_background
 from src.backend.WindowGrabber.Window import Window
 from src.windows.PageManager.elements.MenuButton import MenuButton
 
@@ -743,8 +744,20 @@ class MatchingWindowExpander(BetterExpander):
             self.add_row(Adw.ActionRow(title=window.title, subtitle=window.wm_class, use_markup=False))
 
     def update_matching_windows(self, *args):
+        # The regexes are read here, on the main thread, because they come
+        # from widgets; the query itself must not run here. Listing windows
+        # shells out once per window on most desktops -- and builds the
+        # window grabber's integration on first use, which probes for a
+        # helper binary -- so on the main thread it stalls the UI it is
+        # about to update.
         class_regex = self.auto_change_group.wm_class_entry.get_text()
         title_regex = self.auto_change_group.title_entry.get_text()
 
-        matching_windows = gl.window_grabber.get_all_matching_windows(class_regex=class_regex, title_regex=title_regex)
-        self.load_windows(windows=matching_windows)
+        run_in_background(self._load_matching_windows, class_regex, title_regex)
+
+    def _load_matching_windows(self, class_regex: str, title_regex: str):
+        window_grabber = gl.window_grabber
+        if window_grabber is None:
+            return
+        matching_windows = window_grabber.get_all_matching_windows(class_regex=class_regex, title_regex=title_regex)
+        GLib.idle_add(self.load_windows, matching_windows)

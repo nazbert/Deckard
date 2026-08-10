@@ -51,6 +51,14 @@ class StreamControllerImporter:
 
         log.success("Imported all pages from StreamController")
 
+        # These pages are written wholesale, bypassing every page-settings
+        # setter, so an import carrying enabled window auto-change rules is
+        # the one way rules can appear with nothing to notice them. Without
+        # this the watcher would stay off for the rest of the session and
+        # the imported rules would simply not work.
+        if gl.page_manager is not None:
+            gl.page_manager.refresh_window_watch_state()
+
         if recursive_hasattr(gl, "app.main_win.sidebar.page_selector"):
             GLib.idle_add(gl.app.main_win.sidebar.page_selector.update)
         if recursive_hasattr(gl, "page_manager_window.page_selector"):

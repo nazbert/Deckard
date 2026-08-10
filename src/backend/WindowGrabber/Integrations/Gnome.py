@@ -80,19 +80,27 @@ class Gnome(Integration):
             log.error(f"Failed to connect to D-Bus: {e}")
             pass
 
+    @log.catch
     def start_watching(self) -> None:
         proxy = self.proxy
         if proxy is None or self._signal_handler_id:
             return
         self._signal_handler_id = proxy.connect("g-signal", self.on_dbus_signal)
 
+    @log.catch
     def stop_watching(self) -> None:
         """Drops the shell's window-change subscription.
 
-        The proxy itself stays: it owns no thread and no poll, and the page
-        editor's matching-window list still queries through it while no rule
-        is enabled. Unsubscribing is the whole cost here, and it is bounded
-        by definition -- nothing to join.
+        Bounded by definition -- there is no thread to join.
+
+        The proxy itself stays, because the page editor's matching-window
+        list still queries through it while no rule is enabled. Honest
+        limitation: a GDBusProxy that has been built keeps its match rule on
+        the session bus, so the shell's FocusedWindowChanged signals are
+        still delivered to this process and dropped here rather than never
+        being sent. That is a message on an existing connection, not a
+        process spawn or a poll, and it only applies once something has
+        built the proxy -- a session with no rules never does.
         """
         proxy = self.proxy
         handler_id = self._signal_handler_id

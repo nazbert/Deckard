@@ -26,6 +26,9 @@ bundle as a release asset.
   the foreground window continuously — several helper processes a second on
   X11 and KDE — whether or not any page asked for it. The watcher now starts
   the moment the first rule is enabled and stops when the last one is removed.
+  Consequently the D-Bus `ForegroundWindow` property now tracks the desktop
+  only while window rules are in use; it can still be set from outside at any
+  time via `NotifyForegroundWindow`.
 - Log files are now pruned automatically (the ten most recent rotations are
   kept) and default verbosity is lower — files record debug level and up, the
   console info and up. Set `SC_LOG_TRACE=1` to restore full trace logging on

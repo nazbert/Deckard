@@ -91,7 +91,10 @@ class KDE(Integration):
             return
 
         thread.stop()
-        thread.join(timeout=WATCHER_STOP_TIMEOUT_S)
+        # Never join the calling thread to itself: routing a window change
+        # can reach a page write, and a page write re-gates.
+        if thread is not threading.current_thread():
+            thread.join(timeout=WATCHER_STOP_TIMEOUT_S)
         if thread.is_alive():
             # Parked in a kdotool read that outlived the timeout. The thread
             # is a daemon and its loop rechecks the stop flag as soon as the
@@ -203,8 +206,10 @@ class WatchForActiveWindowChange(threading.Thread):
     @log.catch
     def run(self) -> None:
         while gl.threads_running and not self._stop_event.is_set():
-            # Waiting on the stop event instead of sleeping is what makes a
-            # stop take ~0 ms rather than up to a full poll interval.
+            # Waiting on the stop event rather than sleeping cuts the stop
+            # short instead of running out the poll interval. One already-
+            # elapsed wait can still dispatch after a stop; harmless, since
+            # routing re-reads the rules and finds none.
             if self._stop_event.wait(0.2):
                 break
             window_id = self.kde.get_active_window_id()
