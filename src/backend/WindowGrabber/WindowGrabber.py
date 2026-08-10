@@ -13,12 +13,12 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
-import os
 import re
 from loguru import logger as log
 
 import globals as gl
 
+from src.backend.session_info import desktop_components, session_type
 from src.backend.WindowGrabber.Window import Window
 from src.backend.WindowGrabber.Integration import Integration
 from src.backend.WindowGrabber.Integrations.Hyprland import Hyprland
@@ -28,47 +28,56 @@ from src.backend.WindowGrabber.Integrations.X11 import X11
 from src.backend.WindowGrabber.Integrations.KDE import KDE
 from src.api import notify_foreground_window_changed
 
+
+def select_integration_class(environment_components: list[str], server: str | None) -> type[Integration] | None:
+    """The integration that can grab windows in this session, or None when
+    none can.
+
+    `environment_components` are the XDG_CURRENT_DESKTOP components, matched
+    one by one: the variable is a colon-separated list ("ubuntu:GNOME",
+    "sway:wlroots:swayfx"), so comparing it as a single string leaves stock
+    distro sessions with no integration and automatic page switching dead.
+
+    The order is load-bearing. The X11 session check sits above the KDE
+    component, so a KDE session on Xorg reads windows through xprop rather
+    than kdotool; it sits below the Wayland-only compositors, which have no
+    X11 fallback to be demoted to.
+    """
+    if "hyprland" in environment_components:
+        return Hyprland
+    if "gnome" in environment_components:
+        return Gnome
+    # Sway forks name themselves in the same component ("swayfx") and speak
+    # the same IPC.
+    if any("sway" in component for component in environment_components):
+        return Sway
+    if server == "x11":
+        return X11
+    if "kde" in environment_components:
+        return KDE
+    return None
+
+
 class WindowGrabber:
     def __init__(self):
-        self.SUPPORTED_ENVS = ["hyprland", "gnome", "sway", "sway:wlroots", "sway:wlroots:swayfx", "x11", "kde"]
+        self.environment_components: list[str] = []
+        self.server: str | None = None
 
         self.integration: Integration | None = None
         self.init_integration()
 
     @log.catch
-    def get_active_environment(self) -> str | None:
-        desktop = os.getenv("XDG_CURRENT_DESKTOP")
-        if desktop is None:
-            return None
-        return desktop.lower()
-
-    @log.catch
-    def get_active_server(self) -> str | None:
-        env = os.getenv("XDG_SESSION_TYPE")
-        if env is None:
-            return None
-        return env.lower()
-
-    @log.catch
     def init_integration(self) -> None:
-        self.environment = self.get_active_environment()
-        self.server = self.get_active_server()
+        self.environment_components = desktop_components()
+        self.server = session_type()
 
-        if self.environment not in self.SUPPORTED_ENVS and self.server not in self.SUPPORTED_ENVS:
-            log.error(f"Unsupported environment: {self.environment} with server: {self.server} for window grabber.")
+        integration_class = select_integration_class(self.environment_components, self.server)
+        if integration_class is None:
+            log.error(f"Unsupported environment: {self.environment_components} with server: {self.server} for window grabber.")
             return
 
-        log.info(f"Initializing window grabber for environment: {self.environment} under server: {self.server}")
-        if self.environment == "hyprland":
-            self.integration = Hyprland(self)
-        elif self.environment == "gnome":
-            self.integration = Gnome(self)
-        elif self.environment is not None and "sway" in self.environment:
-            self.integration = Sway(self)
-        elif self.server == "x11":
-            self.integration = X11(self)
-        elif self.environment == "kde":
-            self.integration = KDE(self)
+        log.info(f"Initializing window grabber for environment: {self.environment_components} under server: {self.server}")
+        self.integration = integration_class(self)
 
     @log.catch
     def get_all_windows(self) -> list[Window]:

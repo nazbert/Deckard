@@ -7,6 +7,13 @@ bundle as a release asset.
 
 ## [Unreleased]
 
+### Fixed
+
+- Window-based automatic page switching now works on desktops that report a
+  colon-joined `XDG_CURRENT_DESKTOP`, such as `ubuntu:GNOME` — window
+  grabbing matched only single-name desktops and stayed silently disabled
+  everywhere else.
+
 ### Changed
 
 - Log files are now pruned automatically (the ten most recent rotations are
