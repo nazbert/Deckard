@@ -47,32 +47,54 @@ THE RULES
   layer, is a separate question with a separate guard; this one is only about
   what exists and who creates it.
 * Mutating a slot's contents (`gl.loggers[...] = ...`, appending to a queue) is
-  not a store on `gl` and is not policed. That is those slots' semantics.
+  not a store on `gl` and is not policed, deliberately: that is those slots'
+  semantics, and the queues exist to be appended to. `gl.__dict__[...] = ...`
+  rides the same allowance -- it reaches the module namespace rather than a
+  slot's contents, but it is a subscript store like any other and this check
+  does not see it. Nothing in the tree writes that way.
 
 WHAT COUNTS AS A DECLARATION
 
-Targets of assignments, annotated assignments, augmented assignments, `for` and
-`with ... as`, plus imports and module-scope `def`/`class` names -- collected
-over the module body at any nesting depth, without descending into function or
-class bodies (names bound in there are locals, not module attributes). Names a
-module-scope `del` removes are subtracted, which is why the version-reading
-helper globals.py deletes after use is in no table. `except ... as` names are
-deliberately not collected: Python deletes the handler name when the handler
-exits, so such a name is never a module attribute.
+Targets of assignments, annotated assignments, augmented assignments, `for`,
+`with ... as`, walrus expressions and `type` aliases, plus imports and
+module-scope `def`/`class` names -- collected over the module body at any
+nesting depth, without descending into function, class or lambda bodies (names
+bound in there are locals, not module attributes). The parts of a `def` that do
+evaluate where the `def` sits -- decorators, default arguments, annotations,
+base classes -- are still walked, because a walrus in one of them binds module
+scope. Names a module-scope `del` removes are subtracted, which is why the
+version-reading helper globals.py deletes after use is in no table.
+`except ... as` names are deliberately not collected: Python deletes the handler
+name when the handler exits, so such a name is never a module attribute.
 
-`fallback_font` is the one name with no statement to find: globals.py serves it
-through the module `__getattr__` and caches it into the module dict on first
-read. It is a real slot, so the check adds it to what it collected -- see
-LAZY_SLOTS.
+`fallback_font` is declared the one way that has no name in the source:
+globals.py's module `__getattr__` resolves it on first read and caches it with
+`globals()["fallback_font"] = value`. A write into the namespace dict under a
+literal key is collected like any other binding, so that slot is pinned in both
+directions -- deleting the caching line fails the check until the table entry
+goes too.
 
 A guard that fails open is worse than no guard, because it reads as green while
 covering nothing. So the check also fails when its own footing moves: a missing
 or empty globals.py, a governed root that is not a directory (or a governed
 file that is not a file), a symlinked directory under a root (the walk does not
 descend into one, so every store inside it would go unseen), a file that will
-not parse, a name listed in two tables at once, and any import of `globals`
-whose style this check cannot resolve to an alias. Each is a loud failure
-naming what to fix, never a silent skip.
+not parse, a name listed in two tables at once, and any `import` or
+`from ... import` STATEMENT naming globals that this check cannot resolve to an
+alias. Each is a loud failure naming what to fix, never a silent skip.
+
+WHAT THIS DOES NOT SEE, AND WHY THAT IS THE RIGHT LINE
+
+The module can also be reached without an import statement --
+`importlib.import_module("globals")`, `__import__("globals")`,
+`sys.modules["globals"]` -- and an alias can be laundered through another name
+(`x = gl`, `vars(gl)`, a helper that takes the module as a parameter). None of
+those are detected. The threat model here is the well-meaning change, not the
+determined one: a slot arrives because somebody needed one and reached for the
+nearest surface, and every such arrival in this tree's history has been a plain
+`gl.name = value`. A check that chased every indirection would have to
+approximate the interpreter, and would still lose. This one makes the ordinary
+path visible and leaves the exotic ones to review.
 
 Stdlib only, no imports beyond it: this runs in CI's bare python:3.13-slim
 image alongside compileall, with nothing installed.
@@ -89,14 +111,18 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 GLOBALS_MODULE = "globals.py"
 THIS_SCRIPT = "scripts/check_gl_slots.py"
 
-# Trees the assignment pin walks. Wider than mypy's roots on purpose: main.py
+# What the assignment pin walks. Wider than mypy's roots on purpose: main.py
 # does most of the assigning, and the tests are included because a scenario that
 # invents a slot to stand something up is inventing a slot.
+#
+# What stays ungoverned, and knowingly: the remaining root-level modules
+# (appinfo.py, rebrand_migration.py, globals.py itself), which import before
+# globals exists or are globals; scripts/, which is tooling that never runs in
+# the app process; and third-party plugins, which live outside the tree
+# entirely and are a compatibility surface rather than something to police.
+# Widening these tuples is the fix if any of that stops being true.
 GOVERNED_FILES = ("main.py", "autostart.py", "cli_args.py")
-GOVERNED_TREES = ("src", "GtkHelper", "tests")
-
-# The slot the module __getattr__ serves and caches; no statement declares it.
-LAZY_SLOTS = frozenset({"fallback_font"})
+GOVERNED_TREES = ("src", "GtkHelper", "locales", "tests")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # THE FROZEN INVENTORY
@@ -245,10 +271,10 @@ def declared_names(tree: ast.Module) -> set[str]:
 
     Descends through every compound statement (`if`, `with`, `try`, `match`,
     loops) because a binding inside one is still module scope, and stops at
-    `def`/`class` boundaries because a binding inside one of those is not --
-    except for a `global` declaration, which reaches back out to module scope
-    from wherever it sits, and for a `globals()["name"] = ...` write, which is
-    how the lazy slot is cached.
+    `def`/`class`/`lambda` boundaries because a binding inside one of those is
+    not -- except for a `global` declaration, which reaches back out to module
+    scope from wherever it sits, and for a `globals()["name"] = ...` write,
+    which is how the lazy slot is cached.
     """
     bound: set[str] = set()
     deleted: set[str] = set()
@@ -275,13 +301,34 @@ def declared_names(tree: ast.Module) -> set[str]:
             ):
                 bound.add(key.value)
 
+    def walrus(node: ast.AST) -> None:
+        """Collect `:=` targets from expressions that evaluate in module scope.
+
+        A walrus binds where its expression is evaluated, which for one inside a
+        comprehension is the scope *around* the comprehension -- so a module-scope
+        comprehension can mint a module attribute. A lambda body is its own scope,
+        and is the one expression this does not enter.
+        """
+        for field, value in ast.iter_fields(node):
+            if isinstance(node, ast.Lambda) and field == "body":
+                continue
+            for item in (value if isinstance(value, list) else [value]):
+                if not isinstance(item, ast.AST) or isinstance(item, ast.stmt):
+                    continue   # statements are descend()'s job
+                if isinstance(item, ast.NamedExpr):
+                    bound.add(item.target.id)
+                walrus(item)
+
     def descend(node: ast.stmt) -> None:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             bound.add(node.name)
-            return   # its body binds locals, not module attributes
-        if isinstance(node, ast.ClassDef):
-            bound.add(node.name)
+            # The body binds locals, not module attributes -- but decorators,
+            # default arguments, annotations and base classes are evaluated
+            # where the statement sits, so a walrus in one binds module scope.
+            walrus(node)
             return
+
+        walrus(node)
 
         if isinstance(node, ast.Assign):
             for element in node.targets:
@@ -291,6 +338,8 @@ def declared_names(tree: ast.Module) -> set[str]:
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
                 bound.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.TypeAlias):
+            target(node.name)   # `type X = ...` binds X like an assignment
         elif isinstance(node, (ast.For, ast.AsyncFor)):
             target(node.target)
         elif isinstance(node, (ast.With, ast.AsyncWith)):
@@ -376,7 +425,7 @@ def check_declarations(failures: list[str]) -> set[str]:
         )
         return set()
 
-    declared = declared_names(tree) | LAZY_SLOTS
+    declared = declared_names(tree)
     listed = {name for _, entries in TABLES for name in entries}
 
     for name in sorted(declared - listed):
