@@ -24,6 +24,7 @@ from autostart import setup_autostart
 from src.backend.DeckManagement.HelperMethods import color_values_to_gdk, gdk_color_to_values, get_pango_font_description, get_values_from_pango_font_description
 from src.backend.PresenceMonitor.PresenceMonitor import MODE_SCREENSAVER, MODE_SYSTEM_IDLE
 from src.backend.SettingsManager import AppSettings
+from src.backend.Store.StoreURL import parse_repo_url
 from src.windows.Settings.PluginSettingsPage import PluginSettingsPage
 
 # Import globals
@@ -683,13 +684,42 @@ class CustomContentEntry(Adw.PreferencesRow):
 
         self.button_remove.connect("clicked", self.on_remove)
 
+        # Flag an already-stored url the store cannot use, so the reason a
+        # custom entry never shows up is visible in the row itself.
+        self.refresh_url_validity()
+
+    def refresh_url_validity(self) -> str | None:
+        """Returns the url to persist, or None when the field holds
+        something the store could not use.
+
+        Validation is parse_repo_url -- the exact parse the store performs
+        later -- so a url accepted here can never be one the catalog load
+        has to skip. Main-thread only: it restyles the row.
+        """
+        url = self.url.get_text().strip()
+        if url and parse_repo_url(url) is None:
+            self.url.add_css_class("error")
+            self.url.set_tooltip_text(gl.lm.get("settings-store-custom-url-invalid"))
+            return None
+        self.url.remove_css_class("error")
+        self.url.set_tooltip_text(None)
+        return url
+
     def on_value_changed(self, *args):
+        url = self.refresh_url_validity()
+        if url is None:
+            # Leave the stored entry as it was: persisting a url the store
+            # would only skip buys nothing, and the row stays flagged until
+            # it parses. An emptied field IS persisted (empty string), so
+            # clearing an entry always takes effect.
+            return
+
         settings = gl.settings_manager.get_app_settings()
 
         settings.setdefault("store", {})
         settings["store"].setdefault(self.content_group.store_key, [])
-        settings["store"][self.content_group.store_key][self.i]["url"] = self.url.get_text()
-        settings["store"][self.content_group.store_key][self.i]["branch"] = self.branch.get_text()
+        settings["store"][self.content_group.store_key][self.i]["url"] = url
+        settings["store"][self.content_group.store_key][self.i]["branch"] = self.branch.get_text().strip()
 
         gl.settings_manager.save_app_settings(settings)
 

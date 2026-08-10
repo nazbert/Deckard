@@ -37,6 +37,7 @@ from gi.repository import GLib
 # Import own modules
 from autostart import is_flatpak
 from src.backend.Store.StoreCache import StoreCache
+from src.backend.Store.StoreURL import RepoRef, parse_repo_url
 from src.backend.PluginManager.PluginBase import PluginBase
 from src.backend.DeckManagement.HelperMethods import recursive_hasattr
 from src.backend import http_client
@@ -166,6 +167,14 @@ class StoreBackend:
                 url = store.get("url")
                 if not url:
                     continue
+                if parse_repo_url(url) is None:
+                    # A store whose url cannot be parsed used to raise an
+                    # opaque "x not in list" out of the cache-key helper,
+                    # through fetch_and_parse_store_json (which only catches
+                    # json errors) and out of the whole catalog load -- one
+                    # bad settings entry blanked every store page.
+                    log.error(f"Skipping custom store {url!r}: not a store repository url")
+                    continue
                 custom_branch = store.get("branch")
                 if not isinstance(custom_branch, str) or not custom_branch:
                     # Third-party stores follow the "main" convention; this
@@ -184,7 +193,15 @@ class StoreBackend:
         plugins = []
         if settings.enable_custom_plugins:
             for plugin in settings.custom_plugins:
-                plugins.append((plugin.get("url"), plugin.get("branch")))
+                url = plugin.get("url")
+                if not url:
+                    # An empty row: added in the settings window and never
+                    # filled in. Silent, like get_stores -- it is not an error.
+                    continue
+                if parse_repo_url(url) is None:
+                    log.error(f"Skipping custom plugin {url!r}: not a store repository url")
+                    continue
+                plugins.append((url, plugin.get("branch")))
 
         return plugins
     
@@ -350,13 +367,18 @@ class StoreBackend:
         during the catalog fan-out, and an uncapped requests.get() here
         would evade the limiter.
 
-        Returns the sha str, None when the branch resolves to no commits
-        (non-200 answer, empty/unparseable commit list), or NoConnectionError
-        on a network failure -- the same contract as request_from_url, so
-        callers isinstance-check instead of catching requests exceptions
-        out of a gather.
+        Returns the sha str, None when there is no sha to resolve (a url
+        that names no repository, a non-200 answer, an empty/unparseable
+        commit list), or NoConnectionError on a network failure -- the same
+        contract as request_from_url, so callers isinstance-check instead of
+        catching requests exceptions out of a gather.
         """
-        url = f"https://api.github.com/repos/{self.get_user_name(repo_url)}/{self.get_repo_name(repo_url)}/commits?sha={branch_name}&per_page=1"
+        ref = parse_repo_url(repo_url)
+        if ref is None:
+            log.error(f"Cannot resolve a commit of {repo_url!r}: not a store repository url")
+            return None
+
+        url = f"https://api.github.com/repos/{ref.user}/{ref.repo}/commits?sha={branch_name}&per_page=1"
 
         try:
             with self._fetch_limiter:
@@ -467,6 +489,9 @@ class StoreBackend:
 
     def prepare_plugin(self, plugin, include_image: bool = True, verified: bool = False):
         url = plugin["url"]
+        ref = self.repo_ref_for_entry(url)
+        if ref is None:
+            return None
 
         # Check if suitable version is available
         compatible = True
@@ -513,7 +538,7 @@ class StoreBackend:
 
         stargazers = self.get_stargazers(url)
 
-        author = self.get_user_name(url)
+        author = ref.user
 
         translated_description = gl.lm.get_custom_translation(manifest.get("descriptions", {}))
         translated_short_description = gl.lm.get_custom_translation(manifest.get("short-descriptions", {}))
@@ -541,7 +566,7 @@ class StoreBackend:
             local_sha=self.get_local_sha_for_id(gl.PLUGIN_DIR, manifest.get("id")),
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
-            repository_name=self.get_repo_name(url),
+            repository_name=ref.repo,
             tags=tags,
 
             thumbnail=thumbnail_path or None,
@@ -613,6 +638,9 @@ class StoreBackend:
             return None
 
         url = icon["url"]
+        ref = self.repo_ref_for_entry(url)
+        if ref is None:
+            return None
 
         # Check if suitable version is available
         compatible = True
@@ -641,7 +669,7 @@ class StoreBackend:
         # the catalog -- list it without an image, like prepare_plugin.
         image: "Image.Image | None" = None if isinstance(fetched, NoConnectionError) else fetched
 
-        author = self.get_user_name(url)
+        author = ref.user
 
         stargazers = self.get_stargazers(url)
         if isinstance(stargazers, NoConnectionError):
@@ -672,7 +700,7 @@ class StoreBackend:
             local_sha=self.get_local_sha_for_id(os.path.join(gl.DATA_PATH, "icons"), manifest.get("id")),
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
-            repository_name=self.get_repo_name(url),
+            repository_name=ref.repo,
             tags=tags,
 
             thumbnail=thumbnail_path or None,
@@ -699,6 +727,9 @@ class StoreBackend:
             return None
 
         url = wallpaper["url"]
+        ref = self.repo_ref_for_entry(url)
+        if ref is None:
+            return None
 
         # Check if suitable version is available
         compatible = True
@@ -728,7 +759,7 @@ class StoreBackend:
             return attribution
         attribution = attribution.get("generic", {}) #TODO: Choose correct attribution
 
-        author = self.get_user_name(url)
+        author = ref.user
 
         translated_description = gl.lm.get_custom_translation(manifest.get("descriptions", {}))
         translated_short_description = gl.lm.get_custom_translation(manifest.get("short-descriptions", {}))
@@ -755,7 +786,7 @@ class StoreBackend:
             local_sha=self.get_local_sha_for_id(os.path.join(gl.DATA_PATH, "wallpapers"), manifest.get("id")),
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
-            repository_name=self.get_repo_name(url),
+            repository_name=ref.repo,
             tags=tags,
 
             thumbnail=thumbnail_path or None,
@@ -781,6 +812,9 @@ class StoreBackend:
             return None
 
         url = sd_plus_bar_wallpaper["url"]
+        ref = self.repo_ref_for_entry(url)
+        if ref is None:
+            return None
         
         compatible = True
         version = self.get_newest_compatible_version(sd_plus_bar_wallpaper["commits"])
@@ -809,7 +843,7 @@ class StoreBackend:
             return attribution
         attribution = attribution.get("generic", {}) #TODO: Choose correct attribution
 
-        author = self.get_user_name(url)
+        author = ref.user
 
         translated_description = gl.lm.get_custom_translation(manifest.get("descriptions", {}))
         translated_short_description = gl.lm.get_custom_translation(manifest.get("short-descriptions", {}))
@@ -836,7 +870,7 @@ class StoreBackend:
             local_sha=self.get_local_sha_for_id(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers"), manifest.get("id")),
             minimum_app_version=manifest.get("minimum-app-version") or None,
             app_version=manifest.get("app-version") or None,
-            repository_name=self.get_repo_name(url),
+            repository_name=ref.repo,
             tags=tags,
 
             thumbnail=thumbnail_path or None,
@@ -876,18 +910,28 @@ class StoreBackend:
         return 0
 
     def get_user_name(self, repo_url:str) -> str:
-        splitted =  repo_url.split("/")
-        return splitted[splitted.index("github.com")+1]
-    
+        ref = parse_repo_url(repo_url)
+        if ref is None:
+            raise ValueError(f"Not a store repository url: {repo_url!r}")
+        return ref.user
+
     def get_repo_name(self, repo_url:str) -> str | None:
-        github_split = repo_url.split("github")
-        if len(github_split) < 2:
-            return None
-        split = github_split[1].split("/")
-        if len(split) < 3:
-            return None
-        return split[2]
-    
+        ref = parse_repo_url(repo_url)
+        return None if ref is None else ref.repo
+
+    def repo_ref_for_entry(self, url: object) -> RepoRef | None:
+        """Parses a catalog/settings entry's url, reporting the skip.
+
+        Store entries carry whatever the catalog json or the user's settings
+        hold, so an entry that names no usable repository is dropped here
+        rather than raising through the prepare fan-out as an opaque
+        "x not in list".
+        """
+        ref = parse_repo_url(url)
+        if ref is None:
+            log.error(f"Skipping store entry {url!r}: not a store repository url")
+        return ref
+
     def get_newest_compatible_version(self, available_versions: list[str]) -> str | None:
         if gl.exact_app_version_check:
             if gl.app_version in available_versions:
@@ -1042,12 +1086,12 @@ class StoreBackend:
             return self.clone_repo(repo_url, directory, commit_sha, branch_name, expected_id)
 
 
-        username = self.get_user_name(repo_url)
-        repo_name = self.get_repo_name(repo_url)
-        if repo_name is None:
-            log.error(f"Could not derive a repository name from {repo_url!r}")
+        ref = parse_repo_url(repo_url)
+        if ref is None:
+            log.error(f"Could not derive a repository from {repo_url!r}")
             return 404
-        projectname = repo_name.lower()
+        username = ref.user
+        projectname = ref.repo.lower()
         sha = commit_sha
         if commit_sha is None and branch_name is not None:
             # Used to write the version
