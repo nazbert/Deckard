@@ -15,6 +15,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 # Import python modules
 import signal
 import threading
+import time
 import gi
 
 from src.windows.Store.ResponsibleNotesDialog import ResponsibleNotesDialog
@@ -54,6 +55,14 @@ from src.api import start_dbus_service, stop_dbus_service
 
 # Import globals
 import globals as gl
+
+
+# How long a queued Ctrl+C may go undispatched before the next one force-quits
+# from signal-handler context (see App._on_sigint). A third of the 6s
+# force_quit watchdog: far longer than any dispatch latency a responsive main
+# loop can produce, and short enough that someone holding Ctrl+C against a real
+# wedge reaches it without thinking about it.
+SIGINT_ESCALATE_AFTER_S = 2.0
 
 
 def unix_signal_add(priority, signum, callback) -> bool:
@@ -99,9 +108,10 @@ class App(Adw.Application):
         # registered below so the very first signal already sees it.
         self._quit_started = False
 
-        # Ctrl+C deliveries so far, for _on_sigint's escalation. Same
-        # reason for living here: the first signal must already find it.
-        self._sigint_count = 0
+        # When the first Ctrl+C was seen, for _on_sigint's escalation; None
+        # until then. Same reason for living here as the latch above: the
+        # very first signal must already find it.
+        self._sigint_first_at: float | None = None
 
         # The live engine->UI adapter, so on_quit can detach it. None
         # until on_activate builds the window -- a TERM before that must not
@@ -544,8 +554,8 @@ class App(Adw.Application):
         return GLib.SOURCE_CONTINUE
 
     def _on_sigint(self, signum, frame):
-        """SIGINT (Ctrl+C) entry point. Queues the teardown; escalates on the
-        second press if the first one never got dispatched.
+        """SIGINT (Ctrl+C) entry point. Queues the teardown; escalates if a
+        queued one is still sitting there SIGINT_ESCALATE_AFTER_S later.
 
         A Python-level handler runs between bytecodes on the main thread, so
         it can interrupt any statement in the app -- mid-render, inside a
@@ -570,17 +580,36 @@ class App(Adw.Application):
         sources too, that would leave no signal able to end the process short
         of SIGKILL -- which orphans the plugin backends (own session, so no
         killpg reaches them) and skips the force_quit watchdog, armed only
-        inside on_quit. Hence the escalation: a second press with no teardown
-        yet started means the loop is not dispatching, and force_quit runs
-        right here. It is the one thing safe to call from handler context --
-        terminate_all_backends() and os._exit(1), no GTK, no teardown ordering.
-        Gated on _quit_started so a second press during a teardown that IS
-        running stays a no-op rather than cutting it short.
+        inside on_quit. Hence the escalation, and hence its shape: what proves
+        a wedge is ELAPSED TIME with the teardown still not started, never the
+        press count. A healthy app busy in Python for a moment (on_activate
+        loads pages and resizes images on the main thread) answers a press
+        late, not never, while a double-tap is two presses ~150ms apart and
+        key repeat is three in ~66ms -- escalating on those would os._exit(1)
+        a perfectly live app with no AppQuit fan-out and no close_all(),
+        leaving a deck open for the next startup to fail on. Past the
+        threshold, force_quit is the one thing safe to run from handler
+        context: terminate_all_backends() and os._exit(1), no GTK, no teardown
+        ordering. Gated on _quit_started too, so presses during a teardown
+        that IS running stay no-ops rather than cutting it short.
+
+        SIGINT goes back to SIG_DFL just before that call, as a backstop: both
+        this handler and force_quit log, log sinks take locks, and a wedge
+        inside one would swallow the escalation itself. From that point a
+        further Ctrl+C kills the process outright instead of re-entering the
+        same deadlock.
         """
-        self._sigint_count += 1
-        if self._sigint_count >= 2 and not self._quit_started:
-            log.warning("Second interrupt with no teardown in flight (the main "
-                        "loop is not dispatching); forcing quit")
+        now = time.monotonic()
+        if self._sigint_first_at is None:
+            self._sigint_first_at = now
+        elif (not self._quit_started
+                and now - self._sigint_first_at >= SIGINT_ESCALATE_AFTER_S):
+            log.warning(
+                f"Interrupt requested {now - self._sigint_first_at:.1f}s ago and "
+                f"the teardown never started (the main loop is not dispatching); "
+                f"forcing quit"
+            )
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
             self.force_quit()
             return
         GLib.idle_add(self.on_quit, priority=GLib.PRIORITY_DEFAULT)

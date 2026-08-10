@@ -30,12 +30,16 @@ already covered by scenario_plugin_backend_teardown.py; the end-to-end
      already use. Checked both directly (handler returns without on_quit
      having run; the next main-loop dispatch runs it exactly once) and
      end-to-end with a real SIGINT raised at ourselves.
- 1c. Deferring is only as good as the loop, so a SECOND Ctrl+C with no
-     teardown started forces the quit from handler context. Otherwise a
-     wedged loop swallows every signal -- TERM and HUP are loop sources too
-     -- leaving SIGKILL, which orphans the backends and skips the force_quit
-     watchdog. Gated on the quit-started latch: a press during a teardown
-     that is running must not cut it short.
+ 1c. Deferring is only as good as the loop, so a Ctrl+C arriving while an
+     earlier one has sat undispatched past SIGINT_ESCALATE_AFTER_S forces the
+     quit from handler context. Otherwise a wedged loop swallows every signal
+     -- TERM and HUP are loop sources too -- leaving SIGKILL, which orphans
+     the backends and skips the force_quit watchdog. Gated on elapsed time
+     rather than press count (a double-tap or key repeat on a merely busy app
+     must not os._exit past the fan-out and close_all()), gated on the
+     quit-started latch (a press during a running teardown must not cut it
+     short), and it restores SIG_DFL first so a force_quit that itself wedges
+     stays killable.
   2. A real SIGTERM raised at ourselves reaches on_quit exactly once via the
      GLib main loop (pre-fix this killed the interpreter -> non-zero exit),
      and it is still armed for a *second* delivery. A unix-signal source
@@ -82,6 +86,7 @@ import os
 import signal
 import sys
 import threading
+import time
 
 import globals as gl
 
@@ -171,11 +176,11 @@ class QuitRecorder:
         # The two pieces of App state _on_sigint reads. This stub's on_quit
         # deliberately does NOT latch _quit_started the way the real one does
         # (it has to stay re-runnable across checks), so every check that
-        # delivers a SIGINT resets _sigint_count itself -- otherwise the
-        # escalation, which fires on the second delivery with no teardown in
-        # flight, would trip on a later check's first press.
+        # delivers a SIGINT clears _sigint_first_at itself -- otherwise a
+        # later check's first press would count as a follow-up to an interrupt
+        # stamped seconds earlier and take the escalation.
         self._quit_started = False
-        self._sigint_count = 0
+        self._sigint_first_at = None
 
     def force_quit(self):
         self.force_quits += 1
@@ -227,7 +232,7 @@ def check_sigint_defers_the_teardown_to_the_main_loop(recorder: QuitRecorder) ->
     main loop, the same dispatch context the TERM/HUP unix-signal sources
     already run it in.
     """
-    recorder._sigint_count = 0
+    recorder._sigint_first_at = None
     before = len(recorder.calls)
     recorder._on_sigint(signal.SIGINT, None)
 
@@ -245,19 +250,33 @@ def check_sigint_defers_the_teardown_to_the_main_loop(recorder: QuitRecorder) ->
     print("  PASS: SIGINT queues the teardown onto the main loop")
 
 
-def check_second_sigint_escalates_on_a_wedged_loop(recorder: QuitRecorder) -> None:
-    """A second Ctrl+C with nothing torn down yet must force the quit.
+def check_sigint_escalates_only_on_a_wedged_loop(recorder: QuitRecorder) -> None:
+    """A Ctrl+C left undispatched must force the quit -- but only that one.
 
     Deferring the teardown to the main loop means a Ctrl+C is only as good as
     that loop: on a wedged one the idle never dispatches, and since TERM/HUP
     are loop sources too, no signal short of SIGKILL could end the process --
     which orphans the plugin backends (own session, so no killpg reaches them)
-    and skips the force_quit watchdog, armed only inside on_quit. The second
-    press is therefore the escape hatch, gated on the quit not having started:
-    a second press during a teardown that IS running must stay a no-op rather
-    than cutting the ordered shutdown short.
+    and skips the force_quit watchdog, armed only inside on_quit. Hence the
+    escape hatch, and hence the two things that gate it:
+
+      * elapsed time, not press count. A live app busy in Python for a moment
+        (on_activate loads pages and resizes images on the main thread)
+        answers late, not never -- and a double-tap is ~150ms apart, key
+        repeat ~33ms. Escalating on those would os._exit(1) a healthy app
+        with no AppQuit fan-out and no close_all(), leaving a deck open for
+        the next startup to fail on.
+      * the quit-started latch. Presses during a teardown that IS running
+        must stay no-ops rather than cutting the ordered shutdown short.
+
+    The escalation also hands SIGINT back to SIG_DFL on its way out: both the
+    handler and force_quit log, log sinks take locks, and a wedge inside one
+    would swallow the escalation itself. A further press must then kill the
+    process outright rather than re-enter the same deadlock.
     """
-    recorder._sigint_count = 0
+    import src.app as app_mod
+
+    recorder._sigint_first_at = None
     recorder._quit_started = False
     before_quits = recorder.force_quits
     before_calls = len(recorder.calls)
@@ -266,19 +285,49 @@ def check_second_sigint_escalates_on_a_wedged_loop(recorder: QuitRecorder) -> No
     assert recorder.force_quits == before_quits, (
         "the first Ctrl+C must defer to the main loop, not force the quit"
     )
+    assert recorder._sigint_first_at is not None, (
+        "the first Ctrl+C must stamp when it asked for the quit -- without it "
+        "the escalation has no elapsed time to judge and falls back to "
+        "counting presses"
+    )
+
+    # An immediate second press: a double-tap, or the first repeat of a held
+    # key. The app may simply be busy; it has had no chance to dispatch yet.
+    recorder._on_sigint(signal.SIGINT, None)
+    assert recorder.force_quits == before_quits, (
+        "a double-tapped Ctrl+C must NOT force the quit -- a busy-but-live app "
+        "answers a moment later, and force_quit here skips the AppQuit fan-out "
+        "and close_all(), leaving a deck open for the next startup"
+    )
+
+    # Same press, but the quit it follows has gone unanswered past the
+    # threshold: that is a loop which is not dispatching at all.
+    recorder._sigint_first_at -= app_mod.SIGINT_ESCALATE_AFTER_S
     recorder._on_sigint(signal.SIGINT, None)
     assert recorder.force_quits == before_quits + 1, (
-        "a second Ctrl+C with no teardown in flight must force the quit -- "
-        "otherwise a wedged main loop leaves no signal able to end the process "
-        "and SIGKILL orphans the plugin backends"
+        f"a Ctrl+C arriving more than {app_mod.SIGINT_ESCALATE_AFTER_S}s after "
+        f"an undispatched one must force the quit -- otherwise a wedged main "
+        f"loop leaves no signal able to end the process and SIGKILL orphans "
+        f"the plugin backends"
     )
+    assert signal.getsignal(signal.SIGINT) == signal.SIG_DFL, (
+        f"the escalation must hand SIGINT back to the default disposition "
+        f"before force_quit (got {signal.getsignal(signal.SIGINT)!r}), so a "
+        f"force_quit that wedges in a log sink can still be killed with a "
+        f"further Ctrl+C instead of re-entering the same deadlock"
+    )
+    # Put the handler back for the checks that follow -- from here SIGINT
+    # would otherwise kill this scenario outright.
+    signal.signal(signal.SIGINT, recorder._on_sigint)
     assert len(recorder.calls) == before_calls, (
         f"the escalation must not run on_quit in signal-handler context, got "
         f"{recorder.calls[before_calls:]!r}"
     )
 
-    # ... and once a teardown is in flight, a further press stays a no-op.
+    # ... and once a teardown is in flight, no press escalates, however long
+    # it has been waiting.
     recorder._quit_started = True
+    recorder._sigint_first_at = time.monotonic() - 60
     recorder._on_sigint(signal.SIGINT, None)
     assert recorder.force_quits == before_quits + 1, (
         "a Ctrl+C during a running teardown must not force-quit on top of it "
@@ -286,11 +335,12 @@ def check_second_sigint_escalates_on_a_wedged_loop(recorder: QuitRecorder) -> No
     )
     recorder._quit_started = False
 
-    # Drain the idle the first press queued so it can't land in a later check.
+    # Drain the idles the deferred presses queued so they can't land in a
+    # later check.
     pump_main_context()
     recorder.calls[before_calls:] = []
-    recorder._sigint_count = 0
-    print("  PASS: a second Ctrl+C escalates only while nothing is tearing down")
+    recorder._sigint_first_at = None
+    print("  PASS: Ctrl+C escalates only on a loop that stopped dispatching")
 
 
 def report_signal_path(signum: int, name: str) -> None:
@@ -333,10 +383,11 @@ def check_unix_signal_callback_keeps_source_armed() -> None:
 
 
 def check_signal_reaches_on_quit(recorder: QuitRecorder, signum: int, name: str) -> None:
-    # A SIGINT delivery has to start from a clean count: this stub's on_quit
-    # never latches _quit_started, so a carried-over count would take the
-    # second-press escalation instead of the deferred path under test.
-    recorder._sigint_count = 0
+    # A SIGINT delivery has to look like a first press: this stub's on_quit
+    # never latches _quit_started, so a stamp carried over from an earlier
+    # check would age past the threshold and take the escalation instead of
+    # the deferred path under test.
+    recorder._sigint_first_at = None
     loop = GLib.MainLoop()
     recorder.loop = loop
     before = len(recorder.calls)
@@ -774,7 +825,7 @@ def main() -> None:
     fixtures.start_watchdog(60, label="scenario_sigterm_quit")
     recorder = check_sigint_stays_a_python_handler()
     check_sigint_defers_the_teardown_to_the_main_loop(recorder)
-    check_second_sigint_escalates_on_a_wedged_loop(recorder)
+    check_sigint_escalates_only_on_a_wedged_loop(recorder)
     check_signal_reaches_on_quit(recorder, signal.SIGINT, "SIGINT")
     report_signal_path(signal.SIGTERM, "SIGTERM")
     report_signal_path(signal.SIGHUP, "SIGHUP")
