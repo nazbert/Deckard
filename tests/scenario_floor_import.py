@@ -19,9 +19,16 @@ decorators, base lists, def signatures and their annotations -- is exercised.
 Stubbing is what gives the check its sharp edge: every name the module imports
 at runtime resolves to something, so the ONLY way to raise NameError is to
 reference a name the module never binds at runtime. That is exactly the defect.
+Bodies are compiled with assertions stripped, because an import-time assert
+about real structure cannot be true of stubs.
 
 The module list comes from listing the package directory, so a module added to
-it is covered the moment it exists.
+it is covered the moment it exists, plus the DeckController.py compat shim that
+fronts the package -- a shim is nothing but imports and __all__, which is
+precisely what gets executed here. Under stubbing every imported name resolves,
+so the defect a shim can actually have is __all__ promising a name the import
+block no longer brings in; a module that declares __all__ therefore has each of
+its entries checked for being bound once the body has run.
 
 Developer-machine only: the harness needs a real 3.13 interpreter to be honest
 about the floor. Where /usr/bin/python3.13 is absent the scenario reports that
@@ -40,6 +47,7 @@ FLOOR_VERSION = (3, 13)
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACKAGE_DIR = os.path.join(_REPO_ROOT, "src", "backend", "DeckManagement", "deck_controller")
+COMPAT_SHIM = os.path.join(_REPO_ROOT, "src", "backend", "DeckManagement", "DeckController.py")
 
 # Runs in the floor interpreter, one module per argument. Prints one
 # "OK <stem>" / "FAIL <stem> ..." line per module, so one process covers the
@@ -149,26 +157,43 @@ for p in paths:
     # module has to be registered there before its body runs.
     sys.modules[mod.__name__] = mod
     try:
-        exec(compile(open(p, encoding="utf-8").read(), p, "exec"), mod.__dict__)
+        # optimize=1 strips `assert` statements. A module body that asserts
+        # over real structure (the controller's registry-completeness check)
+        # cannot hold when every value it compares is a stub, and that is a
+        # limitation of the stubbing, not a floor defect. Those asserts run
+        # for real on every ordinary import; what is being exercised here is
+        # the definitions, not the module's self-checks.
+        exec(compile(open(p, encoding="utf-8").read(), p, "exec", optimize=1), mod.__dict__)
     except BaseException as e:
         frame = traceback.extract_tb(sys.exc_info()[2])[-1]
         print("FAIL %s %s: %s @ %s:%d"
               % (stem, type(e).__name__, e, os.path.basename(frame.filename), frame.lineno))
     else:
-        public = [n for n in mod.__dict__ if not n.startswith("_")]
-        print("OK %s (%d names bound)" % (stem, len(public)))
+        # A re-export shim's own failure mode: __all__ drifts away from the
+        # import block above it and promises a name nothing binds.
+        missing = [n for n in getattr(mod, "__all__", ()) if not hasattr(mod, n)]
+        if missing:
+            print("FAIL %s __all__ promises names the module does not bind: %s"
+                  % (stem, ", ".join(missing)))
+        else:
+            public = [n for n in mod.__dict__ if not n.startswith("_")]
+            print("OK %s (%d names bound)" % (stem, len(public)))
 '''
 
 
 def discover_modules() -> list[str]:
     """Every module of the deck_controller package, by listing the directory --
-    so a module added to it is covered without touching this scenario."""
+    so a module added to it is covered without touching this scenario -- plus
+    the compat shim that re-exports the package under the old import path."""
     assert os.path.isdir(PACKAGE_DIR), f"package dir missing: {PACKAGE_DIR}"
     names = sorted(
         n for n in os.listdir(PACKAGE_DIR)
         if n.endswith(".py") and not n.startswith("_")
     )
-    return [os.path.join(PACKAGE_DIR, n) for n in names]
+    modules = [os.path.join(PACKAGE_DIR, n) for n in names]
+    assert os.path.isfile(COMPAT_SHIM), f"compat shim missing: {COMPAT_SHIM}"
+    modules.append(COMPAT_SHIM)
+    return modules
 
 
 def check_package_bodies_execute_on_the_floor() -> None:
@@ -195,10 +220,11 @@ def check_package_bodies_execute_on_the_floor() -> None:
     failures = [ln for ln in lines if ln.startswith("FAIL ")]
     assert not failures, (
         "a deck_controller module cannot be imported on the Python "
-        f"{FLOOR_VERSION[0]}.{FLOOR_VERSION[1]} floor. An annotation in an "
-        "evaluated position (parameter, return, class body or base list) names "
-        "something the module does not bind at runtime -- quote it, or import "
-        "it at runtime:\n  " + "\n  ".join(failures)
+        f"{FLOOR_VERSION[0]}.{FLOOR_VERSION[1]} floor. Either an annotation in "
+        "an evaluated position (parameter, return, class body or base list) "
+        "names something the module does not bind at runtime -- quote it, or "
+        "import it at runtime -- or an __all__ entry has no matching import:"
+        "\n  " + "\n  ".join(failures)
     )
 
     ok = [ln for ln in lines if ln.startswith("OK ")]
