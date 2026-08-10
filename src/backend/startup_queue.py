@@ -72,9 +72,10 @@ LEGS B/C -- CLI REQUESTS PARKED FOR A DECK THAT IS NOT THERE YET
 ``--change-page SERIAL PAGE`` and ``--change-state SERIAL PAGE X,Y N`` name a
 deck by serial. With no instance already running, the invocation becomes the
 instance: it parks its own requests here, boots, and the controller for that
-serial claims them the first time it loads its default page. (With an
-instance already running the request travels over DBus to that process
-instead and never reaches this module.)
+serial claims them the first time it loads its default page. With an instance
+already running the request travels over DBus to that process instead and
+never reaches this module -- except under ``--close-running``, which parks
+here like the no-instance case and then boots over the instance it shut down.
 
 Parking is keyed by serial and last-write-wins -- two ``--change-page`` pairs
 for one serial leave only the second. A request naming a serial that never
@@ -95,10 +96,16 @@ three methods rather than two:
 THREAD CONTRACT (LEGS B/C)
 
 ``park_page_request`` / ``park_state_request`` run on the main thread during
-the pre-boot, single-threaded CLI phase, before any deck exists. The claim,
-peek and resolve calls run on whichever thread brings a controller up or
-reloads its default page: the boot thread, the USB hotplug monitor, the boot
-rescan, or the GTK main thread (screensaver hide, and the no-pages fallback).
+the pre-boot, single-threaded CLI phase, before any deck exists.
+
+The claim, peek and resolve calls run on whichever thread brings a controller
+up or reloads its default page, which is very nearly every thread this process
+has: the main thread (the boot path, before the GTK loop starts), the boot
+rescan thread, the USB hotplug monitor, a deck's own HID reader thread (a key
+press dismisses a showing screensaver, and the hide reloads the default page),
+plugin and action threads (the same dismissal, reached through
+``Page.update_input``), and the GTK main thread (the no-pages fallback). That
+spread is why claiming is one dict operation rather than a check and a pop.
 
 Imports ``globals`` and nothing else first-party, so any layer -- including the
 render engine's import closure -- can import it without risking a cycle.
