@@ -19,7 +19,7 @@ from src.backend.PluginManager.ActionBase import ActionBase
 from src.backend.PluginManager.ActionInputSupport import ActionInputSupport
 from src.backend.PluginManager.ActionCore import ActionCore
 from src.backend.PageManagement.Page import Page
-from src.backend.DeckManagement.DeckController import DeckController
+from src.backend.DeckManagement.deck_controller.controller import DeckController
 from src.backend.DeckManagement.InputIdentifier import Input, InputIdentifier
 
 # Import typing

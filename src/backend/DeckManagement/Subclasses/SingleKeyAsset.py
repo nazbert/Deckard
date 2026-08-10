@@ -20,7 +20,7 @@ import globals as gl
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from src.backend.DeckManagement.DeckController import ControllerInput
+    from src.backend.DeckManagement.deck_controller.inputs import ControllerInput
 
 _error_image: Image.Image | None = None
 

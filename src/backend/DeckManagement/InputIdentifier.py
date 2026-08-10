@@ -3,7 +3,8 @@ from enum import Enum
 
 if TYPE_CHECKING:
     from src.backend.PageManagement.Page import Page
-    from src.backend.DeckManagement.DeckController import DeckController, ControllerInput
+    from src.backend.DeckManagement.deck_controller.controller import DeckController
+    from src.backend.DeckManagement.deck_controller.inputs import ControllerInput
 
 
 # Shape of one entry under an input's "states" map in a page json.

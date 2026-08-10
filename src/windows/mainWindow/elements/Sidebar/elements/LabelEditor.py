@@ -27,7 +27,7 @@ from gi.repository import Gtk, Adw
 from loguru import logger as log
 
 # Import own modules
-from src.backend.DeckManagement.DeckController import KeyLabel
+from src.backend.DeckManagement.Subclasses.KeyLabel import KeyLabel
 from GtkHelper.GtkHelper import RevertButton
 
 # Import globals

@@ -36,7 +36,7 @@ from src.windows.mainWindow.elements.NoPagesError import NoPagesError
 from src.windows.mainWindow.elements.NoDecksError import NoDecksError
 from src.windows.mainWindow.deckSwitcher import DeckSwitcher
 from src.windows.mainWindow.elements.HeaderHamburgerMenuButton import HeaderHamburgerMenuButton
-from src.backend.DeckManagement.DeckController import DeckController
+from src.backend.DeckManagement.deck_controller.controller import DeckController
 from src.backend.PageManagement.Page import Page
 
 from collections.abc import Callable

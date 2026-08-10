@@ -17,7 +17,7 @@ import gi
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from src.backend.DeckManagement.DeckController import ControllerKey
+    from src.backend.DeckManagement.deck_controller.inputs import ControllerKey
 from src.backend.DeckManagement.InputIdentifier import Input
 
 

@@ -21,7 +21,7 @@ from PIL import Image
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from src.backend.DeckManagement.DeckController import ControllerInput
+    from src.backend.DeckManagement.deck_controller.inputs import ControllerInput
 
 class InputVideo(SingleKeyAsset):
     def __init__(self, controller_input: "ControllerInput", video_path: str, fps: int = 30, loop: bool = True,

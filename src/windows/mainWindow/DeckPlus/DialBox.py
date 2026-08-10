@@ -31,7 +31,7 @@ from gi.repository import Gtk, Gdk, GLib, Gio
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.windows.mainWindow.elements.PageSettingsPage import PageSettingsPage
-    from src.backend.DeckManagement.DeckController import DeckController
+    from src.backend.DeckManagement.deck_controller.controller import DeckController
 
 class DialBox(Gtk.Box):
     def __init__(self, deck_controller: "DeckController", page_settings_page: "PageSettingsPage", **kwargs):

@@ -34,9 +34,9 @@ from src.backend.DeckManagement.InputIdentifier import Input, InputEvent, InputI
 # Import typing
 from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
-    from src.backend.DeckManagement.DeckController import ControllerInput, LabelManager
+    from src.backend.DeckManagement.deck_controller.inputs import ControllerInput, ControllerInputState
+    from src.backend.DeckManagement.deck_controller.label_engine import LabelManager
     from src.backend.PluginManager.ActionHolder import ActionHolder
-    from src.backend.DeckManagement.DeckController import ControllerInputState
 
 
 # One save lock per page json path, shared across every Page object for that
@@ -160,9 +160,9 @@ class Page:
         self.save()
 
     def load_action_objects(self):
-        # Function-scoped: DeckController imports this module, so a
-        # module-level import here would close an import cycle.
-        from src.backend.DeckManagement.DeckController import CONTROLLER_CLASSES
+        # Function-scoped: deck_controller/controller.py imports this module,
+        # so a module-level import here would close an import cycle.
+        from src.backend.DeckManagement.deck_controller.controller import CONTROLLER_CLASSES
 
         new_action_objects = {}
 

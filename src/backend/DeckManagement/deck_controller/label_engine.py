@@ -43,7 +43,7 @@ import globals as gl
 
 from typing import TYPE_CHECKING, cast
 if TYPE_CHECKING:
-    from src.backend.DeckManagement.DeckController import ControllerInput
+    from src.backend.DeckManagement.deck_controller.inputs import ControllerInput
 
     class ComposedKeyLabel(KeyLabel):
         """A KeyLabel that has been through LabelManager.inject_defaults():

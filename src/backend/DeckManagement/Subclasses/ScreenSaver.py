@@ -24,7 +24,8 @@ import globals as gl
 from src.backend.DeckManagement.InputIdentifier import Input
 from src.backend import timer_wheel
 if TYPE_CHECKING:
-    from src.backend.DeckManagement.DeckController import DeckController, Background
+    from src.backend.DeckManagement.deck_controller.background_media import Background
+    from src.backend.DeckManagement.deck_controller.controller import DeckController
 
 class ScreenSaver:
     def __init__(self, deck_controller: "DeckController"):
@@ -272,10 +273,16 @@ class ScreenSaver:
         # -- see ReleaseStashedInputsMsg's docstring in
         # DeckManagement/deck_controller/media_writer.py.
         if stashed_inputs:
-            # Local import: DeckController imports ScreenSaver at module
-            # level (for self.screen_saver = ScreenSaver(self)), so a
-            # top-level import here would be circular.
-            from src.backend.DeckManagement.DeckController import ReleaseStashedInputsMsg
+            # Local import, and not because it has to be: hoisting this to
+            # module level works today -- nothing in the media writer's import
+            # closure reaches back here. It stays at call time by design. The
+            # deck controller package imports this module at module level (each
+            # controller builds a ScreenSaver), so keeping the screen saver's
+            # own dependency on that package lazy is what holds the edge
+            # between them one-directional.
+            from src.backend.DeckManagement.deck_controller.media_writer import (
+                ReleaseStashedInputsMsg,
+            )
             self.deck_controller.media_player.submit_control(
                 ReleaseStashedInputsMsg(stashed_inputs)
             )

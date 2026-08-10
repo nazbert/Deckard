@@ -14,12 +14,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 from PIL import Image
 
-# Re-exports, not local dependencies: DeckController does
-# `from src.backend.DeckManagement.ImageHelpers import *` and then uses
-# ImageOps and PILHelper as bare names without importing either itself.
-from PIL import ImageOps  # noqa: F401
-from StreamDeck.ImageHelpers import PILHelper  # noqa: F401
-
 # GLib/GdkPixbuf are imported lazily inside image2pixbuf: it is their
 # only consumer and every one of its callers lives under src/windows/, so a
 # module-level import would drag the widget stack into the engine's import

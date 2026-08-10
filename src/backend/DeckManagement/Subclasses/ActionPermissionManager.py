@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 from loguru import logger as log
 
 if TYPE_CHECKING:
-    from src.backend.DeckManagement.DeckController import ControllerInputState
+    from src.backend.DeckManagement.deck_controller.inputs import ControllerInputState
 
 class ActionPermissionManager:
     def __init__(self, controller_input_state: "ControllerInputState"):
