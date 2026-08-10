@@ -69,7 +69,7 @@ from src.backend.DeckManagement.deck_controller.media_writer import (
 )
 from src.backend.PageManagement.Page import Page
 from src.backend.mem_telemetry import page_switches
-from src.backend import ui_port
+from src.backend import startup_queue, ui_port
 from src.api import notify_active_page_changed
 from src.Signals import Signals
 
@@ -704,13 +704,12 @@ class DeckController:
     def load_default_page(self):
         if not self.get_alive(): return
 
-        api_page_path = None
-        if self.serial_number() in gl.api_page_requests:
-            # Pop, don't just read (design doc bug 13): a `--change-page`
-            # request is one-shot -- left in place, it silently re-applied
-            # itself on every future load_default_page() call for this
-            # serial (every unplug/replug, every "no page found" fallback).
-            api_page_path = gl.api_page_requests.pop(self.serial_number())
+        queue = startup_queue.get()
+
+        # A page change parked by the CLI for this serial. Claiming it removes
+        # it: the request is one-shot (src/backend/startup_queue.py).
+        api_page_path = queue.claim_page_request(self.serial_number())
+        if api_page_path is not None:
             api_page_path = gl.page_manager.find_matching_page_path(api_page_path)
 
         if api_page_path is None:
@@ -735,9 +734,10 @@ class DeckController:
         page = gl.page_manager.get_page(default_page_path, self)
         self.load_page(page)
 
-        # Handle state change requests
-        if self.serial_number() in gl.api_state_requests:
-            state_request = gl.api_state_requests[self.serial_number()]
+        # Handle state change requests: peeked now, resolved at the tail, so a
+        # failure in between leaves it parked (src/backend/startup_queue.py).
+        state_request = queue.peek_state_request(self.serial_number())
+        if state_request is not None:
             page_name = state_request["page_name"]
             coords = state_request["coords"]
             state = state_request["state"]
@@ -791,7 +791,7 @@ class DeckController:
                     log.error(f"State change failed: Unexpected error for device {self.serial_number()}: {e}")
             
             # Remove the request after processing
-            del gl.api_state_requests[self.serial_number()]
+            queue.resolve_state_request(self.serial_number())
 
     @log.catch
     def load_background(self, page: Page, update: bool = True, gen=None):
