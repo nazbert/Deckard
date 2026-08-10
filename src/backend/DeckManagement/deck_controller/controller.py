@@ -1066,9 +1066,11 @@ class DeckController:
                 # under the same lock as the bump. Paints are triggered from
                 # threads outside the load pool (the action pool via on_ready
                 # -> update, the tick loop, update_all_inputs) and read
-                # controller_input.config_gen directly (ControllerInput.update
-                # in deck_controller/inputs.py); any window between the bump
-                # and the stamp lets such a paint carry the previous
+                # controller_input.config_gen directly (ControllerKey.update
+                # and ControllerTouchScreen.update, both in
+                # deck_controller/inputs.py -- the ControllerInput base
+                # declares update() and does nothing); any window between the
+                # bump and the stamp lets such a paint carry the previous
                 # generation and be dropped at the present boundary as stale
                 # -- blanking the newly loaded page's own keys. Stale
                 # cross-page content is still caught by the separate
