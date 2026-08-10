@@ -24,8 +24,11 @@ Covers:
      turn this scenario red;
   3. the full pipeline: a raising Thread whose message and frames carry
      $HOME, the username and a credentialed URL -- asserted against a REAL
-     file sink configured like config_logger()'s logs.log (backtrace=True,
-     diagnose=True) so the {exception} path is exercised, not simulated;
+     file sink, with backtrace=True/diagnose=True deliberately turned ON so
+     the {exception} path is exercised, not simulated. That is the worst
+     case, and it is worse than the app configures: the sinks
+     config_logger() installs carry neither flag, precisely because the
+     patcher below leaves them nothing to expand;
   4. debuggability floor: the traceback survives redaction identifiable --
      `File "~/...scenario_log_redaction.py"` frame, source line, exception
      type/message -- and no diagnose variable dump leaks values;
@@ -207,8 +210,10 @@ def main() -> None:
     log_hooks.install_exception_hooks()  # idempotent
     assert logger._core.patcher is redact_record
 
-    # File sink configured exactly like config_logger()'s logs.log handler
-    # (minus rotation), PLUS a capture sink -- both must receive scrubbed text.
+    # A real file sink, PLUS a capture sink -- both must receive scrubbed
+    # text. backtrace/diagnose are ON here on purpose: they are the loudest
+    # possible {exception} expansion, so a patcher that failed to clear the
+    # record would leak the most here.
     log_dir = os.path.join(fixtures.DATA_DIR, "logs")
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, "logs.log")

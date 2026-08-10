@@ -1,8 +1,15 @@
-import inspect
-import os
 from dataclasses import dataclass
 from loguru import logger
-import globals as gl
+
+# Every level method funnels through log_method, one frame below the plugin
+# that called it, so loguru must read module/function/line one frame up or it
+# would attribute every plugin record to this file. depth=1 does that from
+# sys._getframe; the alternative, inspect.stack(), materializes the WHOLE
+# stack and reads a source line for each frame -- per log call, on paths that
+# run at the media tick rate. The instance is built once and shared: opt()
+# carries only the options, and the core (sinks, patcher) stays shared by
+# reference, so sinks added or reconfigured later still apply.
+_CALLER_LOGGER = logger.opt(depth=1)
 
 @dataclass
 class Loglevel:
@@ -18,7 +25,9 @@ class LoggerConfig:
     log_file_path: str
     base_log_level: str
     rotation: str
-    retention: str
+    # Rotated files kept, oldest deleted first. A file sink without a
+    # retention bound keeps every rotation forever, so this is not optional.
+    retention: int
     compression: str
 
 class Logger:
@@ -35,33 +44,26 @@ class Logger:
         self.add_sink()
 
     def add_log_level(self, log_level: Loglevel):
+        # Resolved once, not per call: the level name is fixed for the life of
+        # this logger.
+        level_name = f"{self.name}_{log_level.name}"
         logger.level(
-            name=f"{self.name}_{log_level.name}",
+            name=level_name,
             no=log_level.priority,
             color=f"{log_level.color}")
 
         def log_method(self, message, *args, **kwargs):
-            caller = inspect.stack()[1]
-            function_name = caller.function
-            line_number = caller.lineno
-
-            file_path = caller.filename
-            base_path = gl.DATA_PATH
-
-            relative_path = os.path.relpath(file_path, base_path)  # Get relative path
-            relative_path = os.path.splitext(relative_path)[0]  # Remove .py extension
-            relative_path = relative_path.replace(os.sep, ".")  # Convert to dot notation
-
-            logger.log(f"{self.name}_{log_level.name}", message, file_name=relative_path, function=function_name, line=line_number)
+            _CALLER_LOGGER.log(level_name, message)
 
         setattr(self, log_level.method_name, log_method.__get__(self))
 
     def add_sink(self):
+        # Prefix built once: the filter runs for every record this handler is
+        # offered, not just the ones it accepts.
+        level_prefix = f"{self.config.name}_"
+
         def log_filter(record):
-            if record["level"].name.startswith(f"{self.config.name}_"):
-                print(record)
-                return True
-            return False
+            return record["level"].name.startswith(level_prefix)
 
         self.sink_id = logger.add(
             sink=self.config.log_file_path,
@@ -71,7 +73,10 @@ class Logger:
             compression=self.config.compression,
             enqueue=True,
             filter=log_filter,
-            format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level} | {extra[file_name]} | {extra[function]}:{extra[line]} - {message}"
+            # {name} is the caller's module, which for a plugin under the data
+            # directory is already the dotted path the old hand-built origin
+            # string spelled out (plugins.<folder>.main).
+            format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level} | {name} | {function}:{line} - {message}"
         )
 
     def remove_sink(self):
