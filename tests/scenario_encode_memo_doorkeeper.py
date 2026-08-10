@@ -14,7 +14,7 @@ Covers:
   (c) clear() resets BOTH the cached entries and the doorkeeper's "seen"
       bookkeeping -- a key cached before a clear() must need two fresh puts
       again afterward, not skip straight back in.
-  (d) Background.set_image() (DeckController.py) clears the deck's
+  (d) Background.set_image() (deck_controller/background_media.py) clears the deck's
       encode_memo -- a background content change orphans every entry keyed
       against the OLD background's composited pixels/hashes (design doc
       P2.5): left uncleared, a full memo would just sit there dead until
@@ -211,22 +211,23 @@ def check_memo_consulted_on_real_encode_path() -> None:
     'unplugging it still passes' gap it closes."""
     import time
     from src.backend.DeckManagement.InputIdentifier import Input
-    import src.backend.DeckManagement.DeckController as DC
+    import src.backend.DeckManagement.deck_controller.inputs as inputs_mod
 
     controller = fixtures.make_headless_controller(serial="encode-memo-realpath-1")
     fixtures.wait_until(lambda: controller.active_page is not None, timeout=3)
     assert controller.is_visual(), "fixture sanity: the encode path only runs on a visual deck"
 
     # Count real encodes so a memo hit is observable as "encode_native_key
-    # was NOT called again".
+    # was NOT called again". ControllerKey.update resolves the name from its own
+    # module, so that is where the counter has to be installed.
     encode_calls = {"n": 0}
-    real_encode = DC.encode_native_key
+    real_encode = inputs_mod.encode_native_key
 
     def counting_encode(deck, img):
         encode_calls["n"] += 1
         return real_encode(deck, img)
 
-    DC.encode_native_key = counting_encode
+    inputs_mod.encode_native_key = counting_encode
     try:
         key = controller.inputs[Input.Key][0]
 
@@ -249,6 +250,15 @@ def check_memo_consulted_on_real_encode_path() -> None:
         )
         cached_before = dict(controller.encode_memo._entries)
         calls_before = encode_calls["n"]
+        # Standing guard, not a fixture detail: the patch below only bites if it
+        # replaces the name in the module the paint path resolves it from, and a
+        # counter stuck at zero makes every "no new encode" assertion compare 0
+        # to 0 -- a pass that proves nothing.
+        assert calls_before > 0, (
+            "the encode counter never fired: encode_native_key is not being "
+            "intercepted on the paint path, so the memo assertions below are "
+            "vacuous"
+        )
 
         # A THIRD identical paint must consult the memo and hit -- no new
         # encode, and the cache contents are unchanged (same objects).
@@ -269,7 +279,7 @@ def check_memo_consulted_on_real_encode_path() -> None:
                 "proving .get() was consulted rather than re-encoding"
             )
     finally:
-        DC.encode_native_key = real_encode
+        inputs_mod.encode_native_key = real_encode
         fixtures.teardown(controller)
 
     print("PASS: the encode memo is consulted (and hits) on the real ControllerKey.update() path")
