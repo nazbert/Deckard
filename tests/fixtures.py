@@ -14,7 +14,7 @@ Two fixture tiers:
 
   * Unit tier (`make_stub_controller`) -- a `StubDeckController` exposing
     exactly what `MediaPlayerThread`'s judge and queues dereference
-    (`DeckController.py` ~100-460): `_page_gen_lock`, `active_page`,
+    (`deck_controller/media_writer.py`): `_page_gen_lock`, `active_page`,
     `_page_load_generation`, `deck` (a `FaultyFakeDeck`), `serial_number()`,
     and the couple of attributes the loop's animation-tick branch reads
     (`background.video`, `inputs[Input.Key/Dial]`). No GTK, no real Page, no

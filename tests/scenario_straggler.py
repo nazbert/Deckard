@@ -5,7 +5,7 @@ present boundary once a newer load_page has bumped the generation past G,
 and a paint enqueued against the *current* generation must still land.
 
 This exercises MediaPlayerThread.perform_media_player_tasks()'s judge
-directly (DeckController.py ~395-441) without spinning the thread loop, so
+directly (deck_controller/media_writer.py) without spinning the thread loop, so
 it's deterministic: one call == "one media cycle".
 """
 import fixtures
