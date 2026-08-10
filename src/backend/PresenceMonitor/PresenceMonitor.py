@@ -377,8 +377,6 @@ class LogindIdleDetector:
                              daemon=True).start()
 
     def setup_dbus(self, bus=None) -> None:
-        if gl.IS_MAC:
-            return
         try:
             # logind lives on the system bus. `bus` is a test seam; production
             # passes None. Compared against None rather than truthiness so a

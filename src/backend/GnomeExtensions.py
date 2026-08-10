@@ -12,9 +12,6 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
-# Import globals first to get IS_MAC
-import globals as gl
-
 from gi.repository import Gio, GLib
 
 from loguru import logger as log
@@ -25,8 +22,6 @@ class GnomeExtensions:
         self.connect_dbus()
 
     def connect_dbus(self) -> None:
-        if gl.IS_MAC:
-            return
         try:
             self.proxy = Gio.DBusProxy.new_for_bus_sync(
                 Gio.BusType.SESSION,

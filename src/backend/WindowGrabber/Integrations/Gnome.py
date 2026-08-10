@@ -19,7 +19,7 @@ from src.backend.WindowGrabber.Window import Window
 import json
 from loguru import logger as log
 
-# Import globals first to get IS_MAC
+# Import globals
 import globals as gl
 
 from gi.repository import Gio, GLib
@@ -34,8 +34,7 @@ class Gnome(Integration):
         super().__init__(window_grabber=window_grabber)
 
         self.proxy: Gio.DBusProxy | None = None
-        if not gl.IS_MAC:
-            self.connect_dbus()
+        self.connect_dbus()
 
     def install_extension(self) -> None:
         # A bare uuid string, like the live onboarding path
@@ -54,8 +53,6 @@ class Gnome(Integration):
 
 
     def connect_dbus(self) -> None:
-        if gl.IS_MAC:
-            return
         try:
             self.proxy = Gio.DBusProxy.new_for_bus_sync(
                 Gio.BusType.SESSION,

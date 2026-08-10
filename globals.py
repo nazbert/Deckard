@@ -9,9 +9,6 @@ import appinfo
 from collections import deque
 from loguru import logger as log
 
-# Automatically detect macOS
-IS_MAC = sys.platform == "darwin"
-
 from cli_args import argparser
 
 MAIN_PATH: str

@@ -21,9 +21,6 @@ import sys
 
 import appinfo
 
-# Automatically detect macOS
-IS_MAC = sys.platform == "darwin"
-
 # Autostart entries written under the pre-rename identity. The app-written
 # "StreamController.desktop" would relaunch an old-identity build at every
 # login; the id-named one is a flatpak portal remnant no code path removed on
@@ -31,10 +28,9 @@ IS_MAC = sys.platform == "darwin"
 # installed old build could recreate them after the one-time data migration.
 LEGACY_AUTOSTART_NAMES = ("StreamController.desktop", appinfo.OLD_APP_ID + ".desktop")
 
-if not IS_MAC:
-    import gi
-    gi.require_version("Xdp", "1.0")
-    from gi.repository import Xdp
+import gi
+gi.require_version("Xdp", "1.0")
+from gi.repository import Xdp
 
 from loguru import logger as log
 
@@ -79,9 +75,6 @@ def remove_legacy_autostart_entries():
 @log.catch
 def setup_autostart(enable: bool = True):
     global _autostart_generation
-    if IS_MAC:
-        return
-
     remove_legacy_autostart_entries()
 
     _autostart_generation += 1
@@ -180,7 +173,7 @@ def ensure_app_desktop_entry():
     to a desktop file of the same name to find its taskbar/dock icon; on
     source installs nothing else provides one.
     """
-    if IS_MAC or is_flatpak():
+    if is_flatpak():
         return
     target = os.path.join(os.environ.get("HOME") or os.path.expanduser("~"),
                           ".local", "share", "applications", f"{appinfo.APP_ID}.desktop")

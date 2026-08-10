@@ -519,7 +519,6 @@ class ActionRow(Adw.ActionRow):
                 continue
             if not isinstance(child, ActionRow):
                 continue
-            # child.set_label_toggled(False)
             active = child.allow_label_toggle.get_active()
             active[i] = False
             child.allow_label_toggle.set_active(active)
@@ -557,20 +556,6 @@ class ActionRow(Adw.ActionRow):
 
         self.allow_background_toggle.connect("toggled", self.on_allow_background_toggled)
 
-    # Disabled: this referenced an on_allow_label_toggled handler that
-    # exists on no class (the label toggle is an ActionRowLabelToggle button
-    # with its own on_label_toggled), so calling it raised AttributeError.
-    # Its only call site -- in label_toggled -- is already commented out.
-    # def set_label_toggled(self, value: bool):
-    #     try:
-    #         self.allow_label_toggle.disconnect_by_func(self.on_allow_label_toggled)
-    #     except TypeError:
-    #         pass
-    #
-    #     self.allow_label_toggle.set_active(value)
-    #
-    #     self.allow_label_toggle.connect("toggled", self.on_allow_label_toggled)
-        
     def get_own_index(self) -> int:
         return self.expander.get_index_of_child(self)
 

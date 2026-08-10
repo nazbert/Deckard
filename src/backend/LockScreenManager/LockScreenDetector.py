@@ -17,9 +17,6 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.backend.LockScreenManager.LockScreenManager import LockScreenManager
 
-# Import globals first to get IS_MAC
-import globals as gl
-
 from gi.repository import Gio
 
 from loguru import logger as log
@@ -27,7 +24,7 @@ from loguru import logger as log
 class LockScreenDetector:
     def __init__(self, lock_screen_manager: "LockScreenManager"):
         self.lock_screen_manager: "LockScreenManager" = lock_screen_manager
-        # Stays None on macOS and whenever the bus connection fails below.
+        # Stays None whenever the bus connection fails below.
         self.bus: Gio.DBusConnection | None = None
 
     def subscribe_to_screen_saver(self, bus_name: str | None, object_path: str, interface: str, callback: Callable[..., Any]) -> None:
@@ -36,8 +33,6 @@ class LockScreenDetector:
         bus_name is the sender to match; the DE detectors pass None (any
         sender), matching the behavior they had before this was hoisted.
         """
-        if gl.IS_MAC:
-            return
         try:
             # Connect to the Session Bus. Kept referenced: the subscription
             # below lives exactly as long as the connection does.

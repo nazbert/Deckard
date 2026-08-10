@@ -10,8 +10,6 @@ class TrayIcon(DBusTrayIcon):
     AppId = f"{appinfo.APP_ID}.TrayIcon"
 
     def __init__(self):
-        if gl.IS_MAC:
-            return
         self.menu = DBusMenu()
         self.menu.add_menu_item(1, "Show Window", callback=self.on_show)
         self.menu.add_menu_item(2, menu_type="separator")
@@ -72,35 +70,3 @@ class TrayIcon(DBusTrayIcon):
     @log.catch
     def on_quit(self):
         self.quit_app_action.activate()
-
-
-
-# import os
-# os.environ["PYSTRAY_BACKEND"] = "appindicator"
-# # import pystray
-
-# from pystray import _appindicator
-# from PIL import Image
-# from pystray import Menu, MenuItem
-
-# class TrayIcon(_appindicator.Icon):
-#     def __init__(self):
-#         icon_image = Image.open("flatpak/icon_256.png")
-#         menu = Menu(
-#             MenuItem("Deckard", enabled=False, action=None),
-#             MenuItem("Open", self.on_open),
-#             MenuItem("Quit", self.on_quit)
-#         )
-#         super().__init__("Deckard", icon_image, menu=menu, title="Deckard")
-
-#     def on_open(self):
-#         print("Open")
-
-#     def on_quit(self):
-#         print("Quit")
-#         self.stop()  # Stop the icon running when "Quit" is clicked
-
-# if __name__ == "__main__":
-#     # Usage
-#     stream_controller_icon = TrayIcon()
-#     stream_controller_icon.run()

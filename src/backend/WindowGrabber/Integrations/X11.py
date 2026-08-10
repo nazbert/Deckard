@@ -21,14 +21,13 @@ from src.backend.WindowGrabber.Window import Window
 import subprocess
 from loguru import logger as log
 
-# Import globals first to get IS_MAC
+# Import globals
 import globals as gl
 
 import gi
 
-if not gl.IS_MAC:
-    gi.require_version("Xdp", "1.0")
-    from gi.repository import Xdp
+gi.require_version("Xdp", "1.0")
+from gi.repository import Xdp
 
 # Import typing
 from typing import TYPE_CHECKING
@@ -39,10 +38,8 @@ class X11(Integration):
     def __init__(self, window_grabber: "WindowGrabber"):
         super().__init__(window_grabber=window_grabber)
 
-        self.flatpak = False
-        if not gl.IS_MAC:
-            portal = Xdp.Portal.new()
-            self.flatpak = portal.running_under_flatpak()
+        portal = Xdp.Portal.new()
+        self.flatpak = portal.running_under_flatpak()
 
         self.is_xprop_installed = self.get_is_xprop_installed()
 
