@@ -16,7 +16,9 @@ Guards:
   2. A task that appends further tasks while the drain runs gets those drained
      too (the iterate-then-clear drain silently discarded them).
   3. Non-callable entries are skipped, not raised on: the list is reachable
-     from plugin code, and one bad entry must not strand the tasks behind it.
+     from plugin code, and an append of `f()` where `f` was meant must not
+     strand the tasks queued behind it. (A task that RAISES does strand them,
+     deliberately -- the drain does not swallow exceptions.)
   4. The append-vs-drain race, both interleavings: gl.app flips between the
      None-check and the append. Whichever side owns the task, it runs exactly
      once -- the reclaim path answers True and leaves nothing queued, the
@@ -294,8 +296,13 @@ def check_runtime_imports_are_lock_free_and_engine_safe() -> None:
             test = node.test
             name = getattr(test, "id", None) or getattr(test, "attr", None)
             if name == "TYPE_CHECKING":
-                for child in ast.walk(node):
-                    type_checking_bodies.add(id(child))
+                # Only the BODY is compile-time. The orelse of an
+                # `if TYPE_CHECKING:` runs at runtime like any other code, so
+                # walking the whole If node would make an import hidden there
+                # invisible to every check below.
+                for stmt in node.body:
+                    for child in ast.walk(stmt):
+                        type_checking_bodies.add(id(child))
 
     roots: set[str] = set()
     for node in ast.walk(tree):
@@ -303,8 +310,14 @@ def check_runtime_imports_are_lock_free_and_engine_safe() -> None:
             continue
         if isinstance(node, ast.Import):
             roots.update(a.name.split(".")[0] for a in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            roots.add(node.module.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                # A relative import has no root to resolve and can only reach
+                # first-party code: record it verbatim so it FAILS the check
+                # below rather than slipping past it.
+                roots.add("." * node.level + (node.module or ""))
+            elif node.module:
+                roots.add(node.module.split(".")[0])
 
     assert roots, f"no runtime imports found in {MODULE_PATH}: this check would pass vacuously"
     first_party = {r for r in roots if r not in sys.stdlib_module_names and r != "globals"}
@@ -312,7 +325,8 @@ def check_runtime_imports_are_lock_free_and_engine_safe() -> None:
         f"startup_queue must import nothing first-party but globals -- the "
         f"engine closure imports it: {sorted(first_party)}"
     )
-    locking = roots & {"threading", "_thread", "multiprocessing", "asyncio"}
+    locking = roots & {"threading", "_thread", "multiprocessing", "asyncio",
+                       "queue", "concurrent"}
     assert not locking, (
         f"the startup queue is deliberately lock-free (GIL-atomic list ops "
         f"plus the append/re-check/remove order): {sorted(locking)}"

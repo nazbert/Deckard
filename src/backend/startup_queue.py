@@ -2,11 +2,11 @@
 Boot-phase deferral: work that needs the running ``App`` but is asked for
 before it exists.
 
-Two call sites used to carry their own copy of this dance -- the notification
-facade (any thread) and the plugin manager's disabled-plugins report (the
-pre-GTK main thread, mid ``create_global_objects``) -- while ``App.on_activate``
-carried the drain that pairs with them. The protocol is subtle enough that one
-copy is the right number, so it lives here.
+This module owns that handshake for the whole process. Its callers are the
+notification facade (any thread) and the plugin manager's disabled-plugins
+report (the pre-GTK main thread, mid ``create_global_objects``); the drain
+that pairs with their appends is ``App.on_activate``. The protocol below is
+subtle enough that one copy of it is the right number.
 
 ``when_app_ready(task)`` answers exactly one question: *may I deliver this
 myself, right now?* True means yes -- the caller owns the delivery. False means
@@ -106,9 +106,13 @@ class StartupQueue:
         side -- this loop, or the appender's post-append reclaim -- and a task
         that appends further tasks while running gets those drained too.
 
-        Return values are ignored. A non-callable entry is skipped rather than
-        raised on: the list is reachable from plugin code, and one bad entry
-        must not strand the tasks queued behind it.
+        Return values are ignored. A NON-CALLABLE entry is skipped rather than
+        raised on: the list is reachable from plugin code, and an append of
+        `f()` where `f` was meant must not take the drain down with it. A task
+        that RAISES is a different case and is deliberately not caught -- the
+        exception propagates out of the drain, and the tasks behind it stay
+        queued, exactly as when this loop lived in on_activate. Swallowing it
+        here would hide failures on the activation path.
         """
         while gl.app_loading_finished_tasks:
             task = gl.app_loading_finished_tasks.pop(0)
