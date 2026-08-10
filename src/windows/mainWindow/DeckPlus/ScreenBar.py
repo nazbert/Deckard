@@ -259,26 +259,51 @@ class ScreenBarImage(Gtk.Picture):
         return next(self.task_ids)
 
     def set_image(self, image: Image.Image):
-        # Callable from any thread: the thumbnail and both conversions are
-        # pure PIL + GdkPixbuf, so they run on the caller (the media thread
-        # for live frames) and only the paint is idled. The mapped check moved
-        # to set_pixbuf_and_del - widget state can't be read from off-main.
+        # Callable from any thread; the map-time replay path. Live frames come
+        # through the UI adapter, which calls the same two halves but
+        # coalesces the paints into one per input.
+        # Default idle priority: high-priority pixbuf updates every frame can
+        # starve the main loop's layout/draw.
+        GLib.idle_add(self.paint_mirror_frame, self.prepare_mirror_frame(image))
+
+    def prepare_mirror_frame(self, image: Image.Image) -> tuple[Any, int]:
+        """The paint-ready payload for `paint_mirror_frame`.
+
+        Any thread: the thumbnail and both conversions are pure PIL +
+        GdkPixbuf, so they run on the caller (the media thread for live
+        frames) and only the paint needs the loop. The mapped check lives in
+        set_pixbuf_and_del - widget state can't be read from off-main.
+
+        The task id travels WITH the pixbuf so a paint that lost the race to a
+        newer frame still drops out in set_pixbuf_and_del.
+        """
         width = 385 #TODO: Find a better way to do this
         thumbnail = image.copy()
         thumbnail.thumbnail((width, width/8))
 
         pixbuf = image2pixbuf(thumbnail.convert("RGBA"), force_transparency=True)
         self.latest_task_id = self.get_new_task_id()
-        # Default idle priority: high-priority pixbuf updates every frame can
-        # starve the main loop's layout/draw.
-        GLib.idle_add(self.set_pixbuf_and_del, pixbuf, self.latest_task_id)
+        task_id = self.latest_task_id
 
         thumbnail.close()
         del thumbnail
 
+        self._push_dial_preview(image)
+        return pixbuf, task_id
+
+    def paint_mirror_frame(self, payload: tuple[Any, int]) -> bool:
+        # Main loop only. Returns False: a GLib idle callback that returns
+        # truthy re-arms forever.
+        pixbuf, task_id = payload
+        self.set_pixbuf_and_del(pixbuf, task_id)
+        return False
+
+    def _push_dial_preview(self, image: Image.Image) -> None:
+        # The sidebar's icon preview for a selected dial is cropped out of the
+        # strip frame, so it rides along with the conversion above -- on the
+        # producer thread, off the loop.
         if gl.app is None or not recursive_hasattr(gl, "app.main_win.sidebar"):
             return
-
 
         identifier = gl.app.main_win.sidebar.active_identifier
         if isinstance(identifier, Input.Dial):

@@ -349,18 +349,28 @@ class KeyButton(Gtk.Frame):
         
 
     def set_image(self, image):
-        # Callable from any thread: image2pixbuf is pure PIL + GdkPixbuf (no
-        # GTK), so the conversion runs on the caller -- the media thread for
-        # live frames -- and only the widget mutation is handed to the loop.
-        pixbuf = image2pixbuf(image.convert("RGBA"), force_transparency=True)
+        # Callable from any thread; the map-time replay path. Live frames
+        # come through the UI adapter, which calls the same two halves but
+        # coalesces the paints into one per input.
         # Default idle priority: high-priority pixbuf updates every frame can
         # starve the main loop's layout/draw.
-        GLib.idle_add(self._apply_pixbuf, pixbuf)
+        GLib.idle_add(self.paint_mirror_frame, self.prepare_mirror_frame(image))
         # image.close()
         # image = None
         # del image
 
-    def _apply_pixbuf(self, pixbuf):
+    def prepare_mirror_frame(self, image):
+        """The paint-ready payload for `paint_mirror_frame`.
+
+        Any thread: image2pixbuf is pure PIL + GdkPixbuf (no GTK), so the
+        conversion runs on the caller -- the media thread for live frames --
+        and only the widget mutation needs the loop.
+        """
+        return image2pixbuf(image.convert("RGBA"), force_transparency=True)
+
+    def paint_mirror_frame(self, pixbuf) -> bool:
+        # Main loop only. Returns False: a GLib idle callback that returns
+        # truthy re-arms forever.
         self.pixbuf = pixbuf
         # update righthand side key preview if possible - before the paint
         # below, which bails out when this button is unmapped
@@ -374,11 +384,12 @@ class KeyButton(Gtk.Frame):
                 # the drop here or load_from_changes has nothing to replay on
                 # remap and the preview goes stale.
                 self._mark_dropped()
-                return
+                return False
             self.image.set_from_pixbuf(self.pixbuf)
         except Exception as e:
             log.debug(f"Key mirror paint skipped: {e}")
             self._mark_dropped()
+        return False
 
     def _mark_dropped(self) -> None:
         controller = getattr(self.key_grid, "deck_controller", None)

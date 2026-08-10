@@ -22,8 +22,12 @@ Covers:
       gl.app.main_win.sidebar unguarded, and FlatpakDeckDisconnectThread
       called check_for_errors() with no window -- both AttributeError crashes
       before the window existed.
+  (e) the GtkUIAdapter's mirror slots coalesce: N pushes against a blocked
+      main loop cost one paint, carrying the newest frame, with the
+      conversion still on the producer.
 """
 import os
+import time
 from types import SimpleNamespace
 
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
@@ -169,11 +173,39 @@ def check_page_change_follows_action_init() -> None:
 
 
 class _RaisingButton:
-    """A widget whose set_image blows up the way a torn-down/rebuilt one does
+    """A widget whose conversion blows up the way a torn-down/rebuilt one does
     (image2pixbuf on a freed surface, a disposed GtkPicture, ...)."""
 
-    def set_image(self, image):
+    def prepare_mirror_frame(self, image):
         raise RuntimeError("widget tree is being torn down")
+
+    def paint_mirror_frame(self, payload):
+        raise RuntimeError("widget tree is being torn down")
+
+
+class _RecordingMirror:
+    """Stands in for a KeyButton / ScreenBarImage: conversion on the producer,
+    paint on the main loop, each half recorded separately."""
+
+    def __init__(self):
+        self.prepared: list = []
+        self.painted: list = []
+
+    def prepare_mirror_frame(self, image):
+        self.prepared.append(image)
+        return image
+
+    def paint_mirror_frame(self, payload) -> bool:
+        self.painted.append(payload)
+        return False
+
+
+class _FakeController:
+    """Hashable stand-in that owns the one piece of engine state the adapter
+    writes to."""
+
+    def __init__(self):
+        self.ui_image_changes_while_hidden: dict = {}
 
 
 def _fake_key_child(button):
@@ -182,6 +214,112 @@ def _fake_key_child(button):
             deck_config=SimpleNamespace(grid=SimpleNamespace(buttons=[[button]]))
         )
     )
+
+
+def _fake_mirror_child(button, strip):
+    return SimpleNamespace(
+        page_settings=SimpleNamespace(
+            deck_config=SimpleNamespace(
+                grid=SimpleNamespace(buttons=[[button]]),
+                screenbar=SimpleNamespace(image=strip),
+            )
+        )
+    )
+
+
+def check_mirror_pushes_coalesce() -> None:
+    """N producer pushes against a blocked main loop must cost ONE paint, and
+    that paint must carry the LAST frame.
+
+    The key mirror used to convert and GLib.idle_add per frame: a stalled loop
+    accumulated one queued callback and one retained pixbuf per frame per key,
+    then painted every superseded frame in turn once it caught up. Both
+    mirrors now hand frames to a per-input latest-wins slot, so the backlog is
+    one frame per input whatever the producer does.
+    """
+    from gi.repository import GLib
+
+    from src.windows.ui_adapter import TOUCHSCREEN_UI_INTERVAL_S, GtkUIAdapter
+
+    controller = _FakeController()
+    button, strip = _RecordingMirror(), _RecordingMirror()
+    adapter = GtkUIAdapter()
+    adapter.bind(controller, _fake_mirror_child(button, strip))
+    adapter._window_mapped = True
+
+    ctx = GLib.MainContext.default()
+
+    def pump() -> None:
+        while ctx.pending():
+            ctx.iteration(False)
+
+    # Earlier checks left idles of their own on the default context.
+    pump()
+
+    key_ident = Input.Key("0x0")
+    frames = [f"key-frame-{i}" for i in range(25)]
+    for frame in frames:
+        assert adapter.push_input_image(controller, key_ident, frame) is True, (
+            "a mirror push was refused with a mapped window and a bound widget"
+        )
+    assert button.painted == [], (
+        "a frame painted while the main loop was blocked -- the paint must be "
+        "marshalled onto the loop, never run on the producer"
+    )
+    assert button.prepared == frames, (
+        "the pixbuf conversion did not run once per frame ON THE PRODUCER "
+        f"({len(button.prepared)} of {len(frames)}) -- coalescing happens on "
+        "the way to the loop, it must not push conversion onto the loop"
+    )
+
+    pump()
+    assert button.painted == [frames[-1]], (
+        f"{len(frames)} pushes against a blocked main loop produced "
+        f"{len(button.painted)} paints ({button.painted!r}) -- the slot must "
+        "collapse them into one paint of the newest frame"
+    )
+    assert controller.ui_image_changes_while_hidden == {}, (
+        "a coalesced frame was dirty-marked even though the newest one "
+        f"painted: {controller.ui_image_changes_while_hidden!r}"
+    )
+
+    # The touchscreen mirror runs on the same slot, plus an interval: its
+    # preview is as wide as the deck, so it is rate-limited on purpose -- and
+    # a frame the interval holds back must still land once it expires, or the
+    # last frame of a burst (a scroll that stops) is lost.
+    ts_ident = Input.Touchscreen("sd-plus")
+    assert adapter.push_input_image(controller, ts_ident, "strip-first") is True
+    pump()
+    assert strip.painted == ["strip-first"], (
+        f"the first strip frame did not paint: {strip.painted!r}"
+    )
+
+    held = [f"strip-{i}" for i in range(10)]
+    pushed_at = time.monotonic()
+    for frame in held:
+        assert adapter.push_input_image(controller, ts_ident, frame) is True
+    pump()
+    if time.monotonic() - pushed_at < TOUCHSCREEN_UI_INTERVAL_S:
+        assert strip.painted == ["strip-first"], (
+            "the touchscreen mirror painted inside its interval: "
+            f"{strip.painted!r}"
+        )
+
+    def flushed() -> bool:
+        pump()
+        return strip.painted == ["strip-first", held[-1]]
+
+    assert fixtures.wait_until(flushed, timeout=5), (
+        "the frame the interval held back never flushed, or flushed a "
+        f"superseded one: {strip.painted!r}"
+    )
+
+    adapter.unbind(controller)
+    assert adapter._mirror_slots == {}, (
+        "unbind left the unplugged deck's mirror slots behind -- each one "
+        "pins the controller and its last frame"
+    )
+    print("PASS: mirror pushes coalesce to one paint of the newest frame per input")
 
 
 def check_every_port_method_is_headless_safe() -> None:
@@ -253,7 +391,7 @@ def check_every_port_method_is_headless_safe() -> None:
         ("_run_input_state_selected", (controller, identifier, 1)),
         ("_run_set_low_fps_warning", (controller, True)),
         ("_run_deck_layout_changed", (controller,)),
-        ("_flush_touchscreen", (controller, Input.Touchscreen("sd-plus"))),
+        ("_drain_mirror", (controller, Input.Touchscreen("sd-plus"))),
     ]
     for name, args in run_bodies:
         try:
@@ -308,6 +446,7 @@ def main() -> None:
     check_accepted_pushes_suppress_markers(port)
     check_page_change_follows_action_init()
     check_every_port_method_is_headless_safe()
+    check_mirror_pushes_coalesce()
 
     print("PASS: scenario_ui_port_events")
 

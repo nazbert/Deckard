@@ -73,11 +73,20 @@ class _FakeStack:
 
 
 class _FakeButton:
-    def __init__(self):
-        self.images = []
+    """The two halves the adapter drives: conversion on the producer, paint on
+    the main loop."""
 
-    def set_image(self, image):
-        self.images.append(image)
+    def __init__(self):
+        self.prepared = []
+        self.painted = []
+
+    def prepare_mirror_frame(self, image):
+        self.prepared.append(image)
+        return image
+
+    def paint_mirror_frame(self, payload):
+        self.painted.append(payload)
+        return False
 
 
 def _fake_grid(rows=1, cols=1):
@@ -174,14 +183,20 @@ def main() -> None:
         assert adapter.push_input_image(controller, identifier, object()) is True, (
             "push was refused despite a bound, mapped grid"
         )
-        assert len(new_grid.buttons[0][0].images) == 1, "the push did not reach the button"
+        assert len(new_grid.buttons[0][0].prepared) == 1, "the push did not reach the button"
+        # The paint resolves the widget again, so it has to land on the bound
+        # grid too -- not on the orphan the push happened to see.
+        assert adapter._drain_mirror(controller, identifier) is False
+        assert len(new_grid.buttons[0][0].painted) == 1, (
+            "the drain did not paint into the bound grid's button"
+        )
 
         adapter.unbind(controller)
         assert adapter.push_input_image(controller, identifier, object()) is False, (
             "push was accepted for an unbound controller -- the frame would "
             "be silently lost instead of dirty-marked"
         )
-        assert len(new_grid.buttons[0][0].images) == 1, "an unbound push still painted"
+        assert len(new_grid.buttons[0][0].prepared) == 1, "an unbound push still reached the button"
 
         # 6. Hotplug DURING MainWindow construction. The adapter
         # is installed before the constructor but `_window` is only set by
