@@ -684,7 +684,10 @@ def check_partial_interception_refused() -> None:
     escapes: a non-empty op list that would replay an outline-only label
     forever. The probe is the tripwire -- a recording is safe to replay only
     if the probe came out blank."""
-    from src.backend.DeckManagement import DeckController as dc
+    # label_engine, not DeckController: _record_label_blits resolves
+    # _BitmapRecorder from the module the code lives in, so a stand-in
+    # installed on the re-exporting namespace never reaches the recording.
+    from src.backend.DeckManagement.deck_controller import label_engine as dc
     from src.backend.DeckManagement.InputIdentifier import Input
 
     controller = _make_controller("labelcache-j")
