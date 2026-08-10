@@ -4,8 +4,9 @@ ImageEnhance.Color factor, default 1.0, UI range 1.0-1.5).
 
 Drives the REAL production code at two of its application points:
 
-  * BackgroundImage.__init__ (src/backend/DeckManagement/DeckController.py)
-    -- the one-time enhancement point for the static background-image path
+  * BackgroundImage.__init__
+    (src/backend/DeckManagement/deck_controller/background_media.py) -- the
+    one-time enhancement point for the static background-image path
     (and, by construction, InputImage in KeyImage.py, which applies the
     identical pattern for key/dial static media).
   * BackgroundVideoCache.__init__ / _canvas_from_source_bgr

@@ -2,15 +2,16 @@
 Unit-tier scenario for the two media paths the per-deck display-saturation
 factor used to skip silently:
 
-  * KeyGIF.__init__ (src/backend/DeckManagement/DeckController.py) -- the
-    animated key/dial GIF path. Frames are decoded+fitted once at
+  * KeyGIF.__init__ (src/backend/DeckManagement/deck_controller/gif_pipeline.py)
+    -- the animated key/dial GIF path. Frames are decoded+fitted once at
     construction and get_next_frame only indexes the retained list, so the
     enhancement must be baked in there (one enhance per frame at load, not
     per media tick). A GIF used as a *background* already routed through the
     saturated video path; a GIF on a key/dial sat visibly duller than the
     PNG/mp4 next to it.
-  * ControllerTouchScreenState._get_fitted_background_image (same file) --
-    the per-touchscreen (SD+ strip) background image. The fitted result is
+  * ControllerTouchScreenState._get_fitted_background_image
+    (src/backend/DeckManagement/DeckController.py) -- the per-touchscreen
+    (SD+ strip) background image. The fitted result is
     memoized under a (path, mtime, size) key that must also gain the
     saturation dimension, or a factor change would keep serving the stale
     enhancement.
