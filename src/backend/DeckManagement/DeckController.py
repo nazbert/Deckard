@@ -916,6 +916,10 @@ class MediaPlayerThread(threading.Thread):
             if (ts_task is not None and ts_task.submit_seq is not None
                     and ts_task.submit_seq < msg.seq):
                 self.touchscreen_task = None
+            # Whether anything is left to paint over the blanks below.
+            # Sampled here, inside the same critical section as the filter,
+            # so it describes the state this Clear actually leaves behind.
+            survivors_queued = bool(self.image_tasks) or self.touchscreen_task is not None
         # Reset dedup state on every current input BEFORE writing the blanks
         # (plan §3): otherwise an identical repaint after this Clear would
         # still match the pre-clear cached hash and get wrongly skipped,
@@ -925,6 +929,43 @@ class MediaPlayerThread(threading.Thread):
             self.deck_controller._write_blank_frames()
         except Exception as e:
             log.error(f"Failed to write blank frames for Clear: {e}")
+
+        # A Clear submitted by ScreenSaver.show() can execute AFTER the
+        # screensaver paints it was meant to precede: show() submits this on
+        # the control queue and only then enqueues the paints onto the task
+        # slots, so a tick that already drained control paints the
+        # screensaver and pops this Clear on its NEXT pass. The seq filter
+        # cannot help -- it wipes queued tasks, and these already ran -- so
+        # the blanks land last over a deck with nothing left to repaint it:
+        # a still screensaver animates nothing and no other producer is
+        # running, leaving it blank until dismissed. Arm the repaint retry,
+        # which is exactly the "content written into a lost window"
+        # recovery it already serves after a failed write, and let
+        # _run_pending_repaint (which runs unconditionally, ahead of the
+        # quiescence gate) restore the imagery. Media-thread state written
+        # from the media thread -- the no-lock single-writer contract
+        # holds; never arm this from show()'s own thread.
+        #
+        # Both conditions are needed, and both are narrow on purpose --
+        # _run_pending_repaint composites and encodes the whole deck, so
+        # arming it on an ordinary screensaver entry would put that work
+        # ahead of the very paints the entry is waiting on (repaints run at
+        # the top of a tick, before the task drain) and visibly slow the
+        # transition:
+        #   * survivors_queued distinguishes the two interleaves. Queued
+        #     survivors ARE the screensaver's paints, still ahead of us and
+        #     about to land on top of these blanks -- the ordering show()
+        #     intended, nothing to recover. Only an empty slot set means the
+        #     paints already went to the device and these blanks just
+        #     overwrote them.
+        #   * showing keeps this off the exit path: hide()'s own phase 3
+        #     reloads and repaints the page it restores, so arming there
+        #     would add a full repaint behind every screensaver exit,
+        #     including exits taken while the user is away -- writes the
+        #     quiescence gate exists to avoid. These are the only two
+        #     callers of DeckController.clear().
+        if not survivors_queued and self.deck_controller.screen_saver.showing:
+            self.deck_controller._schedule_full_repaint()
 
     def _exec_clear_and_close(self) -> None:
         # Set before doing any of the work below (not just relying on the
@@ -2274,19 +2315,25 @@ class DeckController:
         while self.keep_actions_ticking:
             start = time.time()
             ticked_page = self.mark_page_ready_to_clear(False)
-            # A showing screensaver gets no work from this loop at all. Its
-            # imagery lives in `background` and is driven entirely by the
-            # media thread -- video frames through update_tiles() plus the
-            # per-key on_media_player_tick(), a still image painted once by
-            # the apply_prebuilt()/set_from_path() that installed it. The
+            # A showing screensaver gets no per-input work from this loop.
+            # Its imagery lives in `background`: a video advances on the
+            # media thread (update_tiles() plus the per-key
+            # on_media_player_tick()), a still image is composited and
+            # encoded by whichever thread called apply_prebuilt()/
+            # set_from_path() and written once by the media thread. The
             # input set ScreenSaver.show() swaps in is freshly built by
             # init_inputs(): no action, no media, no label on any of it, and
             # ActionCore.get_is_present() refuses plugin writes for the
-            # duration, so nothing here has state to advance. Re-compositing
-            # and re-hashing every input once a second only produced frames
-            # the dedup guard discarded. Repaint after a failed device write
-            # stays with the media loop's pending-full-repaint retry, and
-            # hide() repaints through load_page().
+            # duration, so nothing here has state of its own to advance.
+            #
+            # Repainting every input once a second regardless is not free
+            # and is not this loop's job. Recovery from a lost device write
+            # -- including the blank a late-executing Clear leaves behind on
+            # screensaver entry, which this repaint used to be the only cure
+            # for -- belongs to the media loop's pending-full-repaint retry,
+            # armed at the sites that lose the write (_on_write_result,
+            # _exec_clear). Restoring the page on wake is hide()'s
+            # load_page().
             if not self.screen_saver.showing:
                 for t in self.inputs:
                     for i in self.inputs[t]:
