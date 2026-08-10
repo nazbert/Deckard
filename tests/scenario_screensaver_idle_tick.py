@@ -22,11 +22,16 @@ Pinned here over a REAL DeckController with its REAL tick thread:
      the guard that 2. is about;
   4. hide() still repaints every key, so the wake path is untouched;
   5. and -- the reason 2. is safe to assert at all -- a Clear that executes
-     AFTER the screensaver paints it was ordered before does not strand the
-     deck blank. That interleave used to be cured by the per-second repaint
-     (_exec_clear nulls the dedup hashes, so the next composite was NOT
-     discarded and did reach the device); recovery now belongs to the
-     repaint retry that _exec_clear arms.
+     AFTER the screensaver paints it was ordered before leaves the deck
+     showing the SCREENSAVER, not blank and not the page it replaced. That
+     interleave used to be cured by the per-second repaint (_exec_clear
+     nulls the dedup hashes, so the next composite was NOT discarded and did
+     reach the device); recovery now belongs to the repaint retry
+     _exec_clear arms. Checked against the screensaver's own measured
+     signature because the recovery repaint runs on the media thread while
+     show() is still painting on its own, and the way that race loses is
+     the previous page's imagery sticking -- indistinguishable from success
+     to a bare "not blank" assertion.
 
 update() calls are attributed by CALLING THREAD, not counted globally: the
 media thread legitimately calls the same method (on_media_player_tick, the
@@ -156,7 +161,8 @@ def idle_tick_costs_nothing(controller, deck, key_count) -> None:
           f"screensaver, 0 input repaints from the tick thread")
 
 
-def late_clear_does_not_strand_blank(controller, deck, key_count, blank_hash) -> None:
+def late_clear_does_not_strand_blank(controller, deck, key_count, blank_hash,
+                                     page_sig, ss_sig) -> None:
     """5.: the screensaver-entry interleave the per-second repaint used to
     cure.
 
@@ -220,19 +226,34 @@ def late_clear_does_not_strand_blank(controller, deck, key_count, blank_hash) ->
         "recovery assertion below would be vacuous"
     )
 
-    # ... and the deck must not stay that way.
+    # ... and the deck must come back to the SCREENSAVER's content, not
+    # merely to something non-blank. The repaint races show()'s own
+    # update_all_inputs, and the way that race loses is the previous page's
+    # imagery sticking -- which a bare "not blank" check would wave through.
     def recovered() -> bool:
         return all(
-            (e := deck.last_op_for(f"key:{k}")) is not None and e[4] != blank_hash
+            (e := deck.last_op_for(f"key:{k}")) is not None and e[4] == ss_sig[k]
             for k in range(key_count)
         )
 
-    assert fixtures.wait_until(recovered, timeout=15), (
-        "the deck stayed blank behind a showing screensaver -- a Clear that "
-        "executed after the screensaver's paints wiped them with nothing left "
-        "to restore the picture"
-    )
-    print("PASS: a late-executing Clear no longer strands the deck blank")
+    ok = fixtures.wait_until(recovered, timeout=15)
+    if not ok:
+        stuck = {
+            k: deck.last_op_for(f"key:{k}")[4]
+            for k in range(key_count)
+            if deck.last_op_for(f"key:{k}")[4] != ss_sig[k]
+        }
+        blank_keys = [k for k, h in stuck.items() if h == blank_hash]
+        page_keys = [k for k, h in stuck.items() if h == page_sig[k]]
+        raise AssertionError(
+            "the deck did not come back to the screensaver's content behind a "
+            f"showing screensaver. Blank keys {blank_keys} (a Clear that executed "
+            "after the screensaver's paints wiped them with nothing left to "
+            f"restore the picture); previous-page keys {page_keys} (a recovery "
+            "repaint raced show()'s own update_all_inputs and the pre-swap "
+            f"composite landed last); other {sorted(set(stuck) - set(blank_keys) - set(page_keys))}"
+        )
+    print("PASS: a late-executing Clear recovers to the screensaver's own content")
 
 
 def main() -> None:
@@ -258,6 +279,9 @@ def main() -> None:
             lambda: deck.last_op_for("key:0") is not None, timeout=10
         ), "fixture sanity: the default page never painted"
 
+        assert wait_until_quiet(deck), "the default page never settled"
+        page_sig = {k: deck.last_op_for(f"key:{k}")[4] for k in range(key_count)}
+
         seq_before_show = deck.current_seq()
         controller.screen_saver.show()
         assert controller.screen_saver.showing is True
@@ -272,6 +296,18 @@ def main() -> None:
             "a STATIC screensaver never stopped writing to the deck -- the window "
             "below cannot attribute anything"
         )
+
+        # Signatures for the recovery check in phase 5. Captured from a
+        # CLEAN entry, so "the screensaver's own content" is a measured
+        # value rather than an assumption -- and asserted distinct from
+        # both the page's and blank, or the check could not tell the three
+        # outcomes apart.
+        ss_sig = {k: deck.last_op_for(f"key:{k}")[4] for k in range(key_count)}
+        for k in range(key_count):
+            assert ss_sig[k] not in (blank_hash, page_sig[k]), (
+                f"fixture sanity: key {k}'s screensaver content is "
+                f"indistinguishable from {'blank' if ss_sig[k] == blank_hash else 'the page'}"
+            )
 
         idle_tick_costs_nothing(controller, deck, key_count)
 
@@ -291,7 +327,9 @@ def main() -> None:
         # fixtures.seed_page_with_background_and_screensaver's docstring).
         assert wait_until_quiet(deck), "the restored page never settled"
         controller.screen_saver.set_media_path(screensaver_png)
-        late_clear_does_not_strand_blank(controller, deck, key_count, blank_hash)
+        late_clear_does_not_strand_blank(
+            controller, deck, key_count, blank_hash, page_sig, ss_sig
+        )
     finally:
         fixtures.teardown(controller)
 
