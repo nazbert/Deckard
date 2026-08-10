@@ -123,6 +123,19 @@ DEFAULT_DATA_PATH = os.path.expanduser(f"~/.var/app/{appinfo.APP_ID}/data")
 MAX_REASONABLE_X = 10
 MAX_REASONABLE_Y = 10
 
+# Rotated files kept per log sink, oldest deleted first. Bounding this is the
+# only thing standing between a long-lived install and a log directory that
+# grows without limit -- loguru keeps every rotation unless told otherwise.
+LOG_RETENTION_FILES = 10
+# Default verbosity: the log files and the in-app ring take DEBUG and up, the
+# console INFO and up. TRACE is bulk, and bulk is what fills the files.
+# SC_LOG_TRACE=1 puts every sink back to TRACE for diagnosis; strictly "1",
+# matching SC_NO_ERROR_HOOKS/SC_STRONG_CALLBACKS, so SC_LOG_TRACE=off cannot
+# read as on. Read at import because config_logger() runs once, at boot.
+LOG_TRACE = os.environ.get("SC_LOG_TRACE") == "1"
+FILE_LOG_LEVEL = "TRACE" if LOG_TRACE else "DEBUG"
+CONSOLE_LOG_LEVEL = "TRACE" if LOG_TRACE else "INFO"
+
 main_path = os.path.abspath(os.path.dirname(__file__))
 gl.MAIN_PATH = main_path
 
@@ -133,19 +146,24 @@ def write_logs(record):
 @log.catch
 def config_logger():
     log.remove()
-    # Create log files
-    log.add(os.path.join(gl.DATA_PATH, "logs/logs.log"), rotation="3 days", backtrace=True, diagnose=True, level="TRACE")
+    # Create log files. No backtrace=/diagnose=: the redaction patcher clears
+    # record["exception"] and folds a scrubbed traceback into the message
+    # before any sink sees the record, so there is no exception left for a
+    # sink to expand -- both flags would be inert, and diagnose= in particular
+    # would promise a variable dump that never arrives.
+    log.add(os.path.join(gl.DATA_PATH, "logs/logs.log"), rotation="3 days",
+            retention=LOG_RETENTION_FILES, level=FILE_LOG_LEVEL)
     # Set min level to print
-    log.add(sys.stderr, level="TRACE")
-    log.add(write_logs, level="TRACE")
+    log.add(sys.stderr, level=CONSOLE_LOG_LEVEL)
+    log.add(write_logs, level=FILE_LOG_LEVEL)
 
     plugin_logger = Logger(
         LoggerConfig(
             name="PLUGIN",
             log_file_path=os.path.join(gl.DATA_PATH, "logs/plugins.log"),
-            base_log_level="TRACE",
+            base_log_level=FILE_LOG_LEVEL,
             rotation="3 days",
-            retention=None,
+            retention=LOG_RETENTION_FILES,
             compression="zip"
         ),
         [

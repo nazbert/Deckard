@@ -7,6 +7,13 @@ bundle as a release asset.
 
 ## [Unreleased]
 
+### Changed
+
+- Log files are now pruned automatically (the ten most recent rotations are
+  kept) and default verbosity is lower — files record debug level and up, the
+  console info and up. Set `SC_LOG_TRACE=1` to restore full trace logging on
+  every sink for diagnosis.
+
 ## [0.2.1] - 2026-08-09
 
 ### Fixed
