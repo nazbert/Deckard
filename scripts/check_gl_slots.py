@@ -39,7 +39,9 @@ THE RULES
 * ASSIGNMENT PIN. In every governed file, each attribute store on the module
   alias (`gl.X = ...`, augmented, `for gl.X in ...`, `with ... as gl.X`) must
   name a FROZEN_SLOTS entry. Stores to IMPORTED/INCIDENTAL/MACHINERY names are
-  as much a failure as stores to undeclared ones: those are not API.
+  as much a failure as stores to undeclared ones: those are not API. The one
+  exception is MODULE_TYPE_STORES, which reaches the module's type rather than
+  its inventory.
 * `setattr(gl, ...)` and `delattr(gl, ...)` fail outright -- a computed slot
   name is invisible to this check, which is the whole reason to reject it. So
   does `del gl.X`: it makes the frozen inventory false at runtime.
@@ -219,6 +221,16 @@ IMPORTED: frozenset[str] = frozenset({
 MACHINERY: frozenset[str] = frozenset({
     "__getattr__",   # serves and caches fallback_font on first read
 })
+
+# Attribute stores that reach the module's TYPE rather than its inventory.
+# Rebinding `__class__` to a ModuleType subclass is the documented way to give
+# a module custom attribute behaviour: it changes how reads behave and leaves
+# the set of declared names exactly as it found it, so it cannot mint a slot.
+# The engine read-surface scenario installs a recording module this way and
+# restores the original class in a finally. Nothing else is exempt -- notably
+# `gl.__dict__ = {}` would replace the whole inventory, which is precisely the
+# kind of arrival this check exists to notice.
+MODULE_TYPE_STORES: frozenset[str] = frozenset({"__class__"})
 
 TABLES: tuple[tuple[str, frozenset[str]], ...] = (
     ("FROZEN_SLOTS", frozenset(FROZEN_SLOTS)),
@@ -569,6 +581,8 @@ def check_stores(path: Path, failures: list[str]) -> int:
         nonlocal stores
         name = alias_attribute(node)
         if name is not None:
+            if name in MODULE_TYPE_STORES:
+                return
             stores += 1
             if name not in FROZEN_SLOTS:
                 problems.append((
