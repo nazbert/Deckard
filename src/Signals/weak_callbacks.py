@@ -51,8 +51,13 @@ def _is_bound_method(cb: Callable) -> bool:
     return hasattr(cb, "__self__") and hasattr(cb, "__func__")
 
 
-def _describe_callback(cb: Callable) -> str:
-    """A printable identity for a callback, captured while it's still alive."""
+def describe_callback(cb: Callable) -> str:
+    """A printable identity for a callback, captured while it's still alive.
+
+    Public because callers that report on a callback (a synchronous signal
+    fan-out naming the handler that raised) need the same identity string the
+    registry's own prune log uses.
+    """
     qualname = getattr(cb, "__qualname__", None) or repr(cb)
     module = getattr(cb, "__module__", None)
     return f"{module}.{qualname}" if module else qualname
@@ -72,7 +77,7 @@ class _WeakMethodEntry(weakref.WeakMethod):
 
     def __new__(cls, meth: Callable):
         self = super().__new__(cls, meth)
-        self.description = _describe_callback(meth)
+        self.description = describe_callback(meth)
         return self
 
 

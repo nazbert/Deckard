@@ -22,6 +22,14 @@ already covered by scenario_plugin_backend_teardown.py; the end-to-end
      signal.getsignal(), so Gio.Application.run's register_sigint_fallback
      would see "default handler" and install its own over GLib's sigaction,
      routing Ctrl+C to app.quit() and bypassing on_quit entirely.
+ 1b. That handler only *queues* on_quit onto the main loop. A Python-level
+     handler runs between bytecodes on the main thread and can interrupt any
+     statement in the app, so running the teardown there would destroy the
+     window and drive plugin quit hooks on top of an unrelated stack frame;
+     the queued form lands in the same dispatch context the TERM/HUP sources
+     already use. Checked both directly (handler returns without on_quit
+     having run; the next main-loop dispatch runs it exactly once) and
+     end-to-end with a real SIGINT raised at ourselves.
   2. A real SIGTERM raised at ourselves reaches on_quit exactly once via the
      GLib main loop (pre-fix this killed the interpreter -> non-zero exit),
      and it is still armed for a *second* delivery. A unix-signal source
@@ -32,10 +40,13 @@ already covered by scenario_plugin_backend_teardown.py; the end-to-end
      default disposition, killing the app mid-teardown with the backends
      still running. Hence App._on_unix_signal returning SOURCE_CONTINUE.
   3. Same for SIGHUP (terminal close, a common way the app dies).
-  4. on_quit is idempotent: a second entry (Ctrl+C landing mid-teardown --
-     Python signal handlers run between bytecodes on the main thread) is a
-     no-op instead of re-destroying the window, re-triggering AppQuit and
+  4. on_quit is idempotent: a second entry (a repeated TERM/HUP dispatch, a
+     queued Ctrl+C, the tray or the Gio "quit" action landing mid-teardown) is
+     a no-op instead of re-destroying the window, re-triggering AppQuit and
      arming a second force_quit watchdog.
+ 4b. The AppQuit fan-out isolates its handlers: one raising quit hook (a
+     third-party plugin) is logged and the fan-out continues, instead of
+     aborting the teardown before close_all() and terminate_all_backends().
   5. on_quit tolerates a quit that lands before on_activate built the window;
      the old unguarded self.main_win.destroy() raised AttributeError and
      aborted teardown *before* terminate_all_backends.
@@ -135,14 +146,16 @@ class _ProbeDone(BaseException):
 
 class QuitRecorder:
     """Stands in for App as the handler's `self`: records every on_quit
-    invocation with the args the route passed. The three routes differ --
-    (signum, frame) from signal.signal, () from a GLib unix-signal source,
-    (action, param) from the Gio "quit" action -- which is why the real
-    on_quit is declared as on_quit(self, *args)."""
+    invocation with the args the route passed. The routes differ -- () from a
+    GLib unix-signal source or the idle a Ctrl+C queues, (action, param) from
+    the Gio "quit" action, and (signum, frame) when a runtime without
+    unix-signal sources leaves TERM/HUP on signal.signal -- which is why the
+    real on_quit is declared as on_quit(self, *args)."""
 
-    # The real wrapper the TERM/HUP sources are registered against, under
-    # test unbound on this stub exactly like the other App methods here.
+    # The real wrappers the signals are registered against, under test unbound
+    # on this stub exactly like the other App methods here.
     _on_unix_signal = App._on_unix_signal
+    _on_sigint = App._on_sigint
 
     def __init__(self):
         self.calls = []
@@ -159,20 +172,57 @@ class QuitRecorder:
         return None
 
 
+def pump_main_context(max_iterations: int = 25) -> None:
+    """Dispatch pending sources on the default main context, bounded so a
+    forever-rescheduling source can't hang the scenario."""
+    ctx = GLib.MainContext.default()
+    for _ in range(max_iterations):
+        if not ctx.pending():
+            break
+        ctx.iteration(False)
+
+
 def check_sigint_stays_a_python_handler() -> QuitRecorder:
     recorder = QuitRecorder()
     App.register_signal_handlers(recorder)
 
-    assert signal.getsignal(signal.SIGINT) == recorder.on_quit, (
-        f"SIGINT must stay wired through signal.signal to on_quit, got "
+    assert signal.getsignal(signal.SIGINT) == recorder._on_sigint, (
+        f"SIGINT must stay wired through signal.signal, got "
         f"{signal.getsignal(signal.SIGINT)!r}. A GLib unix-signal source is "
         f"invisible to signal.getsignal(), so moving SIGINT there would let "
         f"Gio.Application.run's register_sigint_fallback install its own "
         f"handler on top and route Ctrl+C to app.quit(), skipping on_quit's "
         f"whole teardown."
     )
-    print("  PASS: SIGINT still routed to on_quit via signal.signal")
+    print("  PASS: SIGINT still routed through signal.signal")
     return recorder
+
+
+def check_sigint_defers_the_teardown_to_the_main_loop(recorder: QuitRecorder) -> None:
+    """The SIGINT handler must queue on_quit, not run it.
+
+    A Python-level handler runs between bytecodes on the main thread, so it
+    can interrupt any statement in the app -- calling the teardown from there
+    destroys the window and drives plugin quit hooks on top of a stack frame
+    that was doing something else. The handler therefore hands on_quit to the
+    main loop, the same dispatch context the TERM/HUP unix-signal sources
+    already run it in.
+    """
+    before = len(recorder.calls)
+    recorder._on_sigint(signal.SIGINT, None)
+
+    assert len(recorder.calls) == before, (
+        f"the SIGINT handler ran the teardown in signal-handler context "
+        f"instead of queueing it on the main loop (got "
+        f"{recorder.calls[before:]!r})"
+    )
+    pump_main_context()
+    fired = recorder.calls[before:]
+    assert fired == [()], (
+        f"the queued teardown must reach on_quit exactly once when the main "
+        f"loop next dispatches, got {fired!r}"
+    )
+    print("  PASS: SIGINT queues the teardown onto the main loop")
 
 
 def report_signal_path(signum: int, name: str) -> None:
@@ -349,7 +399,7 @@ def check_quit_tolerates_missing_main_win() -> None:
     saved_dbus = app_mod.stop_dbus_service
     saved_sm = getattr(gl, "signal_manager", None)
     app_mod.stop_dbus_service = Recorder()
-    gl.signal_manager = Obj(trigger_signal=_trigger_signal)
+    gl.signal_manager = Obj(trigger_signal_sync=_trigger_signal)
     reached = False
     try:
         with no_real_exit():
@@ -390,31 +440,28 @@ class _StoreCacheProbe:
         self.flushes.append(bool(self._watchdog.calls))
 
 
-def check_quit_drains_the_store_cache_index() -> None:
-    """on_quit must flush the deferred store index, behind the watchdog.
+class _RaisingLoggers:
+    """gl.loggers stand-in that cuts a driven on_quit short at the log-sink
+    loop -- everything below it (close_all, the controller loop, the thread
+    joins) needs a real app to stand on."""
 
-    Drives the real on_quit unbound on a stub (the idiom the checks above
-    use) far enough to cover the store-cache drain, then cuts it short at the
-    log-sink loop with a sentinel. Two failure modes are pinned:
+    def values(self):
+        raise _ProbeDone()
 
-      * no flush at all -- the deferred read-clock renewals of the last store
-        browse are lost on every quit, because os._exit(0) skips the atexit
-        hook and the debounce timer is a daemon. Nothing else in the process
-        drains them, so deleting the block leaves every other test green.
-      * flush before timer_wheel.schedule(6, force_quit) -- atomic_write_json
-        fsyncs twice with no timeout, so a wedged filesystem parks the quit
-        there forever with no watchdog behind it.
+
+def drive_on_quit(signal_manager, store_cache=None, watchdog=None) -> Obj:
+    """Run the real App.on_quit unbound on a stub, down to the log-sink loop.
+
+    The idiom the checks above use, with the whole teardown environment
+    on_quit touches before that cut stubbed out. Returns the stub and the
+    Recorder standing in for timer_wheel.schedule, so a caller can assert on
+    ordering relative to the force_quit watchdog -- pass that Recorder in when
+    another stub has to read it while the teardown is still running.
     """
     import src.app as app_mod
     from src.backend import ui_port
 
-    watchdog = Recorder()
-    probe = _StoreCacheProbe(watchdog)
-
-    class _RaisingLoggers:
-        def values(self):
-            raise _ProbeDone()
-
+    watchdog = Recorder() if watchdog is None else watchdog
     stub = Obj(_quit_started=False, force_quit=lambda: None)
     stub._destroy_main_window = lambda: App._destroy_main_window(stub)
 
@@ -430,9 +477,9 @@ def check_quit_drains_the_store_cache_index() -> None:
     }
     app_mod.stop_dbus_service = Recorder()
     app_mod.timer_wheel = Obj(schedule=watchdog)
-    gl.signal_manager = Obj(trigger_signal=Recorder())
+    gl.signal_manager = signal_manager
     gl.deck_manager = Obj(stop_boot_rescan=Recorder())
-    gl.store_backend = Obj(store_cache=probe)
+    gl.store_backend = None if store_cache is None else Obj(store_cache=store_cache)
     gl.loggers = _RaisingLoggers()
     reached = False
     try:
@@ -452,10 +499,78 @@ def check_quit_drains_the_store_cache_index() -> None:
         gl.threads_running = saved["threads_running"]
 
     assert reached, (
-        "the driven on_quit never reached the log-sink loop -- the checks "
-        "below cannot be trusted; something on the teardown path raised "
-        "before the store-cache block"
+        "the driven on_quit never reached the log-sink loop -- the assertions "
+        "that follow cannot be trusted; something on the teardown path raised "
+        "before the cut"
     )
+    return Obj(stub=stub, watchdog=watchdog)
+
+
+def check_appquit_handlers_are_isolated_from_each_other() -> None:
+    """A raising AppQuit handler must not deny its peers the notification.
+
+    The fan-out is synchronous (the process os._exit()s moments later, so
+    queued handlers would never run) and its observers are strangers to each
+    other: a third-party plugin raising in its quit hook used to abort the
+    whole trigger_signal loop, so every handler connected after it -- and, in
+    the caller, everything from close_all() to terminate_all_backends() --
+    was skipped. Driven through the real on_quit against a real SignalManager
+    so both halves are covered: the isolation itself, and the quit path
+    actually using the isolating call.
+    """
+    from src.Signals.Signals import AppQuit
+    from src.Signals.SignalManager import SignalManager
+
+    ran = []
+
+    def first_handler():
+        ran.append("first")
+
+    def raising_handler():
+        ran.append("raiser")
+        raise RuntimeError("simulated plugin quit hook failure")
+
+    def last_handler():
+        ran.append("last")
+
+    signal_manager = SignalManager()
+    for handler in (first_handler, raising_handler, last_handler):
+        signal_manager.connect_signal(AppQuit, handler)
+
+    result = drive_on_quit(signal_manager)
+
+    assert ran == ["first", "raiser", "last"], (
+        f"every AppQuit handler must run even when one of them raises, in "
+        f"connect order, got {ran!r}"
+    )
+    assert result.watchdog.calls, (
+        "the driven on_quit never armed the force_quit watchdog -- a failing "
+        "AppQuit handler aborted the teardown instead of being contained"
+    )
+    print("  PASS: a raising AppQuit handler does not deny its peers or the teardown")
+
+
+def check_quit_drains_the_store_cache_index() -> None:
+    """on_quit must flush the deferred store index, behind the watchdog.
+
+    Drives the real on_quit far enough to cover the store-cache drain, then
+    cuts it short at the log-sink loop with a sentinel. Two failure modes are
+    pinned:
+
+      * no flush at all -- the deferred read-clock renewals of the last store
+        browse are lost on every quit, because os._exit(0) skips the atexit
+        hook and the debounce timer is a daemon. Nothing else in the process
+        drains them, so deleting the block leaves every other test green.
+      * flush before timer_wheel.schedule(6, force_quit) -- atomic_write_json
+        fsyncs twice with no timeout, so a wedged filesystem parks the quit
+        there forever with no watchdog behind it.
+    """
+    watchdog = Recorder()
+    probe = _StoreCacheProbe(watchdog)
+    result = drive_on_quit(Obj(trigger_signal_sync=Recorder()),
+                           store_cache=probe, watchdog=watchdog)
+    stub = result.stub
+
     assert probe.flushes, (
         "on_quit must call store_cache.flush_index(): it is the only live "
         "drain of the deferred index in the real app (os._exit(0) skips the "
@@ -524,6 +639,8 @@ def main() -> None:
     sys.stdout.reconfigure(line_buffering=True)
     fixtures.start_watchdog(60, label="scenario_sigterm_quit")
     recorder = check_sigint_stays_a_python_handler()
+    check_sigint_defers_the_teardown_to_the_main_loop(recorder)
+    check_signal_reaches_on_quit(recorder, signal.SIGINT, "SIGINT")
     report_signal_path(signal.SIGTERM, "SIGTERM")
     report_signal_path(signal.SIGHUP, "SIGHUP")
     check_unix_signal_callback_keeps_source_armed()
@@ -537,6 +654,7 @@ def main() -> None:
         check_signal_reaches_on_quit(recorder, signum, f"{name} (second delivery)")
     check_quit_is_idempotent()
     check_quit_tolerates_missing_main_win()
+    check_appquit_handlers_are_isolated_from_each_other()
     check_quit_drains_the_store_cache_index()
     check_force_quit_terminates_backends()
     check_unix_signal_add_degrades_instead_of_raising()

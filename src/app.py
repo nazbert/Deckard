@@ -292,12 +292,13 @@ class App(Adw.Application):
         self.permissions.present()
 
     def on_quit(self, *args):
-        # Run at most once. SIGINT is a Python-level handler, so
-        # it fires between bytecodes on the main thread: a Ctrl+C landing
-        # during a teardown already in flight would otherwise re-enter here
-        # and re-destroy the window, re-trigger AppQuit, re-run close_all()
-        # and arm a second force_quit watchdog. The interrupted outer frame
-        # resumes normally after this early return.
+        # Run at most once. Several routes lead here -- the TERM/HUP source
+        # (which stays armed and dispatches again on every further signal), the
+        # main-loop idle a Ctrl+C queues, the Gio "quit" action, the tray, the
+        # window's close handler -- and a second arrival during a teardown
+        # already in flight would otherwise re-destroy the window, re-trigger
+        # AppQuit, re-run close_all() and arm a second force_quit watchdog.
+        # The caller resumes normally after this early return.
         if self._quit_started:
             return
         self._quit_started = True
@@ -332,20 +333,18 @@ class App(Adw.Application):
         # App exists, or is internally guarded.
         self._destroy_main_window()
 
-        # Guarded for the same reason as the window teardown above, and it
-        # matters more here: SignalManager.trigger_signal invokes AppQuit
-        # handlers synchronously and *unwrapped*, so one third-party plugin
-        # raising in its quit hook aborts on_quit right here -- before
-        # close_all() (a deck left open fails the next startup with
-        # TransportError(-1)), before terminate_all_backends() (the orphaned
-        # backends this issue is about) and before the force_quit watchdog
-        # below is even armed. With the _quit_started latch above, that abort
-        # is now permanent: every later quit route (tray, Gio "quit" action,
-        # Ctrl+C, TERM) takes the early return instead of retrying.
-        try:
-            gl.signal_manager.trigger_signal(Signals.AppQuit)
-        except Exception as e:
-            log.warning(f"An AppQuit handler failed during shutdown: {e}")
+        # Synchronous on purpose: this process ends in os._exit a few
+        # statements below, so AppQuit handlers queued on the main loop would
+        # never run. trigger_signal_sync isolates them from each other -- one
+        # third-party plugin raising in its quit hook is logged and the fan-out
+        # moves on, rather than aborting on_quit here -- before close_all() (a
+        # deck left open fails the next startup with TransportError(-1)),
+        # before terminate_all_backends() (orphaned plugin backends) and before
+        # the force_quit watchdog below is even armed. An abort here is also
+        # unrecoverable: the _quit_started latch above sends every later quit
+        # route (tray, Gio "quit" action, Ctrl+C, TERM) straight to the early
+        # return instead of retrying the teardown.
+        gl.signal_manager.trigger_signal_sync(Signals.AppQuit)
 
         gl.threads_running = False
 
@@ -532,14 +531,42 @@ class App(Adw.Application):
         self.on_quit()
         return GLib.SOURCE_CONTINUE
 
+    def _on_sigint(self, signum, frame):
+        """SIGINT (Ctrl+C) entry point. Queues the teardown, runs none of it.
+
+        A Python-level handler runs between bytecodes on the main thread, so
+        it can interrupt any statement in the app -- mid-render, inside a
+        GTK callback, with a lock held. Running the teardown from there means
+        destroying the window and driving plugin quit hooks on top of a stack
+        frame that was doing something else entirely. Handing on_quit to the
+        main loop instead defers it to a normal dispatch, which is where the
+        TERM/HUP unix-signal sources already run it -- one teardown context for
+        every signal route.
+
+        PRIORITY_DEFAULT to match those sources: the default idle priority
+        sits below GTK's frame-clock redraws, so a busy UI could postpone the
+        quit the user just asked for. on_quit's plain None return removes the
+        idle source after the single run (SOURCE_REMOVE), which is what an idle
+        wants -- unlike the unix-signal sources, whose sigaction dies with them
+        (see _on_unix_signal).
+
+        A Ctrl+C landing before the loop is up is not lost either: the source
+        goes on the default main context and dispatches as soon as
+        Gio.Application.run starts iterating it.
+        """
+        GLib.idle_add(self.on_quit, priority=GLib.PRIORITY_DEFAULT)
+
     def register_signal_handlers(self):
         # SIGINT stays a Python-level handler: PyGObject's wakeup-fd bridge
         # makes it fire promptly under the GLib loop, and having a custom
         # handler installed keeps Gio.Application.run's register_sigint_fallback
         # inert -- that fallback checks signal.getsignal(SIGINT), cannot see a
         # GLib unix-signal source, and would install its own handler routing
-        # Ctrl+C to app.quit(), bypassing on_quit's whole teardown.
-        signal.signal(signal.SIGINT, self.on_quit)
+        # Ctrl+C to app.quit(), bypassing on_quit's whole teardown. The handler
+        # body only queues onto the main loop, so the teardown itself runs in a
+        # normal dispatch rather than between two arbitrary bytecodes -- see
+        # _on_sigint.
+        signal.signal(signal.SIGINT, self._on_sigint)
         # SIGTERM/SIGHUP: GLib-native sources dispatched on the
         # main loop, so a logout/systemd TERM runs the full teardown -- notably
         # terminate_all_backends(), without which the backends (own session,

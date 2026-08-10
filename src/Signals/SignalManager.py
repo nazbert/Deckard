@@ -17,8 +17,10 @@ import threading
 from collections.abc import Callable
 from typing import Any, Literal, overload
 
-from src.Signals.Signals import AppQuit, Signal
-from src.Signals.weak_callbacks import CallbackRegistry
+from loguru import logger as log
+
+from src.Signals.Signals import Signal
+from src.Signals.weak_callbacks import CallbackRegistry, describe_callback
 
 from gi.repository import GLib
 
@@ -97,6 +99,14 @@ class SignalManager:
             registry.remove(callback)
 
     def trigger_signal(self, signal: type[Signal], *args: Any, **kwargs: Any) -> None:
+        """Dispatch `signal` asynchronously: each observer runs as its own idle
+        callback on the GTK main loop, so this returns before any of them has
+        been called, from whatever thread called it.
+
+        Uniform for every signal type. A caller that needs the observers to
+        have finished before it continues -- the shutdown fan-out, which is
+        followed by os._exit -- calls trigger_signal_sync instead.
+        """
         # Verify signal
         if not issubclass(signal, Signal):
             raise TypeError("signal must be of type Signal")
@@ -109,11 +119,41 @@ class SignalManager:
         # of currently-live callbacks -- safe to iterate here even while
         # another thread concurrently connects/disconnects.
         for callback in registry.snapshot():
-            if signal == AppQuit:
+            # Via the trampoline, not GLib.idle_add(callback, *args,
+            # **kwargs): that form drops kwargs and re-schedules any
+            # truthy-returning handler forever (see _invoke_signal_callback).
+            GLib.idle_add(_invoke_signal_callback, callback, args, kwargs)
+
+    def trigger_signal_sync(self, signal: type[Signal], *args: Any, **kwargs: Any) -> None:
+        """Dispatch `signal` on the calling thread, one observer after another,
+        returning only once all of them have run.
+
+        This is the shutdown fan-out (AppQuit): the process ends in os._exit a
+        few statements later, so observers queued on the main loop would never
+        run at all -- they have to complete inline. Which also means the
+        observers are strangers to each other's failure modes, so each one is
+        invoked inside its own try/except: a third-party plugin raising in its
+        quit hook cannot deny its peers the notification, and cannot abort the
+        caller's teardown either. Each failure is logged with the handler's
+        identity; the fan-out continues.
+
+        Observers are otherwise treated exactly as trigger_signal treats them:
+        one locked snapshot taken up front, and dead weak references skipped
+        silently.
+        """
+        # Verify signal
+        if not issubclass(signal, Signal):
+            raise TypeError("signal must be of type Signal")
+
+        registry = self._get_registry(signal, create=False)
+        if registry is None:
+            return
+
+        for callback in registry.snapshot():
+            try:
                 callback(*args, **kwargs)
-            else:
-                # Via the trampoline, not GLib.idle_add(callback, *args,
-                # **kwargs): that form drops kwargs and re-schedules any
-                # truthy-returning handler forever (see
-                # _invoke_signal_callback).
-                GLib.idle_add(_invoke_signal_callback, callback, args, kwargs)
+            except Exception:
+                log.opt(exception=True).warning(
+                    f"{signal.__name__} handler {describe_callback(callback)} "
+                    f"failed; continuing with the remaining handlers"
+                )
