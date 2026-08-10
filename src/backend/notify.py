@@ -13,7 +13,9 @@ safe from any thread and at any point in startup:
 
 * Before `gl.app` exists the delivery is queued on
   `gl.app_loading_finished_tasks`, which `App.on_activate` drains on the
-  main thread once the window is up.
+  main thread once the window is up. The queueing decision, and the race
+  between that append and the drain, belong to
+  `src/backend/startup_queue.py`.
 * Otherwise it is marshalled with `GLib.idle_add`, and the choice between
   an in-app toast and a desktop notification is made *inside* that callback
   -- i.e. on the GTK main thread. Deciding at call time would read
@@ -30,6 +32,7 @@ from gi.repository import GLib
 
 import appinfo
 import globals as gl
+from src.backend import startup_queue
 
 
 class Notify:
@@ -44,25 +47,14 @@ class Notify:
         self._dispatch(True, text, title)
 
     def _dispatch(self, is_error: bool, text: str, title: str | None) -> None:
-        if gl.app is None:
-            # Drained on the main thread by App.on_activate once the window
-            # is up; re-entering _dispatch then takes the branch below.
-            #
-            # The append races the drain: on_activate may set gl.app and
-            # finish popping the queue between our None-check and our
-            # append, stranding the task forever. After appending, re-check
-            # and try to take the task back -- list.remove/pop are atomic
-            # under the GIL, so exactly one side ends up owning it: either
-            # the drain popped it (remove raises ValueError; the drain
-            # delivers) or we reclaim it here and deliver ourselves.
-            task = lambda: self._dispatch(is_error, text, title)
-            gl.app_loading_finished_tasks.append(task)
-            if gl.app is None:
-                return
-            try:
-                gl.app_loading_finished_tasks.remove(task)
-            except ValueError:
-                return
+        # False means the queue owns the delivery: it is drained on the main
+        # thread by App.on_activate once the window is up, and re-entering
+        # _dispatch then takes the deliver-now path. The append-vs-drain
+        # reclaim protocol behind that answer lives in
+        # src/backend/startup_queue.py.
+        if not startup_queue.get().when_app_ready(
+                lambda: self._dispatch(is_error, text, title)):
+            return
         GLib.idle_add(self._deliver, is_error, text, title)
 
     def _deliver(self, is_error: bool, text: str, title: str | None) -> bool:

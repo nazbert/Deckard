@@ -12,6 +12,7 @@ from src.backend.PluginManager.PluginBase import PluginBase
 from streamcontroller_plugin_tools import BackendBase
 
 import globals as gl
+from src.backend import startup_queue
 
 
 def terminate_backend_process(process, escalate: bool = True) -> None:
@@ -270,9 +271,10 @@ class PluginManager:
             body,
             button=("Update All", "app.update-all-assets", None)
         )
-        if gl.app is None:
-            gl.app_loading_finished_tasks.append(call)
-        else:
+        # Called during plugin load, i.e. before the app exists on the boot
+        # path: the queue answers whether this thread delivers now or
+        # App.on_activate's drain does (src/backend/startup_queue.py).
+        if startup_queue.get().when_app_ready(call):
             call()
 
     def show_load_errors_notification(self):

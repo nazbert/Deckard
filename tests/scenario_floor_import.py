@@ -30,6 +30,12 @@ so the defect a shim can actually have is __all__ promising a name the import
 block no longer brings in; a module that declares __all__ therefore has each of
 its entries checked for being bound once the body has run.
 
+EXTRA_MODULES carries the same check to modules outside that package that are
+written to be importable from the engine's closure. They are listed one by one
+rather than discovered: the point is not "every file in src/backend" (most of
+it drags GTK in and has no floor contract), it is the handful whose whole
+design claim is "any layer may import this".
+
 Developer-machine only: the harness needs a real 3.13 interpreter to be honest
 about the floor. Where /usr/bin/python3.13 is absent the scenario reports that
 and passes rather than hard-requiring a system interpreter.
@@ -48,6 +54,14 @@ FLOOR_VERSION = (3, 13)
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACKAGE_DIR = os.path.join(_REPO_ROOT, "src", "backend", "DeckManagement", "deck_controller")
 COMPAT_SHIM = os.path.join(_REPO_ROOT, "src", "backend", "DeckManagement", "DeckController.py")
+
+# Modules outside the package that claim to be importable from anywhere,
+# engine closure included. Each one is here because something depends on that
+# claim; add a module when it makes the claim, not because it is nearby.
+EXTRA_MODULES = (
+    # The app-ready deferral protocol: imports globals + stdlib only.
+    os.path.join(_REPO_ROOT, "src", "backend", "startup_queue.py"),
+)
 
 # Runs in the floor interpreter, one module per argument. Prints one
 # "OK <stem>" / "FAIL <stem> ..." line per module, so one process covers the
@@ -184,7 +198,8 @@ for p in paths:
 def discover_modules() -> list[str]:
     """Every module of the deck_controller package, by listing the directory --
     so a module added to it is covered without touching this scenario -- plus
-    the compat shim that re-exports the package under the old import path."""
+    the compat shim that re-exports the package under the old import path, plus
+    the explicitly listed EXTRA_MODULES."""
     assert os.path.isdir(PACKAGE_DIR), f"package dir missing: {PACKAGE_DIR}"
     names = sorted(
         n for n in os.listdir(PACKAGE_DIR)
@@ -193,6 +208,14 @@ def discover_modules() -> list[str]:
     modules = [os.path.join(PACKAGE_DIR, n) for n in names]
     assert os.path.isfile(COMPAT_SHIM), f"compat shim missing: {COMPAT_SHIM}"
     modules.append(COMPAT_SHIM)
+    for extra in EXTRA_MODULES:
+        # A listed module that moved must fail here, not silently drop out of
+        # the check the way a glob would.
+        assert os.path.isfile(extra), (
+            f"EXTRA_MODULES lists a module that does not exist: {extra}. "
+            f"Update the list in the change that moved or removed it."
+        )
+        modules.append(extra)
     return modules
 
 
@@ -219,7 +242,7 @@ def check_package_bodies_execute_on_the_floor() -> None:
 
     failures = [ln for ln in lines if ln.startswith("FAIL ")]
     assert not failures, (
-        "a deck_controller module cannot be imported on the Python "
+        "a covered module cannot be imported on the Python "
         f"{FLOOR_VERSION[0]}.{FLOOR_VERSION[1]} floor. Either an annotation in "
         "an evaluated position (parameter, return, class body or base list) "
         "names something the module does not bind at runtime -- quote it, or "
@@ -233,7 +256,7 @@ def check_package_bodies_execute_on_the_floor() -> None:
     )
     for ln in ok:
         print("  " + ln)
-    print(f"PASS: every deck_controller module body executes on Python "
+    print(f"PASS: every covered module body executes on Python "
           f"{FLOOR_VERSION[0]}.{FLOOR_VERSION[1]}")
 
 
