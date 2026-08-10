@@ -15,7 +15,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 from gi.repository import Gtk
 
-from src.backend.DeckManagement.DeckController import ControllerInput
+from src.backend.DeckManagement.deck_controller.inputs import ControllerInput
 from src.backend.DeckManagement.InputIdentifier import InputIdentifier
 import globals as gl
 

@@ -11,7 +11,7 @@ from src.backend.DeckManagement.Subclasses.mp4_tile_cache import Mp4FrameCache, 
 # Import typing
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from src.backend.DeckManagement.DeckController import DeckController
+    from src.backend.DeckManagement.deck_controller.controller import DeckController
 
 class BackgroundVideoCache(Mp4FrameCache):
     """Background video, cached as a re-encoded video at deck-canvas resolution.

@@ -6,7 +6,7 @@ from src.backend.PluginManager.ActionCore import ActionCore
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from src.backend.DeckManagement.DeckController import DeckController
+    from src.backend.DeckManagement.deck_controller.controller import DeckController
     from src.backend.DeckManagement.InputIdentifier import InputIdentifier
     from src.backend.PageManagement.Page import Page
     from src.backend.PluginManager.PluginBase import PluginBase

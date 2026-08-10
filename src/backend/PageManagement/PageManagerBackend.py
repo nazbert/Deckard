@@ -23,7 +23,7 @@ from typing import TypedDict
 from loguru import logger as log
 
 from src.Signals import Signals
-from src.backend.DeckManagement.DeckController import DeckController
+from src.backend.DeckManagement.deck_controller.controller import DeckController
 
 # Import own modules
 from src.backend.PageManagement.Page import Page

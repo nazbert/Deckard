@@ -73,7 +73,7 @@ if TYPE_CHECKING:
     from concurrent.futures import Future
     from threading import Timer
 
-    from src.backend.DeckManagement.DeckController import DeckController
+    from src.backend.DeckManagement.deck_controller.controller import DeckController
 
 
 class ControllerInputState:

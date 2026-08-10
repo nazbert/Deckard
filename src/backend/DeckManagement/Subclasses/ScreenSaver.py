@@ -24,7 +24,8 @@ import globals as gl
 from src.backend.DeckManagement.InputIdentifier import Input
 from src.backend import timer_wheel
 if TYPE_CHECKING:
-    from src.backend.DeckManagement.DeckController import DeckController, Background
+    from src.backend.DeckManagement.deck_controller.background_media import Background
+    from src.backend.DeckManagement.deck_controller.controller import DeckController
 
 class ScreenSaver:
     def __init__(self, deck_controller: "DeckController"):
@@ -272,10 +273,14 @@ class ScreenSaver:
         # -- see ReleaseStashedInputsMsg's docstring in
         # DeckManagement/deck_controller/media_writer.py.
         if stashed_inputs:
-            # Local import: DeckController imports ScreenSaver at module
-            # level (for self.screen_saver = ScreenSaver(self)), so a
-            # top-level import here would be circular.
-            from src.backend.DeckManagement.DeckController import ReleaseStashedInputsMsg
+            # Local import: the deck controller package imports this module
+            # at module level (each controller builds a ScreenSaver), so the
+            # screen saver takes its dependency on the package's media writer
+            # at call time -- a module-level import would point an edge back
+            # into the package that imports this one.
+            from src.backend.DeckManagement.deck_controller.media_writer import (
+                ReleaseStashedInputsMsg,
+            )
             self.deck_controller.media_player.submit_control(
                 ReleaseStashedInputsMsg(stashed_inputs)
             )

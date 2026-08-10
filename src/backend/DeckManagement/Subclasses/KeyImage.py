@@ -17,7 +17,7 @@ from PIL import Image, ImageEnhance
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from src.backend.DeckManagement.DeckController import ControllerInput
+    from src.backend.DeckManagement.deck_controller.inputs import ControllerInput
 
 class InputImage(SingleKeyAsset):
     # mem-plan P2.4: static media used to retain the source-resolution RGBA

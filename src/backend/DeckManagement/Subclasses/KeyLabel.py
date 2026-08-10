@@ -58,7 +58,7 @@ def _find_font_path(font_name: str | None, font_weight: int | None, style: str |
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from src.backend.DeckManagement.DeckController import ControllerInput
+    from src.backend.DeckManagement.deck_controller.inputs import ControllerInput
 
 @dataclass
 class KeyLabel:

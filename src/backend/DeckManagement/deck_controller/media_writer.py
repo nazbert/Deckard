@@ -56,11 +56,11 @@ import globals as gl
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 if TYPE_CHECKING:
-    from src.backend.DeckManagement.DeckController import (
+    from src.backend.DeckManagement.deck_controller.controller import DeckController
+    from src.backend.DeckManagement.deck_controller.inputs import (
         ControllerDial,
         ControllerKey,
         ControllerTouchScreen,
-        DeckController,
     )
 
 

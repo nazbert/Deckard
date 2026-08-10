@@ -26,7 +26,8 @@ import os
 
 # Import own modules
 from src.backend.DeckManagement.Subclasses.RemoteDeckManager import RemoteDeckManager
-from src.backend.DeckManagement.DeckController import DeckController, ClearAndCloseMsg
+from src.backend.DeckManagement.deck_controller.controller import DeckController
+from src.backend.DeckManagement.deck_controller.media_writer import ClearAndCloseMsg
 from src.backend import ui_port
 from src.backend.SettingsManager import SettingsManager
 from src.backend.DeckManagement.Subclasses.FakeDeck import FakeDeck

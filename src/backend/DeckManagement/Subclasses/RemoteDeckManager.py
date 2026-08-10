@@ -2,7 +2,7 @@ from http.server import HTTPServer
 import threading
 from datetime import datetime
 
-from src.backend.DeckManagement.DeckController import DeckController
+from src.backend.DeckManagement.deck_controller.controller import DeckController
 from src.backend.DeckManagement.Subclasses.RemoteDeck import RemoteDeck
 from src.backend.DeckManagement.Subclasses.RemoteDecksLocalServerHandler import create_handler
 

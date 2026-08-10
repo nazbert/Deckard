@@ -56,9 +56,9 @@ if TYPE_CHECKING:
     # and is imported lazily for the one runtime isinstance below.
     from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI
     from src.backend.PluginManager.PluginBase import PluginBase
-    from src.backend.DeckManagement.DeckController import DeckController, ControllerKey
+    from src.backend.DeckManagement.deck_controller.controller import DeckController
+    from src.backend.DeckManagement.deck_controller.inputs import ControllerInput, ControllerInputState, ControllerKey
     from src.backend.PageManagement.Page import Page
-    from src.backend.DeckManagement.DeckController import ControllerInput, ControllerInputState
 
 class ActionCore(rpyc.Service):
     # Change to match your action
@@ -247,10 +247,11 @@ class ActionCore(rpyc.Service):
 
             elif is_video(media_path):
                 # Local import: deck_controller/inputs.py imports ActionCore at
-                # module level, and DeckController imports inputs.py in turn, so
-                # a top-level import here would be circular (same pattern as
-                # ScreenSaver.py's ReleaseStashedInputsMsg import).
-                from src.backend.DeckManagement.DeckController import ControllerKey, KeyGIF
+                # module level, so a top-level ControllerKey import here would
+                # be circular; KeyGIF rides along at the same call site (same
+                # pattern as ScreenSaver.py's ReleaseStashedInputsMsg import).
+                from src.backend.DeckManagement.deck_controller.gif_pipeline import KeyGIF
+                from src.backend.DeckManagement.deck_controller.inputs import ControllerKey
                 key_gif = None
                 if os.path.splitext(media_path)[1].lower() == ".gif" and isinstance(controller_input, ControllerKey):
                     # GIFs on KEYS route to KeyGIF -- parity with the

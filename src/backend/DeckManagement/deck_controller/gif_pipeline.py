@@ -42,7 +42,8 @@ from src.backend.DeckManagement.Subclasses.mp4_tile_cache import get_video_md5
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from src.backend.DeckManagement.DeckController import ControllerKey, DeckController
+    from src.backend.DeckManagement.deck_controller.controller import DeckController
+    from src.backend.DeckManagement.deck_controller.inputs import ControllerKey
     from src.backend.PageManagement.Page import Page
 
 
