@@ -22,18 +22,25 @@ Guards:
   3. main_window() is None for BOTH ways the window can be missing: gl.app is
      None, and gl.app exists without a `main_win` attribute bound yet (the raw
      `gl.app.main_win` raises AttributeError there -- there is no class-body
-     declaration, on_activate binds it). It returns the window once bound.
-  4. app() is the honest raw read, identity-preserving, None included;
+     declaration, on_activate binds it). It returns the window once bound, and
+     it keeps returning it after teardown, because App._destroy_main_window
+     destroys the widget and leaves the attribute bound -- the documented
+     asymmetry, pinned here so the docstring cannot drift back to claiming a
+     post-quit None.
+  4. require_main_window() raises a named error for both of those absences and
+     hands back the concrete window otherwise -- the conversion the raw
+     dereferences want, since none of them has a None branch to keep.
+  5. app() is the honest raw read, identity-preserving, None included;
      require_app() returns the same object post-publish and raises a
      boot-phase RuntimeError before it.
-  5. settings(), app_settings() and deck_settings() pass straight through to
+  6. settings(), app_settings() and deck_settings() pass straight through to
      the settings manager -- the same object, the same shared dict, no copy of
      its own.
-  6. page_manager() stays honestly Optional; require_page_manager() is the
+  7. page_manager() stays honestly Optional; require_page_manager() is the
      opt-in that turns absence into a named error.
-  7. Every accessor re-reads its gl slot per call, so rebinding a slot (which
+  8. Every accessor re-reads its gl slot per call, so rebinding a slot (which
      is exactly what the harness and future tests do) is honoured.
-  8. The module's runtime imports are `globals` plus stdlib -- the claim that
+  9. The module's runtime imports are `globals` plus stdlib -- the claim that
      lets any layer, engine closure included, import it without a cycle.
 
 No GTK: the accessors know nothing about the toolkit, and neither does this.
@@ -191,11 +198,53 @@ def check_main_window_covers_both_absences() -> None:
     running.main_win = window
     assert services.main_window() is window
 
-    # Teardown nulls it; the accessor must not have cached the window.
+    # Teardown does NOT null the attribute -- App._destroy_main_window destroys
+    # the widget and leaves it bound, and nothing else clears it -- so a
+    # destroyed window still reads as present. Pinned because the accessor's
+    # docstring warns callers about exactly this, and a future slot-clearing
+    # fix must land as a deliberate change to both.
+    window.destroyed = True
+    assert services.main_window() is window, (
+        "a destroyed-but-bound main_win still comes back: nothing unbinds it"
+    )
+
+    # A slot rebound to None is seen on the next call, not cached.
     running.main_win = None
     assert services.main_window() is None
 
-    print("PASS: main_window() is None for both ways the window can be missing")
+    print("PASS: main_window() covers both absences and does not invent a post-quit None")
+
+
+def check_require_main_window() -> None:
+    gl.app = None
+    try:
+        services.require_main_window()
+    except RuntimeError as e:
+        message = str(e)
+    else:
+        raise AssertionError("require_main_window() must raise while gl.app is None")
+    assert "gl.app.main_win" in message, message
+
+    running = FakeApp()
+    gl.app = running
+    try:
+        services.require_main_window()
+    except RuntimeError as e:
+        message = str(e)
+    else:
+        raise AssertionError(
+            "require_main_window() must raise while main_win is unbound -- the "
+            "window between the App being published and on_activate building it"
+        )
+    assert "on_activate" in message, message
+
+    window = FakeWindow()
+    running.main_win = window
+    got = services.require_main_window()
+    assert got is window, "require_main_window() must hand back the window itself"
+    assert got is not None, "the whole point of the require_* form"
+
+    print("PASS: require_main_window() names both absences and returns the window")
 
 
 def check_settings_accessors_pass_through() -> None:
@@ -298,6 +347,7 @@ def main() -> None:
         check_tr_before_the_locale_manager_exists()
         check_app_and_require_app()
         check_main_window_covers_both_absences()
+        check_require_main_window()
         check_settings_accessors_pass_through()
         check_page_manager_pair()
         check_runtime_imports_are_globals_only()
