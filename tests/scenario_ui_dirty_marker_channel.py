@@ -128,7 +128,11 @@ def check_touchscreen_drain_drops(controller, ts_ident) -> None:
     )
 
     # 4. A drain that finds the widget gone (a rebuild between push and paint)
-    # is the last drop shape the slot can produce.
+    # is the last drop shape that is worth MARKING. One more exists and is
+    # deliberately silent: unbind() drops the slot, so a drain queued before
+    # it finds no payload and returns without marking. That is correct -- the
+    # deck is gone, and a marker on a controller nothing will ever re-map is
+    # only a reference to it.
     adapter = GtkUIAdapter()
     adapter.bind(controller, SimpleNamespace())
     adapter._window_mapped = True

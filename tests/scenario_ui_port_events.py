@@ -26,6 +26,7 @@ Covers:
       main loop cost one paint, carrying the newest frame, with the
       conversion still on the producer.
 """
+import itertools
 import os
 import time
 from types import SimpleNamespace
@@ -228,14 +229,19 @@ def _fake_mirror_child(button, strip):
 
 
 def check_mirror_pushes_coalesce() -> None:
-    """N producer pushes against a blocked main loop must cost ONE paint, and
-    that paint must carry the LAST frame.
+    """N producer pushes against a blocked main loop must cost ONE main-loop
+    CALLBACK and one paint, and that paint must carry the LAST frame.
 
     The key mirror used to convert and GLib.idle_add per frame: a stalled loop
     accumulated one queued callback and one retained pixbuf per frame per key,
     then painted every superseded frame in turn once it caught up. Both
     mirrors now hand frames to a per-input latest-wins slot, so the backlog is
     one frame per input whatever the producer does.
+
+    Counting the drains, not just the paints, is the point: a slot that armed
+    a callback per push would still paint once (the first drain empties it)
+    and would look identical from the widget's side while re-creating exactly
+    the main-loop pressure this exists to remove.
     """
     from gi.repository import GLib
 
@@ -246,6 +252,17 @@ def check_mirror_pushes_coalesce() -> None:
     adapter = GtkUIAdapter()
     adapter.bind(controller, _fake_mirror_child(button, strip))
     adapter._window_mapped = True
+
+    # Every scheduled callback lands here first: push_input_image resolves
+    # self._drain_mirror at schedule time, so an instance attribute wins.
+    drains: list = []
+    real_drain = adapter._drain_mirror
+
+    def counting_drain(controller, identifier) -> bool:
+        drains.append(identifier)
+        return real_drain(controller, identifier)
+
+    adapter._drain_mirror = counting_drain
 
     ctx = GLib.MainContext.default()
 
@@ -273,6 +290,11 @@ def check_mirror_pushes_coalesce() -> None:
     )
 
     pump()
+    assert len(drains) == 1, (
+        f"{len(frames)} pushes against a blocked main loop scheduled "
+        f"{len(drains)} main-loop callbacks -- the slot must arm at most one "
+        "while a drain is outstanding, however many frames arrive"
+    )
     assert button.painted == [frames[-1]], (
         f"{len(frames)} pushes against a blocked main loop produced "
         f"{len(button.painted)} paints ({button.painted!r}) -- the slot must "
@@ -295,15 +317,22 @@ def check_mirror_pushes_coalesce() -> None:
     )
 
     held = [f"strip-{i}" for i in range(10)]
-    pushed_at = time.monotonic()
+    drains.clear()
     for frame in held:
         assert adapter.push_input_image(controller, ts_ident, frame) is True
     pump()
-    if time.monotonic() - pushed_at < TOUCHSCREEN_UI_INTERVAL_S:
+    # The deadline is the slot's own: it starts at the drain that painted
+    # "strip-first", not at the pushes above.
+    slot = adapter._mirror_slots[(controller, ts_ident)]
+    if time.monotonic() < slot._last_drain + TOUCHSCREEN_UI_INTERVAL_S:
         assert strip.painted == ["strip-first"], (
             "the touchscreen mirror painted inside its interval: "
             f"{strip.painted!r}"
         )
+    assert len(drains) <= 1, (
+        f"{len(held)} pushes inside the interval scheduled {len(drains)} "
+        "callbacks -- the held frame needs exactly one delayed drain"
+    )
 
     def flushed() -> bool:
         pump()
@@ -313,6 +342,9 @@ def check_mirror_pushes_coalesce() -> None:
         "the frame the interval held back never flushed, or flushed a "
         f"superseded one: {strip.painted!r}"
     )
+    assert len(drains) == 1, (
+        f"the held frame took {len(drains)} callbacks to reach the loop"
+    )
 
     adapter.unbind(controller)
     assert adapter._mirror_slots == {}, (
@@ -320,6 +352,120 @@ def check_mirror_pushes_coalesce() -> None:
         "pins the controller and its last frame"
     )
     print("PASS: mirror pushes coalesce to one paint of the newest frame per input")
+
+
+def check_dial_preview_rides_the_strip_payload() -> None:
+    """The sidebar's dial preview is a crop of the strip frame, so it travels
+    IN that frame's payload: converted on the producer, painted by the same
+    main-loop callback, with no callback of its own.
+
+    Handing the crop to IconSelector.set_image instead puts one uncoalesced
+    idle on the loop per PRODUCED frame -- at PRIORITY_HIGH, above GTK's own
+    redraw -- which is exactly the pressure the mirror slot removes, and it
+    would arrive at the producer's rate rather than the painted one.
+
+    The real prepare/paint halves run against a stand-in `self`, so this tests
+    that code and not a reimplementation of it.
+    """
+    import src.windows.mainWindow.DeckPlus.ScreenBar as screenbar_mod
+    from PIL import Image
+
+    from src.windows.mainWindow.DeckPlus.ScreenBar import ScreenBarImage
+
+    class _FakeIconSelector:
+        def __init__(self):
+            self.task_ids = itertools.count()
+            self.latest_task_id = None
+            self.painted: list = []
+
+        def get_new_task_id(self):
+            return next(self.task_ids)
+
+        def set_pixbuf_and_del(self, pixbuf, task_id=None):
+            self.painted.append((pixbuf, task_id))
+
+        def set_image(self, image):
+            raise AssertionError(
+                "the dial preview went through IconSelector.set_image -- that "
+                "schedules its own uncoalesced PRIORITY_HIGH idle per frame"
+            )
+
+    icon_selector = _FakeIconSelector()
+    touchscreen = SimpleNamespace(get_dial_image_area=lambda ident: (0, 0, 40, 100))
+    strip = SimpleNamespace(
+        task_ids=itertools.count(),
+        latest_task_id=None,
+        screenbar=SimpleNamespace(
+            deck_controller=SimpleNamespace(get_input=lambda ident: touchscreen)),
+        painted=[],
+    )
+    strip.get_new_task_id = lambda: next(strip.task_ids)
+    strip.set_pixbuf_and_del = lambda pixbuf, task_id=None: strip.painted.append(task_id)
+    strip._prepare_dial_preview = lambda image: ScreenBarImage._prepare_dial_preview(
+        strip, image)
+    # set_image reaches back through self for both halves.
+    strip.prepare_mirror_frame = lambda image: ScreenBarImage.prepare_mirror_frame(
+        strip, image)
+    strip.paint_mirror_frame = lambda payload: ScreenBarImage.paint_mirror_frame(
+        strip, payload)
+
+    # Recording stand-in for the module's GLib: prepare/paint must not reach
+    # for the loop at all, and set_image must reach for it exactly once.
+    scheduled: list = []
+    real_glib, real_app = screenbar_mod.GLib, gl.app
+    screenbar_mod.GLib = SimpleNamespace(
+        idle_add=lambda callback, *args, **kwargs: scheduled.append(callback))
+    gl.app = SimpleNamespace(
+        main_win=SimpleNamespace(
+            sidebar=SimpleNamespace(
+                active_identifier=Input.Dial("0"),
+                key_editor=SimpleNamespace(icon_selector=icon_selector),
+            )
+        )
+    )
+    try:
+        frame = Image.new("RGBA", (800, 100), (10, 20, 30, 255))
+
+        payload = ScreenBarImage.prepare_mirror_frame(strip, frame)
+        assert icon_selector.painted == [], (
+            "the dial preview painted from the producer thread"
+        )
+        assert scheduled == [], (
+            f"preparing a strip frame scheduled {len(scheduled)} main-loop "
+            "callbacks -- conversion belongs on the producer, scheduling to "
+            "the mirror slot"
+        )
+        dial = payload[2]
+        assert dial is not None and dial[0] is icon_selector, (
+            f"the dial preview never reached the strip's payload: {dial!r}"
+        )
+
+        assert ScreenBarImage.paint_mirror_frame(strip, payload) is False
+        assert len(strip.painted) == 1, "the strip pixbuf did not paint"
+        assert len(icon_selector.painted) == 1, (
+            "the dial preview did not paint with the strip frame it was cut "
+            f"from: {icon_selector.painted!r}"
+        )
+        assert scheduled == [], (
+            "painting the payload scheduled an extra callback -- the dial "
+            "preview is already on the loop with the strip frame"
+        )
+
+        # The replay path still costs exactly one callback for the whole
+        # frame, dial preview included.
+        ScreenBarImage.set_image(strip, frame)
+        assert len(scheduled) == 1, (
+            f"set_image scheduled {len(scheduled)} callbacks, expected 1"
+        )
+
+        # No dial selected: nothing rides along.
+        gl.app.main_win.sidebar.active_identifier = Input.Key("0x0")
+        assert ScreenBarImage.prepare_mirror_frame(strip, frame)[2] is None, (
+            "a strip frame carried a dial preview with no dial selected"
+        )
+    finally:
+        screenbar_mod.GLib, gl.app = real_glib, real_app
+    print("PASS: the dial preview rides the strip's payload instead of its own idle")
 
 
 def check_every_port_method_is_headless_safe() -> None:
@@ -447,6 +593,7 @@ def main() -> None:
     check_page_change_follows_action_init()
     check_every_port_method_is_headless_safe()
     check_mirror_pushes_coalesce()
+    check_dial_preview_rides_the_strip_payload()
 
     print("PASS: scenario_ui_port_events")
 

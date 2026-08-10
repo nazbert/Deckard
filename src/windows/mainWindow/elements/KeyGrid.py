@@ -365,6 +365,12 @@ class KeyButton(Gtk.Frame):
         Any thread: image2pixbuf is pure PIL + GdkPixbuf (no GTK), so the
         conversion runs on the caller -- the media thread for live frames --
         and only the widget mutation needs the loop.
+
+        No staleness stamp here, unlike the screenbar's: a key's live frames
+        are coalesced into one slot (so they cannot queue up out of order),
+        and the only other producer is the map-time replay, which dispatches
+        in attach order like every other idle. An inversion between the two
+        costs one stale frame and the next repaint corrects it.
         """
         return image2pixbuf(image.convert("RGBA"), force_transparency=True)
 

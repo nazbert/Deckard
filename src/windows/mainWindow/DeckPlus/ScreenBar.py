@@ -38,6 +38,11 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.windows.mainWindow.elements.PageSettingsPage import PageSettingsPage
 
+# (icon selector, dial pixbuf, its task id), or None when no dial is selected.
+DialPreview = tuple[Any, Any, int] | None
+# What one mirrored strip frame carries: (pixbuf, task id, dial preview).
+MirrorFrame = tuple[Any, int, DialPreview]
+
 class ScreenBar(Gtk.Frame):
     def __init__(self, page_settings_page: "PageSettingsPage", identifier: Input.Touchscreen, **kwargs):
         self.page_settings_page = page_settings_page
@@ -243,9 +248,11 @@ class ScreenBarImage(Gtk.Picture):
         self.on_map_tasks: list[Callable[[], Any]] = []
         self.connect("map", self.on_map)
 
-        # next() on a count is atomic; a read-modify-write on latest_task_id
-        # would hand two frames the same id now that producers are threads,
-        # letting a stale one pass the check in set_pixbuf_and_del.
+        # next() on a count is atomic, so no two frames are handed the same id
+        # now that producers are threads. Publishing it is still a plain
+        # store, so two producers can land their ids out of order and the
+        # older one wins the check in set_pixbuf_and_del; the next frame
+        # corrects it, and one producer per screenbar is the normal case.
         self.task_ids = itertools.count()
         # None until the first frame is queued.
         self.latest_task_id: int | None = None
@@ -266,16 +273,21 @@ class ScreenBarImage(Gtk.Picture):
         # starve the main loop's layout/draw.
         GLib.idle_add(self.paint_mirror_frame, self.prepare_mirror_frame(image))
 
-    def prepare_mirror_frame(self, image: Image.Image) -> tuple[Any, int]:
+    def prepare_mirror_frame(self, image: Image.Image) -> MirrorFrame:
         """The paint-ready payload for `paint_mirror_frame`.
 
-        Any thread: the thumbnail and both conversions are pure PIL +
+        Any thread: the thumbnail and every conversion are pure PIL +
         GdkPixbuf, so they run on the caller (the media thread for live
         frames) and only the paint needs the loop. The mapped check lives in
         set_pixbuf_and_del - widget state can't be read from off-main.
 
         The task id travels WITH the pixbuf so a paint that lost the race to a
-        newer frame still drops out in set_pixbuf_and_del.
+        newer frame still drops out in set_pixbuf_and_del. It is stamped on
+        THIS widget while the mirror's drain re-resolves the screenbar from
+        the deck stack, so the stamp only decides between frames of one
+        widget: a screenbar replaced between a push and its paint would take
+        the id with it, and the replacement's own frames re-stamp from its own
+        counter.
         """
         width = 385 #TODO: Find a better way to do this
         thumbnail = image.copy()
@@ -288,37 +300,48 @@ class ScreenBarImage(Gtk.Picture):
         thumbnail.close()
         del thumbnail
 
-        self._push_dial_preview(image)
-        return pixbuf, task_id
+        return pixbuf, task_id, self._prepare_dial_preview(image)
 
-    def paint_mirror_frame(self, payload: tuple[Any, int]) -> bool:
+    def paint_mirror_frame(self, payload: MirrorFrame) -> bool:
         # Main loop only. Returns False: a GLib idle callback that returns
         # truthy re-arms forever.
-        pixbuf, task_id = payload
+        pixbuf, task_id, dial = payload
         self.set_pixbuf_and_del(pixbuf, task_id)
+        if dial is not None:
+            # Already on the loop, so this needs no idle of its own -- and
+            # riding the strip's payload is what keeps it coalesced.
+            icon_selector, dial_pixbuf, dial_task_id = dial
+            icon_selector.set_pixbuf_and_del(dial_pixbuf, dial_task_id)
         return False
 
-    def _push_dial_preview(self, image: Image.Image) -> None:
-        # The sidebar's icon preview for a selected dial is cropped out of the
-        # strip frame, so it rides along with the conversion above -- on the
-        # producer thread, off the loop.
+    def _prepare_dial_preview(self, image: Image.Image) -> DialPreview:
+        """The sidebar's icon preview for a selected dial, cropped out of this
+        same strip frame and converted here on the producer.
+
+        It travels in the strip's payload rather than in a slot of its own:
+        the crop cannot be newer or older than the frame it came from, so one
+        payload keeps the two in step and costs no second callback. Sending it
+        straight to IconSelector.set_image instead would put an uncoalesced
+        idle per produced frame back on the loop.
+        """
         if gl.app is None or not recursive_hasattr(gl, "app.main_win.sidebar"):
-            return
+            return None
 
         identifier = gl.app.main_win.sidebar.active_identifier
-        if isinstance(identifier, Input.Dial):
-            # Own controller, not whichever deck happens to be visible: this
-            # widget belongs to one deck, and resolving via the deck stack
-            # would be a GTK read on the producer thread.
-            touch_screen = self.screenbar.deck_controller.get_input(Input.Touchscreen("sd-plus"))
-            if touch_screen is None:
-                return
-            dial_image_area = touch_screen.get_dial_image_area(identifier)
+        if not isinstance(identifier, Input.Dial):
+            return None
+        # Own controller, not whichever deck happens to be visible: this
+        # widget belongs to one deck, and resolving via the deck stack
+        # would be a GTK read on the producer thread.
+        touch_screen = self.screenbar.deck_controller.get_input(Input.Touchscreen("sd-plus"))
+        if touch_screen is None:
+            return None
 
-            dial_image = image.crop(dial_image_area)
-
-            # Converts on this thread as well and idles only its own paint.
-            gl.app.main_win.sidebar.key_editor.icon_selector.set_image(dial_image)
+        icon_selector = gl.app.main_win.sidebar.key_editor.icon_selector
+        dial_image = image.crop(touch_screen.get_dial_image_area(identifier))
+        pixbuf = image2pixbuf(dial_image.convert("RGBA"), force_transparency=True)
+        icon_selector.latest_task_id = icon_selector.get_new_task_id()
+        return icon_selector, pixbuf, icon_selector.latest_task_id
 
     def set_pixbuf_and_del(self, pixbuf, task_id: int = None):
         if task_id is not None:

@@ -113,6 +113,13 @@ class _MirrorSlot:
                 self._last_drain = time.monotonic()
             return payload
 
+    def disarm(self) -> None:
+        """Undo an `offer` whose callback never got scheduled. The payload
+        stays: without this the slot looks armed forever and the input's
+        preview freezes with a frame pinned behind it."""
+        with self._lock:
+            self._armed = False
+
 
 class GtkUIAdapter(ui_port.UIPort):
     def __init__(self):
@@ -214,7 +221,11 @@ class GtkUIAdapter(ui_port.UIPort):
     def unbind(self, controller) -> None:
         self._children.pop(controller, None)
         self._page_sync_queued.pop(controller, None)
-        for key in [k for k in self._mirror_slots if k[0] is controller]:
+        # list() first: the media thread creates a slot the first time it
+        # mirrors an input, and a size change under the comprehension would
+        # raise straight through on_deck_removed -- which would skip the
+        # controller's close() and strand its media thread and USB handle.
+        for key in [k for k in list(self._mirror_slots) if k[0] is controller]:
             del self._mirror_slots[key]
 
     def _on_window_map(self, *args) -> None:
@@ -283,13 +294,22 @@ class GtkUIAdapter(ui_port.UIPort):
             if delay_s is None:
                 # A drain is already armed and now carries this frame.
                 return True
-            if delay_s <= 0:
-                # Default idle priority: high-priority pixbuf updates every
-                # frame can starve the main loop's layout/draw.
-                GLib.idle_add(self._drain_mirror, controller, identifier)
-            else:
-                GLib.timeout_add(int(delay_s * 1000) + 1, self._drain_mirror,
-                                 controller, identifier)
+            try:
+                # Idle priority on BOTH arms: pixbuf updates that outrank
+                # GTK's layout/draw (priority 120) starve the very redraw
+                # they are feeding. timeout_add defaults to priority 0, so
+                # the delayed arm has to say so explicitly.
+                if delay_s <= 0:
+                    GLib.idle_add(self._drain_mirror, controller, identifier)
+                else:
+                    GLib.timeout_add(int(delay_s * 1000) + 1, self._drain_mirror,
+                                     controller, identifier,
+                                     priority=GLib.PRIORITY_DEFAULT_IDLE)
+            except BaseException:
+                # Nothing will drain this slot now; leaving it armed would
+                # freeze the input for good.
+                slot.disarm()
+                raise
             return True
         except Exception:
             # Open failure set: widget lookups race window teardown, and
