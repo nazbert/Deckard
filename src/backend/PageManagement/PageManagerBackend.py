@@ -31,6 +31,7 @@ from src.backend.PageManagement.Page import Page
 from src.backend.PageManagement import page_flush
 from src.backend.PageManagement.page_flush import canonical_path
 from src.backend.PageManagement.page_document import PageDocument
+from src.backend.PageManagement.page_pins import PagePins
 from src.backend.DeckManagement.HelperMethods import natural_sort_by_filenames
 from src.backend.atomic_json import atomic_write_json
 
@@ -78,6 +79,9 @@ class PageManagerBackend:
         # the new Page fills from the new file.
         self._documents: dict[str, PageDocument] = {}
         self._documents_guard = threading.Lock()
+        # Holders of a cached page that eviction cannot see for itself.
+        # Public: the deck controller brackets its tick and key work with it.
+        self.pins = PagePins()
         self.custom_pages = []
 
         self.page_order = []
@@ -127,6 +131,7 @@ class PageManagerBackend:
                     entry["page_number"] = self.page_number
                     page_object: Page | None = entry["page"]
                     self.page_number += 1
+                    self.pins.reserve_fetch(page_object, deck_controller)
                     return page_object
 
                 in_flight = self._loads_in_flight.get(in_flight_key)
@@ -143,6 +148,7 @@ class PageManagerBackend:
                 # the pre-guard twin-page tradeoff, now confined to this
                 # pathological case.
                 page_object = self.load_page(path, deck_controller)
+                self.pins.reserve_fetch(page_object, deck_controller)
                 self.clear_old_cached_pages()
                 return page_object
 
@@ -163,6 +169,9 @@ class PageManagerBackend:
                 self._loads_in_flight.pop(in_flight_key, None)
             done.set()
 
+        # Reserved BEFORE this fetch's own eviction pass, which reaches a
+        # fresh page (it sorts last) only when the excess covers all of them.
+        self.pins.reserve_fetch(page_object, deck_controller)
         self.clear_old_cached_pages()
         return page_object
 
@@ -195,6 +204,8 @@ class PageManagerBackend:
 
         with self._pages_lock:
             self.pages.pop(deck_controller, None)
+            # The deck is gone, so its outstanding fetch has no future holder.
+            self.pins.release_fetch(deck_controller)
 
     def pages_for_controller(self, deck_controller: "DeckController") -> list["Page"]:
         """Snapshot of every cached Page object for one controller. Used by
@@ -271,7 +282,7 @@ class PageManagerBackend:
                 return
 
             # Oldest first by page_number; the active page of each controller
-            # and pages mid-tick (ready_to_clear False) are never evicted.
+            # and every pinned page (fetched, mid-tick, mid-gesture) are safe.
             evictable = []
             for controller, controller_pages in self.pages.items():
                 if controller.active_page is None:
@@ -280,7 +291,7 @@ class PageManagerBackend:
                     page_obj = page_data["page"]
                     if page_obj is controller.active_page:
                         continue
-                    if not page_obj.ready_to_clear:
+                    if self.pins.is_pinned(page_obj):
                         continue
                     evictable.append((page_data["page_number"], controller_pages, path, page_obj))
 
@@ -296,26 +307,15 @@ class PageManagerBackend:
             # between the snapshot and this point the page may have
             # become live -- activated by a load_page (WindowGrabber cycling
             # generates exactly this cache pressure), stashed as a
-            # controller's screensaver-pending page, or re-marked mid-tick.
-            # Pop INSIDE the lock and BEFORE the teardown, so a concurrent
-            # get_page() mints a fresh Page instead of receiving this gutted
-            # one.
-            #
-            # Residual NOT covered here (needs ownership pin-counts): a page
-            # already fetched via get_page() but not yet handed to load_page()
-            # is neither active_page nor screensaver-pending and is born
-            # ready_to_clear=True (Page.__init__), so it stays evictable in
-            # this pre-activation window. The harm there is narrow: its
-            # action_objects are still empty (built by load_page ->
-            # initialize_actions, which runs only after active_page is set),
-            # so clear_action_objects() is a near-no-op -- the observable
-            # effect is just the duplicate-Page mint. Only ownership
-            # pin-counts close this structurally.
+            # controller's screensaver-pending page, or newly pinned by a
+            # fetch or a bracket. Pop INSIDE the lock and BEFORE the teardown,
+            # so a concurrent get_page() mints a fresh Page instead of
+            # receiving this gutted one.
             with self._pages_lock:
                 page_data = controller_pages.get(path)
                 if page_data is None or page_data.get("page") is not page_obj:
                     continue  # already discarded/replaced
-                if not page_obj.ready_to_clear:
+                if self.pins.is_pinned(page_obj):
                     continue
                 if self._page_is_live(page_obj):
                     continue
@@ -331,7 +331,12 @@ class PageManagerBackend:
         active, or stashed as the screensaver-pending page (held for the
         whole screensaver duration and invisible to the snapshot guards --
         evicting it made ScreenSaver.hide() load a page whose every action
-        was dead)."""
+        was dead).
+
+        Kept alongside the pins, not folded into them: this is DERIVED from
+        what the controllers hold, so it is exact and has no release to drop.
+        Pins cover the complement -- the windows where no controller field
+        names the page yet, or no longer does while work on it is in flight."""
         for controller in (gl.deck_manager.deck_controller if gl.deck_manager is not None else []):
             if controller.active_page is page_obj:
                 return True
@@ -423,6 +428,9 @@ class PageManagerBackend:
 
             page.json_path = new_path
             page.rebind_document(document)
+            # A rename is not a handoff -- nothing here activates the page --
+            # so this fetch retires on the spot.
+            self.pins.release_fetch(controller)
 
         # Update path in Settings file
         for serial_number, path in default_pages.items():

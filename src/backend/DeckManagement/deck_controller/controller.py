@@ -1080,6 +1080,12 @@ class DeckController:
                     for controller_input in self.inputs[input_type]:
                         controller_input.config_gen = gen
 
+            # Installed: active_page protects it now, so the fetch can stop
+            # doing so. The screensaver branch skips this deliberately -- its
+            # page reaches no deck yet; the reservation carries it to hide().
+            if (manager := gl.page_manager) is not None:
+                manager.pins.release_fetch(self)
+
             if page is None:
                 # Clear deck
                 self.clear()
@@ -1227,13 +1233,15 @@ class DeckController:
             # armed at the sites that lose the write (_on_write_result,
             # _exec_clear). Restoring the page on wake is hide()'s
             # load_page().
-            if not self.screen_saver.showing:
-                for t in self.inputs:
-                    for i in self.inputs[t]:
-                        i.get_active_state().own_actions_tick_threaded()
-
-            # Reset the SAME page the False-call marked.
-            self.mark_page_ready_to_clear(True, ticked_page)
+            try:
+                if not self.screen_saver.showing:
+                    for t in self.inputs:
+                        for i in self.inputs[t]:
+                            i.get_active_state().own_actions_tick_threaded()
+            finally:
+                # Reset the SAME page the False-call marked, in `finally`
+                # because a raising body would otherwise pin it forever.
+                self.mark_page_ready_to_clear(True, ticked_page)
 
             end = time.time()
             wait = max(0.1, self.TICK_DELAY - (end - start))
@@ -1260,18 +1268,10 @@ class DeckController:
         return keys[index]
 
     def mark_page_ready_to_clear(self, ready_to_clear: bool, page: "Page" = None):
-        """Marks (and returns) the page whose eviction-safety flag was set.
-        Callers that bracket work between a False-call and a True-call MUST
-        pass the page captured from the False-call back to the True-call:
-        re-dereferencing active_page after the work marked whatever page a
-        concurrent switch had installed, leaving the OLD page pinned
-        ready_to_clear=False forever -- unevictable, silently shrinking the
-        eviction budget."""
-        if page is None:
-            page = self.active_page
-        if page is not None:
-            page.ready_to_clear = ready_to_clear
-        return page
+        """Pins (False) or releases (True) the page bracketed work must
+        outlive, and returns it -- PagePins.bracket has the pass-back rule."""
+        page = self.active_page if page is None else page
+        return page if (pm := gl.page_manager) is None else pm.pins.bracket(page, ready_to_clear)
     
     def get_deck_settings(self):
         if not self.get_alive():

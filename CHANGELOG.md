@@ -9,6 +9,11 @@ bundle as a release asset.
 
 ### Fixed
 
+- Switching to a page while several pages are already cached no longer lands
+  you on a dead one. With enough pages open the app could discard a page in
+  the moment between picking it and showing it, leaving a deck whose keys
+  looked right but did nothing until the page was loaded again — and leaving
+  a second, competing copy of that page behind.
 - Page edits made in different places at the same time no longer overwrite
   each other. Changing a page's settings — a screensaver, brightness,
   background or window-rule override — while a plugin or a key edit was
