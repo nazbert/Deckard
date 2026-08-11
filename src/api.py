@@ -276,29 +276,182 @@ def start_dbus_service():
         _api_instance = DeckardAPI()
         _bus.publish_object(DBUS_OBJECT_PATH, _api_instance)
 
-        # Publish a sub-object for each connected controller
+        # Catch-up sweep for the decks that were registered before the service
+        # existed; every later arrival publishes itself from the deck
+        # lifecycle. This already runs on the main context, so the same worker
+        # the lifecycle marshals to is called directly -- one code path, and
+        # one deck that fails to publish no longer abandons the rest.
         if gl.deck_manager is not None:
-            for controller in gl.deck_manager.deck_controller:
-                _publish_controller(controller)
+            for controller in list(gl.deck_manager.deck_controller):
+                _publish_on_main(controller)
 
         log.success(f"DBus API published at {DBUS_OBJECT_PATH}")
     except Exception as e:
         log.error(f"Failed to start DBus API service: {e}")
 
 
-def _publish_controller(controller):
-    """Publish a ControllerInstanceAPI for a single deck controller."""
-    global _bus
+def publish_controller(controller) -> None:
+    """Put a deck controller on the bus, from wherever it was registered.
+
+    Decks are registered from the USB monitor thread, the boot re-enumeration
+    thread and the main thread, while dasbus keeps its object registrations in
+    a plain dict and dispatches them on the GLib main context -- so the
+    registration itself is marshalled there and nowhere else.
+
+    The bus check is the first statement and dereferences nothing: callers
+    reach this during boot with a controller that is still being built, and
+    with no service to publish to there is nothing to look at. Those decks are
+    covered by start_dbus_service's sweep.
+    """
+    if _bus is None:
+        return
+    GLib.idle_add(_publish_on_main, controller)
+
+
+def unpublish_controller(controller) -> None:
+    """Take a deck controller off the bus when it is removed.
+
+    Guard and marshal exactly as publish_controller does. A client holding a
+    proxy for the removed deck gets UnknownObject from here on, which is what
+    stops the published object set and the Controllers property from
+    disagreeing about which decks exist.
+    """
+    if _bus is None:
+        return
+    GLib.idle_add(_unpublish_on_main, controller)
+
+
+def _known_serial(controller) -> str:
+    """The controller's serial without asking the device for it -- usable on a
+    failure path, where the deck may be exactly what went wrong."""
+    return getattr(controller, "_serial_number", None) or "<unknown>"
+
+
+def _publish_on_main(controller) -> bool:
+    """Idle worker for publish_controller. Main context only."""
+    try:
+        _publish_controller(controller)
+    except Exception as e:
+        log.error(
+            f"DBus API: failed to publish controller {_known_serial(controller)}: "
+            f"{e}. That deck is off the DBus API for this session."
+        )
+    return GLib.SOURCE_REMOVE
+
+
+def _unpublish_on_main(controller) -> bool:
+    """Idle worker for unpublish_controller. Main context only."""
+    try:
+        _unpublish_controller(controller)
+    except Exception as e:
+        log.error(
+            f"DBus API: failed to unpublish controller {_known_serial(controller)}: "
+            f"{e}. Its object stays on the bus, bound to a deck that is gone."
+        )
+    return GLib.SOURCE_REMOVE
+
+
+def _publish_controller(controller) -> None:
+    """Publish a ControllerInstanceAPI for a single deck controller.
+
+    Main context only -- see publish_controller.
+    """
+    if _bus is None:
+        return  # the service stopped between queuing this and running it
+    if gl.deck_manager is None or controller not in gl.deck_manager.deck_controller:
+        # Removed again before this ran. Publishing it now would leave an
+        # object behind that no removal is ever going to clear.
+        return
     serial = controller.serial_number()
-    if serial in _controller_instances:
-        return  # already published
-    path_component = _serial_to_dbus_path(serial)
-    obj_path = f"{CONTROLLER_BASE_PATH}/{path_component}"
+    existing = _controller_instances.get(serial)
+    if existing is not None:
+        if existing._controller is controller or (
+                gl.deck_manager is not None
+                and existing._controller in gl.deck_manager.deck_controller):
+            return  # already published
+        # The serial is still claimed by a controller that has already been
+        # removed: nothing orders its unpublish against this publish, since
+        # removal queues its work outside the deck manager's lock and the
+        # registration sites take no lock at all. Drop the dead object here
+        # rather than leave the deck that is actually plugged in off the API
+        # for the rest of the session. The unpublish that arrives afterwards
+        # looks its entry up by controller identity, finds the serial bound to
+        # this fresh controller, and correctly does nothing.
+        log.warning(
+            f"DBus API: replacing the stale object for deck {serial} -- its "
+            f"controller was removed, and this publish arrived first."
+        )
+        _bus.unpublish_object(existing._object_path)
+        del _controller_instances[serial]
+    obj_path = f"{CONTROLLER_BASE_PATH}/{_serial_to_dbus_path(serial)}"
+    taken_by = _serial_published_at(obj_path)
+    if taken_by is not None:
+        log.error(
+            f"DBus API: not publishing controller {serial}: {obj_path} already "
+            f"belongs to {taken_by}. Two serials that differ only in characters "
+            f"a DBus path cannot carry map to one path; that deck stays off the "
+            f"API rather than taking over another deck's object."
+        )
+        return
     instance = ControllerInstanceAPI(controller)
     instance._object_path = obj_path
-    _controller_instances[serial] = instance
+    # Seed the page the deck is already showing. The boot page is loaded
+    # before this object exists, so waiting for the first switch to feed
+    # ActivePageName left it reading empty on a deck that plainly had a page.
+    active_page = controller.active_page
+    instance._active_page_name = "" if active_page is None else active_page.get_name()
     _bus.publish_object(obj_path, instance)
+    # Recorded only once the bus accepted it, so a failed publish leaves the
+    # serial free to be published again rather than permanently claimed.
+    _controller_instances[serial] = instance
     log.info(f"DBus API: published controller {serial} at {obj_path}")
+    _emit_controllers_changed()
+
+
+def _unpublish_controller(controller) -> None:
+    """Remove a controller's object from the bus.
+
+    Main context only -- see unpublish_controller.
+    """
+    if _bus is None:
+        return  # already stopped, which unpublished everything
+    serial = _serial_published_for(controller)
+    if serial is None:
+        # Never published, already unpublished, or -- after a fast replug --
+        # the serial now belongs to the fresh controller, whose object must
+        # stay up. Identity, not serial, is what this call is about.
+        return
+    instance = _controller_instances.pop(serial)
+    _bus.unpublish_object(instance._object_path)
+    log.info(f"DBus API: unpublished controller {serial} from {instance._object_path}")
+    _emit_controllers_changed()
+
+
+def _serial_published_at(obj_path: str) -> str | None:
+    """The serial already published at `obj_path`, if any."""
+    for serial, instance in _controller_instances.items():
+        if instance._object_path == obj_path:
+            return serial
+    return None
+
+
+def _serial_published_for(controller) -> str | None:
+    """The serial this exact controller is published under, if any."""
+    for serial, instance in _controller_instances.items():
+        if instance._controller is controller:
+            return serial
+    return None
+
+
+def _emit_controllers_changed() -> None:
+    """Tell clients watching the top-level object that the deck inventory
+    moved, so arrivals and removals are a signal rather than a poll."""
+    if _api_instance is None:
+        return
+    _emit_properties_changed(
+        DBUS_OBJECT_PATH, TOP_IFACE,
+        {"Controllers": GLib.Variant("as", _api_instance.Controllers)},
+    )
 
 
 def stop_dbus_service():
