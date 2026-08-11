@@ -23,6 +23,7 @@ Covers:
 
 GIF fixtures are generated with PIL at runtime -- no binary fixtures.
 """
+import json
 import os
 
 import fixtures
@@ -63,7 +64,64 @@ def _reference_canvas(gif_path: str, frame_index: int, canvas_size) -> Image.Ima
         return ImageOps.fit(gif.convert("RGBA"), tuple(canvas_size), Image.Resampling.LANCZOS)
 
 
+def _seed_deck_background(serial: str, gif_path: str) -> None:
+    """Put the extended GIF background in the deck's settings BEFORE the
+    controller exists.
+
+    check_deck_background sets the same background on the object directly,
+    which is the state it means to test. But the controller loads the deck's
+    background on a worker thread while it is starting up, and that load reads
+    these settings -- so with nothing on disk it read `extend-to-touchscreen`
+    absent, defaulted to False, and turned the extension back off underneath
+    the check whenever it landed after it. Seeding the values the check sets
+    makes the two agree: whichever order they run in, both apply the same
+    background with the same geometry. It also means the check now covers the
+    real read path -- a deck-scope background, loaded from the deck's own
+    settings -- rather than only the direct setters.
+
+    Written raw because the settings manager does not exist yet: the fixture
+    builds it while it builds the controller, which is the point of writing
+    this first.
+    """
+    path = os.path.join(gl.DATA_PATH, "settings", "decks", f"{serial}.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        # loop/fps match set_from_path's defaults, which is what the check
+        # calls, so the two applications are identical in every argument.
+        json.dump({"background": {
+            "enable": True,
+            "extend-to-touchscreen": True,
+            "media-path": gif_path,
+            "loop": True,
+            "fps": 30,
+        }}, f)
+
+
+def _await_startup_background(controller) -> None:
+    """Wait out the controller's own background load before touching it.
+
+    The load runs on a worker thread as the controller starts, and it goes
+    through the same setters this check does -- so anything it does after the
+    check has begun lands in the middle of it: the flag turned back off, or a
+    rebuild in flight when the check asks for the published tile (which is
+    None mid-rebuild, by contract). Seeding the deck settings above makes the
+    two agree on WHAT to apply; this makes them agree on WHEN, so the check
+    reads a settled background instead of one still being built.
+
+    The published tile is the signal because it is the last thing the load
+    publishes and exactly what the check reads. The lock is then taken and
+    released to fence the worker's exit from the load itself: the tile appears
+    while it is still held."""
+    assert fixtures.wait_until(
+        lambda: controller.background.get_identified_tile(0) is not None, timeout=10.0
+    ), "the controller never published its deck-scope background"
+    with controller._background_load_lock:
+        pass
+
+
 def check_deck_background(controller, gif_path: str) -> None:
+    _await_startup_background(controller)
+
     background = controller.background
     background.set_extend_to_touchscreen(True, update=False)
     background.set_from_path(gif_path)
@@ -143,6 +201,7 @@ def main() -> None:
     start_watchdog(60, label="scenario_gif_background")
     gif_path = _make_gif(os.path.join(gl.DATA_PATH, "media", "bg.gif"))
 
+    _seed_deck_background("gif-bg-1", gif_path)
     controller = fixtures.make_headless_controller(serial="gif-bg-1")
     try:
         check_deck_background(controller, gif_path)

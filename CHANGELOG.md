@@ -88,6 +88,18 @@ bundle as a release asset.
   app may still be starting, rather than only that nothing is connected: the
   interface answers from the moment Deckard takes its bus name, which is
   before it has opened any deck.
+- A damaged custom-asset library file no longer prevents Deckard from
+  starting. It was read while the app was still building itself, so an
+  unreadable one stopped the app before any window appeared, with nothing on
+  screen to say why. Deckard now starts with an empty custom-asset library and
+  says so in the log; the damaged file is renamed aside and kept next to the
+  new empty one, so nothing is thrown away, and the asset files themselves are
+  untouched.
+- Importing a StreamDeck UI profile now updates the deck settings the rest of
+  the app is reading. The import wrote its brightness and screensaver
+  preferences straight to the file, so anything that had already read that
+  deck — the deck itself included — could go on showing the settings from
+  before the import until something else caused them to be read again.
 
 ### Changed
 

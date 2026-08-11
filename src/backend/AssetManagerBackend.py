@@ -19,7 +19,6 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk, GLib
 
 # Import Python modules
-import json
 import os
 import shutil
 import uuid
@@ -28,15 +27,19 @@ from loguru import logger as log
 from PIL import Image
 
 # Import own modules
-from src.backend.DeckManagement.HelperMethods import is_video, is_image, sha256, file_in_dir, create_empty_json, download_file, is_svg
-from src.backend.atomic_json import atomic_write_json
+from src.backend.DeckManagement.HelperMethods import is_video, is_image, sha256, file_in_dir, download_file, is_svg
+from src.backend import settings_store
 
 # Import globals
 import globals as gl
 
 
 class AssetManagerBackend(list):
-    JSON_PATH = os.path.join(gl.DATA_PATH, "Assets", "AssetManager", "Assets.json")
+    # Where the library index is, snapshotted at import from the surface that
+    # owns it, so this class and the store cannot name two different files.
+    # The store resolves the path per call; this attribute does not, which is
+    # only safe because the data path is settled before any of this imports.
+    JSON_PATH = settings_store.ASSET_LIBRARY.path()
     def __init__(self):
         self.load_json()
 
@@ -45,16 +48,19 @@ class AssetManagerBackend(list):
         self.remove_invalid_data()
 
     def load_json(self):
-        # Create file if it does not exist
-        create_empty_json(self.JSON_PATH)
-        # Load json file
-        with open(self.JSON_PATH, "r") as f:
-            self.clear()
-            content = json.load(f)
-            self.extend(content)
+        # An unreadable library index must not stop the app from starting:
+        # this constructor runs while the global objects are being built, so a
+        # raise here means the user's app never comes up at all. The store
+        # moves a corrupt index aside to a .corrupt sidecar, logs it and reads
+        # an empty library -- everything else still works, the assets are
+        # still on disk, and the file is still there to look at. An absent
+        # index reads as the empty LIST it is: seeding a fresh install with an
+        # empty object instead put the wrong shape in the file.
+        self.clear()
+        self.extend(settings_store.get().read(settings_store.ASSET_LIBRARY))
 
     def save_json(self):
-        atomic_write_json(self.JSON_PATH, list(self))
+        settings_store.get().write(settings_store.ASSET_LIBRARY, list(self))
 
     def add(self, asset_path: str, licence_name: str = None, licence_url: str = None, author: str = None) -> str | None:
         if not os.path.exists(asset_path):

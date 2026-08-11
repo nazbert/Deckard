@@ -13,13 +13,12 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import Python modules
-import os, json, copy
-from loguru import logger as log
+import os, copy
 from functools import lru_cache
 
 # Import own modules
 import globals as gl
-from src.backend.atomic_json import atomic_write_json, prune_corrupt_sidecars, quarantine_corrupt_file
+from src.backend import settings_store
 
 
 def _fallback_font() -> str:
@@ -383,57 +382,25 @@ class SettingsManager:
         than on the quarantine side-effect having removed the primary: a
         corrupt file is corrupt whether or not it could be moved aside, so
         the recovery must not depend on the rename succeeding.
+
+        A forward, not a second implementation: the read-with-heal lives in
+        the settings store, and the ~30 call sites that reach it through this
+        name are the reason the name stays.
         """
-        if not os.path.exists(file_path):
-            return {}, False
-        try:
-            with open(file_path) as f:
-                return json.load(f), False
-        except FileNotFoundError:
-            # Raced a concurrent quarantine between the exists() check and
-            # the open.
-            return {}, False
-        except ValueError as e:
-            # ValueError, not JSONDecodeError: garbage bytes raise
-            # UnicodeDecodeError while decoding, which is a ValueError but not
-            # a JSON error -- it used to escape this handler and propagate out
-            # of every page/settings load. JSONDecodeError is itself a
-            # ValueError subclass, so one clause covers both.
-            # Quarantine instead of leaving the corrupt file in place: the
-            # caller gets {} either way, but the next save would overwrite
-            # the only remaining copy of the user's data. Renamed aside it
-            # stays recoverable (a prior .corrupt is never clobbered), and
-            # page loads heal from their backup (get_page_data) off the
-            # returned corrupt=True flag regardless of whether this rename
-            # succeeded.
-            moved, dest = quarantine_corrupt_file(file_path)
-            if moved:
-                log.error(f"Invalid json in {file_path}: {e} -- preserved at {dest}, loading empty")
-                # Bounded retention, scoped to the file that just gained a
-                # sidecar -- never a startup-wide sweep. Covers pages
-                # and deck/app settings alike: PageManagerBackend routes its
-                # corrupt-read handling through this loader.
-                for pruned in prune_corrupt_sidecars(file_path, protect=dest):
-                    log.info(f"Pruned old quarantined copy {pruned}")
-            else:
-                log.error(
-                    f"Invalid json in {file_path}: {e} -- could NOT move it aside "
-                    f"(left in place); callers with a backup will heal, loading empty"
-                )
-            return {}, True
+        return settings_store.get().load_file(file_path)
 
     @staticmethod
     def save_settings_to_file(file_path: str, settings: dict) -> None:
-        # Atomic write (tmp file + fsync + os.replace) so an interrupted
-        # write can't truncate the settings file; also creates parent dirs.
-        atomic_write_json(file_path, settings)
+        # A forward: the store writes atomically (tmp file + fsync +
+        # os.replace, so an interrupted write can't truncate the settings
+        # file) and drops any cached surface living at that path.
+        settings_store.get().save_file(file_path, settings)
 
+        # The lru_caches still hosted here have no path of their own to
+        # compare against, so any settings write clears all of them. Surfaces
+        # that have moved to the store are invalidated by the write above,
+        # by path, and are deliberately not swept from here.
         gl.settings_manager.invalidate_all_caches()
-
-    @lru_cache
-    def _load_deck_settings_cached(self, deck_serial_number: str) -> dict:
-        path = os.path.join(gl.DATA_PATH, "settings", "decks", f"{deck_serial_number}.json")
-        return self.load_settings_from_file(path)
 
     def get_deck_settings(self, deck_serial_number: str) -> dict:
         """
@@ -447,12 +414,15 @@ class SettingsManager:
         Returns:
             dict: The deck settings loaded from the file.
         """
-        return copy.deepcopy(self._load_deck_settings_cached(deck_serial_number))
-    
+        return settings_store.get().read(settings_store.DECK, deck_serial_number)
+
     def save_deck_settings(self, deck_serial_number: str, settings: dict) -> None:
         """
         Saves the settings for a deck.
-        This is just a wrapper around save_settings_to_file()
+
+        The write is atomic and invalidates this deck's cached copy -- and
+        only this deck's: a settings write elsewhere in the tree cannot change
+        what is in a deck's file, so it has no business clearing it.
 
         Args:
             deck_serial_number (str): The serial number of the deck.
@@ -461,10 +431,7 @@ class SettingsManager:
         Returns:
             None
         """
-        path = os.path.join(gl.DATA_PATH, "settings", "decks", f"{deck_serial_number}.json")
-        self.save_settings_to_file(path, settings)
-
-        self.invalidate_all_caches()
+        settings_store.get().write(settings_store.DECK, settings, deck_serial_number)
 
     @lru_cache
     def get_app_settings(self) -> dict:
