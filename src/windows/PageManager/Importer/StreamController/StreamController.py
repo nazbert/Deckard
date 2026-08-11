@@ -53,7 +53,7 @@ class StreamControllerImporter:
 
             self.save_json(page_path, page)
 
-            gl.page_manager.update_dict_of_pages_with_path(page_path)
+            gl.page_manager.refresh_document(page_path)
             gl.page_manager.reload_pages_with_path(page_path)
 
             log.success(f"Imported page {page_name}")

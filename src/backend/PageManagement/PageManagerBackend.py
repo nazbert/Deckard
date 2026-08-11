@@ -28,6 +28,7 @@ from src.backend.DeckManagement.deck_controller.controller import DeckController
 # Import own modules
 from src.backend.PageManagement.Page import Page
 from src.backend.PageManagement import page_flush
+from src.backend.PageManagement.page_document import PageDocument, document_key
 from src.backend.DeckManagement.HelperMethods import natural_sort_by_filenames
 from src.backend.atomic_json import atomic_write_json
 
@@ -58,6 +59,16 @@ class PageManagerBackend:
         # the first construction instead of building a twin Page whose
         # actions register live event/signal handlers.
         self._loads_in_flight: dict[tuple, tuple[threading.Thread, threading.Event]] = {}
+        # One document per page file, keyed by resolved path: the content of
+        # that page, held once and shared by every Page object on it. Never
+        # pruned -- one entry per distinct page path, which is the bound the
+        # flush seam's per-path save locks already live under (tens), so
+        # eviction would buy nothing and cost the guarantee the registry is
+        # for. A page deleted and later recreated under the same name reuses
+        # its document, which the load that mints the new Page fills from the
+        # new file.
+        self._documents: dict[str, PageDocument] = {}
+        self._documents_guard = threading.Lock()
         self.custom_pages = []
 
         self.page_order = []
@@ -380,6 +391,14 @@ class PageManagerBackend:
 
         shutil.copy2(old_path, new_path)
 
+        # The content follows the file, before the loop below rather than
+        # after it: the loop asks for the page under its OLD name, which mints
+        # a Page (and with it a document) for any deck that did not have it
+        # cached. Moving first leaves those mints to a throwaway document at
+        # the old name and keeps the one carrying the real content -- pending
+        # edits included -- out of their reach.
+        document = self.rename_document(old_path, new_path)
+
         page_settings = gl.settings_manager.load_settings_from_file(self.PAGE_SETTINGS_PATH)
         default_pages = page_settings.get("default-pages", {})
 
@@ -394,6 +413,7 @@ class PageManagerBackend:
                 continue
 
             page.json_path = new_path
+            page.rebind_document(document)
 
         # Update path in Settings file
         for serial_number, path in default_pages.items():
@@ -607,23 +627,77 @@ class PageManagerBackend:
                 continue
             controller.load_page(active_page, allow_reload=True)
 
-    def update_dict_of_pages_with_path(self, path: str) -> None:
-        # Re-reading from disk can't lose unsaved in-memory edits: every
-        # in-tree Page.dict mutator persists via save() in the same call.
-        # A path with a pending flush is the one case where that invariant
-        # is suspended, and there the dirty Page -- not the file -- is the
-        # authority: propagating its snapshot is what re-reading a file the
-        # flush has already written would have returned anyway, without the
-        # round trip.
-        source = page_flush.get().pending_page(path)
-        pages = self.get_pages_with_path(path)
-        for page in pages:
-            if source is None:
-                page.update_dict()
-            elif page is not source:
-                # A snapshot per sibling: every Page owns its dict outright,
-                # exactly as a per-page disk read handed it one.
-                page.dict = source.get_without_action_objects()
+    def get_document(self, path: str) -> PageDocument:
+        """The one document holding `path`'s content, minted on first ask.
+
+        Every Page on a path goes through here, which is what makes them
+        share a dict instead of each holding a copy of the file.
+        """
+        key = document_key(path)
+        with self._documents_guard:
+            document = self._documents.get(key)
+            if document is None:
+                document = PageDocument(path)
+                self._documents[key] = document
+            return document
+
+    def refresh_document(self, path: str) -> None:
+        """Re-read `path` into the document holding it, if there is one.
+
+        For the writers that put bytes in a page file without going through
+        the page that owns it -- an import, a whole-settings write, the asset
+        sweep. Every Page on that path is looking at the document, so one
+        re-read is the whole propagation.
+
+        A path this process has never held is left alone rather than loaded:
+        there is no in-memory content to correct, and the load that mints its
+        first Page reads the file anyway.
+        """
+        with self._documents_guard:
+            document = self._documents.get(document_key(path))
+        if document is None:
+            return
+        document.refresh_from_disk()
+
+    def rename_document(self, old_path: str, new_path: str) -> PageDocument:
+        """Re-file `old_path`'s content under `new_path` and return it.
+
+        A page move re-points every Page's json_path in place, so the document
+        those Pages read through has to follow the same file -- otherwise the
+        next page created under the freed-up old name would be handed the
+        moved page's content.
+
+        The document object itself is carried over rather than reloaded,
+        because it can hold edits that are on no disk yet: a save landing in
+        the move's own window is dropped from the pending map (a timer firing
+        after the move would write the moved-from file back into existence)
+        but stays in memory for the next save to carry to the new name. A
+        reload here would be exactly the thing that loses it.
+
+        A document already standing at the destination is displaced. Its file
+        has just been overwritten by the move, so nothing it holds describes
+        that file any more, and its Pages carry on off their own content
+        exactly as they did before -- which only a rename onto a page name
+        another deck is showing can produce.
+        """
+        old_key = document_key(old_path)
+        new_key = document_key(new_path)
+        with self._documents_guard:
+            moved = self._documents.pop(old_key, None)
+            if moved is not None:
+                moved.path = new_path
+                self._documents[new_key] = moved
+                return moved
+            standing = self._documents.get(new_key)
+            if standing is not None:
+                return standing
+            document = PageDocument(new_path)
+            self._documents[new_key] = document
+        # Nothing in this process was holding the moved-from page, so this
+        # document starts empty; the file it names is the copy the move has
+        # already made, and the Pages about to bind it need its content.
+        document.refresh_from_disk()
+        return document
 
     def get_page_data(self, path: str, use_backup: bool = True) -> dict:
         """
@@ -664,7 +738,7 @@ class PageManagerBackend:
 
     def set_page_data(self, path: str, data: dict, reload_brightness: bool = True, reload_screensaver: bool = True, reload_background: bool = True, reload_inputs: bool = True):
         self.settings_manager.save_settings_to_file(path, data)
-        self.update_dict_of_pages_with_path(path)
+        self.refresh_document(path)
         if any([reload_brightness, reload_screensaver, reload_background, reload_inputs]):
             self.reload_pages_with_path(path,
                                         brightness=reload_brightness,
@@ -729,8 +803,8 @@ class PageManagerBackend:
                 # Write updated page data back to file (atomically)
                 atomic_write_json(page_path, page_dict)
 
-                # Update internal cache or tracking dict with this page path
-                self.update_dict_of_pages_with_path(page_path)
+                # Bring the in-memory page in line with the file just written
+                self.refresh_document(page_path)
 
                 # Reload any loaded Page objects corresponding to this file
                 pages = self.get_pages_with_path(page_path)
@@ -833,14 +907,15 @@ class PageManagerBackend:
         data["settings"] = settings
         self.settings_manager.save_settings_to_file(path, data)
 
-        # Refresh EVERY cached Page object for this path, not just the ones
-        # active on a controller (same mechanism set_page_data uses). A
-        # cached-but-not-active Page kept its pre-edit dict here, and the
-        # next Page.save() from any trigger (plugin set_settings, key/state
-        # edits, ...) rewrote the file from that stale dict -- silently
-        # erasing the just-saved settings section (auto-change, screensaver,
-        # brightness, background overrides).
-        self.update_dict_of_pages_with_path(path)
+        # This wrote the file behind the page's back, so the page has to be
+        # told. Every Page on this path reads through the one document, so
+        # this reaches the cached-but-not-active ones too -- and those are the
+        # ones that mattered: such a Page kept its pre-edit dict, and the next
+        # Page.save() from any trigger (plugin set_settings, key/state edits,
+        # ...) rewrote the file from it, silently erasing the just-saved
+        # settings section (auto-change, screensaver, brightness, background
+        # overrides).
+        self.refresh_document(path)
 
     def any_auto_change_rule_enabled(self) -> bool:
         """True when at least one page has its window auto-change switched on.

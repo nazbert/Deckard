@@ -145,13 +145,11 @@ def _settle(grabber: WindowGrabber) -> None:
 # ===================================================================== #
 
 class StubPage:
+    """Only json_path: writing a page's settings refreshes the one document
+    that holds its content, not the Page objects reading through it."""
+
     def __init__(self, json_path: str):
         self.json_path = json_path
-
-    def update_dict(self) -> None:
-        """Writing a page's settings refreshes every cached Page on that
-        path, and a deck sitting on the page being edited is found through
-        its active_page -- which here is this stub."""
 
 
 class StubDeck:

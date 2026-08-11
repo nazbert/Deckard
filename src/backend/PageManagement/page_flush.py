@@ -285,8 +285,9 @@ class PageFlush:
     def pending_page(self, path: str) -> "Page | None":
         """The Page whose edits `path` is still waiting for, or None.
 
-        The authority question, asked by anything that would otherwise re-read
-        the file to find out what the page says.
+        Whether a path is still ahead of its file, and who holds the edits --
+        the seam's own state, readable so that the ordering rules stated here
+        can be asserted from outside rather than taken on trust.
         """
         with self._pending_guard:
             entry = self._pending.get(path)
