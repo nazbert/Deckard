@@ -65,10 +65,6 @@ import os
 import time
 import threading
 
-import usb.core
-import usb.util
-from StreamDeck.DeviceManager import DeviceManager
-
 # Cap OpenCV's global parallel_for_ pool before the first cv2 call anywhere
 # in the app -- the pool is created lazily and sized to nproc by default,
 # which is where the 32 same-second "background_0"-named threads come from
@@ -279,32 +275,6 @@ def update_assets():
     # Show toast in ui
     gl.notify.info(f"{number_of_installed_updates} assets updated")
 
-@log.catch
-def reset_all_decks():
-    # Find all USB devices
-    devices = usb.core.find(find_all=True, idVendor=DeviceManager.USB_VID_ELGATO)
-    for device in devices:
-        try:
-            # Check if it's a StreamDeck
-            if device.idProduct in [
-                DeviceManager.USB_PID_STREAMDECK_ORIGINAL,
-                DeviceManager.USB_PID_STREAMDECK_ORIGINAL_V2,
-                DeviceManager.USB_PID_STREAMDECK_MINI,
-                DeviceManager.USB_PID_STREAMDECK_XL,
-                DeviceManager.USB_PID_STREAMDECK_MK2,
-                DeviceManager.USB_PID_STREAMDECK_PEDAL,
-                DeviceManager.USB_PID_STREAMDECK_PLUS,
-                DeviceManager.USB_PID_STREAMDECK_MK2_SCISSOR,
-                DeviceManager.USB_PID_STREAMDECK_MK2_MODULE,
-                DeviceManager.USB_PID_STREAMDECK_MINI_MK2_MODULE,
-                DeviceManager.USB_PID_STREAMDECK_XL_V2_MODULE,
-            ]:
-                # Reset deck
-                usb.util.dispose_resources(device)
-                device.reset()
-        except (usb.core.USBError, NotImplementedError):
-            log.error("Failed to reset deck, maybe it's already connected to another instance? Skipping...")
-
 
 def name_has_owner(session_bus: Gio.DBusConnection, name: str) -> bool:
     """Is `name` owned on the session bus right now?
@@ -386,7 +356,7 @@ def quit_running():
 
     # Transition guard for the rename (docs/rename-deckard-plan.md, Phase 2):
     # a pre-rename build still owning the old bus name is invisible to the
-    # gate above, and reset_all_decks() below would USB-reset decks it owns.
+    # gate above, and this boot would go on to open decks it still holds.
     # Probe with NameHasOwner, and never address the old name directly:
     # a plain call to a well-known name activates it, which for the old id
     # could START an upstream install via its D-Bus service file -- the very
@@ -661,13 +631,11 @@ def main():
     # quit_running() catches a fully-booted instance; two launches booting
     # at the same moment (login autostart + session restore) both pass its
     # probe. The lock claim is the atomic tie-breaker, and it must happen
-    # BEFORE reset_all_decks() so a losing launch never USB-resets decks
-    # the winner is initializing (field incident 2026-07-16).
+    # BEFORE any deck is opened so a losing launch never grabs hardware the
+    # winner is initializing (field incident 2026-07-16).
     closing = gl.argparser.parse_args().close_running
     if not single_instance.claim(appinfo.APP_ID, wait_seconds=10.0 if closing else 0.0):
         hand_off_to_lock_owner(closing=closing)
-
-    reset_all_decks()
 
     migration_manager = MigrationManager()
     # Add migrators
