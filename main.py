@@ -473,6 +473,18 @@ def main():
         sys.exit(1)
 
     if decision is instance_gate.Decision.REMOTE:
+        # Anything make_api_calls() parked belongs to the instance that owns
+        # the name, not to this process: it was parked while nothing owned it,
+        # and this process is leaving without opening a deck.
+        try:
+            failures = cli_forward.forward_parked_requests()
+        except Exception as e:
+            # The requests are already popped; losing them AND exiting 0
+            # would be the silent drop this arm exists to prevent.
+            failures = [f"Could not hand the parked requests over: {e}"]
+        for failure in failures:
+            print(failure, file=sys.stderr)
+
         # The running instance takes it from here: GApplication forwards this
         # activation to it, and its own activate handler presents the window.
         # Best-effort on purpose -- if the primary dies between the two calls
@@ -483,7 +495,7 @@ def main():
         except Exception as e:
             log.warning(f"Could not present the running instance's window: {e}")
         log.info("Already running, exiting")
-        sys.exit(0)
+        sys.exit(1 if failures else 0)
 
     migration_manager = MigrationManager()
     # Add migrators

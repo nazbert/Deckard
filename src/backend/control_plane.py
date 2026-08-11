@@ -116,13 +116,21 @@ def _controllers() -> list[DeckController]:
 
 def _no_such_deck(serial_number: str) -> ControlResult:
     """The unknown-serial result, listing what IS connected -- the answer to
-    "did I typo the serial?" belongs in the failure itself."""
+    "did I typo the serial?" belongs in the failure itself.
+
+    With nothing connected there is no list to give, and the empty answer is
+    ambiguous in a way that matters: the app answers requests from the moment
+    it takes the bus name, which is before it has enumerated a single deck. So
+    the empty case names that possibility rather than leaving a person to
+    conclude their deck is unplugged when it is simply not open yet.
+    """
     available = [controller.serial_number() for controller in _controllers()]
     if available:
         message = (f"StreamDeck with serial '{serial_number}' not found. "
                    f"Available devices: {', '.join(available)}")
     else:
-        message = "No StreamDeck devices connected"
+        message = ("No StreamDeck devices connected yet "
+                   "(the app may still be starting)")
     return ControlResult(False, "no-such-deck", message)
 
 

@@ -42,6 +42,20 @@ the winner. ``establish()`` therefore does four things, in this order:
 4. The verdict: a remote hands off to the primary and exits; the primary shoos
    a pre-rename instance off the Stream Deck before it opens any deck itself.
 
+WHY NOTHING HERE CLAIMS THE NAME FIRST
+
+The obvious way to settle a race earlier is to claim the application name up
+front, before the expensive work, and this module deliberately does not have
+that shape. A connection that already owns the application name makes
+GApplication's own ``register()`` find the name taken, and it demotes the very
+process holding it to a remote instance -- so a pre-claim of the name defeats
+the mechanism it was meant to help. Claiming a DIFFERENT name instead does work,
+and that is precisely the second owner of uniqueness this module replaced: two
+names to keep in step, and a winner that held one of them while the other was
+still unowned for the length of a boot. What survives is asking rather than
+claiming -- NameHasOwner probes and release polls own nothing -- which leaves
+``register()`` as the only claim in the tree and its verdict as the only one.
+
 WHAT REGISTERING ALSO DOES
 
 ``register()`` emits the application's ``startup``, so the toolkit's own
@@ -333,10 +347,15 @@ def _close_running_instance(session_bus: Gio.DBusConnection, app_id: str) -> Non
         return
 
     if not _wait_until_dispatching(session_bus, app_id):
+        # Two instances answer nothing and they are indistinguishable from
+        # here: one still booting, and one fully up with a blocked main loop.
+        # The disposition is right for both -- an instance that cannot hear the
+        # question must not be killed by it -- so the message names both rather
+        # than asserting the one it cannot know.
         raise CloseRunningFailed(
-            f"The running instance is still starting up and did not begin "
-            f"answering within {CLOSE_GRACE_SECONDS:.0f}s; it was left running "
-            f"and nothing was started"
+            f"The running instance did not answer within "
+            f"{CLOSE_GRACE_SECONDS:.0f}s -- it is still starting up, or it is "
+            f"stuck; it was left running and nothing was started"
         )
 
     log.info("Closing running instance")

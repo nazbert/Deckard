@@ -93,6 +93,12 @@ three methods rather than two:
   load retry it rather than lose it. Collapsing the pair into one claim would
   silently turn a retry into a drop.
 
+There is one caller that wants the whole parking rather than one serial's, and
+it is not going to apply any of it: an invocation parks BEFORE the race for the
+application name is decided, so a launch can park its requests and then find
+out it is the second instance. ``claim_parked_requests`` is how those reach the
+instance that won instead of leaving with this process.
+
 THREAD CONTRACT (LEGS B/C)
 
 ``park_page_request`` / ``park_state_request`` run on the main thread during
@@ -238,6 +244,35 @@ class StartupQueue:
         Idempotent, and a serial with nothing parked is not an error.
         """
         gl.api_state_requests.pop(serial_number, None)
+
+    # ---------------------------------------------------------------- #
+    # Legs B/C -- the whole parking, for a process that is leaving      #
+    # ---------------------------------------------------------------- #
+
+    def claim_parked_requests(self) -> tuple[list[tuple[str, str]],
+                                             list[tuple[str, dict]]]:
+        """Everything parked, removed as it is handed over.
+
+        Claimed, not peeked: the caller is a launch that lost the race for the
+        application name and is passing its requests to the instance that won
+        (see src/backend/cli_forward.py). Nothing here is going to be applied
+        by this process, so leaving a copy behind for a retry that will never
+        run would only be a way to apply them twice if one ever did.
+
+        Insertion order is argv order within each kind -- the CLI parks pages
+        and states in the order it read the flags, and the forwarder sends
+        every page change and then every state change, each group in that
+        order. Each removal is a single dict operation, the
+        same discipline the per-serial claim keeps.
+
+        Called from the pre-boot CLI phase, single-threaded, before any deck
+        exists: the same phase the parking itself happens in.
+        """
+        pages = [(serial, gl.api_page_requests.pop(serial))
+                 for serial in list(gl.api_page_requests)]
+        states = [(serial, gl.api_state_requests.pop(serial))
+                  for serial in list(gl.api_state_requests)]
+        return pages, states
 
 
 # The process-wide queue. A module singleton rather than a `gl` slot: the point

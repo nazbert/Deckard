@@ -36,12 +36,15 @@ Legs:
   7. The CLI's own transport object drives this service, from a thread, over
      the app's well-known name -- the one part of the forwarding path that no
      other scenario constructs against something that answers.
-  8. And what it says when the methods do not answer. An instance whose name
-     is owned but whose objects are not published yet -- the whole of every
-     launch, until activation finishes -- is reported by GDBus exactly like an
-     instance too old to have the methods, so the CLI's message has to offer
-     both readings. A call refused for any other reason arrives as something
-     printable rather than as a toolkit error nothing catches.
+  8. And what it says when the methods are not on the bus. An instance whose
+     name is owned but whose objects are not there is reported by GDBus
+     exactly like an instance too old to have the methods, so the CLI's
+     message covers both -- but that state is no longer a starting instance:
+     the app publishes before it takes the name. What is left is a build
+     without the methods and an instance shutting down, which drops its
+     interface and keeps the name until the process ends. A call refused for
+     any other reason arrives as something printable rather than as a toolkit
+     error nothing catches.
 """
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH before globals)
 
@@ -308,38 +311,42 @@ def leg_the_cli_transport_speaks_to_this_service(controller) -> None:
 
 
 def leg_an_instance_that_does_not_answer(controller) -> None:
-    """What the CLI says when the methods are not there -- over the real bus,
-    through the real transport, for BOTH of the things that produces.
+    """What the CLI says when the methods are not on the bus -- over the real
+    bus, through the real transport, for both of the things that produces.
 
-    GDBus reports a missing OBJECT the same way it reports a missing method,
-    so an instance that owns the bus name but has not published its objects
-    yet is indistinguishable from an instance too old to have the methods.
-    That window is not exotic: it is every launch, from the moment the app
-    takes its name to the moment the service starts at the end of activation.
-    A message naming only the old build would therefore be plainly wrong about
-    a current one that is simply still starting.
+    GDBus reports a missing OBJECT the same way it reports a missing method, so
+    an instance that owns the bus name with nothing published behind it is
+    indistinguishable here from an instance too old to have the methods.
+
+    What that state MEANS is what changed. It used to be the beginning of every
+    launch, because the name was taken at registration and the objects went up
+    at the end of activation; the app now publishes before it registers, so a
+    name owned by this build always has the methods behind it. The state below
+    is therefore no longer a starting instance -- it is a build without the
+    methods, or one that is shutting down and has already taken its interface
+    off the bus while it still holds the name.
 
     The name stays owned here and the top-level object is taken off the bus,
-    which is that window exactly.
+    which is that state exactly.
     """
     from src.backend import cli_forward
 
     transport = cli_forward._BusTransport()
     page_before = active_name(controller)
 
-    # Phase 1 -- the boot window: the name is owned, the objects are not there
-    # yet. Mutating the registrations happens here, on the main context, as
-    # everything else that touches them does.
+    # Phase 1 -- the object is gone and the name is not: what a client meets
+    # while an instance tears down. Mutating the registrations happens here, on
+    # the main context, as everything else that touches them does.
     api._bus.unpublish_object(api.DBUS_OBJECT_PATH)
 
-    def drive_boot_window(answers: dict) -> None:
+    def drive_missing_object(answers: dict) -> None:
         answers["running"] = transport.is_running()
         # The whole forwarding path, so what is asserted is the sentence a
         # person would actually read rather than a constant this file names.
         answers["failures"] = cli_forward._forward(
             transport, [(SERIAL, "Alpha")], [(SERIAL, "States", "0,0", 1)])
 
-    booting = drive_on_worker(drive_boot_window, "cli-transport-boot-window")
+    no_objects = drive_on_worker(drive_missing_object, "cli-transport-no-objects")
 
     api._bus.publish_object(api.DBUS_OBJECT_PATH, api._api_instance)
 
@@ -361,15 +368,20 @@ def leg_an_instance_that_does_not_answer(controller) -> None:
 
     older = drive_on_worker(drive_missing_method, "cli-transport-missing-method")
 
-    assert booting["running"] is True, (
-        "the name is owned -- an instance still starting looks exactly as "
-        "running as a finished one, which is why this window is reachable")
-    assert booting["failures"] == [cli_forward.SKEW_MESSAGE], booting["failures"]
-    assert "finished starting" in cli_forward.SKEW_MESSAGE, (
-        f"this leg just produced that message from an instance that is merely "
-        f"mid-launch, so it cannot only offer the older-build reading: "
-        f"{cli_forward.SKEW_MESSAGE!r}")
+    assert no_objects["running"] is True, (
+        "the name is owned -- an instance with nothing published looks exactly "
+        "as running as any other, which is why this state is reachable")
+    assert no_objects["failures"] == [cli_forward.SKEW_MESSAGE], no_objects["failures"]
     assert "older build" in cli_forward.SKEW_MESSAGE, cli_forward.SKEW_MESSAGE
+    assert "shutting down" in cli_forward.SKEW_MESSAGE, (
+        f"the state this leg just produced is also what tearing down looks "
+        f"like from outside, and it is now the only other way to reach it: "
+        f"{cli_forward.SKEW_MESSAGE!r}")
+    assert "finished starting" not in cli_forward.SKEW_MESSAGE, (
+        f"an instance that is starting cannot answer this way any more -- it "
+        f"publishes before it takes the name -- so offering that reading sends "
+        f"people to wait for something that already happened: "
+        f"{cli_forward.SKEW_MESSAGE!r}")
     assert isinstance(older["missing_method"], cli_forward.OlderInstance), (
         f"a method this build does not have must reach the same answer: "
         f"{older['missing_method']!r}")
@@ -381,7 +393,8 @@ def leg_an_instance_that_does_not_answer(controller) -> None:
     assert active_name(controller) == page_before, (
         f"nothing above was applied, so the deck must not have moved: "
         f"{active_name(controller)}")
-    print("  PASS: an instance that does not answer is reported for both reasons")
+    print("  PASS: an instance with no methods on the bus is reported for the "
+          "two things that now means")
 
 
 def run_legs(bus_address: str, controller, other) -> None:

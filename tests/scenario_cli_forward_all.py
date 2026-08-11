@@ -25,10 +25,10 @@ Guards:
      invocation is about to become the instance.
   4. A failure reported by the instance comes back in the verdict, and does
      NOT stop the requests behind it.
-  5. An instance that does not answer to the methods produces one explanatory
+  5. An instance with no control methods on the bus produces one explanatory
      failure and no further attempts -- and that failure names both of the
-     things it can mean, because an instance still starting up is
-     indistinguishable here from one that is too old.
+     things that state can still mean: a build too old to have them, and one
+     shutting down that has already dropped its interface.
   5b. A conversation that breaks outright is reported the same way, in the
      bus's own words, rather than escaping the CLI as an exception.
   6. Validation is syntax only, and all-or-nothing: a malformed group leaves
@@ -227,11 +227,15 @@ def check_an_older_instance_says_so_once() -> None:
     assert verdict.failures == [cli_forward.SKEW_MESSAGE], verdict.failures
     assert "restart" in cli_forward.SKEW_MESSAGE, (
         "the message has to say what to do about it")
-    assert "finished starting" in cli_forward.SKEW_MESSAGE, (
-        "an instance that owns the bus name but has not published its objects "
-        "yet answers identically to one that is too old, and the whole of its "
-        "window is a normal launch -- a message that only says 'older build' "
-        "is wrong about a current one that is still starting up")
+    assert "older build" in cli_forward.SKEW_MESSAGE, cli_forward.SKEW_MESSAGE
+    assert "shutting down" in cli_forward.SKEW_MESSAGE, (
+        "an instance takes its interface off the bus before it lets go of the "
+        "name, so it answers identically to one too old to have the methods -- "
+        "and that is now the only other way to reach this")
+    assert "finished starting" not in cli_forward.SKEW_MESSAGE, (
+        "a starting instance publishes its objects BEFORE it takes the name, "
+        "so it cannot answer this way at all any more; telling people to wait "
+        "for a startup to finish would send them to wait for nothing")
     assert len(recorder.forwards()) == 1, (
         f"every request would fail identically, so the rest are pointless: "
         f"{recorder.forwards()}")

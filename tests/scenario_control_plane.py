@@ -138,7 +138,11 @@ def check_unknown_serial(plane) -> None:
         "both entry points must answer an unknown serial identically")
 
     # With nothing connected there is no list to offer, and saying "available
-    # devices: " would be worse than saying what is true.
+    # devices: " would be worse than saying what is true. What it says instead
+    # has to leave room for the deck being on its way: requests are answered
+    # from the moment the app takes the bus name, which is before it has opened
+    # a single deck, so "none connected" full stop would tell a person their
+    # deck is unplugged when it is merely not enumerated yet.
     manager = gl.deck_manager
     saved = manager.deck_controller
     manager.deck_controller = []
@@ -147,7 +151,8 @@ def check_unknown_serial(plane) -> None:
     finally:
         manager.deck_controller = saved
     assert not empty.ok and empty.code == "no-such-deck", empty
-    assert empty.message == "No StreamDeck devices connected", empty.message
+    assert empty.message == ("No StreamDeck devices connected yet "
+                             "(the app may still be starting)"), empty.message
 
     print("PASS: an unknown serial answers no-such-deck and lists what is connected")
 
