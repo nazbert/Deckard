@@ -103,17 +103,41 @@ class Page:
         log.debug(f"Loaded page {self.get_name()} in {end - start:.2f} seconds")
 
     def save(self) -> None:
-        # Persist through the flush seam, which owns the per-path lock and
-        # the write itself. Marked and flushed back to back, so the page is
-        # on disk by the time this returns.
-        flush = page_flush.get()
-        flush.mark_dirty(self)
-        flush.flush_path(self.json_path)
+        # Records the edit and arms the write; the flush seam owns the
+        # per-path lock, the write itself and when it happens (a trailing
+        # timer, so a burst of edits costs one write instead of one each).
+        # The in-memory change is already visible to every reader -- what is
+        # deferred is only the disk. Anything that needs the file level
+        # NOW -- a page switch, a deck closing, quit, or any read of the page
+        # file -- asks the seam for it.
+        page_flush.get().mark_dirty(self)
 
-    def make_backup(self):
+    def flush(self) -> str:
+        """Write this page's file NOW rather than on its debounce timer, and
+        return the path written.
+
+        The counterpart to save(): mutators mark, boundaries flush. A
+        boundary is anything after which the edits may never get another
+        chance -- the deck leaving this page, the deck going away, the app
+        quitting -- or anything about to read the file.
+
+        The path comes back because the boundary that flushes a page almost
+        always has to name the file it just made current (the page switch
+        reports it to plugins and over DBus), and taking one without the
+        other is the mistake worth making impossible.
+        """
+        page_flush.get().flush_path(self.json_path)
+        return self.json_path
+
+    def make_backup(self, json_path: str | None = None):
         os.makedirs(os.path.join(gl.DATA_PATH, "pages","backups"), exist_ok=True)
 
-        src_path = self.json_path
+        # The flush passes the path it holds the save lock for. It is this
+        # page's own path in every case but one: a page move re-points
+        # json_path while a write for the old path may still be pending, and
+        # backing up a file other than the one about to be overwritten would
+        # copy the wrong page over the wrong backup.
+        src_path = json_path if json_path is not None else self.json_path
         dst_path = os.path.join(gl.DATA_PATH, "pages","backups", os.path.basename(src_path))
 
         # Check if json in src is valid

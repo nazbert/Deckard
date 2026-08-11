@@ -158,7 +158,13 @@ class MenuButton(Gtk.MenuButton):
 
     def import_page_name_selected_callback(self, name):
         import_dict = {}
-        with open(self.selected_file.get_path(), "r") as f:
+        source_path = self.selected_file.get_path()
+        # Read barrier: on the duplicate path this file IS a live page, so
+        # its pending edits belong on disk before the copy is read -- a
+        # duplicate must not be a second-old version of what is on screen.
+        # A no-op for a genuine import, whose source is not a page of ours.
+        page_flush.get().flush_path(source_path)
+        with open(source_path, "r") as f:
             import_dict = json.load(f)
 
         self.selected_file = None

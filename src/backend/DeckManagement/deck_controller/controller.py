@@ -1035,7 +1035,7 @@ class DeckController:
             # this call is an actual switch, not the no-op reload above.
             page_switches.bump()
 
-            old_path = self.active_page.json_path if self.active_page is not None else None
+            old_path = self.active_page.flush() if self.active_page is not None else None
 
             # Reset every key's pressed visual BEFORE the generation bump:
             # press_state lives on the reused ControllerKey and

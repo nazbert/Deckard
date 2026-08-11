@@ -19,6 +19,7 @@ import time
 
 from fixtures import FaultyFakeDeck, seed_page, start_watchdog
 
+from src.backend.PageManagement import page_flush
 from src.backend.PageManagement.Page import Page
 
 
@@ -72,7 +73,12 @@ def main() -> int:
     try:
         for i in range(100):
             try:
+                # save() marks; the serialization -- and so the RuntimeError
+                # this pins -- happens in the flush, asked for here so the
+                # property is checked 100 times rather than once when a timer
+                # gets round to it.
                 page.save()
+                page_flush.get().flush_path(path)
             except RuntimeError as e:
                 print(f"FAIL: save() raised under concurrent mutation on iteration {i}: {e}")
                 return 1
@@ -102,15 +108,17 @@ def main() -> int:
 
     events = []
     ev_lock = threading.Lock()
+    in_critical = threading.Event()
 
     def instrument(page_obj, name):
         orig = page_obj.make_backup
 
-        def probe():
+        def probe(json_path=None):
             with ev_lock:
                 events.append((name, "enter", time.monotonic()))
+            in_critical.set()
             time.sleep(0.15)  # hold the critical section open
-            orig()
+            orig(json_path)
             with ev_lock:
                 events.append((name, "exit", time.monotonic()))
 
@@ -119,13 +127,19 @@ def main() -> int:
     instrument(page_a, "a")
     instrument(page_b, "b")
 
-    barrier = threading.Barrier(2)
-
-    def saver(page_obj):
-        barrier.wait()
+    def saver(page_obj, wait_for_the_other):
+        # One pending record per path, so the second marker must arrive
+        # while the first flush is ALREADY inside the critical section --
+        # otherwise the two coalesce into a single write and there is no
+        # ordering left to observe. Gating on the first probe's entry makes
+        # that interleaving the one the test always gets.
+        if wait_for_the_other and not in_critical.wait(timeout=10):
+            raise AssertionError("the first save never reached its critical section")
         page_obj.save()
+        page_flush.get().flush_path(path2)
 
-    threads = [threading.Thread(target=saver, args=(p,)) for p in (page_a, page_b)]
+    threads = [threading.Thread(target=saver, args=(p, wait))
+               for p, wait in ((page_a, False), (page_b, True))]
     for th in threads:
         th.start()
     for th in threads:
