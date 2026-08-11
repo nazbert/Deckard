@@ -13,11 +13,15 @@ Guards:
   1. An unknown serial answers `no-such-deck` and names the serials that ARE
      connected; with no decks at all it says so instead of listing nothing.
   2. An unknown page answers `no-such-page` and lists the pages that exist.
-     The App.on_change_page guards ported from scenario_change_page_unknown
-     live here 1:1 (unknown name leaves the page alone; unknown name with NO
-     active page does not load anything -- the abspath(None)/get_page(None)
-     crash pair; the happy path; the same-page repeat; a non-matching serial),
-     so that scenario can retire once its transport does.
+     The five guards ported from scenario_change_page_unknown live here 1:1
+     (unknown name leaves the page alone; unknown name with NO active page
+     does not load anything -- the abspath(None)/get_page(None) crash pair;
+     the happy path; the same-page repeat; a non-matching serial). They are
+     driven through the DBus method the CLI now forwards to, which is where
+     the Gio action they were written against used to land.
+  2b. A page that RESOLVES but cannot be built answers `page-build-failed` and
+     leaves the deck alone. Handing get_page's None to load_page CLEARS the
+     deck, so every surface used to blank the device and report success.
   3. Asking for the page a deck ALREADY shows loads nothing. Asserted through
      the DBus method over the fake deck's write journal, because that method
      is where the no-op was missing: every SetActivePage call reloaded the
@@ -34,9 +38,9 @@ Guards:
      it through here, and resolves it only afterwards, so this propagation is
      exactly what leaves a failed request parked for the next load to retry
      (scenario_cli_request_park guard 7 pins the other half).
-  8. Each Gio action delegate and the service core produce the SAME outcome
-     for the same request, page and state alike -- the pin against a transport
-     quietly re-growing rules of its own.
+  8. The DBus methods and the service core produce the SAME outcome for the
+     same request, page and state alike -- the pin against a transport quietly
+     re-growing rules of its own.
   9. A request names one deck and reaches only that deck.
 """
 import fixtures  # noqa: F401  (isolates DATA_PATH before src imports)
@@ -59,25 +63,6 @@ SERIAL_A = "cp-a"
 SERIAL_B = "cp-b"
 WIDE_KEY = "9x9"
 WIDE_STATES = 20
-
-
-class FakeVariant:
-    """GLib.Variant stand-in: the action handlers only unpack()."""
-
-    def __init__(self, value):
-        self._value = value
-
-    def unpack(self):
-        return self._value
-
-
-class FakeAppSelf:
-    """What App.on_change_page/on_change_state dereference off `self`.
-    Deliberately kept as thin as scenario_change_page_unknown's: a delegate
-    that reaches for more than this has grown rules again."""
-
-    def __init__(self, deck_manager):
-        self.deck_manager = deck_manager
 
 
 def seed_multistate_page(page_name: str, key_ident: str, n_states: int) -> str:
@@ -192,35 +177,86 @@ def check_unknown_page(plane, controller) -> None:
     assert plane.change_state(SERIAL_A, "no-such-page", "0,0", 0).code == "no-such-page", (
         "a state change must fail on the page BEFORE it looks at coordinates")
 
-    # --- The scenario_change_page_unknown guards, 1:1. on_change_page crashed
-    # on an unknown name: it compared os.path.abspath(None) against the active
-    # page's path and called get_page(page_path=None) before its None check.
-    from src.app import App
+    # --- The scenario_change_page_unknown guards, 1:1, through the transport
+    # a `--change-page` reaches today. The handler they were written against
+    # crashed on an unknown name: it compared os.path.abspath(None) against
+    # the active page's path and called get_page(page_path=None) before its
+    # None check.
+    from src.api import DeckardAPI
 
-    fake_app = FakeAppSelf(gl.deck_manager)
+    top = DeckardAPI()
 
-    App.on_change_page(fake_app, None, FakeVariant((SERIAL_A, "no-such-page")))
+    assert top.ChangePage(SERIAL_A, "no-such-page"), (
+        "an unknown page must answer with the reason, not the empty string "
+        "that means success")
     assert controller.active_page is active_before, (
         "unknown page name must leave the active page untouched")
 
     # Unknown page with NO active page: the second half of the same crash.
     controller.active_page = None
-    App.on_change_page(fake_app, None, FakeVariant((SERIAL_A, "no-such-page")))
+    top.ChangePage(SERIAL_A, "no-such-page")
     assert controller.active_page is None, "skip path must not load anything"
     controller.active_page = active_before
 
     # Happy path, same page again (the no-op), and a serial nobody reports --
     # none of them may raise.
     target = fixtures.seed_page("ChangeTarget")
-    App.on_change_page(fake_app, None, FakeVariant((SERIAL_A, "ChangeTarget")))
+    assert top.ChangePage(SERIAL_A, "ChangeTarget") == ""
     assert fixtures.wait_until(
         lambda: controller.active_page is not None
         and os.path.abspath(controller.active_page.json_path) == os.path.abspath(target)
     ), "known page name must still load the page"
-    App.on_change_page(fake_app, None, FakeVariant((SERIAL_A, "ChangeTarget")))
-    App.on_change_page(fake_app, None, FakeVariant(("other-serial", "ChangeTarget")))
+    assert top.ChangePage(SERIAL_A, "ChangeTarget") == "", (
+        "the deck already showing the page is a fulfilled request")
+    assert top.ChangePage("other-serial", "ChangeTarget"), (
+        "a serial nobody reports must answer with the reason")
 
     print("PASS: an unknown page answers no-such-page and never disturbs the deck")
+
+
+def check_unbuildable_page_leaves_the_deck_alone(plane, controller) -> None:
+    """A page name that RESOLVES to a file the store cannot turn into a page.
+
+    get_page answers None, and load_page(None) clears the deck -- so the deck
+    went blank while the request reported success, on every surface at once.
+    """
+    load_named_page(controller, "Alpha")
+    active_before = controller.active_page
+    page_manager = gl.page_manager
+    real_get_page = page_manager.get_page
+
+    def failing_get_page(path, deck_controller, *args, **kwargs):
+        if os.path.basename(path) == "Beta.json":
+            return None
+        return real_get_page(path, deck_controller, *args, **kwargs)
+
+    page_manager.get_page = failing_get_page
+    try:
+        result = plane.change_page_on(controller, "Beta")
+        assert not result.ok and result.code == "page-build-failed", (
+            f"a page that cannot be built must be a failure, not a success "
+            f"that happens to clear the deck: {result}")
+        assert "Beta" in result.message, result.message
+        assert controller.active_page is active_before, (
+            f"the deck was cleared by a page it could not build: "
+            f"{active_name(controller)}")
+
+        # And through the transports, since both used to report success while
+        # the deck went dark.
+        from src.api import ControllerInstanceAPI, DeckardAPI
+
+        assert DeckardAPI().ChangePage(SERIAL_A, "Beta") == result.message
+        ControllerInstanceAPI(controller).SetActivePage("Beta")
+        assert controller.active_page is active_before, (
+            "SetActivePage cleared the deck with a page it could not build")
+
+        # The state entry point fails on the page before it looks further.
+        state_result = plane.change_state_on(controller, "Beta", "0,0", 0)
+        assert state_result.code == "page-build-failed", state_result
+    finally:
+        del page_manager.get_page
+
+    print("PASS: a page that cannot be built is a failure, and the deck keeps its page")
 
 
 # ===================================================================== #
@@ -331,6 +367,14 @@ def check_device_truth_bounds(plane, controller_b) -> None:
     assert c_input.state == 19, f"the input must actually be on state 19: {c_input.state}"
     assert SERIAL_B in ok.message, ok.message
 
+    # A state that arrives as text still applies. Nothing on the DBus
+    # signature can carry a string any more, but the parked-request dict is
+    # written into by hand, so the success arm of that conversion is only true
+    # while something asserts it.
+    assert plane.change_state_on(controller_b, "Wide", "9,9", "18").ok
+    assert c_input.state == 18, f"a state given as text must apply: {c_input.state}"
+    assert plane.change_state_on(controller_b, "Wide", "9,9", 19).ok
+
     # Out of bounds for THIS device.
     oob = plane.change_state_on(controller_b, "Wide", "10,10", 0)
     assert not oob.ok and oob.code == "coords-out-of-bounds", oob
@@ -431,14 +475,14 @@ def check_unexpected_exception_propagates(plane, controller) -> None:
 # 8. The delegate and the core agree                                     #
 # ===================================================================== #
 
-def check_gaction_delegate_matches_service(plane, controller) -> None:
-    """Drives App.on_change_page unbound (the transport) and the service core
-    over the same requests from the same starting state, and compares what the
-    deck ended up doing. The delegate is allowed to render the answer however
-    it likes; it is not allowed to decide anything."""
-    from src.app import App
+def check_dbus_delegate_matches_service(plane, controller) -> None:
+    """Drives the DBus method (the transport) and the service core over the
+    same requests from the same starting state, and compares what the deck
+    ended up doing. The transport is allowed to render the answer however it
+    likes; it is not allowed to decide anything."""
+    from src.api import DeckardAPI
 
-    fake_app = FakeAppSelf(gl.deck_manager)
+    top = DeckardAPI()
 
     def outcome(drive) -> tuple:
         """(active page, loads performed) after `drive()`, from a fixed start.
@@ -466,25 +510,31 @@ def check_gaction_delegate_matches_service(plane, controller) -> None:
         ("not-a-deck", "Beta"),        # an unknown serial
     ]
     for serial, page_name in requests:
-        through_action = outcome(
-            lambda s=serial, p=page_name: App.on_change_page(fake_app, None, FakeVariant((s, p))))
+        through_method = outcome(
+            lambda s=serial, p=page_name: top.ChangePage(s, p))
         through_service = outcome(
             lambda s=serial, p=page_name: plane.change_page(s, p))
-        assert through_action == through_service, (
+        assert through_method == through_service, (
             f"request ({serial!r}, {page_name!r}) came out differently through the "
-            f"action ({through_action}) than through the service ({through_service}) "
-            f"-- the transport has grown rules of its own")
+            f"DBus method ({through_method}) than through the service "
+            f"({through_service}) -- the transport has grown rules of its own")
+        # And the method says exactly what the service decided: empty on
+        # success (the no-op included), the service's own sentence otherwise.
+        result = plane.change_page(serial, page_name)
+        assert top.ChangePage(serial, page_name) == ("" if result.ok else result.message), (
+            f"the method's answer for ({serial!r}, {page_name!r}) is not the "
+            f"service's: {result}")
 
-    print("PASS: the action delegate and the service core reach the same outcome")
+    print("PASS: the DBus method and the service core reach the same outcome")
 
 
 def check_state_delegate_matches_service(plane, controller) -> None:
-    """Guard 8's other half, for the state transport. Same shape: drive
-    App.on_change_state unbound and the service core over the same requests
-    from the same starting state, and compare what the deck ended up doing."""
-    from src.app import App
+    """Guard 8's other half, for the state transport. Same shape: drive the
+    DBus method and the service core over the same requests from the same
+    starting state, and compare what the deck ended up doing."""
+    from src.api import DeckardAPI
 
-    fake_app = FakeAppSelf(gl.deck_manager)
+    top = DeckardAPI()
     c_input = controller.get_input(Input.Key(WIDE_KEY))
 
     def outcome(drive) -> tuple:
@@ -505,27 +555,30 @@ def check_state_delegate_matches_service(plane, controller) -> None:
             del controller.load_page
         return (active_name(controller), c_input.state, len(loads))
 
-    # Every value a string, which is what the stringly-typed action transport
-    # actually delivers -- the conversion is the service's job on both paths.
+    # The state is an integer on this transport (the method's signature says
+    # so), and the coordinates are still the text the caller typed -- parsing
+    # them is the service's job, on every path.
     requests = [
-        (SERIAL_B, "Wide", "9,9", "5"),          # applied
-        (SERIAL_B, "Wide", "9,9", "99"),         # state out of range
-        (SERIAL_B, "Wide", "9,9", "five"),       # not an integer
-        (SERIAL_B, "Wide", "nope", "5"),         # not coordinates
-        (SERIAL_B, "Wide", "0,0", "1"),          # in bounds, single-state input
-        (SERIAL_B, "no-such-page", "9,9", "5"),  # unknown page
-        ("not-a-deck", "Wide", "9,9", "5"),      # unknown serial
+        (SERIAL_B, "Wide", "9,9", 5),          # applied
+        (SERIAL_B, "Wide", "9,9", 99),         # state out of range
+        (SERIAL_B, "Wide", "9,9", -1),         # below the first state
+        (SERIAL_B, "Wide", "nope", 5),         # not coordinates
+        (SERIAL_B, "Wide", "0,0", 1),          # in bounds, single-state input
+        (SERIAL_B, "no-such-page", "9,9", 5),  # unknown page
+        ("not-a-deck", "Wide", "9,9", 5),      # unknown serial
     ]
     for request in requests:
-        through_action = outcome(
-            lambda r=request: App.on_change_state(fake_app, None, FakeVariant(r)))
+        through_method = outcome(lambda r=request: top.ChangeState(*r))
         through_service = outcome(lambda r=request: plane.change_state(*r))
-        assert through_action == through_service, (
-            f"request {request} came out differently through the action "
-            f"({through_action}) than through the service ({through_service}) "
+        assert through_method == through_service, (
+            f"request {request} came out differently through the DBus method "
+            f"({through_method}) than through the service ({through_service}) "
             f"-- the transport has grown rules of its own")
+        result = plane.change_state(*request)
+        assert top.ChangeState(*request) == ("" if result.ok else result.message), (
+            f"the method's answer for {request} is not the service's: {result}")
 
-    print("PASS: the state delegate and the service core reach the same outcome")
+    print("PASS: the state method and the service core reach the same outcome")
 
 
 def check_other_decks_are_untouched(plane, controller_a, controller_b) -> None:
@@ -568,13 +621,14 @@ def main() -> None:
     try:
         check_unknown_serial(plane)
         check_unknown_page(plane, controller_a)
+        check_unbuildable_page_leaves_the_deck_alone(plane, controller_a)
         check_same_page_no_op_through_dbus(controller_a)
         check_load_only_if_different(plane, controller_a)
         check_device_truth_bounds(plane, controller_b)
         check_other_decks_are_untouched(plane, controller_a, controller_b)
         check_validation_failures_are_results(plane, controller_a)
         check_unexpected_exception_propagates(plane, controller_a)
-        check_gaction_delegate_matches_service(plane, controller_a)
+        check_dbus_delegate_matches_service(plane, controller_a)
         check_state_delegate_matches_service(plane, controller_b)
     finally:
         fixtures.teardown(controller_b)

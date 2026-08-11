@@ -7,6 +7,7 @@ tools to query and control Deckard.
 Top-level object: /io/github/nazbert/Deckard
   - Controllers property (list of serial numbers)
   - Pages property, AddPage, RemovePage
+  - ChangePage, ChangeState
   - NotifyForegroundWindow, IconPacks property, GetIconNames
   - ForegroundWindow property (WindowInfo struct)
 
@@ -25,7 +26,7 @@ from loguru import logger as log
 
 from dasbus.server.interface import dbus_interface
 from dasbus.connection import SessionMessageBus
-from dasbus.typing import Str, List
+from dasbus.typing import Int, Str, List
 from dasbus.error import DBusError
 from gi.repository import GLib
 
@@ -182,6 +183,49 @@ class DeckardAPI:
                     log.warning(f"DBus API: RemovePage – page not found: {name}")
         except Exception as e:
             log.error(f"DBus API: RemovePage error: {e}")
+
+    def ChangePage(self, serial: Str, page: Str) -> Str:
+        """Show `page` -- a page name or a page path -- on the deck reporting
+        `serial`.
+
+        Answers with the empty string when the request was applied, and with
+        the reason when it was not. "Applied" includes the deck already being
+        on that page: a no-op is a fulfilled request, not a failure, and a
+        caller that switches on every event would otherwise have to tell the
+        two apart to stay quiet.
+
+        Returning the reason instead of logging it is the whole point of this
+        method existing. The CLI forwards here, and a person who mistypes a
+        page name has to read about it in their terminal rather than in the
+        log of a process they cannot see. Unexpected exceptions are left to
+        propagate: dasbus turns those into an error reply, which is a truer
+        answer than an empty string.
+        """
+        log.info(f"DBus API: ChangePage called – serial={serial!r} page={page!r}")
+        result = control_plane.get().change_page(serial, page)
+        if result.ok:
+            return ""
+        log.warning(f"DBus API: ChangePage – {result.message}")
+        return result.message
+
+    def ChangeState(self, serial: Str, page: Str, coords: Str, state: Int) -> Str:
+        """Set the input at `coords` on `page` of the deck reporting `serial`
+        to `state`, loading that page first if it is not the active one.
+
+        Same answer shape as ChangePage: empty on success, the reason
+        otherwise. Coordinates travel as the "x,y" text the caller typed --
+        the control plane parses them once, for every transport -- while the
+        state is a plain integer, because nothing about a state number needs
+        to survive as text.
+        """
+        log.info(f"DBus API: ChangeState called – serial={serial!r} page={page!r} "
+                 f"coords={coords!r} state={state!r}")
+        result = control_plane.get().change_state(serial, page, coords, state)
+        if result.ok:
+            log.info(f"DBus API: ChangeState – {result.message}")
+            return ""
+        log.warning(f"DBus API: ChangeState – {result.message}")
+        return result.message
 
     def NotifyForegroundWindow(self, name: Str, wm_class: Str) -> None:
         """
