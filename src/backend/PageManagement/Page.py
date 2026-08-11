@@ -90,7 +90,7 @@ class Page:
         self.load(load_from_file=True) #TODO: Later we want to limit the load of action objects to the available inputs
 
     @property
-    def dict(self) -> _Dict:
+    def dict(self) -> _Dict[str, Any]:
         """This page's content, straight from the document that owns it.
 
         Deliberately without a setter. Every Page on a path holds the one dict

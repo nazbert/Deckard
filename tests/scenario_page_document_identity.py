@@ -26,9 +26,11 @@ identity instead of a protocol. This scenario holds that:
   4. A REFRESH NEVER BLANKS A SECTION. It writes the new content in first and
      removes what the new content dropped second, so a reader crossing it can
      see a stale section one moment longer but can never see a section both
-     versions have go missing. Checked by reading from another thread across
-     tens of thousands of refreshes -- clearing first fails this in the first
-     handful.
+     versions have go missing. Pinned deterministically by looking at the
+     document from inside the update itself; a real reader on a real thread
+     then witnesses the same thing across tens of thousands of refreshes,
+     which is a witness rather than a pin -- it needs the interpreter's switch
+     interval wound right down to catch a window this narrow at all.
 
   5. THE HEAL IS REACHED. A document loads through the page manager, so a
      corrupt primary is substituted from pages/backups/ exactly as it is for
@@ -36,11 +38,36 @@ identity instead of a protocol. This scenario holds that:
 
   6. THE DICT CANNOT BE REPLACED. `page.dict = {...}` raises rather than
      handing that Page a private copy its siblings cannot see.
+
+  7. ONE FILE, ONE KEY, WHATEVER SPELLING NAMES IT. A page reached through a
+     symlinked directory and the same page reached through the resolved one
+     share a document, a save lock and a pending write. Keying those on the
+     raw spelling instead is a data-loss bug rather than an inefficiency: the
+     mark sits under one name, the read barrier asks under the other and walks
+     straight through, and the re-read behind that barrier then erases the
+     edit from memory as well as leaving it unwritten.
+
+  8. A RENAME DOES NOT REFRESH THE LIVE PAGE. The move asks for the page under
+     its old name, which mints a Page for any deck that had not cached it;
+     that mint must not be able to pull the moved page's content back off the
+     file it is moving away from, or an edit that is only in memory dies with
+     it.
+
+  9. A RENAME ONTO AN OPEN PAGE CORRECTS IT. Renaming over a name a deck is
+     showing replaces that deck's file underneath it; the document standing
+     there is re-read, or the deck keeps showing the page the move discarded
+     and writes it back at its next save.
+
+ 10. A WRITE THAT GOES AROUND THE PAGE KEEPS THE PAGE'S PENDING EDIT. The
+     whole-settings write reads, edits and writes the file itself, then asks
+     for a re-read; a page with edits still pending must come out of that with
+     both -- its own edit and the new settings.
 """
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
 
 import json
 import os
+import sys
 import threading
 
 import globals as gl
@@ -294,10 +321,17 @@ def check_refresh_never_blanks_a_section() -> int:
 
     thread = threading.Thread(target=reader, daemon=True)
     thread.start()
+    # The window between the two steps is a few bytecodes wide, so at the
+    # default 5 ms switch interval the reader is almost never scheduled inside
+    # it and the loop witnesses nothing either way. Wound down, it lands there
+    # reliably -- and still never sees a missing section, which is the point.
+    previous_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
     try:
         for i in range(20000):
             document.adopt(with_settings if i % 2 else without_settings)
     finally:
+        sys.setswitchinterval(previous_interval)
         stop.set()
         thread.join(timeout=5)
 
@@ -328,6 +362,173 @@ def check_heal_through_the_document() -> int:
     return 0
 
 
+def check_two_spellings_are_one_page() -> int:
+    """A symlinked second name for the pages directory, which is the shape a
+    data directory under a symlink gives every page in it."""
+    path = seed_page("TwoSpellings")
+    link_dir = os.path.join(gl.DATA_PATH, "pages_link")
+    if not os.path.islink(link_dir):
+        os.symlink(gl.page_manager.PAGE_PATH, link_dir)
+    other = os.path.join(link_dir, os.path.basename(path))
+    if os.path.realpath(other) != os.path.realpath(path):
+        print("FAIL: the two spellings do not name one file -- check vacuous")
+        return 1
+
+    if page_flush._get_save_lock(path) is not page_flush._get_save_lock(other):
+        print("FAIL: two spellings of one page file take two save locks -- "
+              "their backup and write can interleave on the same bytes")
+        return 1
+
+    # The first spelling wins the document's own name, which is the half of
+    # this that decides where a refresh's read barrier is aimed.
+    page_a = Page(json_path=path, deck_controller=StubController("spell-a"))
+    page_b = Page(json_path=other, deck_controller=StubController("spell-b"))
+    if page_a.dict is not page_b.dict:
+        print("FAIL: two spellings of one page file got two documents")
+        return 1
+
+    # The edit is marked under the SECOND spelling; the refresh below asks
+    # under the first.
+    page_b.dict["two-spellings"] = "edit-via-the-link"
+    page_b.save()
+    gl.page_manager.refresh_document(path)
+
+    if page_a.dict.get("two-spellings") != "edit-via-the-link":
+        print("FAIL: a refresh through one spelling erased an edit marked "
+              f"under the other: {page_a.dict}")
+        return 1
+    if read_file(path).get("two-spellings") != "edit-via-the-link":
+        print("FAIL: the edit marked under the second spelling never reached "
+              "the file -- its read barrier did not see the mark")
+        return 1
+
+    print("PASS: two spellings of one page file are one document, one save "
+          "lock and one pending write")
+    return 0
+
+
+def check_rename_does_not_refresh_the_live_page() -> int:
+    """A move with a deck that has no cache entry for the page.
+
+    The move asks every controller for the page under its old name, so that
+    deck mints a Page -- and a mint reads the file. An edit that is only in
+    memory has to survive that.
+    """
+    old_path = seed_page("RenameMe")
+    ctrl_a = StubController("rename-a")
+    ctrl_b = StubController("rename-b")
+    gl.deck_manager.deck_controller = [ctrl_a, ctrl_b]
+
+    page = gl.page_manager.get_page(old_path, ctrl_a)
+    ctrl_a.active_page = page
+    # ctrl_b is live but has never seen this page: an active page of its own,
+    # and no cache entry for old_path.
+    other_page = gl.page_manager.get_page(seed_page("RenameBystander"), ctrl_b)
+    ctrl_b.active_page = other_page
+
+    # In memory only -- no save, exactly like a pasted key waiting for the
+    # reload that will persist it.
+    page.dict["only-in-memory"] = "not-marked"
+
+    new_path = os.path.join(gl.page_manager.PAGE_PATH, "Renamed.json")
+    gl.page_manager.move_page(old_path, new_path)
+
+    if page.json_path != new_path:
+        print(f"FAIL: the move did not re-point the page: {page.json_path}")
+        return 1
+    if page.dict.get("only-in-memory") != "not-marked":
+        print(f"FAIL: the move destroyed an unsaved in-memory edit: {page.dict}")
+        return 1
+    if gl.page_manager.get_document(new_path).data is not page.dict:
+        print("FAIL: the renamed page's document is not the one its Page reads")
+        return 1
+
+    # Every Page the move touched ends up on that one document, including the
+    # one it minted for the deck that had never cached this page.
+    minted = gl.page_manager.get_page(old_path, ctrl_b)
+    if minted is not None and minted.dict is not page.dict:
+        print("FAIL: the Page minted during the move reads its own copy")
+        return 1
+
+    print("PASS: a rename carries the page's content over instead of "
+          "re-reading it, for every deck the move touches")
+    return 0
+
+
+def check_rename_over_a_live_page() -> int:
+    """A rename onto a page name a deck is already showing, where the page
+    being renamed was never opened.
+
+    Nothing moves onto the destination's document -- there is none to move --
+    so the document standing there is the one that must be corrected: its file
+    has just been replaced underneath it, and a Page reading through it would
+    otherwise keep showing the overwritten page and write it back at its next
+    save.
+    """
+    source_path = seed_page("StandingSource")
+    write_file(source_path, {"keys": {}, "which-page": "the-source"})
+    target_path = seed_page("StandingTarget")
+    write_file(target_path, {"keys": {}, "which-page": "the-target"})
+
+    controller = StubController("standing-1")
+    gl.deck_manager.deck_controller = [controller]
+    # Only the DESTINATION is open, so only it has a document.
+    target_page = gl.page_manager.get_page(target_path, controller)
+    controller.active_page = target_page
+    if target_page.dict.get("which-page") != "the-target":
+        print(f"FAIL: the destination page did not load: {target_page.dict}")
+        return 1
+
+    gl.page_manager.move_page(source_path, target_path)
+
+    if read_file(target_path).get("which-page") != "the-source":
+        print("FAIL: the move did not put the source page at the target name "
+              "-- check vacuous")
+        return 1
+    if target_page.dict.get("which-page") != "the-source":
+        print("FAIL: the deck showing the renamed-over page kept the content "
+              f"the move replaced: {target_page.dict}")
+        return 1
+
+    print("PASS: a rename onto an open page corrects the document standing "
+          "at that name")
+    return 0
+
+
+def check_settings_write_keeps_a_pending_edit() -> int:
+    """The two seams crossing: a page edit still on its timer while the whole
+    settings section is written round the outside of the page."""
+    path = seed_page("SettingsCross")
+    page = Page(json_path=path, deck_controller=StubController("cross-1"))
+
+    page.dict["pending-edit"] = "marked-not-written"
+    page.save()
+    if read_file(path).get("pending-edit") is not None:
+        print("FAIL: the edit was written inline -- nothing is pending, so "
+              "the check is vacuous")
+        return 1
+
+    gl.page_manager.set_page_settings(path, {"brightness": {"value": 42}})
+
+    if page.dict.get("pending-edit") != "marked-not-written":
+        print(f"FAIL: the settings write erased the pending edit: {page.dict}")
+        return 1
+    if page.dict.get("settings", {}).get("brightness", {}).get("value") != 42:
+        print(f"FAIL: the settings never reached the live page: {page.dict}")
+        return 1
+    on_disk = read_file(path)
+    if on_disk.get("pending-edit") != "marked-not-written":
+        print(f"FAIL: the pending edit never reached the file: {on_disk}")
+        return 1
+    if on_disk.get("settings", {}).get("brightness", {}).get("value") != 42:
+        print(f"FAIL: the settings never reached the file: {on_disk}")
+        return 1
+
+    print("PASS: a whole-settings write flushes the page's pending edit and "
+          "leaves both on the page and on disk")
+    return 0
+
+
 def check_dict_cannot_be_replaced() -> int:
     path = seed_page("NoSetter")
     page = Page(json_path=path, deck_controller=StubController("nosetter-1"))
@@ -349,6 +550,10 @@ def main() -> int:
                   check_refresh_preserves_aliasing,
                   check_refresh_never_blanks_a_section,
                   check_heal_through_the_document,
+                  check_two_spellings_are_one_page,
+                  check_rename_does_not_refresh_the_live_page,
+                  check_rename_over_a_live_page,
+                  check_settings_write_keeps_a_pending_edit,
                   check_dict_cannot_be_replaced):
         WRITES.clear()
         if check() != 0:

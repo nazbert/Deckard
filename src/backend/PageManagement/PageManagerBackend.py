@@ -28,7 +28,8 @@ from src.backend.DeckManagement.deck_controller.controller import DeckController
 # Import own modules
 from src.backend.PageManagement.Page import Page
 from src.backend.PageManagement import page_flush
-from src.backend.PageManagement.page_document import PageDocument, document_key
+from src.backend.PageManagement.page_flush import canonical_path
+from src.backend.PageManagement.page_document import PageDocument
 from src.backend.DeckManagement.HelperMethods import natural_sort_by_filenames
 from src.backend.atomic_json import atomic_write_json
 
@@ -59,14 +60,21 @@ class PageManagerBackend:
         # the first construction instead of building a twin Page whose
         # actions register live event/signal handlers.
         self._loads_in_flight: dict[tuple, tuple[threading.Thread, threading.Event]] = {}
-        # One document per page file, keyed by resolved path: the content of
-        # that page, held once and shared by every Page object on it. Never
-        # pruned -- one entry per distinct page path, which is the bound the
-        # flush seam's per-path save locks already live under (tens), so
-        # eviction would buy nothing and cost the guarantee the registry is
-        # for. A page deleted and later recreated under the same name reuses
-        # its document, which the load that mints the new Page fills from the
-        # new file.
+        # One document per page file, keyed the way every other per-page
+        # registry in the process is keyed (the flush seam's canonical_path),
+        # so a page reached by two spellings is one document with one save
+        # lock and one pending record rather than two of each.
+        #
+        # Never pruned, and unlike the lock and pending registries an entry
+        # here is a whole page dict -- ~16 KB for a fully populated deck's
+        # page, so a session that visits fifty pages holds on the order of a
+        # megabyte it will not give back. That is the price of the guarantee:
+        # the registry is the only thing that can promise a path has ONE
+        # content, and an entry dropped while any Page still reads through it
+        # would hand the next Page a second copy -- silently, which is the
+        # failure this exists to remove. A page deleted and later recreated
+        # under the same name reuses its document, which the load that mints
+        # the new Page fills from the new file.
         self._documents: dict[str, PageDocument] = {}
         self._documents_guard = threading.Lock()
         self.custom_pages = []
@@ -633,7 +641,7 @@ class PageManagerBackend:
         Every Page on a path goes through here, which is what makes them
         share a dict instead of each holding a copy of the file.
         """
-        key = document_key(path)
+        key = canonical_path(path)
         with self._documents_guard:
             document = self._documents.get(key)
             if document is None:
@@ -654,7 +662,7 @@ class PageManagerBackend:
         first Page reads the file anyway.
         """
         with self._documents_guard:
-            document = self._documents.get(document_key(path))
+            document = self._documents.get(canonical_path(path))
         if document is None:
             return
         document.refresh_from_disk()
@@ -674,28 +682,38 @@ class PageManagerBackend:
         but stays in memory for the next save to carry to the new name. A
         reload here would be exactly the thing that loses it.
 
-        A document already standing at the destination is displaced. Its file
-        has just been overwritten by the move, so nothing it holds describes
-        that file any more, and its Pages carry on off their own content
-        exactly as they did before -- which only a rename onto a page name
-        another deck is showing can produce.
+        Three outcomes, all of them reachable:
+
+        * The usual one -- a document at the old name, which moves.
+        * A document already standing at the destination while one also moves
+          onto it: the mover wins the key and the standing one is DISPLACED,
+          left to the Pages that hold it. Their content is their own and their
+          json_path is unchanged, so they carry on writing it exactly as they
+          did before, but nothing refreshes them any more. Only a rename onto
+          a page name another deck is showing produces this.
+        * A document standing at the destination with nothing moving onto it,
+          because no Page in this process held the moved-from page. Nothing is
+          displaced; the standing document IS the destination and is re-read,
+          because the move has just replaced the file underneath it.
         """
-        old_key = document_key(old_path)
-        new_key = document_key(new_path)
+        old_key = canonical_path(old_path)
+        new_key = canonical_path(new_path)
         with self._documents_guard:
             moved = self._documents.pop(old_key, None)
             if moved is not None:
                 moved.path = new_path
                 self._documents[new_key] = moved
                 return moved
-            standing = self._documents.get(new_key)
-            if standing is not None:
-                return standing
-            document = PageDocument(new_path)
-            self._documents[new_key] = document
-        # Nothing in this process was holding the moved-from page, so this
-        # document starts empty; the file it names is the copy the move has
-        # already made, and the Pages about to bind it need its content.
+            document = self._documents.get(new_key)
+            if document is None:
+                document = PageDocument(new_path)
+                self._documents[new_key] = document
+        # Nothing moved onto this document, and the file underneath it is now
+        # the moved page: a document already standing here would otherwise
+        # keep serving the overwritten content to every Page reading through
+        # it (and put it back on disk at the next save), and a document just
+        # minted here has no content at all. Outside the guard, because the
+        # re-read goes through the read barrier and so takes a save lock.
         document.refresh_from_disk()
         return document
 

@@ -13,9 +13,14 @@ had stopped agreeing with.
 A ``PageDocument`` is that content, once. Every Page on a path reads and
 writes through the same dict object, so an edit made through one of them is
 already made for all of them, with no file involved. The registry that hands
-documents out lives on the page manager: one document per page file, minted on
-first use and never dropped -- a page count of documents, which is the bound
-the flush seam's per-path lock registry already lives under.
+documents out lives on the page manager, keyed through the flush seam's
+``canonical_path`` so that a page named two ways is one document with one save
+lock and one pending write rather than two of each. Documents are minted on
+first use and never dropped, and what is being kept is a whole page dict --
+tens of kilobytes each, so a long session across many pages holds on the order
+of a megabyte it will not give back. The registry is the only thing that can
+promise a file has one content; an entry dropped while a Page still reads
+through it hands the next Page a second copy, silently.
 
 WHAT A DOCUMENT DOES NOT OWN
 
@@ -66,10 +71,19 @@ the straddled pair an in-place update can produce. And nested containers are
 untouched here -- only top-level keys are rebound, each to a tree the loader
 has just finished building -- so a structural snapshot walking ``data["keys"]``
 walks an object this never mutates.
+
+One reader can do more than see that anomaly: it can keep it. A flush that
+takes its snapshot between the two steps writes a page still carrying the
+sections the refresh is about to drop, so the file and the memory disagree,
+and the next read of that file puts the dropped sections back. The window is
+the microseconds between one C-level update and a handful of deletes, on the
+one path where a refresh and a write of the same page overlap, and the outcome
+is a page with something stale in it rather than a page missing something --
+the same direction every other choice here leans. Closing it means holding
+this lock across the write as well, which is the writer's lock to give.
 """
 from __future__ import annotations
 
-import os
 import threading
 from typing import Any
 
@@ -142,15 +156,3 @@ def document_for(path: str) -> PageDocument:
     if page_manager is None:
         return PageDocument(path)
     return page_manager.get_document(path)
-
-
-def document_key(path: str) -> str:
-    """The registry key for ``path``.
-
-    Resolved, so that two spellings of one page file -- a symlinked data
-    directory, a path built by a different join -- get one document rather
-    than two that quietly disagree. The document keeps the spelling it was
-    first asked for, because that is the one the loader's backup lookup takes
-    the page's basename from.
-    """
-    return os.path.realpath(path)
