@@ -9,6 +9,12 @@ bundle as a release asset.
 
 ### Fixed
 
+- Page edits made in different places at the same time no longer overwrite
+  each other. Changing a page's settings — a screensaver, brightness,
+  background or window-rule override — while a plugin or a key edit was
+  saving the same page could silently drop one of the two changes, from the
+  file and from the running app, so a setting you had just made would be back
+  to its old value the next time you looked.
 - Window-based automatic page switching now works on desktops that report a
   colon-joined `XDG_CURRENT_DESKTOP`, such as `ubuntu:GNOME` — window
   grabbing matched only single-name desktops and stayed silently disabled

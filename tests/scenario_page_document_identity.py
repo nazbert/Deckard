@@ -136,6 +136,17 @@ def read_file(path: str) -> dict:
         return json.load(f)
 
 
+def read_file_through_barrier(path: str) -> dict:
+    """The file as any reader of a page sees it: pending edits written first.
+
+    Every page edit -- a Page's save, a settings write, a whole-page replace
+    -- is marked and written on the flush seam's timer, so reading the bytes
+    without asking for the write reads the page as it was before the edit.
+    """
+    page_flush.get().flush_path(path)
+    return read_file(path)
+
+
 def write_file(path: str, data: dict) -> None:
     """A page file written by somebody other than the page: an importer, a
     settings write, the asset sweep."""
@@ -374,7 +385,7 @@ def check_two_spellings_are_one_page() -> int:
         print("FAIL: the two spellings do not name one file -- check vacuous")
         return 1
 
-    if page_flush._get_save_lock(path) is not page_flush._get_save_lock(other):
+    if page_flush.save_lock(path) is not page_flush.save_lock(other):
         print("FAIL: two spellings of one page file take two save locks -- "
               "their backup and write can interleave on the same bytes")
         return 1
@@ -497,7 +508,7 @@ def check_rename_over_a_live_page() -> int:
 
 def check_settings_write_keeps_a_pending_edit() -> int:
     """The two seams crossing: a page edit still on its timer while the whole
-    settings section is written round the outside of the page."""
+    settings section is written."""
     path = seed_page("SettingsCross")
     page = Page(json_path=path, deck_controller=StubController("cross-1"))
 
@@ -516,7 +527,9 @@ def check_settings_write_keeps_a_pending_edit() -> int:
     if page.dict.get("settings", {}).get("brightness", {}).get("value") != 42:
         print(f"FAIL: the settings never reached the live page: {page.dict}")
         return 1
-    on_disk = read_file(path)
+    # The settings are an edit of the page now, not a write around it, so
+    # they reach the file the way every page edit does -- through the seam.
+    on_disk = read_file_through_barrier(path)
     if on_disk.get("pending-edit") != "marked-not-written":
         print(f"FAIL: the pending edit never reached the file: {on_disk}")
         return 1
@@ -524,8 +537,8 @@ def check_settings_write_keeps_a_pending_edit() -> int:
         print(f"FAIL: the settings never reached the file: {on_disk}")
         return 1
 
-    print("PASS: a whole-settings write flushes the page's pending edit and "
-          "leaves both on the page and on disk")
+    print("PASS: a whole-settings write and a page edit still on its timer "
+          "both survive, on the page and on disk")
     return 0
 
 

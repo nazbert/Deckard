@@ -13,7 +13,6 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 import os
-import json
 import threading
 import time
 
@@ -22,7 +21,6 @@ import globals as gl
 
 from loguru import logger as log
 from copy import copy
-import shutil
 
 # Import globals
 from src.backend.PluginManager.EventAssigner import EventAssigner
@@ -42,25 +40,6 @@ if TYPE_CHECKING:
 # Inside Page's body the name `dict` is the page-content property, so
 # annotations written there reach the builtin through this alias.
 _Dict = dict
-
-
-def _snapshot_json_tree(value):
-    """Structural copy of a json-shaped tree: dicts/lists are re-created,
-    leaves are shared by reference. dict.copy() and list() run entirely in C
-    under the GIL, so each container snapshots atomically even while another
-    thread is mutating it -- unlike json.dump (or copy.deepcopy), this can
-    never raise `RuntimeError: dict changed size during iteration`. That is
-    what makes it safe over a page document, whose content every deck showing
-    that page edits through directly, and which a refresh rebinds top-level
-    keys of in place: whatever this walks, it walks its own copy of. Leaves
-    are deliberately NOT deep-copied: action entries hold live ActionCore
-    objects under "object" (the caller strips those from the copy), which
-    must never be duplicated."""
-    if isinstance(value, dict):
-        return {key: _snapshot_json_tree(item) for key, item in value.copy().items()}
-    if isinstance(value, list):
-        return [_snapshot_json_tree(item) for item in list(value)]
-    return value
 
 
 class Page:
@@ -164,50 +143,18 @@ class Page:
         return self.json_path
 
     def make_backup(self, json_path: str | None = None):
-        os.makedirs(os.path.join(gl.DATA_PATH, "pages","backups"), exist_ok=True)
-
         # The flush passes the path it holds the save lock for. It is this
         # page's own path in every case but one: a page move re-points
         # json_path while a write for the old path may still be pending, and
         # backing up a file other than the one about to be overwritten would
         # copy the wrong page over the wrong backup.
-        src_path = json_path if json_path is not None else self.json_path
-        dst_path = os.path.join(gl.DATA_PATH, "pages","backups", os.path.basename(src_path))
-
-        # Only a primary that reads back as a whole page is worth copying.
-        # Both refusals below leave pages/backups/ untouched and let the
-        # write that follows go ahead, because the two ways to lose a page
-        # here are to put the damage on top of the copy that survives it, and
-        # to make the page unwritable by refusing to write at all.
-        try:
-            with open(src_path) as f:
-                json.load(f)
-        except FileNotFoundError:
-            # Nothing to copy. A page whose file the loader quarantined is
-            # live in memory (get_page_data substituted the backup) with no
-            # primary behind it, and the write this guards recreates the file
-            # from that page -- the only thing that hands the user back a
-            # writable page. Raising instead made every write of it fail on a
-            # timer thread, dropping the edits with nothing but a log line.
-            log.warning(f"No page file at {src_path} to back up; the write recreates it")
-            return
-        except ValueError as e:
-            # ValueError, not JSONDecodeError: a file of garbage bytes raises
-            # UnicodeDecodeError while decoding, before the parser ever sees
-            # it -- a ValueError but not a JSON error, so the narrower clause
-            # let it escape and take the write down with it. The settings
-            # loader catches the pair as one for the same reason.
-            log.error(f"Invalid json in {src_path}: {e}")
-            return
-
-        shutil.copy2(src_path, dst_path)
+        page_document.back_up_page_file(json_path if json_path is not None else self.json_path)
 
     def move_key_to_end(self, dictionary, key):
-        # Operates on the passed dict (save()'s snapshot). This used to
+        # Operates on the passed dict (the flush's snapshot). This used to
         # pop/reinsert on live self.dict instead -- mutating the page
         # mid-save while never reordering the dict actually being written.
-        if key in dictionary:
-            dictionary[key] = dictionary.pop(key)
+        page_document.move_key_to_end(dictionary, key)
 
     def set_background(self, file_path):
         self.dict.setdefault("background", {})
@@ -513,21 +460,10 @@ class Page:
         self.save()
 
     def get_without_action_objects(self):
-        # Serialize from a snapshot, never the live tree: json.dump over
-        # self.dict raced concurrent mutations (a RuntimeError mid-dump
-        # lost the whole save), and the old shallow copy() meant the
-        # `del action["object"]` below mutated the ORIGINAL action dicts.
-        dictionary = _snapshot_json_tree(self.dict)
-        for type in Input.KeyTypes:
-            for key in dictionary.get(type, {}):
-                for state in dictionary[type][key].get("states", {}):
-                    if "actions" not in dictionary[type][key]["states"][state]:
-                        continue
-                    for action in dictionary[type][key]["states"][state]["actions"]:
-                        if "object" in action:
-                            del action["object"]
-
-        return dictionary
+        # The content and its file shape are the document's, not this
+        # object's: the flush writes pages no deck is showing too, and those
+        # have no Page to ask.
+        return self._document.get_without_action_objects()
 
     def get_all_actions(self, action_dict: _Dict = None):
         if action_dict is None:
