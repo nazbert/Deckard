@@ -140,13 +140,31 @@ class Page:
         src_path = json_path if json_path is not None else self.json_path
         dst_path = os.path.join(gl.DATA_PATH, "pages","backups", os.path.basename(src_path))
 
-        # Check if json in src is valid
-        with open(src_path) as f:
-            try:
+        # Only a primary that reads back as a whole page is worth copying.
+        # Both refusals below leave pages/backups/ untouched and let the
+        # write that follows go ahead, because the two ways to lose a page
+        # here are to put the damage on top of the copy that survives it, and
+        # to make the page unwritable by refusing to write at all.
+        try:
+            with open(src_path) as f:
                 json.load(f)
-            except json.decoder.JSONDecodeError as e:
-                log.error(f"Invalid json in {src_path}: {e}")
-                return
+        except FileNotFoundError:
+            # Nothing to copy. A page whose file the loader quarantined is
+            # live in memory (get_page_data substituted the backup) with no
+            # primary behind it, and the write this guards recreates the file
+            # from that page -- the only thing that hands the user back a
+            # writable page. Raising instead made every write of it fail on a
+            # timer thread, dropping the edits with nothing but a log line.
+            log.warning(f"No page file at {src_path} to back up; the write recreates it")
+            return
+        except ValueError as e:
+            # ValueError, not JSONDecodeError: a file of garbage bytes raises
+            # UnicodeDecodeError while decoding, before the parser ever sees
+            # it -- a ValueError but not a JSON error, so the narrower clause
+            # let it escape and take the write down with it. The settings
+            # loader catches the pair as one for the same reason.
+            log.error(f"Invalid json in {src_path}: {e}")
+            return
 
         shutil.copy2(src_path, dst_path)
 

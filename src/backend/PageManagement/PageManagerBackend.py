@@ -372,6 +372,12 @@ class PageManagerBackend:
         # arrives without them.
         page_flush.get().flush_path(old_path)
 
+        # And the destination is about to be replaced wholesale, so anything
+        # pending for THAT path would land after the copy and undo the
+        # rename. Symmetric with the source discard below; a no-op unless the
+        # new name already had a page.
+        page_flush.get().discard_path(new_path)
+
         shutil.copy2(old_path, new_path)
 
         page_settings = gl.settings_manager.load_settings_from_file(self.PAGE_SETTINGS_PATH)

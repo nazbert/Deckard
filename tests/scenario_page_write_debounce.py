@@ -19,12 +19,14 @@ is only safe if two things hold, and this scenario holds them:
      that proves it: pending edits for a deleted page are DISCARDED, because
      flushing them would write the file back into existence.
 
-  3. THE COPY IN pages/backups/ IS THE FILE AS THE SESSION FOUND IT. One copy
+  3. THE COPY IN pages/backups/ IS THE FILE AS THE SEAM FOUND IT. One copy
      per page per session, taken before the first write and never refreshed
-     by a later one -- so it is the state before this session's edits, which
-     is what a heal wants and what a per-write copy stopped being. A file
-     handed to another writer (deleted, moved, imported over) opens a fresh
-     session for that path; an unparseable primary is never copied at all.
+     by a later one -- so it is the state before this seam's writes, which is
+     what a heal wants and what a per-write copy stopped being. A file handed
+     to another writer (deleted, moved, imported over) opens a fresh session
+     for that path, and the handover waits for any write in flight. A primary
+     that will not parse is never copied; a primary that is not there is
+     written back.
 
 Timing is driven, never waited on: the flush's scheduler and clock are
 constructor arguments, so this runs in virtual time with no sleeps -- the
@@ -664,7 +666,7 @@ def check_delete_discards(controller) -> None:
 
 def check_backup_is_once_per_session(controller) -> None:
     """One copy into pages/backups/ per page per session, holding the file as
-    the session found it.
+    the seam found it.
 
     The copy used to be taken on every save, which made it a chase: a full
     re-parse of the file plus a byte copy per keystroke, for a backup that
@@ -699,7 +701,7 @@ def check_backup_is_once_per_session(controller) -> None:
         f"total): the copy is per session, not per write")
     assert read_page(backup) == opening_state, (
         "a later write refreshed the backup, so it now holds this session's "
-        "own output instead of the state the session opened with")
+        "own output instead of the state it found the file in")
     assert read_page(path)["debounce-marker"] == "second-write"
     print("PASS: a page is copied into pages/backups/ once per session, "
           "before the first write, and later writes leave that copy alone")
@@ -769,6 +771,143 @@ def check_discard_reopens_the_backup(controller) -> None:
           "next write copies what the new owner left on disk")
 
 
+def check_discard_waits_for_a_flush_in_flight(controller) -> None:
+    """A discard arriving while a flush holds the path must wait for it, or
+    the flush undoes the discard from behind.
+
+    Both ends of that window hurt, and both are silent. The flush finishes
+    its backup bookkeeping AFTER the copy, so a discard that slips through
+    mid-copy is overwritten by the record the flush adds on its way out --
+    pages/backups/ then keeps the page the import replaced, and a heal undoes
+    the import. And the flush's own write is still to come: it lands on top
+    of the file the importer wrote, putting the pre-import page back.
+
+    Real threads, because that is where the window is: the flush is stalled
+    inside its critical section and the discard is fired from another thread
+    while it sits there.
+    """
+    scheduler = ManualScheduler()
+    page_flush._flush = page_flush.PageFlush(scheduler=scheduler, clock=time.monotonic)
+    WRITES.clear()
+    BACKUPS.clear()
+    path = seed_page("DiscardRace")
+    backup = backup_path_of(path)
+    page = gl.page_manager.get_page(path, controller)
+
+    # Stalled after the copy and before the write -- the widest point of the
+    # window, and the one where the seam still has both to lose.
+    in_flush = threading.Event()
+    at_discard = threading.Event()
+    release = threading.Event()
+    real_make_backup = page.make_backup
+    imported = {"keys": {}, "dials": {}, "touchscreens": {}, "imported": True}
+
+    def stalling_make_backup(json_path=None):
+        result = real_make_backup(json_path)
+        in_flush.set()
+        assert release.wait(20), "the stalled flush was never released"
+        return result
+
+    page.make_backup = stalling_make_backup
+    try:
+        edit(page, "pre-import")
+        flusher = threading.Thread(target=scheduler.fire, args=(scheduler.last_handle,),
+                                   name="discard-race-flush")
+        flusher.start()
+        assert in_flush.wait(20), "the deferred write never reached its backup"
+
+        def importing():
+            at_discard.set()
+            page_flush.get().discard_path(path)
+            write_page(path, imported)
+
+        importer = threading.Thread(target=importing, name="discard-race-import")
+        importer.start()
+        assert at_discard.wait(20), "the importing thread never started"
+        importer.join(0.5)
+        assert importer.is_alive(), (
+            "the discard returned while a flush held the path: that flush "
+            "still has a write and a backup record to land, both of them on "
+            "top of the import this discard is clearing the way for")
+
+        release.set()
+        flusher.join(20)
+        importer.join(20)
+        assert not flusher.is_alive(), "the stalled flush never finished"
+        assert not importer.is_alive(), "the import never finished"
+    finally:
+        del page.make_backup
+        release.set()
+
+    assert read_page(path) == imported, (
+        "the flush that was in flight wrote its pre-import page over the "
+        "file the import had just written")
+    assert len(backups_of(path)) == 1, (
+        f"expected the pre-import page to have been backed up once: {BACKUPS}")
+
+    # What the next write of this path backs up is the import's own content
+    # -- which it can only do if the record the discard cleared stayed
+    # cleared through the end of the flush that was in flight.
+    edit(page, "post-import")
+    scheduler.fire(scheduler.last_handle)
+    assert len(backups_of(path)) == 2, (
+        "the write after the import reused a backup record the discard had "
+        "cleared: pages/backups/ still holds the page the import replaced, "
+        "and a heal would put it back")
+    assert read_page(backup) == imported
+    print("PASS: a discard waits for a flush already holding the path, so "
+          "neither its write nor its bookkeeping outlives the handover")
+
+
+def check_quarantined_primary_is_written_back(controller) -> None:
+    """A page whose file is gone stays writable: the write recreates it.
+
+    The loader quarantines an unparseable page by renaming it aside, and
+    get_page_data then serves the backup instead -- so a page can be live on
+    screen and editable with no primary behind it at all. Opening that
+    missing file for the backup used to raise, on a timer thread, taking the
+    write with it: every edit of that page vanished into a log line with
+    nothing on screen to say so, for as long as the session lasted. Nothing
+    to copy is a refusal like any other, and the write it guards puts the
+    page back.
+    """
+    vt = fresh_flush()
+    path = seed_page("Quarantined")
+    quarantined = path + ".corrupt"
+    backup = backup_path_of(path)
+    page = gl.page_manager.get_page(path, controller)
+
+    last_good = {"keys": {}, "dials": {}, "touchscreens": {}, "from": "before the quarantine"}
+    write_page(backup, last_good)
+    os.rename(path, quarantined)
+
+    try:
+        edit(page, "written-after-the-quarantine")
+        vt.advance(page_flush.DEBOUNCE_S)
+
+        assert os.path.exists(path), (
+            "the page file was not recreated: the write raised on the "
+            "missing primary, so nothing the user does to this page can be "
+            "saved for the rest of the session")
+        assert read_page(path)["debounce-marker"] == "written-after-the-quarantine"
+        assert page_flush.get().pending_page(path) is None, (
+            "the edit is still pending after its write")
+        assert backups_of(path) == [], "a primary that was not there was copied"
+        assert read_page(backup) == last_good, (
+            "the recreated page was copied over the backup it was healed from")
+
+        # Final for the session, like the corrupt refusal: the file exists
+        # again, but what it holds is this seam's own output.
+        edit(page, "and-again")
+        vt.advance(page_flush.DEBOUNCE_S)
+        assert backups_of(path) == []
+        assert read_page(backup) == last_good
+    finally:
+        os.remove(quarantined)
+    print("PASS: a page whose file was quarantined is written back rather "
+          "than silently unwritable, and its backup is left alone")
+
+
 def check_corrupt_primary_is_never_backed_up(controller) -> None:
     """A primary that will not parse is not copied over the backup, and that
     refusal stands for the session.
@@ -813,8 +952,30 @@ def check_corrupt_primary_is_never_backed_up(controller) -> None:
     assert read_page(backup) == last_good, (
         "the last copy taken before the corruption was replaced by a "
         "duplicate of the file that is already on disk")
-    print("PASS: an unparseable primary is never copied over its backup, and "
-          "the refusal is not revisited later in the session")
+
+    # Garbage bytes rather than malformed JSON: decoding fails before the
+    # parser is ever reached, which is a ValueError but not a JSON error --
+    # the case a JSONDecodeError-only guard lets through, taking the write
+    # down with it and dropping the edit.
+    binary_path = seed_page("BinaryPrimary")
+    binary_backup = backup_path_of(binary_path)
+    binary_page = gl.page_manager.get_page(binary_path, controller)
+    write_page(binary_backup, last_good)
+    with open(binary_path, "wb") as f:
+        f.write(b"\x00\xff\xfe not text at all")
+
+    edit(binary_page, "written-over-the-garbage")
+    vt.advance(page_flush.DEBOUNCE_S)
+
+    assert read_page(binary_path)["debounce-marker"] == "written-over-the-garbage", (
+        "an undecodable primary took the write down with it: the edit was "
+        "dropped on a timer thread with only a log line to show for it")
+    assert backups_of(binary_path) == [], (
+        "a file of garbage bytes was copied into pages/backups/")
+    assert read_page(binary_backup) == last_good
+    print("PASS: an unparseable primary -- malformed or not text at all -- is "
+          "never copied over its backup and never costs the write, and the "
+          "refusal is not revisited later in the session")
 
 
 def call_sites_in(module_path: str, func_name: str) -> list[tuple[int, str]]:
@@ -942,6 +1103,8 @@ def main() -> None:
         check_delete_discards(controller)
         check_backup_is_once_per_session(controller)
         check_discard_reopens_the_backup(controller)
+        check_discard_waits_for_a_flush_in_flight(controller)
+        check_quarantined_primary_is_written_back(controller)
         check_corrupt_primary_is_never_backed_up(controller)
         check_eviction_keeps_pending_edits(controller)
         check_every_reader_takes_the_barrier()

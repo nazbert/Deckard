@@ -49,21 +49,24 @@ coalescing by widening exactly the loss window the cap exists to bound.
 
 THE BACKUP
 
-Before this process first overwrites a page file, the file as this session
+Before this process first overwrites a page file, the file as this seam
 found it is copied to ``pages/backups/<name>.json`` -- the copy the page
 manager heals from when the primary reads back corrupt. That copy is taken
 ONCE per path per session, not once per write: it is a full re-parse of the
 file plus a byte copy, and taken per keystroke it bought a backup whose
 contents chased the primary a fraction of a second behind.
 
-Holding the session's opening state rather than the last saved one is the
+Holding the state the seam found rather than the last one it wrote is the
 point of doing it once, not the price of it. A backup is only ever read when
 the primary is unreadable, and nothing here can make it unreadable: every
 page file this process writes goes out as ``atomic_write_json``'s
 temporary-then-replace, so a write that dies mid-flight leaves the previous
-complete page, never half of two. Corruption therefore arrives from outside
--- a filesystem fault, a full disk, another program editing the file -- and
-against that, a copy from before this session's edits is as serviceable as a
+complete page, never half of two. (The one page write anywhere that is not
+atomic is the rename's ``copy2`` onto the destination name it is claiming --
+it can leave a partial file under that new name, but it cannot truncate the
+page being renamed.) Corruption therefore arrives from outside -- a
+filesystem fault, a full disk, another program editing the file -- and
+against that, a copy from before this seam's writes is as serviceable as a
 copy from a second ago, while being the only one that predates whatever went
 wrong. History older than this session is somebody else's job and already
 done: the boot backup zips every page file into a timestamped archive and
@@ -94,7 +97,9 @@ without a barrier sees a page as it was up to a second ago.
 A barrier can make a GTK-thread reader wait for a write already in flight on
 a timer thread -- bounded by one page write, and the trade the deferral is
 for: one possible wait on a read against a guaranteed pair of fsyncs on every
-keystroke.
+keystroke. ``discard_path`` waits on the same lock for the same bound, and
+must: a discard that walked past a flush already inside its critical section
+would be undone by that flush the moment it finished.
 
 THREAD CONTRACT
 
@@ -233,12 +238,13 @@ class PageFlush:
         # writable -- the next mint of that path reads the file through the
         # barrier, so it picks up exactly what this reference kept alive.
         self._pending: dict[str, _Pending] = {}
-        # Page files this process has already copied into pages/backups/. The
+        # Page files this seam has already copied into pages/backups/. The
         # copy keeps the state a file was in BEFORE this seam overwrote it,
         # which is a property of the session and not of any one write, so it
-        # is taken once per path. Grows one entry per distinct page path and
-        # never prunes -- bounded by the user's page count, like the lock
-        # registry above.
+        # is taken once per path. One entry per distinct page path, pruned
+        # only by discard_path (which hands the file to another writer, so
+        # the question reopens) -- bounded by the user's page count, like the
+        # lock registry above.
         self._backed_up: set[str] = set()
         self._pending_guard = threading.Lock()
         self._scheduler: Scheduler = scheduler if scheduler is not None else TimerWheelScheduler()
@@ -367,15 +373,18 @@ class PageFlush:
         it -- and no other flush of the same file can slip between the check
         and the copy.
 
-        A REFUSAL COUNTS AS DONE. make_backup declines to copy a primary it
-        cannot parse, which is the one case where copying would destroy the
-        very thing the backup is for. Asking again on the next write would
-        find that primary parseable -- this seam wrote it a moment ago -- and
-        put a duplicate of the current file over the last copy that predates
-        the corruption, which is the only copy worth having. So the first
-        write of a path in a session settles that path's backup either way,
-        and only a make_backup that raises (nothing was read, nothing was
-        overwritten) leaves the question open for the next write.
+        A REFUSAL COUNTS AS DONE. make_backup returns without copying when
+        the primary will not parse (copying it would destroy the very thing
+        the backup is for) and when the primary is not there at all (there is
+        nothing to copy, and the write about to follow recreates the file).
+        Asking again on the next write would find that primary parseable --
+        this seam wrote it a moment ago -- and put a duplicate of the current
+        file over the last copy taken before the damage, which is the only
+        copy worth having. So the first write of a path in a session settles
+        that path's backup, whether it took one or declined to; what is left
+        open for the next write is only the case where make_backup RAISES,
+        which is now an unexpected I/O error -- nothing was read and nothing
+        gets overwritten, because the exception takes the write with it.
 
         `path`, never page.json_path: a page move re-points that attribute in
         place, and the file whose previous state has to be kept is the one
@@ -425,10 +434,28 @@ class PageFlush:
         exactly what it says it is -- the backup is the file as it was before
         this seam first wrote it -- with "before" starting again each time
         somebody else takes the file over wholesale.
+
+        UNDER THE PATH'S SAVE LOCK, like a flush, so a discard cannot land in
+        the middle of one. A flush that is already inside its critical
+        section has read its entry and may be anywhere between the backup and
+        the write; a discard slipping past it would be undone twice over --
+        the backup record re-added by the copy the flush is in the middle of,
+        and the file itself overwritten with the pre-discard page after the
+        caller had replaced it. Waiting means the flush finishes against the
+        old file, and the delete, move or import that follows this call has
+        the last word.
+
+        The wait is bounded by one page write, the same bound (and the same
+        lock) a read barrier already accepts, and every caller reaches here
+        holding no other lock of its own: the save lock takes nothing else
+        while held -- the backup, the snapshot and the atomic write are
+        stdlib file I/O -- so it is a leaf, and acquiring it under a page
+        manager or controller lock cannot invert anything.
         """
-        with self._pending_guard:
-            entry = self._pending.pop(path, None)
-            self._backed_up.discard(path)
+        with _get_save_lock(path):
+            with self._pending_guard:
+                entry = self._pending.pop(path, None)
+                self._backed_up.discard(path)
         if entry is not None and entry.handle is not None:
             self._scheduler.cancel(entry.handle)
 
