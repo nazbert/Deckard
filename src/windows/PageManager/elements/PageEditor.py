@@ -625,7 +625,13 @@ class ScreensaverGroup(PageEditorGroup):
         better_disconnect(self.delay_spin, self.on_delay_changed)
         better_disconnect(self.loop_toggle, self.on_loop_changed)
         better_disconnect(self.fps_spin, self.on_fps_changed)
-        better_disconnect(self.brightness_scale, self.on_brightness_changed)
+        # .scale, not the row: the handler is connected to the inner scale, and
+        # better_disconnect swallows a miss -- so naming the row here left the
+        # handler attached and selecting another page in the list added one
+        # more, until every load of the row wrote the brightness it had just
+        # displayed back to the page and reapplied it to the deck, once per
+        # page ever selected.
+        better_disconnect(self.brightness_scale.scale, self.on_brightness_changed)
         better_disconnect(self.media_selector_button, self.on_media_selector_click)
 
     def load_config_settings(self, page_path: str):
@@ -640,7 +646,10 @@ class ScreensaverGroup(PageEditorGroup):
         self.delay_spin.set_value(screensaver_settings.get("time-delay", 5))
         self.loop_toggle.set_active(screensaver_settings.get("loop", True))  # default: loop on
         self.fps_spin.set_value(screensaver_settings.get("fps", 30))
-        self.brightness_scale.set_value(screensaver_settings.get("brightness", 75))
+        # 30, the value the deck actually dims to when nothing is stored --
+        # this slider used to show 75, which is the RUNNING brightness and
+        # what no screensaver has ever applied.
+        self.brightness_scale.set_value(screensaver_settings.get("brightness", 30))
 
         self.set_thumbnail(screensaver_settings.get("media-path", None))
 

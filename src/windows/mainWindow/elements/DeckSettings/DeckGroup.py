@@ -92,16 +92,20 @@ class Rotation(Adw.PreferencesRow):
     def on_value_changed_idle(self):
         rot = int(self.toggle_group.get_active_name())
 
-        deck_settings = gl.settings_manager.get_deck_settings(self.deck_serial_number)
-        deck_settings["rotation"] = rot
-        gl.settings_manager.save_deck_settings(self.deck_serial_number, deck_settings)
+        deck_settings = gl.settings_manager.deck(self.deck_serial_number)
+        deck_settings.set_value("rotation", rot)
+        deck_settings.save()
 
         self.settings_page.deck_controller.set_rotation(rot)
 
     def load_default(self, *args):
-        better_disconnect(self.toggle_group, "notify::active")
+        # By handler, not by signal name: better_disconnect takes the callable
+        # and quietly swallows what it cannot disconnect, so a name here left
+        # the handler connected -- and the set_active_name below then saved and
+        # re-applied a rotation nobody had touched, one handler more per open.
+        better_disconnect(self.toggle_group, self.on_value_changed)
 
-        rot = gl.settings_manager.get_deck_settings(self.deck_serial_number).get("rotation", 0)
+        rot = gl.settings_manager.deck(self.deck_serial_number).get("rotation")
         self.toggle_group.set_active_name(str(rot))
 
         self.toggle_group.connect("notify::active", self.on_value_changed)
@@ -120,6 +124,8 @@ class Brightness(Adw.PreferencesRow):
         self.on_map_tasks: list = []
         self.connect("map", self.on_map)
 
+        # One handler, always: load_default defers itself at construction (an
+        # unparented row is never mapped), so this connect is the first one.
         self.load_default()
         self.scale.connect("value-changed", self.on_value_changed)
 
@@ -147,10 +153,9 @@ class Brightness(Adw.PreferencesRow):
         value = round(scale.get_value())
 
         # Update and save brightness in deck settings
-        settings_manager = gl.settings_manager
-        deck_settings = settings_manager.get_deck_settings(self.deck_serial_number)
-        deck_settings.setdefault("brightness", {})["value"] = value
-        settings_manager.save_deck_settings(self.deck_serial_number, deck_settings)
+        deck_settings = gl.settings_manager.deck(self.deck_serial_number)
+        deck_settings.set("brightness", "value", value)
+        deck_settings.save()
 
         # Check if brightness is overwritten by the current page (there may
         # be no active page, e.g. right after connect or with zero pages)
@@ -167,19 +172,15 @@ class Brightness(Adw.PreferencesRow):
             self.on_map_tasks.clear()
             self.on_map_tasks.append(lambda: self.load_default())
             return
-        
-        original_values = gl.settings_manager.get_deck_settings(self.deck_serial_number)
-        
-        # Set defaut values 
-        original_values.setdefault("brightness", {})
-        brightness = original_values["brightness"].setdefault("value", 50)
 
-        # Save if changed
-        if original_values != gl.settings_manager.get_deck_settings(self.deck_serial_number):
-            gl.settings_manager.save_deck_settings(self.deck_serial_number, original_values)
-
-        # Update ui
-        self.scale.set_value(brightness)
+        # Read-only, and with the handler off. This runs on every open of the
+        # page: filling the missing key here would persist a brightness nobody
+        # chose, and letting the scale's handler see the load would save it AND
+        # push it to the physical deck -- opening a settings page is not a
+        # decision to change the deck.
+        better_disconnect(self.scale, self.on_value_changed)
+        self.scale.set_value(gl.settings_manager.deck(self.deck_serial_number).get("brightness", "value"))
+        self.scale.connect("value-changed", self.on_value_changed)
 
 
 class Saturation(Adw.PreferencesRow):
@@ -202,7 +203,7 @@ class Saturation(Adw.PreferencesRow):
         self.on_map_tasks: list = []
         self.connect("map", self.on_map)
 
-        self.load_default()
+        self.load_default()  # defers at construction -- see Brightness above
         self.scale.connect("value-changed", self.on_value_changed)
 
     def on_map(self, widget):
@@ -247,18 +248,12 @@ class Saturation(Adw.PreferencesRow):
             self.on_map_tasks.append(lambda: self.load_default())
             return
 
-        original_values = gl.settings_manager.get_deck_settings(self.deck_serial_number)
-
-        # Set default value
-        original_values.setdefault("display", {})
-        saturation = original_values["display"].setdefault("saturation", 1.0)
-
-        # Save if changed
-        if original_values != gl.settings_manager.get_deck_settings(self.deck_serial_number):
-            gl.settings_manager.save_deck_settings(self.deck_serial_number, original_values)
-
-        # Update ui
-        self.scale.set_value(saturation)
+        # Read-only, and with the handler off -- same reason as Brightness
+        # above: an open of the page must neither write the file nor reload
+        # the page behind a factor nobody changed.
+        better_disconnect(self.scale, self.on_value_changed)
+        self.scale.set_value(gl.settings_manager.deck(self.deck_serial_number).get("display", "saturation"))
+        self.scale.connect("value-changed", self.on_value_changed)
 
 
 class Screensaver(Adw.PreferencesRow):
@@ -370,33 +365,21 @@ class Screensaver(Adw.PreferencesRow):
 
     def load_defaults(self):
         self.disconnect_signals()
-        original_values = gl.settings_manager.get_deck_settings(self.deck_serial_number)
-        
-        # Set defaut values 
-        original_values.setdefault("screensaver", {})
-        enable = original_values["screensaver"].setdefault("enable", False)
-        path = original_values["screensaver"].setdefault("media-path", None)
-        # True, matching load_screensaver's default -- this setdefault
-        # PERSISTS what it returns, so a False here would silently pin the
-        # deck's screensaver to one-shot the first time the settings page is
-        # opened, undoing the runtime default without the user touching it.
-        loop = original_values["screensaver"].setdefault("loop", True)
-        fps = original_values["screensaver"].setdefault("fps", 30)
-        time = original_values["screensaver"].setdefault("time-delay", 5)
-        brightness = original_values["screensaver"].setdefault("brightness", 30)
-
-        # Save if changed
-        if original_values != gl.settings_manager.get_deck_settings(self.deck_serial_number):
-            gl.settings_manager.save_deck_settings(self.deck_serial_number, original_values)
+        # One read, and read-only: the missing keys show the deck-settings
+        # schema's defaults without being written into the file. Persisting
+        # them here would pin today's default onto every deck whose settings
+        # page has ever been opened.
+        config = gl.settings_manager.deck(self.deck_serial_number).section("screensaver")
 
         # Update ui
-        self.enable_switch.set_active(enable)
-        self.config_box.set_visible(enable)
-        self.time_spinner.set_value(time)
-        self.loop_switch.set_active(loop)
-        self.fps_spinner.set_value(fps)
-        self.scale.set_value(brightness)
+        self.enable_switch.set_active(config["enable"])
+        self.config_box.set_visible(config["enable"])
+        self.time_spinner.set_value(config["time-delay"])
+        self.loop_switch.set_active(config["loop"])
+        self.fps_spinner.set_value(config["fps"])
+        self.scale.set_value(config["brightness"])
 
+        path = config["media-path"]
         if path is not None:
             if os.path.isfile(path):
                 self.set_thumbnail(path)
@@ -412,11 +395,10 @@ class Screensaver(Adw.PreferencesRow):
         return bool(active_page.dict.get("screensaver", {}).get("overwrite", False))
 
     def on_toggle_enable(self, toggle_switch, state):
-        config = gl.settings_manager.get_deck_settings(self.deck_serial_number)
-        config.setdefault("screensaver", {})
-        config["screensaver"]["enable"] = state
+        config = gl.settings_manager.deck(self.deck_serial_number)
+        config.set("screensaver", "enable", state)
         # Save
-        gl.settings_manager.save_deck_settings(self.deck_serial_number, config)
+        config.save()
         # Update enable if not overwritten by the active page
         if not self.page_overwrites_screensaver():
             self.settings_page.deck_controller.screen_saver.set_enable(state)
@@ -424,42 +406,38 @@ class Screensaver(Adw.PreferencesRow):
         self.config_box.set_visible(state)
 
     def on_toggle_loop(self, toggle_switch, state):
-        config = gl.settings_manager.get_deck_settings(self.deck_serial_number)
-        config.setdefault("screensaver", {})
-        config["screensaver"]["loop"] = state
+        config = gl.settings_manager.deck(self.deck_serial_number)
+        config.set("screensaver", "loop", state)
         # Save
-        gl.settings_manager.save_deck_settings(self.deck_serial_number, config)
+        config.save()
 
         # Update loop if not overwritten by the active page
         if not self.page_overwrites_screensaver():
             self.settings_page.deck_controller.screen_saver.set_loop(state)
 
     def on_change_fps(self, spinner):
-        config = gl.settings_manager.get_deck_settings(self.deck_serial_number)
-        config.setdefault("screensaver", {})
-        config["screensaver"]["fps"] = spinner.get_value_as_int()
+        config = gl.settings_manager.deck(self.deck_serial_number)
+        config.set("screensaver", "fps", spinner.get_value_as_int())
         # Save
-        gl.settings_manager.save_deck_settings(self.deck_serial_number, config)
+        config.save()
         # Update fps if not overwritten by the active page
         if not self.page_overwrites_screensaver():
             self.settings_page.deck_controller.screen_saver.set_fps(spinner.get_value_as_int())
 
     def on_change_time(self, spinner):
-        config = gl.settings_manager.get_deck_settings(self.deck_serial_number)
-        config.setdefault("screensaver", {})
-        config["screensaver"]["time-delay"] = round(spinner.get_value_as_int())
+        config = gl.settings_manager.deck(self.deck_serial_number)
+        config.set("screensaver", "time-delay", round(spinner.get_value_as_int()))
         # Save
-        gl.settings_manager.save_deck_settings(self.deck_serial_number, config)
+        config.save()
         # Update time if not overwritten by the active page
         if not self.page_overwrites_screensaver():
             self.settings_page.deck_controller.screen_saver.set_time(round(spinner.get_value_as_int()))
 
     def on_change_brightness(self, scale):
-        config = gl.settings_manager.get_deck_settings(self.deck_serial_number)
-        config.setdefault("screensaver", {})
-        config["screensaver"]["brightness"] = scale.get_value()
+        config = gl.settings_manager.deck(self.deck_serial_number)
+        config.set("screensaver", "brightness", scale.get_value())
         # Save
-        gl.settings_manager.save_deck_settings(self.deck_serial_number, config)
+        config.save()
         # Update brightness if not overwritten by the active page
         if not self.page_overwrites_screensaver():
             self.settings_page.deck_controller.screen_saver.set_brightness(scale.get_value())
@@ -477,18 +455,15 @@ class Screensaver(Adw.PreferencesRow):
         self.media_selector_button.set_child(self.media_selector_image)
 
     def on_choose_image(self, button):
-        settings = gl.settings_manager.get_deck_settings(self.deck_serial_number)
-        settings.setdefault("screensaver", {})
-        media_path = settings["screensaver"].get("media-path", None)
+        media_path = gl.settings_manager.deck(self.deck_serial_number).get("screensaver", "media-path")
 
         gl.app.let_user_select_asset(default_path=media_path, callback_func=self.update_image)
 
     def update_image(self, image_path):
         self.set_thumbnail(image_path)
-        settings = gl.settings_manager.get_deck_settings(self.deck_serial_number)
-        settings.setdefault("screensaver", {})
-        settings["screensaver"]["media-path"] = image_path
-        gl.settings_manager.save_deck_settings(self.deck_serial_number, settings)
+        settings = gl.settings_manager.deck(self.deck_serial_number)
+        settings.set("screensaver", "media-path", image_path)
+        settings.save()
 
         deck_controller = self.settings_page.deck_controller
         # No active page (e.g. right after connect or with zero pages) means

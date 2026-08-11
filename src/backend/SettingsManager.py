@@ -433,6 +433,26 @@ class SettingsManager:
         """
         settings_store.get().write(settings_store.DECK, settings, deck_serial_number)
 
+    def deck(self, deck_serial_number: str) -> settings_store.DeckSettings:
+        """Typed view onto one deck's settings, with the schema's defaults
+        applied at read and unknown keys refused at write.
+
+        One file read per view: build it once at the top of a load path and
+        destructure it, rather than asking per key.
+        """
+        return settings_store.DeckSettings(
+            self.get_deck_settings(deck_serial_number), deck_serial_number
+        )
+
+    def deck_view(self, settings: dict) -> settings_store.DeckSettings:
+        """The same view over deck settings the caller already read.
+
+        For readers that decide for themselves whether the file is read at all
+        -- the deck controller short-circuits to an empty dict once its deck is
+        gone, and that decision must stay in front of the read.
+        """
+        return settings_store.DeckSettings(settings)
+
     @lru_cache
     def get_app_settings(self) -> dict:
         path = os.path.join(gl.DATA_PATH, "settings", "settings.json")

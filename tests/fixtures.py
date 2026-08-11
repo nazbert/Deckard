@@ -82,12 +82,25 @@ if gl.DATA_PATH.startswith(_REAL_DATA_ROOTS):
     raise RuntimeError("refusing to run the harness against the real user data dir")
 
 from src.backend.DeckManagement.InputIdentifier import Input  # noqa: E402
+from src.backend.settings_store import DeckSettings  # noqa: E402
 from faulty_fake_deck import FaultyFakeDeck  # noqa: E402
 
 
 # ===================================================================== #
 # Stub gl.* collaborators
 # ===================================================================== #
+
+class _StubDeckSettings(DeckSettings):
+    """A deck-settings view that saves into a StubSettingsManager's dict
+    instead of onto disk -- the unit tier has no settings files."""
+
+    def __init__(self, data: dict, serial: str, manager: "StubSettingsManager"):
+        super().__init__(data, serial)
+        self._manager = manager
+
+    def save(self) -> None:
+        self._manager.save_deck_settings(self.serial, self.data)
+
 
 class StubSettingsManager:
     """Minimal gl.settings_manager stand-in for the unit tier. Only the
@@ -112,6 +125,12 @@ class StubSettingsManager:
 
     def save_deck_settings(self, serial_number: str, settings: dict) -> None:
         self._deck_settings[serial_number] = settings
+
+    def deck(self, serial_number: str) -> "_StubDeckSettings":
+        return _StubDeckSettings(self.get_deck_settings(serial_number), serial_number, self)
+
+    def deck_view(self, settings: dict) -> DeckSettings:
+        return DeckSettings(settings)
 
 
 class StubDeckManager:

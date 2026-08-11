@@ -131,7 +131,7 @@ class DeckController:
         # arguments.
         deck.open(True)
 
-        rotation = self.get_deck_settings().get("rotation", 0)
+        rotation = gl.settings_manager.deck_view(self.get_deck_settings()).get("rotation")
         self.deck = BetterDeck(deck, rotation)
 
         try:
@@ -316,17 +316,21 @@ class DeckController:
             self.page_auto_loaded: bool = False
             self.last_manual_loaded_page_path: str | None = None
 
-            deck_settings = self.get_deck_settings()
+            deck_settings = gl.settings_manager.deck_view(self.get_deck_settings())
 
             # None so the first set_brightness() below always writes to the device,
             # even when the stored value equals the skip-write guard's default.
             self.brightness = None
-            brightness = deck_settings.get("brightness", {}).get("value", 75)
+            brightness = deck_settings.get("brightness", "value")
             self.set_brightness(brightness)
 
             # If screen is locked start the screensaver - this happens when the deck gets reconnected during the screensaver
             if gl.screen_locked and gl.settings_manager.app().lock_on_lock_screen:
                 self.allow_interaction = False
+                # Apply the deck's own screensaver config first: nothing has
+                # loaded a page on this branch, so without it the deck shows
+                # the ScreenSaver class's bare state -- no media, wrong dim.
+                self._apply_screensaver_config(deck_settings.section("screensaver"))
                 self.screen_saver.show()
             else:
                 # Which failures may cost the deck its registration, and which
@@ -793,9 +797,7 @@ class DeckController:
 
     @log.catch
     def load_background(self, page: Page, update: bool = True, gen=None):
-        deck_settings = self.get_deck_settings()
-
-        deck_background_settings = deck_settings.get("background", {})
+        deck_background_settings = gl.settings_manager.deck_view(self.get_deck_settings()).section("background")
         page_background_settings = page.dict.get("settings", {}).get("background", {})
 
         log.info(f"Loading background in thread: {threading.get_ident()}")
@@ -828,13 +830,13 @@ class DeckController:
         if not self.get_alive():
             return
 
-        deck_brightness = self.get_deck_settings().get("brightness", {})
+        deck_brightness = gl.settings_manager.deck_view(self.get_deck_settings()).section("brightness")
         page_brightness = page.dict.get("settings",{}).get("brightness", {})
 
         if page_brightness.get("overwrite", False):
             value = page_brightness.get("value", 75)
         else:
-            value = deck_brightness.get("value", 75)
+            value = deck_brightness["value"]
 
         log.info(value)
 
@@ -842,8 +844,7 @@ class DeckController:
 
     @log.catch
     def load_screensaver(self, page: Page):
-        deck_settings = self.get_deck_settings()
-        deck_screensaver_settings = deck_settings.get("screensaver", {})
+        deck_screensaver_settings = gl.settings_manager.deck_view(self.get_deck_settings()).section("screensaver")
         page_screensaver_settings = page.dict.get("settings", {}).get("screensaver", {})
 
         log.info(f"Loading screensaver in thread: {threading.get_ident()}")
@@ -854,18 +855,16 @@ class DeckController:
         else:
             config = {}
 
+        self._apply_screensaver_config(config)
+
+    def _apply_screensaver_config(self, config: dict) -> None:
+        """Push one screensaver config onto the ScreenSaver. The deck arm
+        arrives with DECK_DEFAULTS already filled in; the literals below are
+        the PAGE arm's and the nothing-configured arm's -- a page that
+        overwrites the screensaver is describing it itself."""
         self.screen_saver.set_media_path(config.get("media-path"))
         self.screen_saver.set_enable(config.get("enable", False))
         self.screen_saver.set_time(config.get("time-delay", 5))
-        # loop defaults ON: a screensaver video/GIF whose config
-        # predates the loop toggle used to play exactly one pass and then hold
-        # its last frame on-device for the whole idle window -- a frozen deck,
-        # never what "screensaver" means. True is also what every media-layer
-        # default already is (ScreenSaver.loop, Background.set_from_path/
-        # prebuild_from_path, BackgroundVideo/GifBackground). The settings
-        # UI's read defaults match this, so the toggle never shows OFF while
-        # the media actually loops. The page background keeps loop=False by
-        # default -- a one-shot page-entry flourish is a real use there.
         self.screen_saver.set_loop(config.get("loop", True))
         self.screen_saver.set_fps(config.get("fps", 30))
         self.screen_saver.set_brightness(config.get("brightness", 30))
@@ -1322,11 +1321,10 @@ class DeckController:
         that, not instantaneously."""
         value = round(float(value), 2)
         if abs(value - self.display_saturation) <= 0.001:
-            # Same-value echo -- notably the settings pane re-emitting the
-            # loaded value on open (DeckGroup's Saturation.load_default is
-            # deferred to map, so its set_value() fires the already-connected
-            # value-changed handler): persisting + a full page reload would
-            # be a pure no-op with a visible flicker, so skip entirely.
+            # Same-value echo: persisting and reloading the page would be a
+            # pure no-op with a visible flicker. Reached whenever a caller
+            # re-applies the factor it already holds -- a repeated drag step
+            # landing on the same rounded value, a plugin, a settings pane.
             return
         deck_settings = self.get_deck_settings()
         deck_settings.setdefault("display", {})["saturation"] = value

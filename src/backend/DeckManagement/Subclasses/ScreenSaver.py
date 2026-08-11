@@ -51,7 +51,11 @@ class ScreenSaver:
         self.showing: bool = False
 
         self.media_path: str | None = None
-        self.brightness: int = 25
+        # The screensaver brightness default, same number the deck-settings
+        # schema carries: a config always reaches here through a load, and if
+        # one ever does not, an unreached load must degrade to the documented
+        # default rather than to a fifth number nothing else knows about.
+        self.brightness: int = 30
         self.fps: int = 30
         self.loop: bool = True
         # Non-None only while actually armed (enabled and not showing);
@@ -81,7 +85,10 @@ class ScreenSaver:
         if self.enable and not self.showing:
             self._arm_timer()
 
-    def set_media_path(self, media_path: str) -> None:
+    def set_media_path(self, media_path: str | None) -> None:
+        # None is the ordinary case, not an edge one: it is what every config
+        # without a chosen media says, and what the background layer takes to
+        # mean "blank".
         self.media_path = media_path
 
         if self.showing:
