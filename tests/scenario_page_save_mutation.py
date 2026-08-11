@@ -111,18 +111,23 @@ def main() -> int:
     in_critical = threading.Event()
 
     def instrument(page_obj, name):
-        orig = page_obj.make_backup
+        # Hooked on the snapshot, which every flush takes under the save
+        # lock -- not on the backup, which is taken once per file per
+        # session, so the second flush of this one path never reaches it and
+        # there would be no second critical section left to observe.
+        orig = page_obj.get_without_action_objects
 
-        def probe(json_path=None):
+        def probe():
             with ev_lock:
                 events.append((name, "enter", time.monotonic()))
             in_critical.set()
             time.sleep(0.15)  # hold the critical section open
-            orig(json_path)
+            snapshot = orig()
             with ev_lock:
                 events.append((name, "exit", time.monotonic()))
+            return snapshot
 
-        page_obj.make_backup = probe
+        page_obj.get_without_action_objects = probe
 
     instrument(page_a, "a")
     instrument(page_b, "b")
