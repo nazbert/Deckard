@@ -39,6 +39,7 @@ import os
 from src.backend import timer_wheel
 from src.backend import ui_port
 from src.backend import startup_queue
+from src.backend.PageManagement import page_flush
 from src.windows.ui_adapter import GtkUIAdapter
 from src.windows.mainWindow.mainWindow import MainWindow
 from src.windows.AssetManager.AssetManager import AssetManager
@@ -368,6 +369,18 @@ class App(Adw.Application):
         # the existing ones down (same residual window as a hotplug event
         # arriving mid-quit, which the USB monitor has always had).
         gl.deck_manager.stop_boot_rescan()
+
+        # Write out every page edit still sitting on its debounce timer.
+        # Those timers fire on daemon threads, and this process ends in
+        # os._exit -- so without this call quitting within a second of the
+        # last edit loses it. Same placement rationale as the store cache
+        # flush below, and the same trade: both are atomic_write_json pairs
+        # of fsyncs with no timeout of their own, so a wedged filesystem
+        # costs the 6s watchdog above rather than hanging the quit.
+        try:
+            page_flush.get().flush_all()
+        except Exception as e:
+            log.warning(f"Could not write pending page edits during shutdown: {e}")
 
         # Drain the store cache's deferred index writes. This
         # process ends in os._exit(0), which skips StoreCache's atexit hook,

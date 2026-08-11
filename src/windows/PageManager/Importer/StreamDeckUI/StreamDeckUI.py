@@ -3,6 +3,7 @@ import os
 import json
 
 from src.backend.DeckManagement.HelperMethods import recursive_hasattr
+from src.backend.PageManagement import page_flush
 from src.backend.atomic_json import atomic_write_json
 from src.windows.PageManager.Importer.StreamDeckUI.helper import font_family_from_path, hex_to_rgba255
 from src.windows.PageManager.Importer.StreamDeckUI.code_conv import parse_keys_as_keycodes
@@ -269,6 +270,12 @@ class StreamDeckUIImporter:
 
 
                 page_path = page_paths[page_name]
+                # An import replaces a page wholesale, so a write still
+                # pending for that path would land after this one and undo
+                # it. Dropped here rather than inside save_json, which also
+                # writes deck settings files the flush seam knows nothing
+                # about -- the barrier belongs on the page path only.
+                page_flush.get().discard_path(page_path)
                 self.save_json(page_path, page)
                 # gl.signal_manager.trigger_signal(Signals.PageAdd, page_path) # We don't trigger the action to save ressources
                 # time.sleep(0.005) # Otherwise the app can't hold up - The problem is the signal call, but is is necessary to

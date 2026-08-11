@@ -18,6 +18,7 @@ from loguru import logger as log
 import globals as gl
 from src.backend.DeckManagement.HelperMethods import is_video
 from src.backend.DeckManagement.Subclasses.mp4_tile_cache import registry_cache_paths, sat_suffix
+from src.backend.PageManagement import page_flush
 
 VID_CACHE = os.path.join(gl.DATA_PATH, "cache", "videos")
 
@@ -167,6 +168,12 @@ def _md5_of_file(path: str) -> str:
 
 def collect_referenced_video_hashes() -> set[str]:
     video_paths: set[str] = set()
+    # Read barrier before reading every page file: what this sweep does NOT
+    # find it deletes, so a page whose new background video is still sitting
+    # on the write debounce would have that video's cache swept out from
+    # under it. flush_all rather than a per-path call because the scan reads
+    # the whole page set, and only page files are ever pending.
+    page_flush.get().flush_all()
     for json_path in _collect_json_paths():
         try:
             _walk_for_video_paths(gl.settings_manager.load_settings_from_file(json_path), video_paths)

@@ -2,6 +2,7 @@ import os
 import json
 
 from src.backend.DeckManagement.HelperMethods import recursive_hasattr
+from src.backend.PageManagement import page_flush
 from src.backend.atomic_json import atomic_write_json
 
 from loguru import logger as log
@@ -41,7 +42,15 @@ class StreamControllerImporter:
             page_path = os.path.join(gl.DATA_PATH, "pages", f"{page_name}.json")
             if ".json.json" in page_path:
                 page_path = page_path.replace(".json.json", ".json")
-            
+
+            # An import replaces a page wholesale, so any write still pending
+            # for that path is writing a version the user just chose to
+            # discard -- and it would land AFTER this one and undo the
+            # import. Dropped rather than flushed, and scoped to the page
+            # path: save_json also writes deck settings, which the flush seam
+            # knows nothing about.
+            page_flush.get().discard_path(page_path)
+
             self.save_json(page_path, page)
 
             gl.page_manager.update_dict_of_pages_with_path(page_path)

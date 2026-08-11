@@ -120,6 +120,8 @@ def check_add_page() -> None:
 
 
 def check_page_save(controller) -> None:
+    from src.backend.PageManagement import page_flush
+
     page = controller.active_page
     before = read_json(page.json_path)
 
@@ -127,7 +129,13 @@ def check_page_save(controller) -> None:
     # json.dump chokes on it mid-serialization.
     page.dict["poison"] = Unserializable()
     try:
+        # save() only marks the page now -- the serialization, and so the
+        # TypeError, belongs to the flush. Asked for explicitly here, which
+        # is what every synchronous flush site (page switch, deck close,
+        # quit, any read of the file) does; the assertion below is unchanged,
+        # because what is being pinned is the file, not the timing.
         page.save()
+        page_flush.get().flush_path(page.json_path)
     except TypeError:
         pass
     else:

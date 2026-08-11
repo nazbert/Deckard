@@ -151,7 +151,28 @@ class PageManagerBackend:
         docs/memory-footprint-impl-plan.md P1.3 step 8; design doc bug 1):
         the dead controller's active_page was otherwise permanently
         unevictable and kept distorting clear_old_cached_pages()'s budget
-        for every other live controller."""
+        for every other live controller.
+
+        Pending edits are written first. The deck this ran for is going away
+        -- unplugged, or the app quitting -- so every page it was showing has
+        reached a boundary, and the entries that hold those pages are about
+        to go. That is the difference from eviction, which never writes: it
+        is a memory reclaim on a running deck, and a page evicted with edits
+        outstanding is kept alive by the flush seam itself.
+
+        Best-effort per page, like every other step of a teardown: a page
+        that will not serialize must not abort the deregistration and leave
+        the controller in the cache forever."""
+        flush = page_flush.get()
+        with self._pages_lock:
+            paths = list(self.pages.get(deck_controller, {}))
+        for path in paths:
+            try:
+                flush.flush_path(path)
+            except Exception:
+                log.opt(exception=True).warning(
+                    f"Could not write pending edits of page {path} while closing a deck")
+
         with self._pages_lock:
             self.pages.pop(deck_controller, None)
 
@@ -346,6 +367,11 @@ class PageManagerBackend:
             self.clear_old_cached_pages()
 
     def move_page(self, old_path: str, new_path: str):
+        # Read barrier: the copy below is a read of the old file, so edits
+        # still pending for it belong on disk first or the renamed page
+        # arrives without them.
+        page_flush.get().flush_path(old_path)
+
         shutil.copy2(old_path, new_path)
 
         page_settings = gl.settings_manager.load_settings_from_file(self.PAGE_SETTINGS_PATH)
@@ -372,6 +398,17 @@ class PageManagerBackend:
         # Save updated default pages
         page_settings["default-pages"] = default_pages
         gl.settings_manager.save_settings_to_file(self.PAGE_SETTINGS_PATH, page_settings)
+
+        # Retire any write still pending for the file about to disappear --
+        # a timer firing after the removal would write the moved-from page
+        # back into existence. Deliberately AFTER the json_path re-point
+        # above: a mark reads json_path and inserts its entry under one lock,
+        # so once every Page points at the new path no further mark can land
+        # under the old key, and this discard is the last one that can.
+        # Edits marked between the flush above and the re-point are dropped
+        # from the pending map only, not from memory -- they are still in the
+        # page's dict, and the next save carries them to the new path.
+        page_flush.get().discard_path(old_path)
 
         os.remove(old_path)
         self.refresh_window_watch_state()
@@ -452,6 +489,13 @@ class PageManagerBackend:
                 if not controller_pages:
                     with self._pages_lock:
                         self.pages.pop(controller, None)
+
+        # Throw away any write still pending for this page rather than
+        # flushing it: a timer firing after the removal below would write the
+        # deleted page straight back onto disk. Placed as late as possible,
+        # after the cache teardown above has dropped every in-tree holder of
+        # the Page, so nothing that could re-mark it is still running.
+        page_flush.get().discard_path(page_path)
 
         # Delete the JSON file representing the page
         if os.path.exists(page_path):
@@ -719,6 +763,13 @@ class PageManagerBackend:
 
         # Ensure backup directory exists
         os.makedirs(os.path.dirname(backup_zip_path), exist_ok=True)
+
+        # Read barrier for every page at once: this zips the files, so a page
+        # with edits still pending would go into the archive without them.
+        # The only caller today runs at boot, before any page can be dirty --
+        # but a zip of every page is a read like any other, and asking for
+        # the flush costs nothing when there is nothing to write.
+        page_flush.get().flush_all()
 
         # Create a zip archive and add all page files
         with zipfile.ZipFile(backup_zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as backup_zip:

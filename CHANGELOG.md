@@ -21,6 +21,15 @@ bundle as a release asset.
 
 ### Changed
 
+- Page edits are written in the background about a second after the last
+  change, instead of once per keystroke. Typing a label used to write the
+  whole page file — with two disk syncs — for every character, on the same
+  thread that draws the window. The page is still written immediately when
+  you switch page, close a deck or quit the app, and whenever anything reads
+  the file, so what you see and what is exported or backed up is always
+  current. The trade: a crash or power cut can now cost the last second of
+  edits — up to five while you are typing continuously — where before it
+  could cost none.
 - The active window is no longer watched in the background unless a page
   actually uses a window auto-change rule. Previously every session polled
   the foreground window continuously — several helper processes a second on
