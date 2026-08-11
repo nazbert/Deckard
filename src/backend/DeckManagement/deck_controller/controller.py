@@ -1584,10 +1584,10 @@ class DeckController:
             except Exception:
                 pass
 
-        # Step 8: deregistration. The dead controller's active_page was
-        # otherwise permanently unevictable (design doc bug 1) and kept
-        # distorting clear_old_cached_pages()'s budget for every other live
-        # controller.
+        # Step 8: deregistration, which also WRITES: it flushes every page
+        # still cached for this deck before dropping the entries that hold
+        # them. The dead controller's active_page was otherwise permanently
+        # unevictable (design doc bug 1), distorting every other deck's budget.
         if gl.page_manager is not None:
             gl.page_manager.discard_controller(self)
         self.active_page = None

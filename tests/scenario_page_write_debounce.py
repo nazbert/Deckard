@@ -30,16 +30,25 @@ import ast
 import gc
 import json
 import os
+import shutil
+import threading
+import time
 
 from fixtures import make_headless_controller, seed_page, start_watchdog, teardown
 
 import globals as gl
 from src.backend.PageManagement import page_flush
 
-WATCHDOG_SECONDS = 90
+WATCHDOG_SECONDS = 120
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-APP_PY = os.path.join(REPO_ROOT, "src", "app.py")
+SRC = os.path.join(REPO_ROOT, "src")
+APP_PY = os.path.join(SRC, "app.py")
+MENU_BUTTON_PY = os.path.join(SRC, "windows", "PageManager", "elements", "MenuButton.py")
+SC_IMPORTER_PY = os.path.join(SRC, "windows", "PageManager", "Importer", "StreamController",
+                              "StreamController.py")
+SDUI_IMPORTER_PY = os.path.join(SRC, "windows", "PageManager", "Importer", "StreamDeckUI",
+                                "StreamDeckUI.py")
 
 # Every atomic_write_json the flush seam performed, as
 # (path, path_still_marked_pending_while_writing, virtual_time).
@@ -111,6 +120,61 @@ class VirtualTime:
             return 0
         furthest = max(due_at for due_at, _cb in self.armed.values())
         return self.advance(max(0.0, furthest - self.now))
+
+
+class ManualScheduler:
+    """A timer source whose handles fire one at a time, when told.
+
+    Where `VirtualTime` models the wheel's clock, this models its
+    *concurrency*: a fire runs on a real thread, so a mark can land while a
+    write is in flight -- the interleaving that decides whether an edit is
+    written or silently lost.
+    """
+
+    def __init__(self):
+        self.armed: dict[int, object] = {}
+        self.cancelled: list[int] = []
+        self.last_handle = 0
+
+    def schedule(self, delay_s, callback):
+        self.last_handle += 1
+        self.armed[self.last_handle] = callback
+        return self.last_handle
+
+    def cancel(self, handle):
+        self.cancelled.append(handle)
+        self.armed.pop(handle, None)
+
+    def fire(self, handle) -> None:
+        callback = self.armed.pop(handle, None)
+        if callback is not None:
+            callback()
+
+
+class CountingFlush:
+    """A flush seam that records what it was asked to do and does nothing.
+
+    For the barrier sites whose whole content is the ask: the write they
+    would have caused is somebody else's assertion.
+    """
+
+    def __init__(self):
+        self.calls: list[tuple[str, str | None]] = []
+
+    def mark_dirty(self, page) -> None:
+        self.calls.append(("mark_dirty", page.json_path))
+
+    def pending_page(self, path):
+        return None
+
+    def flush_path(self, path) -> None:
+        self.calls.append(("flush_path", path))
+
+    def flush_all(self) -> None:
+        self.calls.append(("flush_all", None))
+
+    def discard_path(self, path) -> None:
+        self.calls.append(("discard_path", path))
 
 
 # The virtual time the flush seam currently runs on.
@@ -253,6 +317,112 @@ def check_max_dirty_age_cap(controller) -> None:
           "age, and the cap opens a fresh window")
 
 
+def check_mid_write_mark_survives(controller) -> None:
+    """An edit made WHILE a write is in flight must not be swallowed by it.
+
+    The write in flight is serializing a snapshot taken before that edit
+    existed, so retiring the pending record it finds afterwards -- rather
+    than the one it actually wrote -- would drop an edit that no timer will
+    ever come back for: the newer mark's own timer fires, finds nothing
+    pending, and returns without writing or logging. Nothing else in the
+    suite can tell the two apart, because both leave the map empty and the
+    file written.
+    """
+    scheduler = ManualScheduler()
+    page_flush._flush = page_flush.PageFlush(scheduler=scheduler, clock=time.monotonic)
+    WRITES.clear()
+    path = seed_page("MidWrite")
+    page = gl.page_manager.get_page(path, controller)
+
+    in_write = threading.Event()
+    release = threading.Event()
+    recorder = page_flush.atomic_write_json
+
+    def blocking_write(target, data):
+        in_write.set()
+        assert release.wait(20), "the write was never released"
+        recorder(target, data)
+
+    page_flush.atomic_write_json = blocking_write
+    try:
+        edit(page, "before-the-write")
+        first_handle = scheduler.last_handle
+
+        firing = threading.Thread(target=scheduler.fire, args=(first_handle,),
+                                  name="mid-write-flush")
+        firing.start()
+        assert in_write.wait(20), "the deferred write never started"
+
+        edit(page, "during-the-write")
+        second_handle = scheduler.last_handle
+        assert second_handle != first_handle, (
+            "the mid-write mark did not arm a timer of its own")
+
+        release.set()
+        firing.join(20)
+        assert not firing.is_alive(), "the flush thread never finished"
+    finally:
+        page_flush.atomic_write_json = recorder
+        release.set()
+
+    assert page_flush.get().pending_page(path) is not None, (
+        "the write retired a pending record it did not write -- the edit made "
+        "while it was serializing is now unreachable, and nothing will raise "
+        "or log about it")
+    assert second_handle in scheduler.armed, (
+        "the mid-write mark's timer was cancelled by the write that did not "
+        "include it: nothing is left to write that edit")
+
+    scheduler.fire(second_handle)
+    assert read_page(path)["debounce-marker"] == "during-the-write", (
+        "the edit made during the write never reached disk")
+    assert page_flush.get().pending_page(path) is None
+    print("PASS: an edit made during a write keeps its own record and its own "
+          "timer, and lands")
+
+
+def check_flush_writes_the_path_it_locked(controller) -> None:
+    """The file written is the key the edits were marked under, never
+    whatever `json_path` says when the flush runs.
+
+    A page move re-points `json_path` in place, so the two names can differ
+    for as long as a mark is outstanding. move_page orders its discard so
+    that window closes (checked below); this is the invariant that makes
+    that ordering *safe* rather than merely lucky -- with it, a flush and its
+    lock can never be about different files, so nothing has to reason about
+    the window at all.
+    """
+    scheduler = ManualScheduler()
+    page_flush._flush = page_flush.PageFlush(scheduler=scheduler, clock=time.monotonic)
+    WRITES.clear()
+    marked_path = seed_page("Diverge")
+    other_path = seed_page("DivergeOther")
+    page = gl.page_manager.get_page(marked_path, controller)
+
+    edit(page, "belongs-to-the-marked-path")
+    other_before = read_page(other_path)
+
+    # The re-point, exactly as move_page performs it, with a mark outstanding.
+    page.json_path = other_path
+    try:
+        page_flush.get().flush_path(marked_path)
+    finally:
+        page.json_path = marked_path
+
+    assert read_page(marked_path)["debounce-marker"] == "belongs-to-the-marked-path", (
+        "the flush wrote somewhere other than the path it locked")
+    assert read_page(other_path) == other_before, (
+        "the flush wrote the page's CURRENT json_path instead of the path it "
+        "locked and was asked for -- two files, one lock, and the wrong one "
+        "overwritten")
+
+    backup = os.path.join(gl.page_manager.PAGE_PATH, "backups", os.path.basename(marked_path))
+    assert os.path.exists(backup), (
+        "no backup was taken for the file being overwritten")
+    print("PASS: a flush writes -- and backs up -- the path it locked, not the "
+          "page's current json_path")
+
+
 def check_page_switch_flushes(controller) -> None:
     vt = fresh_flush()
     old_page = controller.active_page
@@ -273,11 +443,21 @@ def check_page_switch_flushes(controller) -> None:
 
 def check_deck_close_flushes() -> None:
     vt = fresh_flush()
-    closing = make_headless_controller(serial="debounce-closing", page_name="Closing")
+    # A deck with no default page loads whichever page sorts first, which by
+    # now is some other check's -- so name the page this deck is to show
+    # before the controller exists, and hold the fixture to it.
+    serial = "debounce-closing"
+    active_path = seed_page("Closing")
+    gl.page_manager.set_default_page(serial, active_path)
+
+    closing = make_headless_controller(serial=serial, page_name="Closing")
     try:
         page = closing.active_page
         assert page is not None, "the fixture controller has no active page"
         path = page.json_path
+        assert path == active_path, (
+            f"the closing deck is showing {os.path.basename(path)}, not the "
+            f"page this check is about")
         edit(page, "written-on-close")
 
         # A page this deck visited earlier and still has cached, dirty and
@@ -361,9 +541,30 @@ def check_move_flushes_then_discards(controller) -> None:
     page = gl.page_manager.get_page(old_path, controller)
     edit(page, "carried-across")
 
-    new_path = os.path.join(gl.page_manager.PAGE_PATH, "Moved.json")
-    gl.page_manager.move_page(old_path, new_path)
+    # A save landing mid-move, keyed under the path the move is about to
+    # remove. Hooked onto the copy, which sits between the move's flush and
+    # its json_path re-point -- the only window in which a mark can still
+    # take the old key. Without this the move's discard has nothing to
+    # discard and the check passes whether or not it exists.
+    raced = {"landed": False}
+    real_copy2 = shutil.copy2
 
+    def copy2_then_race(src, dst, *args, **kwargs):
+        result = real_copy2(src, dst, *args, **kwargs)
+        if not raced["landed"]:
+            raced["landed"] = True
+            page.dict["raced-edit"] = "marked-mid-move"
+            page.save()
+        return result
+
+    new_path = os.path.join(gl.page_manager.PAGE_PATH, "Moved.json")
+    shutil.copy2 = copy2_then_race
+    try:
+        gl.page_manager.move_page(old_path, new_path)
+    finally:
+        shutil.copy2 = real_copy2
+
+    assert raced["landed"], "the mid-move save never ran -- the check is vacuous"
     assert written_paths() == [old_path], (
         f"the move did not write the source page before copying it: {WRITES}")
     assert read_page(new_path)["debounce-marker"] == "carried-across", (
@@ -375,10 +576,20 @@ def check_move_flushes_then_discards(controller) -> None:
 
     vt.fire_all()
     assert not os.path.exists(old_path), (
-        "a timer wrote the moved-from page back into existence")
+        "a pending write resurrected the moved-from page")
     assert written_paths() == [old_path], (
         f"a stale timer wrote after the move: {WRITES}")
-    print("PASS: a move writes the source, then retires its pending write")
+
+    # The raced edit was dropped from the pending map, not from memory: the
+    # next save carries it to the page's new path.
+    page.save()
+    assert list(page_flush.get()._pending) == [new_path], (
+        "a save after the move keyed the pending write under the old path")
+    vt.fire_all()
+    assert read_page(new_path)["raced-edit"] == "marked-mid-move", (
+        "the edit made mid-move was lost rather than carried to the new path")
+    print("PASS: a move writes the source and retires its pending write, and a "
+          "save that raced it neither resurrects the old file nor is lost")
 
 
 def check_delete_discards(controller) -> None:
@@ -401,6 +612,79 @@ def check_delete_discards(controller) -> None:
         "a pending write resurrected the deleted page file")
     print("PASS: deleting a page discards its pending write, and nothing "
           "resurrects it")
+
+
+def call_sites_in(module_path: str, func_name: str) -> list[tuple[int, str]]:
+    """(line, source) for every call in one function, outermost call first."""
+    with open(module_path) as f:
+        tree = ast.parse(f.read())
+    funcs = [node for node in ast.walk(tree)
+             if isinstance(node, ast.FunctionDef) and node.name == func_name]
+    assert len(funcs) == 1, (
+        f"expected exactly one {func_name} in {os.path.basename(module_path)}, "
+        f"found {len(funcs)}")
+    return [(node.lineno, ast.unparse(node))
+            for node in ast.walk(funcs[0]) if isinstance(node, ast.Call)]
+
+
+def assert_barrier_precedes(module_path: str, func_name: str, barrier: str,
+                            guarded: str, why: str) -> None:
+    calls = call_sites_in(module_path, func_name)
+    barriers = [line for line, src in calls if barrier in src]
+    guards = [line for line, src in calls if guarded in src]
+    where = f"{os.path.basename(module_path)}:{func_name}"
+    assert guards, f"{where} no longer contains `{guarded}` -- this check has gone stale"
+    assert barriers, f"{where} does not call `{barrier}`: {why}"
+    assert min(barriers) < min(guards), (
+        f"{where} calls `{barrier}` only AFTER `{guarded}`: {why}")
+
+
+def check_every_reader_takes_the_barrier() -> None:
+    """The six sites that touch a page file without going through
+    get_page_data, each pinned so that removing its barrier turns something
+    red.
+
+    They are the reason deferral is safe at all: a reader without one sees a
+    page as it was up to a second ago, and an importer without one has its
+    work undone by a timer a second later. Two of them are reachable
+    headless and are driven through a counting seam; the four that live
+    behind GTK are pinned at the source, where what matters is not only that
+    the call exists but that it comes BEFORE the read or write it guards.
+    """
+    counting = CountingFlush()
+    page_flush._flush = counting
+
+    gl.page_manager.backup_pages()
+    assert ("flush_all", None) in counting.calls, (
+        "the boot backup zips every page file without asking for pending "
+        f"edits first: {counting.calls}")
+
+    counting.calls.clear()
+    from src.backend.DeckManagement.Subclasses import video_cache_sweeper
+    video_cache_sweeper.collect_referenced_video_hashes()
+    assert ("flush_all", None) in counting.calls, (
+        "the video cache sweep reads every page file without asking for "
+        f"pending edits first -- and deletes the caches it finds no reference to: {counting.calls}")
+
+    assert_barrier_precedes(
+        MENU_BUTTON_PY, "export_page_callback", "flush_path(page_path)", "open(page_path",
+        "an export would ship the page as it was up to a second ago")
+    assert_barrier_precedes(
+        MENU_BUTTON_PY, "import_page_name_selected_callback",
+        "flush_path(source_path)", "open(source_path",
+        "duplicating a page would copy a stale version of what is on screen")
+    assert_barrier_precedes(
+        SC_IMPORTER_PY, "perform_import",
+        "discard_path(page_path)", "self.save_json(page_path, page)",
+        "a write pending for an imported-over page would land after the "
+        "import and undo it")
+    assert_barrier_precedes(
+        SDUI_IMPORTER_PY, "perform_import",
+        "discard_path(page_path)", "self.save_json(page_path, page)",
+        "a write pending for an imported-over page would land after the "
+        "import and undo it")
+    print("PASS: every page-file reader outside get_page_data takes the "
+          "barrier, and takes it first")
 
 
 def check_eviction_keeps_pending_edits(controller) -> None:
@@ -444,6 +728,8 @@ def main() -> None:
         check_burst_is_one_write(controller)
         check_read_barrier_sees_pending_edits(controller)
         check_max_dirty_age_cap(controller)
+        check_mid_write_mark_survives(controller)
+        check_flush_writes_the_path_it_locked(controller)
         check_page_switch_flushes(controller)
         check_deck_close_flushes()
         check_flush_all_covers_quit(controller)
@@ -451,6 +737,7 @@ def main() -> None:
         check_move_flushes_then_discards(controller)
         check_delete_discards(controller)
         check_eviction_keeps_pending_edits(controller)
+        check_every_reader_takes_the_barrier()
     finally:
         teardown(controller)
 

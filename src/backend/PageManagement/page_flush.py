@@ -36,6 +36,16 @@ allowed past ``MAX_DIRTY_AGE_S`` after the *first* unwritten edit: once that
 deadline is reached the re-arm is for zero seconds, i.e. the next write goes
 out immediately and starts a fresh window.
 
+The window only reopens on a write that completes with nothing marked behind
+it: a mark landing *inside* a capped write inherits the older
+``first_marked``, so it is born already past the deadline and stays clamped
+to an immediate write until one completes mark-free. At any normal write
+speed that is a single extra write and the debounce is back; where writes
+take longer than the user's typing gaps, it degrades toward one write per
+edit -- the pre-debounce behaviour, and the safe direction to degrade in,
+since the alternative (restarting the clock on every mark) would buy back the
+coalescing by widening exactly the loss window the cap exists to bound.
+
 Marking never writes. Every deferred write happens on a timer thread, which
 is the point: the fsync pair leaves the GTK main thread. What a user
 perceives as "done" still writes synchronously, on the thread that got there

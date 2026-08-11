@@ -130,7 +130,7 @@ def main() -> int:
     def saver(page_obj, wait_for_the_other):
         # One pending record per path, so the second marker must arrive
         # while the first flush is ALREADY inside the critical section --
-        # otherwise the two coalesce into a single write and there is no
+        # otherwise the two can coalesce into a single write and there is no
         # ordering left to observe. Gating on the first probe's entry makes
         # that interleaving the one the test always gets.
         if wait_for_the_other and not in_critical.wait(timeout=10):
