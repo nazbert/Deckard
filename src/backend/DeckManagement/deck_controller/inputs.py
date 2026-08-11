@@ -60,6 +60,7 @@ from src.backend.DeckManagement.deck_controller.media_writer import (
     encode_native_key,
     encode_native_touchscreen,
 )
+from src.backend.PageManagement import page_pins
 from src.backend.PageManagement.Page import ActionOutdated, NoActionHolderFound, Page
 from src.backend.PluginManager.ActionCore import ActionCore
 from src.backend import timer_wheel
@@ -830,66 +831,68 @@ class ControllerKey(ControllerInput["ControllerKeyState"]):
                 self.cancel_gesture()
             return
 
-        pressed_page = self.deck_controller.mark_page_ready_to_clear(False)
-        self.press_state = press_state
+        # Hold the page this press landed on for the whole callback: a
+        # press that changes pages still owes its remaining events to the
+        # page it was pressed on. Structural, because a raising body that
+        # skipped a hand-written release would pin that page against
+        # eviction for the life of the process, once per press.
+        with page_pins.holding(self.deck_controller.active_page):
+            self.press_state = press_state
 
-        self.update()
+            self.update()
 
-        active_state = self.get_active_state()
-        if press_state: # Key down
-            self.down_start_time = time.time()
-            # Snapshot the state and its resolved actions NOW (see
-            # __init__): every event of this gesture -- including this DOWN,
-            # which otherwise resolves actions only when the pool worker
-            # runs -- goes to the actions that were on the key when the
-            # finger landed, regardless of page swaps in between.
-            gesture_actions = active_state.get_own_actions()
-            self._gesture = (active_state, gesture_actions)
-            self.start_hold_timer()
-            active_state.own_actions_event_callback_threaded(
-                event=Input.Key.Events.DOWN,
-                show_notifications=True,
-                actions=gesture_actions
-            )
-
-        elif self.down_start_time is not None: # Key up
-            gesture = self._gesture
-            if gesture is not None:
-                gesture_state, gesture_actions = gesture
-            else:
-                gesture_state, gesture_actions = active_state, None
-            if time.time() - self.down_start_time >= self.deck_controller.hold_time:
-                gesture_state.own_actions_event_callback_threaded(
-                    event=Input.Key.Events.HOLD_STOP,
+            active_state = self.get_active_state()
+            if press_state: # Key down
+                self.down_start_time = time.time()
+                # Snapshot the state and its resolved actions NOW (see
+                # __init__): every event of this gesture -- including this DOWN,
+                # which otherwise resolves actions only when the pool worker
+                # runs -- goes to the actions that were on the key when the
+                # finger landed, regardless of page swaps in between.
+                gesture_actions = active_state.get_own_actions()
+                self._gesture = (active_state, gesture_actions)
+                self.start_hold_timer()
+                active_state.own_actions_event_callback_threaded(
+                    event=Input.Key.Events.DOWN,
+                    show_notifications=True,
                     actions=gesture_actions
                 )
-            else:
+
+            elif self.down_start_time is not None: # Key up
+                gesture = self._gesture
+                if gesture is not None:
+                    gesture_state, gesture_actions = gesture
+                else:
+                    gesture_state, gesture_actions = active_state, None
+                if time.time() - self.down_start_time >= self.deck_controller.hold_time:
+                    gesture_state.own_actions_event_callback_threaded(
+                        event=Input.Key.Events.HOLD_STOP,
+                        actions=gesture_actions
+                    )
+                else:
+                    gesture_state.own_actions_event_callback_threaded(
+                        event=Input.Key.Events.SHORT_UP,
+                        actions=gesture_actions
+                    )
+                self.down_start_time = None
+                self.stop_hold_timer()
                 gesture_state.own_actions_event_callback_threaded(
-                    event=Input.Key.Events.SHORT_UP,
+                    event=Input.Key.Events.UP,
+                    show_notifications=False,
                     actions=gesture_actions
                 )
-            self.down_start_time = None
-            self.stop_hold_timer()
-            gesture_state.own_actions_event_callback_threaded(
-                event=Input.Key.Events.UP,
-                show_notifications=False,
-                actions=gesture_actions
-            )
-            # Gesture complete: drop the snapshot (single atomic store, see
-            # __init__) so a superseded page's action objects aren't pinned
-            # past their last event.
-            self._gesture = None
+                # Gesture complete: drop the snapshot (single atomic store, see
+                # __init__) so a superseded page's action objects aren't pinned
+                # past their last event.
+                self._gesture = None
 
-        else: # Key up with no gesture clock
-            # The matching DOWN was swallowed or its bookkeeping already
-            # cleared (e.g. a screensaver show/hide cycle mid-hold resets
-            # down_start_time on the live keys). Nothing to dispatch, but a
-            # still-armed hold timer or pinned snapshot from that orphaned
-            # DOWN must not outlive the physical release.
-            self.cancel_gesture()
-        # Reset the SAME page the False-call marked -- a press
-        # that triggers a page change would otherwise pin the old page.
-        self.deck_controller.mark_page_ready_to_clear(True, pressed_page)
+            else: # Key up with no gesture clock
+                # The matching DOWN was swallowed or its bookkeeping already
+                # cleared (e.g. a screensaver show/hide cycle mid-hold resets
+                # down_start_time on the live keys). Nothing to dispatch, but a
+                # still-armed hold timer or pinned snapshot from that orphaned
+                # DOWN must not outlive the physical release.
+                self.cancel_gesture()
 
     def _tile_passthrough_ok(self, state: "ControllerKeyState") -> bool:
         """Whether this key composites to exactly the shared background tile

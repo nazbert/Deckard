@@ -72,6 +72,10 @@ EXTRA_MODULES = (
     # through it, so it inherits the engine closure's floor contract too. It
     # names no application type at all -- globals and stdlib only.
     os.path.join(_REPO_ROOT, "src", "backend", "PageManagement", "page_document.py"),
+    # The page-cache pins: the deck controller reaches them on its tick and
+    # key paths, which are the engine closure at its most load-bearing. It
+    # imports globals + stdlib only; every type it names is TYPE_CHECKING-only.
+    os.path.join(_REPO_ROOT, "src", "backend", "PageManagement", "page_pins.py"),
 )
 
 # Runs in the floor interpreter, one module per argument. Prints one

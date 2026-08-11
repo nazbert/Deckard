@@ -57,8 +57,6 @@ class Page:
         # Dir that contains all actions this allows us to keep them at reload
         self.action_objects = {}
 
-        self.ready_to_clear = True
-
         # Serializes the on_ready_called claim in initialize_actions: it
         # runs outside _load_page_lock (deliberately -- it can block on a
         # run_on_main marshal), so two concurrent load_page(samePage) calls

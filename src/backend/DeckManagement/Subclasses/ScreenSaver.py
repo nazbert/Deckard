@@ -337,6 +337,12 @@ class ScreenSaver:
             # a page change landing in that gap is overwritten by this older
             # load -- the same window the plain active_page reload always had.
             pending = self.deck_controller.take_pending_screensaver_page()
+            # Taking it ends the only protection it had -- from here until
+            # phase 3 installs it, the page is neither pending nor active, so
+            # cache pressure could tear it down and hand the load a corpse.
+            # Reserve it for that gap; installing it releases the reservation.
+            if pending is not None and gl.page_manager is not None:
+                gl.page_manager.pins.reserve_fetch(pending, self.deck_controller)
             active_page = pending if pending is not None else self.deck_controller.active_page
             time_delay = self.time_delay
             follow_up = lambda: self._hide_followup(active_page, time_delay)

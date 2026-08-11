@@ -6,12 +6,12 @@ Scenario: three small guards.
        timeline on another deck showing a DIFFERENT page. Now filtered by
        active page, like update_input.
   (b): mark_page_ready_to_clear dereferenced active_page at call time; a
-       page switch during a slow on_tick left the OLD page pinned
-       ready_to_clear=False forever (unevictable). The bracket now captures
-       the page at the False-call and resets that same object. Covered three
-       ways: the flag value after a tick-shape swap; the same swap driven
-       END-TO-END through clear_old_cached_pages (the page must actually be
-       evicted -- the whole point of the fix); and the real key-handler path
+       page switch during a slow on_tick left the OLD page pinned against
+       eviction forever (unevictable). The bracket now captures the page at
+       the False-call and releases that same object. Covered three ways: the
+       pin count after a tick-shape swap; the same swap driven END-TO-END
+       through clear_old_cached_pages (the page must actually be evicted --
+       the whole point of the fix); and the real key-handler path
        (event_callback 3706/3737) with a press-triggered page change landing
        mid-bracket.
   (c): initialize_actions' bare check-then-set on on_ready_called let two
@@ -91,6 +91,11 @@ def check_ready_to_clear_repoint(controller) -> int:
     page_b_path = seed_page("MarkSwapB")
     page_b = gl.page_manager.get_page(page_b_path, controller)
 
+    # The baseline the bracket must return to, taken AFTER the fetch above:
+    # asserting "unpinned" instead would pass on the accident that this
+    # fetch retires page_a's own reservation, not on the bracket balancing.
+    holders_before = gl.page_manager.pins.count(page_a)
+
     # Simulate the bracket the tick loop / key handler runs, with a page
     # switch landing in the middle (exactly what a slow on_tick allows).
     captured = controller.mark_page_ready_to_clear(False)
@@ -102,10 +107,10 @@ def check_ready_to_clear_repoint(controller) -> int:
         # red run reports the semantic failure below, not a TypeError.
         controller.mark_page_ready_to_clear(True)
 
-    if not page_a.ready_to_clear:
-        print("FAIL(b): the old page stayed pinned ready_to_clear=False "
-              "forever -- unevictable, silently shrinking the eviction "
-              "budget")
+    if not fixtures.wait_until(
+            lambda: gl.page_manager.pins.count(page_a) <= holders_before):
+        print("FAIL(b): the old page stayed pinned against eviction forever "
+              "-- unevictable, silently shrinking the eviction budget")
         return 1
     print("PASS: the bracket resets the page it marked, not whatever is "
           "active now")
@@ -346,9 +351,10 @@ def check_ready_to_clear_key_handler(controller) -> int:
         print("FAIL(setup): switch target resolved to the pressed page")
         return 1
 
-    # Make sure both pages start evictable-clean so the assertion is meaningful.
-    pressed_page.ready_to_clear = True
-    switched_to.ready_to_clear = True
+    # The baseline the bracket must return to. Not necessarily zero: the
+    # fetch above reserves the page it returns, and the tick loop brackets
+    # the active page on its own clock.
+    holders_before = gl.page_manager.pins.count(pressed_page)
 
     # Inject the page switch mid-callback: event_callback calls self.update()
     # at line 3709, AFTER mark_page_ready_to_clear(False) (3706) and BEFORE
@@ -372,9 +378,10 @@ def check_ready_to_clear_key_handler(controller) -> int:
     if not switched["done"]:
         print("FAIL(setup): the mid-callback switch injection never ran")
         return 1
-    if not pressed_page.ready_to_clear:
+    if not fixtures.wait_until(
+            lambda: gl.page_manager.pins.count(pressed_page) <= holders_before):
         print("FAIL(b-key): a key press that switched pages left the OLD "
-              "(pressed) page pinned ready_to_clear=False -- the key-handler "
+              "(pressed) page pinned against eviction -- the key-handler "
               "bracket re-dereferenced active_page instead of the pressed page")
         return 1
     print("PASS: the key-handler bracket resets the pressed page, not the "

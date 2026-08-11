@@ -1059,6 +1059,11 @@ def check_eviction_keeps_pending_edits(controller) -> None:
     page = gl.page_manager.get_page(path, controller)
     edit(page, "survives-eviction")
     del page
+    # The fetch above reserves the page against eviction until its caller
+    # activates it or the deck fetches again. There is no caller here, so
+    # stand in for the one that moved on -- otherwise the reservation, not the
+    # flush seam, is what keeps the page, and this check proves nothing.
+    gl.page_manager.pins.release_fetch(controller)
 
     original_max = gl.page_manager.max_pages
     try:
