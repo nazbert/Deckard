@@ -66,6 +66,12 @@ EXTRA_MODULES = (
     # imports globals + the input identifiers + stdlib, and every application
     # type it names is TYPE_CHECKING-only.
     os.path.join(_REPO_ROOT, "src", "backend", "control_plane.py"),
+    # The CLI's forwarding half: its body runs on the deployment floor at every
+    # `--change-page`/`--change-state` invocation, and main.py -- the only
+    # thing that imports it -- cannot be imported by a scenario, so nothing
+    # else executes it on 3.13. Standard library plus the app id and the
+    # startup queue; the toolkit is imported inside the bus transport.
+    os.path.join(_REPO_ROOT, "src", "backend", "cli_forward.py"),
     # The typed gl accessors: imports globals + stdlib only, and every type it
     # names is TYPE_CHECKING-only -- precisely the shape this check exists for.
     os.path.join(_REPO_ROOT, "src", "backend", "services.py"),

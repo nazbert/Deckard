@@ -2,14 +2,15 @@
 One place decides whether a page or state switch is valid.
 
 "Switch deck S to page P" and "set input (x,y) on page P of deck S to state N"
-arrive from several transports -- the DBus API, the Gio actions a second CLI
-invocation forwards to the running instance, and the argv requests a booting
-process parks for a deck that has not enumerated yet. Each of those used to
-carry its own copy of the rules, and the copies had drifted: the same-page
-no-op was in two of the three, an unknown page was warned about, listed with
-suggestions, or silently swallowed depending on where the request landed, and
-coordinate bounds were the device's truth here but invented constants in the
-CLI's own pre-check. This module is the single rule set they all ask.
+arrive from several transports -- the DBus methods an external tool or a
+second CLI invocation calls on the running instance, and the argv requests a
+booting process parks for a deck that has not enumerated yet. Each of those
+used to carry its own copy of the rules, and the copies had drifted: the
+same-page no-op was in two of the three, an unknown page was warned about,
+listed with suggestions, or silently swallowed depending on where the request
+landed, and coordinate bounds were the device's truth here but invented
+constants in the CLI's own pre-check. This module is the single rule set they
+all ask.
 
 WHAT IS A RULE AND WHAT IS A TRANSPORT
 
@@ -89,6 +90,7 @@ class ControlResult:
                                 fulfilled request, not a failure)
       ``"no-such-deck"``        no controller reports that serial
       ``"no-such-page"``        no page file matches that name or path
+      ``"page-build-failed"``   the page exists but could not be built
       ``"no-page-manager"``     asked before the page store exists (boot only)
       ``"bad-coords"``          coordinates are not ``x,y``
       ``"coords-out-of-bounds"``  outside THIS device's key layout
@@ -169,7 +171,18 @@ class ControlPlane:
         if active_page is not None and os.path.abspath(page_path) == os.path.abspath(active_page.json_path):
             return ControlResult(True, "already-active", f"Page '{page_ref}' is already active")
 
-        controller.load_page(page_manager.get_page(page_path, controller))
+        page = page_manager.get_page(page_path, controller)
+        if page is None:
+            # The file matched a name but could not be built into a page.
+            # Handing that None to load_page is how every switch surface used
+            # to answer this: load_page(None) CLEARS the deck, so a page that
+            # failed to build blanked the device and reported success. A deck
+            # that keeps showing what it had is the better failure, and the
+            # caller gets told why instead of being congratulated.
+            return ControlResult(False, "page-build-failed",
+                                 f"Page '{page_ref}' could not be loaded")
+
+        controller.load_page(page)
         return ControlResult(True)
 
     def change_state_on(self, controller: DeckController, page_ref: str,
@@ -205,9 +218,12 @@ class ControlPlane:
             return ControlResult(False, "no-such-input",
                                  f"Could not find input at coordinates ({x},{y})")
 
-        # The state number arrives as an int from the parked-request dict and
-        # as a string from the stringly-typed action transports; converting
-        # here is what keeps that difference the transports' business.
+        # The state number is an int on the DBus method's signature and on the
+        # CLI's parked requests, which convert at their own edge -- but the
+        # parked dict is written into directly, by the boot path's own tests
+        # and by anything else holding `gl.api_state_requests`, so a string
+        # still reaches here. Converting is cheaper than requiring every
+        # writer of that dict to have got the type right.
         try:
             state_number = int(state)
         except (TypeError, ValueError):

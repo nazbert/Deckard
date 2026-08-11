@@ -36,7 +36,6 @@ from loguru import logger as log
 import os
 
 # Import own modules
-from src.backend import control_plane
 from src.backend import timer_wheel
 from src.backend import ui_port
 from src.backend import startup_queue
@@ -210,13 +209,6 @@ class App(Adw.Application):
         # (ownership rules in src/backend/startup_queue.py).
         gl.app = self
         startup_queue.get().drain_app_ready()
-        change_page_action = Gio.SimpleAction.new("change_page", GLib.VariantType("as")) # as = array of strings
-        change_page_action.connect("activate", self.on_change_page)
-        self.add_action(change_page_action)
-
-        change_state_action = Gio.SimpleAction.new("change_state", GLib.VariantType("as")) # as = array of strings
-        change_state_action.connect("activate", self.on_change_state)
-        self.add_action(change_state_action)
 
         # Start DBus API service
         start_dbus_service()
@@ -745,32 +737,6 @@ class App(Adw.Application):
             return GLib.SOURCE_REMOVE
 
         GLib.idle_add(_send)
-
-    def on_change_page(self, action, data: GLib.Variant, *args):
-        """
-        page_name can be either the name or the path of the page
-
-        The action is a transport: unpack the arguments and hand them to the
-        control plane, which owns the rules every other transport is judged by
-        too. Only the rendering of the answer belongs here.
-        """
-        serial_number, page_name = data.unpack()
-
-        result = control_plane.get().change_page(serial_number, page_name)
-        if not result.ok:
-            log.error(result.message)
-
-    def on_change_state(self, action, data: GLib.Variant, *args):
-        """
-        Change the state of a specific StreamDeck item
-        """
-        serial_number, page_name, coords, state_number = data.unpack()
-
-        result = control_plane.get().change_state(serial_number, page_name, coords, state_number)
-        if result.ok:
-            log.info(result.message)
-        else:
-            log.error(result.message)
 
     def send_outdated_plugin_notification(self, plugin_id: str) -> None:
         self.send_notification(

@@ -22,6 +22,21 @@ bundle as a release asset.
   showing now does nothing, instead of reloading the deck. Scripts that set a
   page on every event — a window rule, a home-automation trigger — made the
   deck re-render all of its keys each time.
+- Every `--change-page` and `--change-state` on one command line now takes
+  effect. When Deckard was already running, only the first request was sent to
+  it: a command carrying several page changes moved one deck and left the
+  others alone, and any state change on a command that also changed a page was
+  dropped entirely.
+- `--change-page` and `--change-state` now report failures in the terminal you
+  typed them in, and exit non-zero, instead of leaving the reason in the
+  running instance's log where nothing showed it to you. Requests are also no
+  longer pre-rejected against limits the CLI invented (coordinates above 10,
+  states above 20): a large deck's real coordinates and state numbers now
+  reach the running instance, which checks them against the device itself.
+- A page that cannot be loaded no longer blanks the deck while reporting
+  success. Asking for a page whose file is present but unusable cleared every
+  key and said the switch had worked; the deck now keeps the page it was
+  showing and the request explains itself.
 - Switching to a page while several pages are already cached no longer lands
   you on a dead one. With enough pages open the app could discard a page in
   the moment between picking it and showing it, leaving a deck whose keys

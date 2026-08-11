@@ -108,7 +108,8 @@ from src.backend.PresenceMonitor.PresenceMonitor import PresenceMonitor
 from src.tray import TrayIcon
 from src.backend.Logger import Logger, LoggerConfig, Loglevel
 from src.backend.log_hooks import install_exception_hooks, redirect_faulthandler
-from src.backend import single_instance, startup_queue
+from src.backend import cli_forward, single_instance
+from src.backend.cli_forward import DBUS_CALL_TIMEOUT_MS
 
 # Migration
 from src.backend.Migration.MigrationManager import MigrationManager
@@ -120,8 +121,6 @@ import globals as gl
 
 # Define constants
 DEFAULT_DATA_PATH = os.path.expanduser(f"~/.var/app/{appinfo.APP_ID}/data")
-MAX_REASONABLE_X = 10
-MAX_REASONABLE_Y = 10
 
 # Rotated files kept per log sink, oldest deleted first. Bounding this is the
 # only thing standing between a long-lived install and a log directory that
@@ -305,11 +304,6 @@ def reset_all_decks():
                 device.reset()
         except (usb.core.USBError, NotImplementedError):
             log.error("Failed to reset deck, maybe it's already connected to another instance? Skipping...")
-
-# Every CLI-side D-Bus call carries this instead of the 25s bus default:
-# without it a wedged instance that accepts but never replies blocks startup
-# for that long.
-DBUS_CALL_TIMEOUT_MS = 5000
 
 
 def name_has_owner(session_bus: Gio.DBusConnection, name: str) -> bool:
@@ -617,116 +611,22 @@ def handle_listing_commands():
     
     return False
 
-def validate_state_change_args(args):
-    """
-    Validate CLI arguments for --change-state
-    Returns (is_valid, error_message)
-    """
-    if not args.change_state:
-        return True, None
-    
-    for i, (serial_number, page_name, coords, state_number) in enumerate(args.change_state):
-        # Validate serial number format (basic check)
-        if not serial_number or not isinstance(serial_number, str):
-            return False, f"Invalid serial number in argument {i+1}: '{serial_number}'"
-        
-        # Validate page name
-        if not page_name or not isinstance(page_name, str):
-            return False, f"Invalid page name in argument {i+1}: '{page_name}'"
-        
-        # Validate coordinate format
-        if not coords or not isinstance(coords, str):
-            return False, f"Invalid coordinates in argument {i+1}: '{coords}'"
-        
-        if ',' not in coords:
-            return False, f"Invalid coordinate format in argument {i+1}: '{coords}'. Expected format: 'x,y' (e.g., '0,0')"
-        
-        try:
-            x, y = map(int, coords.split(','))
-            if x < 0 or y < 0:
-                return False, f"Coordinates must be non-negative in argument {i+1}: '{coords}'"
-            if x > MAX_REASONABLE_X or y > MAX_REASONABLE_Y:  # Reasonable bounds check
-                return False, f"Coordinates seem too large in argument {i+1}: '{coords}'. Most StreamDecks have coordinates 0-4"
-        except ValueError:
-            return False, f"Invalid coordinate format in argument {i+1}: '{coords}'. Expected integers like '0,0'"
-        
-        # Validate state number
-        try:
-            state_num = int(state_number)
-            if state_num < 0:
-                return False, f"State number must be non-negative in argument {i+1}: '{state_number}'"
-            if state_num > 20:  # Reasonable bounds check
-                return False, f"State number seems too large in argument {i+1}: '{state_number}'. Most items have 1-5 states"
-        except ValueError:
-            return False, f"Invalid state number in argument {i+1}: '{state_number}'. Must be an integer"
-    
-    return True, None
-
 def make_api_calls():
-    args = gl.argparser.parse_args()
-    has_page_requests = args.change_page
-    has_state_requests = args.change_state
-    
-    if not has_page_requests and not has_state_requests:
-        return False
-    
-    # Validate state change arguments before proceeding
-    if has_state_requests:
-        is_valid, error_msg = validate_state_change_args(args)
-        if not is_valid:
-            print(f"Error: {error_msg}", file=sys.stderr)
-            print("\nUsage examples:", file=sys.stderr)
-            print("  --change-state CL123456789 Main 0,0 1", file=sys.stderr)
-            print("  --change-state CL123456789 Soundboard 2,1 0", file=sys.stderr)
-            print("\nParameters:", file=sys.stderr)
-            print("  SERIAL_NUMBER: Device serial (e.g., CL123456789)", file=sys.stderr)
-            print("  PAGE_NAME: Page name (e.g., Main, Soundboard)", file=sys.stderr)
-            print("  COORDINATES: Position as x,y (e.g., 0,0 for top-left)", file=sys.stderr)
-            print("  STATE_NUMBER: State to change to (e.g., 0, 1, 2)", file=sys.stderr)
-            sys.exit(1)
-    
-    session_bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-    running = False
-    try:
-        running = name_has_owner(session_bus, appinfo.APP_ID)
-    except GLib.Error:
-        running = False
+    """Apply this invocation's --change-page / --change-state requests.
 
-    # Handle page change requests
-    if has_page_requests:
-        for serial_number, page_name in args.change_page:
-            if not running or args.close_running:
-                startup_queue.get().park_page_request(serial_number, page_name)
-            else:
-                # Other instance is running - call dbus interfaces
-                activate_action(session_bus, appinfo.APP_ID, appinfo.DBUS_OBJECT_PATH,
-                                "change_page", GLib.Variant("as", [serial_number, page_name]))
-                return True
-
-    # Handle state change requests
-    if has_state_requests:
-        for serial_number, page_name, coords, state_number in args.change_state:
-            if not running or args.close_running:
-                try:
-                    state_num = int(state_number)
-                    startup_queue.get().park_state_request(serial_number, {
-                        "page_name": page_name,
-                        "coords": coords,
-                        "state": state_num
-                    })
-                except ValueError:
-                    print(f"Error: Invalid state number '{state_number}'. Must be an integer.", file=sys.stderr)
-                    sys.exit(1)
-            else:
-                # Other instance is running - call dbus interfaces
-                activate_action(session_bus, appinfo.APP_ID, appinfo.DBUS_OBJECT_PATH,
-                                "change_state", GLib.Variant("as", [serial_number, page_name, coords, state_number]))
-                return True
-
-    return False
+    True means a running instance took them and this process is finished;
+    False means they are parked (or there were none) and this process boots.
+    Everything but reading argv and leaving the process lives in cli_forward,
+    where a test can reach it -- this module re-execs itself on import.
+    """
+    verdict = cli_forward.forward_cli_requests(gl.argparser.parse_args())
+    for failure in verdict.failures:
+        print(failure, file=sys.stderr)
+    if verdict.failures:
+        sys.exit(1)
+    return verdict.handled
 
 
-    
 @log.catch
 def main():
     # Safety net first: from here on, uncaught exceptions on the
