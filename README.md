@@ -30,7 +30,7 @@ Deckard shares StreamController's UI and plugin ecosystem but has rebuilt most o
 
 - All settings and page JSON is written atomically; corrupt files are quarantined and healed by the loader instead of crashing the app or being silently overwritten.
 - Plugin-store installs are transactional (stage, validate, swap) — an interrupted download can't leave a half-installed plugin behind.
-- The single-instance lock is claimed atomically at boot, and SIGTERM/logout shuts the app down cleanly, including plugin backend processes.
+- Uniqueness is decided atomically at boot by the application framework itself (the session name is the tie-break, claimed before any deck opens), and SIGTERM/logout shuts the app down cleanly, including plugin backend processes.
 - Uncaught exceptions from every thread are routed into the log file, with credential redaction.
 - Store networking uses a shared session with retry and backoff instead of one-shot requests.
 

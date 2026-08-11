@@ -26,7 +26,9 @@ Modes:
 
 Every mode prints single-line records on stdout, flushed, so the parent can
 read them with a blocking readline and never wonder whether output is stuck in
-a buffer.
+a buffer. The name-owning modes additionally report what arrives at the WIRE
+(see watch_the_wire), which is the only way a mode that never dispatches can
+say what it was sent.
 """
 import os
 import sys
@@ -130,8 +132,42 @@ def mode_activate() -> None:
         say("ACTIVATED")
 
 
+# The watched connection and its callback, for the process lifetime. Both are
+# load-bearing: a filter is dropped when the Python wrapper it was added
+# through is collected, and the connection underneath is a singleton that stays
+# alive regardless -- so letting the wrapper go leaves a process that is still
+# on the bus and no longer reports anything. Measured, and silent: the filter
+# simply stops being called, which reads as "nothing ever arrived".
+_WIRE_WATCH: list = []
+
+
+def watch_the_wire() -> None:
+    """Report every action Activate that ARRIVES, from GDBus's worker thread.
+
+    A leg asserting that an instance was never asked to quit cannot see that
+    through the action handler: the handler runs on the main context, so a
+    child that never reaches its loop says nothing whether the message came or
+    not, and the assertion holds by construction rather than by evidence. A
+    connection filter runs on the worker thread that reads the socket, so it
+    reports the arrival of a message nothing is ever going to act on -- which
+    is the whole of what those legs are about.
+    """
+    connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+
+    def on_message(_connection, message, incoming, *_user_data):
+        if incoming and message.get_interface() == "org.gtk.Actions" \
+                and message.get_member() == "Activate":
+            body = message.get_body()
+            say(f"WIRE-ACTIVATE {body.unpack()[0] if body else '?'}")
+        return message
+
+    _WIRE_WATCH.append((connection, on_message))
+    connection.add_filter(on_message)
+
+
 def _become_primary_loop(app_id: str, answer_quit: bool,
                          use_gate: bool = True) -> None:
+    watch_the_wire()
     app = Gio.Application(application_id=app_id)
     if use_gate:
         decision = instance_gate.establish(app, publish=lambda: None,

@@ -69,6 +69,25 @@ bundle as a release asset.
   seconds and exiting with an error — which also lost a `--change-page` sent
   in that window. A startup slower than the session bus's own call timeout
   still outlasts the wait.
+- A page or state change given to a launch that lost the startup race is no
+  longer dropped. Two launches at the same moment leave one of them handing
+  over to the other, and the requests it had already taken went with it —
+  nothing applied, nothing said, and a successful exit code.
+- The message shown when the running Deckard does not answer `--change-page`
+  or `--change-state` now names what it can actually mean. It offered a
+  startup that had not finished as the likely explanation, which stopped being
+  possible when the app started publishing its interface before taking its bus
+  name; it now names the two things that remain — an older build, and an
+  instance that is shutting down — with what to do about each.
+- The list of controllers on the D-Bus interface now matches the objects a
+  client can address. It was read from the decks the app had, so during the
+  moment between a deck being added and its object appearing it named a deck
+  whose object was not there yet — and a client that composed a path from that
+  list got an error for a deck that was plainly plugged in.
+- Asking to change a page on a deck when none are connected now says that the
+  app may still be starting, rather than only that nothing is connected: the
+  interface answers from the moment Deckard takes its bus name, which is
+  before it has opened any deck.
 
 ### Changed
 

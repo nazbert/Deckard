@@ -64,8 +64,9 @@ already covered by scenario_plugin_backend_teardown.py; the end-to-end
   6. force_quit terminates the backends before os._exit(1), so even a wedged
      teardown that the 6s watchdog cuts short doesn't orphan them.
   7. unix_signal_add() degrades (returns False) instead of raising when the
-     install itself fails. It runs inside App.__init__, so an escaping
-     exception there costs the whole startup.
+     install itself fails. It runs on the boot path, after the decks are open
+     and before the main loop starts, so an escaping exception there would end
+     a launch that had already done all of its work.
   8. That degraded path -- GLib 2.80+ moved the Unix API into the separate
      GLibUnix-2.0 namespace, and a runtime shipping neither spelling gets a
      plain signal.signal handler -- still routes TERM/HUP to the teardown.

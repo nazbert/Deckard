@@ -10,6 +10,13 @@ enumerated yet and goes on to boot (see src/backend/startup_queue.py legs
 B/C). With an instance running, the requests are FORWARDED to it over the bus
 and this process is done.
 
+Which of the two it is has to be decided before the process knows whether it
+will BE the instance -- parking exists for the boot that comes after it, so it
+cannot wait for the name to be settled. A launch that parks and then loses that
+race is therefore holding requests that belong to another process, and
+``forward_parked_requests`` is the way they get there instead of dying with
+this one.
+
 WHY THIS IS NOT IN main.py
 
 main.py cannot be imported by anything: its module body re-execs the process
@@ -97,22 +104,32 @@ DBUS_CALL_TIMEOUT_MS = 5000
 # The interface the top-level object carries -- the app id itself.
 TOP_IFACE = appinfo.APP_ID
 
-# What comes back when the method is not there to call. GDBus uses these two
-# spellings for a missing method depending on its version -- and, importantly,
-# for a missing OBJECT as well: an instance that owns the bus name but has not
-# published its objects yet answers exactly like an instance that is too old
-# to have the methods. SKEW_MESSAGE says both, because this cannot tell them
-# apart. (Telling them apart means asking the instance what it implements,
-# which is worth doing when the boot window it exists for is closed.)
+# What comes back when the methods are not there to call. GDBus uses these two
+# spellings for a missing method depending on its version, and for a missing
+# OBJECT as well -- both answered from its own worker thread, so they arrive
+# promptly whether or not the instance is dispatching anything (measured).
+#
+# This used to be the STARTING instance's answer too, and could not be told
+# from an old build's. It no longer is: the app publishes its objects before it
+# takes the bus name (src/backend/instance_gate.py), so a name owned by a build
+# that does this always has the methods behind it. What is left reaching here
+# is a build too old to have them, or an instance on its way OUT -- teardown
+# takes the interface off the bus first and keeps the name until the process
+# ends. (An instance whose publish failed outright looks the same, and says so
+# in its own log.) A WEDGED instance is a different answer entirely: its
+# objects are up, the call queues behind whatever the loop is stuck on, and the
+# caller gets the timeout below rather than this.
 _METHOD_MISSING = (
     "org.freedesktop.DBus.Error.UnknownMethod",
     "org.freedesktop.DBus.Error.UnknownInterface",
 )
 
 SKEW_MESSAGE = (
-    "The running Deckard has not finished starting, or is an older build "
-    "without the page and state methods this command needs. Try again in a "
-    "moment, and restart it if this persists."
+    "The running Deckard is not answering to the page and state methods this "
+    "command needs. An older build does not have them at all, and restarting "
+    "it is what picks up a build that does. An instance that is shutting down "
+    "answers the same way until it is gone, so if one was just quitting, try "
+    "again in a moment."
 )
 
 USAGE = """
@@ -128,8 +145,8 @@ Parameters:
 
 
 class OlderInstance(Exception):
-    """The running instance did not answer to the control methods -- see
-    SKEW_MESSAGE for the two things that produces."""
+    """The running instance has no control methods on the bus -- see
+    _METHOD_MISSING for what is left that produces this."""
 
 
 class TransportError(Exception):
@@ -290,6 +307,37 @@ def forward_cli_requests(args: Namespace,
 
     return Verdict(handled=True,
                    failures=_forward(transport, page_requests, state_requests))
+
+
+def forward_parked_requests(transport: Transport | None = None) -> list[str]:
+    """Hand this process's PARKED requests to the instance that owns the name.
+
+    For the launch that parked and then lost. Parking happens before the race
+    for the application name is decided -- it has to, since the requests exist
+    to be applied by the boot that follows -- so an invocation can park, get as
+    far as registering, and only there learn that another launch got the name
+    first. The requests are then sitting in a process that is about to exit
+    without opening a deck: without this they left with it, applying nothing
+    and reporting success.
+
+    Nothing is probed first. The caller has just been told that another
+    instance owns the name, which is a better answer than asking again; if that
+    instance disappeared in between, the send fails and says so, exactly as any
+    other forward does. The shapes come out of this module's own parking a
+    moment earlier, so they need no re-reading -- the state is already the
+    integer the bus method takes.
+
+    Returns the failures to print. Empty means everything was sent and taken.
+    """
+    page_requests, parked_states = startup_queue.get().claim_parked_requests()
+    if not page_requests and not parked_states:
+        return []
+    if transport is None:
+        transport = _BusTransport()
+    return _forward(transport, page_requests, [
+        (serial, parked["page_name"], parked["coords"], parked["state"])
+        for serial, parked in parked_states
+    ])
 
 
 # ===================================================================== #

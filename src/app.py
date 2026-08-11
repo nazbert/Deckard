@@ -144,9 +144,9 @@ class App(Adw.Application):
             # gl.app.main_win consumer and the controllers' cached UI
             # bindings (field incident 2026-07-16: the replacement was
             # also never presented because the boot argv had -b, so preview
-            # pushes dirty-marked forever). Delegate to on_reopen so this
-            # route behaves exactly like the single-instance probe's
-            # Activate("reopen") -- one code path for re-activation.
+            # pushes dirty-marked forever). Delegate to on_reopen so a
+            # forwarded activation and the kept reopen action share one
+            # re-activation code path.
             #
             # Guarded by an explicit completion flag, NOT by main_win:
             # MainWindow.__init__'s first statement publishes itself as

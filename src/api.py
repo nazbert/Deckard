@@ -282,13 +282,30 @@ class DeckardAPI:
     
     @property
     def Controllers(self) -> List[Str]:
-        """Serial numbers of all connected controllers."""
-        try:
-            if gl.deck_manager is not None:
-                return [c.serial_number() for c in gl.deck_manager.deck_controller]
-        except Exception as e:
-            log.error(f"DBus API: Controllers error: {e}")
-        return []
+        """Serial numbers of the controllers a client can address.
+
+        The published object set is the source, not the deck manager's list, so
+        this property and the objects behind it cannot disagree: every serial
+        listed here has an object at the path composed from it, because listing
+        it and publishing it are one step (_publish_controller).
+
+        When it was read from the deck manager it announced decks that had no
+        object yet, and a client that took what it found and addressed it got
+        UnknownObject for a deck that was plainly plugged in.
+
+        The disagreement that remains points the other way, at the truth rather
+        than at the bus: publishing is marshalled onto the main context, so
+        between a deck registering and its publish idle running, this property
+        does not name a deck the app already has. Under-reporting a deck for a
+        moment costs a client a retry; over-reporting one costs it an error on
+        a path it composed from this very list. GLib runs idles below GDBus's
+        own dispatch, so an external read CAN overtake a publish queued before
+        it -- the window is not ordered away, it is healed, by the
+        PropertiesChanged that publishing emits.
+
+        Main context only, like every registration mutation.
+        """
+        return list(_controller_instances)
 
     @property
     def ForegroundWindow(self) -> Tuple[Str, Str]:
@@ -356,9 +373,9 @@ def unpublish_controller(controller) -> None:
     """Take a deck controller off the bus when it is removed.
 
     Guard and marshal exactly as publish_controller does. A client holding a
-    proxy for the removed deck gets UnknownObject from here on, which is what
-    stops the published object set and the Controllers property from
-    disagreeing about which decks exist.
+    proxy for the removed deck gets UnknownObject from here on, and the
+    Controllers property stops naming it in the same step: the registry the
+    object comes off is the one the property is read from.
     """
     if _bus is None:
         return
@@ -489,7 +506,14 @@ def _serial_published_for(controller) -> str | None:
 
 def _emit_controllers_changed() -> None:
     """Tell clients watching the top-level object that the deck inventory
-    moved, so arrivals and removals are a signal rather than a poll."""
+    moved, so arrivals and removals are a signal rather than a poll.
+
+    Sent from the publish and unpublish workers, after the registry has been
+    updated -- so the value carried is the object set as it now stands, and a
+    client that read the property early is corrected by this rather than left
+    to poll. Reading it through the property keeps that one source: a payload
+    composed from anything else could announce a set nobody could address.
+    """
     if _api_instance is None:
         return
     _emit_properties_changed(

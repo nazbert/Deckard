@@ -39,15 +39,25 @@ Legs:
      still ends up on the bus. Nothing orders those two enqueues, and losing
      that race used to leave a plugged-in, working deck with no object for
      the rest of the session.
+  8. Which way the Controllers property is allowed to be wrong. It is read
+     from the published set, so it can lag the decks the app has -- and can
+     never name one a client cannot address, which is the failure that costs
+     the client an error rather than a retry.
 
 Every publish and unpublish is recorded with the thread that made it, and
 asserted to be the main context: the marshalling is the whole point of the
 design and is otherwise invisible to a passing test.
+
+Between every leg, the property and the object set are asked -- both from the
+outside, over the wire -- whether they still name the same decks. That
+agreement is a property of every observed state, not of one moment, so it is
+checked as one rather than restated leg by leg.
 """
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH before globals)
 
 import ctypes  # noqa: E402
 import os  # noqa: E402
+import re  # noqa: E402
 import shutil  # noqa: E402
 import signal  # noqa: E402
 import subprocess  # noqa: E402
@@ -71,12 +81,14 @@ PROPS_IFACE = "org.freedesktop.DBus.Properties"
 SERIAL_BOOT = "api-boot-1"
 SERIAL_HOT = "api-hotplug-1"
 SERIAL_REMOTE = "remote-deck-api-1"
+SERIAL_LATE = "api-late-1"
 
 # Hardcoded rather than run through _serial_to_dbus_path, so the sanitization
 # a client depends on to compose a path from a serial is pinned here too.
 PATH_BOOT = f"{api.CONTROLLER_BASE_PATH}/api_boot_1"
 PATH_HOT = f"{api.CONTROLLER_BASE_PATH}/api_hotplug_1"
 PATH_REMOTE = f"{api.CONTROLLER_BASE_PATH}/remote_deck_api_1"
+PATH_LATE = f"{api.CONTROLLER_BASE_PATH}/api_late_1"
 
 PAGE = "Main"
 
@@ -291,8 +303,45 @@ class Observer:
         return self.get_property(api.DBUS_OBJECT_PATH, api.TOP_IFACE,
                                  "Controllers")
 
+    def published_paths(self) -> list[str]:
+        """Every controller object that is actually there, asked of the bus.
+
+        Introspecting the node the controller objects hang under is how an
+        outsider enumerates them: GDBus answers it out of its own registration
+        table, so this is the object set as the bus holds it rather than
+        anything this process says about it.
+        """
+        xml = self.call(api.CONTROLLER_BASE_PATH,
+                        "org.freedesktop.DBus.Introspectable",
+                        "Introspect", None).unpack()[0]
+        return sorted(f"{api.CONTROLLER_BASE_PATH}/{name}"
+                      for name in re.findall(r'<node\s+name="([^"]+)"', xml))
+
     def active_page(self, object_path: str) -> str:
         return self.get_property(object_path, api.CTRL_IFACE, "ActivePageName")
+
+
+def assert_agreement(observer: Observer, where: str) -> None:
+    """The property and the addressable object set name the same decks.
+
+    Both read from outside, over the wire, because that is the only place the
+    disagreement ever mattered: a client reads Controllers, composes a path per
+    serial, and calls it. A serial the property gives that the bus does not
+    have is that client's next call failing on a deck it was just told about.
+
+    The composition uses the app's own sanitizer rather than a second copy of
+    the rule -- the legs below pin the sanitized paths literally, which is
+    where that rule is actually held.
+    """
+    listed = sorted(api._serial_to_dbus_path(serial)
+                    for serial in observer.controllers())
+    published = sorted(os.path.basename(path)
+                       for path in observer.published_paths())
+    assert listed == published, (
+        f"{where}: Controllers names {listed} while the bus carries objects "
+        f"for {published} -- a client composing a path from this property "
+        f"reaches something that is not there"
+    )
 
 
 def wait_for_object(observer: Observer, object_path: str,
@@ -633,6 +682,94 @@ def leg_inverted_replug_order(manager, observer: Observer) -> None:
     print("  PASS: a publish queued before the old deck's unpublish survives it")
 
 
+def serials_registered(manager) -> list[str]:
+    """What the deck manager has, which is what the property used to report."""
+    return [controller.serial_number() for controller in manager.deck_controller]
+
+
+def leg_publish_lag_direction(manager, observer: Observer) -> None:
+    """8: which way the property is allowed to be wrong.
+
+    Publishing is marshalled onto the main context, so a deck is registered
+    with the deck manager for a moment before its object exists. The property
+    disagrees with SOMETHING during that moment whichever source it is read
+    from, and the direction is the whole of it:
+
+      * read from the deck manager, it names a deck that has no object, and
+        the client that composes a path from that name gets UnknownObject for
+        a deck that is plainly plugged in;
+      * read from the published set, it does not yet name a deck the app
+        already has, and the client that retries -- or simply listens to the
+        PropertiesChanged that publishing emits -- finds it.
+
+    Nothing orders an external read against a queued publish, and this does not
+    pretend otherwise: GLib runs idles below GDBus's own dispatch, so a read
+    that arrives after a publish was queued can still be answered first. That
+    is precisely the window driven here, deliberately, by leaving the context
+    un-iterated.
+
+    Which is also why the absence half is asserted in-process: reading over the
+    bus means pumping this context, and pumping it dispatches the very publish
+    the window is made of.
+    """
+    deck = FaultyFakeDeck(serial_number=SERIAL_LATE, deck_type="Fake Deck")
+    controller = manager._init_deck_controller_with_retry(deck)
+    assert controller is not None, "the late controller failed to build"
+    manager.deck_controller.append(controller)
+
+    observer.property_changes.clear()
+    api.publish_controller(controller)  # queued, and deliberately unpumped
+
+    top = api.get_api_instance()
+    assert SERIAL_LATE in serials_registered(manager), \
+        "the deck never registered, so there is no disagreement to have"
+    assert api.get_controller_instance(SERIAL_LATE) is None, \
+        "the publish ran anyway -- this leg needs the queued, undispatched one"
+    assert SERIAL_LATE not in top.Controllers, (
+        f"the property named a deck with no object on the bus: read from the "
+        f"deck manager it announces decks a client cannot address, which is "
+        f"the one direction this must never fail in ({top.Controllers})"
+    )
+
+    pump_until(lambda: api.get_controller_instance(SERIAL_LATE) is not None,
+               10.0, "the queued publish never ran")
+    assert SERIAL_LATE in top.Controllers, \
+        "the deck is published and the property still does not name it"
+    assert wait_for_object(observer, PATH_LATE) == PAGE, \
+        "the late deck's object never answered"
+    assert_agreement(observer, "after a queued publish dispatched")
+
+    healed = [value for value in observer.controller_changes()
+              if SERIAL_LATE in value]
+    assert healed, (
+        "nothing announced the new deck, so a client that read the property "
+        "in the window above has no way to learn it was wrong except by "
+        "polling -- the signal is what closes a window that cannot be ordered "
+        "away"
+    )
+
+    # The removal side of the same window, which fails the other way round: the
+    # deck leaves the manager first and its object goes when the queued work
+    # runs. The property must stay with the OBJECT here too -- a client told
+    # the deck is gone while its object still answers is being lied to just as
+    # surely, only in the other direction.
+    observer.property_changes.clear()
+    manager.remove_controller(controller)  # queues the unpublish
+    assert SERIAL_LATE not in serials_registered(manager), \
+        "the removal did not happen, so there is no window to be in"
+    assert SERIAL_LATE in top.Controllers, (
+        f"the property dropped a deck whose object is still on the bus: read "
+        f"from the deck manager it stops naming a deck a client can still "
+        f"drive ({top.Controllers})"
+    )
+
+    pump_until(lambda: api.get_controller_instance(SERIAL_LATE) is None, 10.0,
+               "the queued unpublish never ran")
+    expect_gone(observer, PATH_LATE)
+    assert_agreement(observer, "after a queued unpublish dispatched")
+    print("  PASS: the property lags the decks, never the objects")
+
+
 def leg_stop_service(manager, observer: Observer) -> None:
     """6: stopping takes everything off the bus, and the lifecycle calls that
     keep arriving afterwards are silent no-ops."""
@@ -674,11 +811,17 @@ def run_legs(bus_address: str) -> None:
     observer = None
     try:
         observer = leg_boot_sweep(manager, bus_address)
+        assert_agreement(observer, "after the boot sweep")
         leg_worker_thread_arrival(manager, observer)
+        assert_agreement(observer, "after a deck arrived on a worker thread")
         leg_active_page_seeded(manager, observer)
         stale = leg_removal_unpublishes(manager, observer)
+        assert_agreement(observer, "after a deck was removed")
         leg_replug(manager, observer, stale)
+        assert_agreement(observer, "after a replug")
         leg_inverted_replug_order(manager, observer)
+        assert_agreement(observer, "after a publish and unpublish crossed")
+        leg_publish_lag_direction(manager, observer)
         leg_stop_service(manager, observer)
     finally:
         api.stop_dbus_service()

@@ -49,6 +49,9 @@ Legs:
      nobody owns the name, so boot degraded; somebody does, so stop.
  10. OLD-NAME GUARD -- a still-running pre-rename instance is asked to quit and
      waited for, on the primary path only, before this launch opens any deck.
+ 11. PARKED REQUESTS -- a launch that parked `--change-page` requests and then
+     turned out to be the remote hands them to the instance that owns the name
+     instead of exiting with them still in its own memory.
 
 The fail-open leg runs in a child pointed at a dead bus address rather than by
 killing the daemon this scenario owns: the legs share one daemon, and a leg
@@ -67,12 +70,16 @@ import globals as gl  # noqa: E402
 
 import appinfo  # noqa: E402
 import src.api as api  # noqa: E402
-from src.backend import instance_gate  # noqa: E402
+from cli_args import argparser  # noqa: E402
+from src.backend import cli_forward, instance_gate  # noqa: E402
 
 from scenario_api_lifecycle_publish import (  # noqa: E402
     Observer, _die_with_parent, pump, pump_until, start_private_bus,
     stop_private_bus,
 )
+# The running instance as a recorder, shared rather than copied: what leg 11
+# needs is the object the forwarding rules are already pinned against.
+from scenario_cli_forward_all import Recorder  # noqa: E402
 
 WATCHDOG_SECONDS = 180
 
@@ -92,8 +99,22 @@ ID_SILENT = "io.github.nazbert.DeckardGateSilent"
 ID_FAILOPEN = "io.github.nazbert.DeckardGateFailOpen"
 ID_BLOCKED = "io.github.nazbert.DeckardGateBlocked"
 ID_OLDGUARD = "io.github.nazbert.DeckardGateOldGuard"
+ID_PARKED = "io.github.nazbert.DeckardGateParked"
 
 RACE_CONTENDERS = 8
+
+# One command carrying both kinds, each naming its own deck, so a request lost
+# on the way out cannot hide behind last-write-wins parking.
+PARKED_ARGV = [
+    "--change-page", "gate-deck-a", "Alpha",
+    "--change-page", "gate-deck-b", "Beta",
+    "--change-state", "gate-deck-c", "Gamma", "1,2", "3",
+]
+PARKED_FORWARDS = [
+    ("page", "gate-deck-a", "Alpha"),
+    ("page", "gate-deck-b", "Beta"),
+    ("state", "gate-deck-c", "Gamma", "1,2", 3),
+]
 
 
 # ===================================================================== #
@@ -354,7 +375,15 @@ def leg_close_running_mid_boot(observer: Observer) -> None:
 
 
 def leg_close_running_never_answers(observer: Observer) -> None:
-    """An instance that never starts dispatching is left alone, not killed."""
+    """An instance that never starts dispatching is left alone, not killed.
+
+    "Never asked" is asserted at the WIRE, not at the action handler. The
+    handler runs on a main context this child never reaches, so a child that
+    was sent a quit and a child that was not print exactly the same nothing --
+    an assertion on that is true by construction and would survive the quit
+    being sent again. The child's connection filter runs on the GDBus worker
+    thread instead and reports what ARRIVED, dispatched or not.
+    """
     child = spawn("primary-quit", ID_SILENT, DECKARD_GATE_DISPATCH_DELAY=300)
     grace = instance_gate.CLOSE_GRACE_SECONDS
     try:
@@ -368,6 +397,8 @@ def leg_close_running_never_answers(observer: Observer) -> None:
         except instance_gate.CloseRunningFailed as e:
             took = time.monotonic() - started
             assert "still starting up" in str(e), e
+            assert "stuck" in str(e), (
+                f"the message must name the wedged case it cannot rule out: {e}")
             assert "left running" in str(e), (
                 f"the message must not read as though the quit was sent: {e}")
         else:
@@ -386,12 +417,14 @@ def leg_close_running_never_answers(observer: Observer) -> None:
         instance_gate.CLOSE_GRACE_SECONDS = grace
         kill(child)
     said = records(child)
-    assert "QUIT-RECEIVED" not in said, (
-        f"a quit was delivered to an instance that was never dispatching: "
-        f"{said}"
+    assert "WIRE-ACTIVATE" not in said, (
+        f"a quit reached the instance at the wire: it would have sat in the "
+        f"queue and killed it whenever its loop finally started, a moment "
+        f"after this launch had already given up -- {said}"
     )
+    assert "QUIT-RECEIVED" not in said, said
     print(f"  PASS: an instance that never answers is left running, unasked "
-          f"({took:.2f}s)")
+          f"(nothing on the wire, {took:.2f}s)")
 
 
 def leg_close_running_refused(observer: Observer) -> None:
@@ -427,8 +460,16 @@ def leg_close_running_refused(observer: Observer) -> None:
     finally:
         instance_gate.CLOSE_GRACE_SECONDS = grace
         kill(child)
+    said = records(child)
+    # This instance WAS asked, and the wire says so. Which is also what makes
+    # the leg above's silence mean anything: the same witness, watching the
+    # same thing, reports an arrival here.
+    assert said.get("WIRE-ACTIVATE") == "quit", (
+        f"the quit never reached this instance, so it did not refuse anything "
+        f"-- and the witness the unasked leg trusts reports nothing: {said}"
+    )
     print(f"  PASS: --close-running that cannot close fails after its grace "
-          f"({took:.2f}s)")
+          f"(asked at the wire, {took:.2f}s)")
 
 
 def leg_fail_open() -> None:
@@ -485,6 +526,65 @@ def leg_old_name_guard(observer: Observer) -> None:
     finally:
         kill(child)
     print(f"  PASS: a pre-rename instance is quit and waited for ({took:.2f}s)")
+
+
+def leg_parked_requests_follow_the_handoff(observer: Observer) -> None:
+    """A launch that parked its requests and then lost the race hands them on.
+
+    The two decisions happen in this order and cannot happen in the other: an
+    invocation parks BEFORE it can know whether it will be the instance,
+    because parked requests exist for the boot that would follow. So a
+    `--change-page` invocation can find the name unowned, park, get as far as
+    registering, and only there be told it is a remote -- holding requests in a
+    process that is about to exit having opened nothing.
+
+    They used to leave with it. No error, nothing applied, exit 0: the shape a
+    real deck found by firing a page change at the same moment as a launch.
+
+    The instance is a child that owns the name and dispatches, so the verdict
+    below is a real registration against a real owner rather than an arranged
+    one -- and the requests are parked by the production path, not written into
+    the parking by hand.
+    """
+    child = spawn("primary-deaf", ID_PARKED)
+    try:
+        wait_for_line(child, "READY")
+        assert has_owner(observer.connection, ID_PARKED)
+
+        parked = cli_forward.forward_cli_requests(
+            argparser.parse_args(PARKED_ARGV), Recorder(running=False))
+        assert not parked.handled and not parked.failures, parked
+        assert gl.api_page_requests and gl.api_state_requests, (
+            "nothing was parked, so the loss this leg is about cannot happen")
+
+        app = Gio.Application(application_id=ID_PARKED)
+        decision = instance_gate.establish(app, publish=lambda: None,
+                                           close_running=False)
+        assert decision is instance_gate.Decision.REMOTE, decision
+
+        refusal = "Page 'Beta' not found. Available pages: Alpha"
+        instance = Recorder(running=True, answers={"gate-deck-b": refusal})
+        failures = cli_forward.forward_parked_requests(instance)
+
+        assert instance.forwards() == PARKED_FORWARDS, (
+            f"the requests this launch parked never reached the instance that "
+            f"owns the name -- they die here, silently, when nothing sends "
+            f"them: {instance.forwards()}"
+        )
+        assert failures == [refusal], (
+            f"what the instance says about a request has to come back to the "
+            f"terminal that typed it, on this path as on any other: {failures}"
+        )
+        assert not gl.api_page_requests and not gl.api_state_requests, (
+            f"the parking still holds requests that have been handed over: "
+            f"{gl.api_page_requests} / {gl.api_state_requests}"
+        )
+    finally:
+        kill(child)
+        gl.api_page_requests.clear()
+        gl.api_state_requests.clear()
+    print("  PASS: requests parked by the launch that lost the race are handed "
+          "to the one that won")
 
 
 class RefusingApp:
@@ -573,6 +673,7 @@ def run_legs(bus_address: str) -> None:
         leg_fail_open()
         leg_registration_failure_arms(observer)
         leg_old_name_guard(observer)
+        leg_parked_requests_follow_the_handoff(observer)
     finally:
         api.stop_dbus_service()
         observer.connection.close_sync(None)
