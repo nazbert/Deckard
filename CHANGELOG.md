@@ -9,6 +9,15 @@ bundle as a release asset.
 
 ### Fixed
 
+- A deck plugged in after Deckard has started now appears on the D-Bus
+  interface, and a deck that is unplugged disappears from it. Only the decks
+  present at launch were ever published, so scripts driving Deckard over
+  D-Bus could not see a deck plugged in later — including the common case of
+  starting with the session, before the deck is ready — while a deck that had
+  been removed stayed on the interface, still answering calls.
+- The active page name a deck reports over D-Bus is now correct from the
+  moment it appears there, instead of reading empty until something changed
+  the page.
 - Asking a deck over the D-Bus interface to show the page it is already
   showing now does nothing, instead of reloading the deck. Scripts that set a
   page on every event — a window rule, a home-automation trigger — made the

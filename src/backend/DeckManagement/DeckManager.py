@@ -31,6 +31,7 @@ from src.backend.DeckManagement.deck_controller.media_writer import ClearAndClos
 from src.backend import ui_port
 from src.backend.SettingsManager import SettingsManager
 from src.backend.DeckManagement.Subclasses.FakeDeck import FakeDeck
+from src.api import publish_controller, unpublish_controller
 
 # Import globals
 import globals as gl
@@ -135,6 +136,7 @@ class DeckManager:
                 continue
 
             self.deck_controller.append(controller)
+            publish_controller(controller)
             # Announce ONCE per newly registered controller. The announce
             # used to sit inside this loop and walk every remote controller
             # again on each iteration -- N announcements for deck N, i.e. N
@@ -252,6 +254,11 @@ class DeckManager:
         deck_controller = self._init_deck_controller_with_retry(deck, attempts=attempts, retry_delay=retry_delay)
         if deck_controller is not None:
             self.deck_controller.append(deck_controller)
+            # After the append, so the DBus API's object set and its
+            # live-derived Controllers property always agree. Publishing is a
+            # no-op until the service starts, which sweeps up whatever the
+            # boot enumeration registered before it.
+            publish_controller(deck_controller)
 
     def _init_deck_controller_with_retry(self, deck, attempts: int = 3, retry_delay: float = 0.5) -> DeckController | None:
         # Opening a deck and reading its serial right after open is occasionally
@@ -383,6 +390,12 @@ class DeckManager:
                 return
             self.deck_controller.remove(deck_controller)
 
+        # The removal is committed, so the DBus API can drop the deck's object
+        # now: leaving it published would keep answering calls on a controller
+        # that is being torn down, while the Controllers property already says
+        # the deck is gone.
+        unpublish_controller(deck_controller)
+
         # UI detach first (plan P1.3): on_deck_removed queues the detach
         # SYNCHRONOUSLY before returning, so a fast unplug/replug can't race a
         # late detach against a fresh add and leave two stack children
@@ -423,6 +436,10 @@ class DeckManager:
         ui_port.get().on_page_list_changed()
 
         self.deck_controller.append(deck_controller)
+        # Hotplug, boot re-enumeration and runtime-added fake decks all land
+        # here, each on its own thread; publishing marshals to the main
+        # context itself.
+        publish_controller(deck_controller)
         if is_fake:
             self.fake_deck_controller.append(deck_controller)
 
