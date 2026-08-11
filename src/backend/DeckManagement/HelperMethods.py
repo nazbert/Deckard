@@ -39,7 +39,6 @@ if TYPE_CHECKING:
     from gi.repository import Gdk, Pango
 
 from src.backend.DeckManagement import font_resolver
-from src.backend.atomic_json import atomic_write_json
 
 # Import globals
 from autostart import is_flatpak
@@ -189,14 +188,6 @@ def get_image_aspect_ratio(img: Image.Image) -> str:
     gcd = math.gcd(width, height)
     aspect_ratio = f"{width//gcd}:{height//gcd}"
     return aspect_ratio
-
-
-def create_empty_json(path: str, ignore_present: bool = False):
-    if not ignore_present and os.path.exists(path):
-        return
-
-    # Write empty json (atomically; also creates parent dirs)
-    atomic_write_json(path, {})
 
 
 def get_file_name_from_url(url: str):

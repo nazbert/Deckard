@@ -4,6 +4,7 @@ import json
 
 from src.backend.DeckManagement.HelperMethods import recursive_hasattr
 from src.backend.PageManagement import page_flush
+from src.backend import settings_store
 from src.backend.atomic_json import atomic_write_json
 from src.windows.PageManager.Importer.StreamDeckUI.helper import font_family_from_path, hex_to_rgba255
 from src.windows.PageManager.Importer.StreamDeckUI.code_conv import parse_keys_as_keycodes
@@ -94,22 +95,17 @@ class StreamDeckUIImporter:
         for deck in self.export.get("state", {}):
             ## Deck preferences -- merge into whatever deck settings already
             ## exist; replacing the file wholesale erased every unrelated
-            ## section (rotation, key layout, ...) on import.
-            preferences_path = os.path.join(gl.DATA_PATH, "settings", "decks", f"{deck}.json")
-            preferences = {}
-            try:
-                with open(preferences_path) as f:
-                    preferences = json.load(f)
-            except (OSError, json.JSONDecodeError):
-                preferences = {}
-            preferences.setdefault("brightness", {})["value"] = self.export["state"][deck].get("brightness", 75)
-            screensaver = preferences.setdefault("screensaver", {})
-            screensaver["enable"] = True
-            screensaver["time-delay"] = self.export["state"][deck].get("display_timeout", 5*60)//60
-            screensaver["brightness"] = self.export["state"][deck].get("brightness_dimmed", 0)
-
-            os.makedirs(os.path.dirname(preferences_path), exist_ok=True)
-            self.save_json(preferences_path, preferences)
+            ## section (rotation, key layout, ...) on import. Through the
+            ## settings store rather than straight to the file: a deck's
+            ## settings are served from a cache that a raw write leaves stale,
+            ## so an import used to be invisible to everything that had
+            ## already read that deck -- including the deck itself.
+            with settings_store.get().edit(settings_store.DECK, deck) as preferences:
+                preferences.setdefault("brightness", {})["value"] = self.export["state"][deck].get("brightness", 75)
+                screensaver = preferences.setdefault("screensaver", {})
+                screensaver["enable"] = True
+                screensaver["time-delay"] = self.export["state"][deck].get("display_timeout", 5*60)//60
+                screensaver["brightness"] = self.export["state"][deck].get("brightness_dimmed", 0)
 
             # Final page filenames for this deck, collision-suffixed, so
             # same-named user pages survive and intra-import ChangePage
@@ -272,9 +268,9 @@ class StreamDeckUIImporter:
                 page_path = page_paths[page_name]
                 # An import replaces a page wholesale, so a write still
                 # pending for that path would land after this one and undo
-                # it. Dropped here rather than inside save_json, which also
-                # writes deck settings files the flush seam knows nothing
-                # about -- the barrier belongs on the page path only.
+                # it. Dropped here rather than inside save_json, so the
+                # barrier sits at the point the page is replaced and the
+                # writer stays a writer.
                 page_flush.get().discard_path(page_path)
                 self.save_json(page_path, page)
                 # gl.signal_manager.trigger_signal(Signals.PageAdd, page_path) # We don't trigger the action to save ressources

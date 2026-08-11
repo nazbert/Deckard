@@ -83,6 +83,11 @@ EXTRA_MODULES = (
     # through it, so it inherits the engine closure's floor contract too. It
     # names no application type at all -- globals and stdlib only.
     os.path.join(_REPO_ROOT, "src", "backend", "PageManagement", "page_document.py"),
+    # The settings store: the settings manager forwards its loader to it, and
+    # the settings manager is read from the engine closure, so the store
+    # carries the closure's floor contract. Standard library plus globals, the
+    # atomic writer and the logger -- and it names no application type at all.
+    os.path.join(_REPO_ROOT, "src", "backend", "settings_store.py"),
     # The page-cache pins: the deck controller reaches them on its tick and
     # key paths, which are the engine closure at its most load-bearing. It
     # imports globals + stdlib only; every type it names is TYPE_CHECKING-only.
