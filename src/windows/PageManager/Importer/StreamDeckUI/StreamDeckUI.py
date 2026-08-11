@@ -280,7 +280,7 @@ class StreamDeckUIImporter:
                 # gl.signal_manager.trigger_signal(Signals.PageAdd, page_path) # We don't trigger the action to save ressources
                 # time.sleep(0.005) # Otherwise the app can't hold up - The problem is the signal call, but is is necessary to
 
-                gl.page_manager.update_dict_of_pages_with_path(page_path)
+                gl.page_manager.refresh_document(page_path)
                 gl.page_manager.reload_pages_with_path(page_path)
                 log.success(f"Imported page {page_name} as page {os.path.basename(page_path)} on deck {deck}")
 

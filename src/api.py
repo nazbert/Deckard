@@ -151,7 +151,7 @@ class DeckardAPI:
             page_dict = json.loads(json_contents) if json_contents else {}
             if gl.page_manager is not None:
                 path = gl.page_manager.add_page(name, page_dict)
-                gl.page_manager.update_dict_of_pages_with_path(path)
+                gl.page_manager.refresh_document(path)
                 gl.page_manager.reload_pages_with_path(path)
                 gl.signal_manager.trigger_signal(Signals.PageAdd, path)
         except FileExistsError as e:

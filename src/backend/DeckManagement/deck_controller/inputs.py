@@ -427,9 +427,6 @@ class ControllerInput(Generic[StateT]):
             d["states"].setdefault(str(state), {})
 
         page.save()
-        page_manager = gl.page_manager
-        if page_manager is not None:
-            page_manager.update_dict_of_pages_with_path(page.json_path)
 
         self.update_state_switcher()
 
@@ -478,9 +475,6 @@ class ControllerInput(Generic[StateT]):
 
 
         page.save()
-        page_manager = gl.page_manager
-        if page_manager is not None:
-            page_manager.update_dict_of_pages_with_path(page.json_path)
 
         self.update_state_switcher()
 

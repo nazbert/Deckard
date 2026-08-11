@@ -26,7 +26,7 @@ import shutil
 
 # Import globals
 from src.backend.PluginManager.EventAssigner import EventAssigner
-from src.backend.PageManagement import page_flush
+from src.backend.PageManagement import page_document, page_flush
 import globals as gl
 
 from src.backend.PluginManager.ActionCore import ActionCore
@@ -39,12 +39,20 @@ if TYPE_CHECKING:
     from src.backend.PluginManager.ActionHolder import ActionHolder
 
 
+# Inside Page's body the name `dict` is the page-content property, so
+# annotations written there reach the builtin through this alias.
+_Dict = dict
+
+
 def _snapshot_json_tree(value):
     """Structural copy of a json-shaped tree: dicts/lists are re-created,
     leaves are shared by reference. dict.copy() and list() run entirely in C
     under the GIL, so each container snapshots atomically even while another
     thread is mutating it -- unlike json.dump (or copy.deepcopy), this can
-    never raise `RuntimeError: dict changed size during iteration`. Leaves
+    never raise `RuntimeError: dict changed size during iteration`. That is
+    what makes it safe over a page document, whose content every deck showing
+    that page edits through directly, and which a refresh rebinds top-level
+    keys of in place: whatever this walks, it walks its own copy of. Leaves
     are deliberately NOT deep-copied: action entries hold live ActionCore
     objects under "object" (the caller strips those from the copy), which
     must never be duplicated."""
@@ -59,10 +67,13 @@ class Page:
     def __init__(self, json_path, deck_controller, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.dict = {}
-
         self.json_path = json_path
         self.deck_controller = deck_controller
+
+        # The content of the page file, shared with every other Page on this
+        # path. Bound before load() below, which is the first thing to read
+        # through it.
+        self._document = page_document.document_for(json_path)
 
         # Dir that contains all actions this allows us to keep them at reload
         self.action_objects = {}
@@ -78,20 +89,43 @@ class Page:
 
         self.load(load_from_file=True) #TODO: Later we want to limit the load of action objects to the available inputs
 
+    @property
+    def dict(self) -> _Dict[str, Any]:
+        """This page's content, straight from the document that owns it.
+
+        Deliberately without a setter. Every Page on a path holds the one dict
+        the document has, so assigning a new one here would give this Page a
+        copy nobody else can see -- the divergence the document exists to
+        remove, reintroduced silently in whichever call site did it. Mutate
+        what this returns; to replace the whole content, refresh the document.
+        """
+        return self._document.data
+
+    def rebind_document(self, document: "page_document.PageDocument") -> None:
+        """Read through `document` from now on.
+
+        For a page rename, which is the one thing that changes which file a
+        live Page belongs to: json_path is re-pointed in place, and this
+        follows it, so a Page that was minted under the old name during the
+        rename ends up on the same content as every other Page of the renamed
+        page instead of on a copy of its own.
+        """
+        self._document = document
+
     def get_name(self) -> str:
         return os.path.splitext(os.path.basename(self.json_path))[0]
-    
+
     def update_dict(self) -> None:
         """
         Updates the dict without any updates on the action objects.
         Do NOT use if you made changes to the action objects
+
+        The refresh lands in the document, so every deck showing this page
+        gets it -- and so an unsaved edit made through any of them is
+        overwritten, which is why a mutator saves in the same call it mutates.
         """
-        page_manager = gl.page_manager
-        if page_manager is None:
-            # Only before create_global_objects(); nothing to load from.
-            return
-        self.dict = page_manager.get_page_data(self.json_path)
-    
+        self._document.refresh_from_disk()
+
     def load(self, load_from_file: bool = False):
         start = time.time()
         if load_from_file:
@@ -237,7 +271,7 @@ class Page:
 
     # def load_action_object_sector(self, loaded_action_objects, dict_key: str, state)
 
-    def get_new_action_object(self, loaded_action_objects: dict, action_id: str, state: int, i: int, input_ident):
+    def get_new_action_object(self, loaded_action_objects: _Dict, action_id: str, state: int, i: int, input_ident):
         
         plugin_manager = gl.plugin_manager
         if plugin_manager is None:
@@ -495,7 +529,7 @@ class Page:
 
         return dictionary
 
-    def get_all_actions(self, action_dict: dict = None):
+    def get_all_actions(self, action_dict: _Dict = None):
         if action_dict is None:
             action_dict = self.action_objects
         actions = []
@@ -563,7 +597,7 @@ class Page:
 
         return {}
                 
-    def set_action_dict(self, action_object = None, identifier: InputIdentifier = None, state: int = None, index: int = None, action_dict: dict = None):
+    def set_action_dict(self, action_object = None, identifier: InputIdentifier = None, state: int = None, index: int = None, action_dict: _Dict = None):
         # Arg validation
         if action_object is None:
             if None in (identifier, state, index):
@@ -593,7 +627,7 @@ class Page:
         return action_dict.get("settings", {})
 
 
-    def set_action_settings(self, action_object = None, identifier: InputIdentifier = None, state: int = None, index: int = None, settings: dict = None):
+    def set_action_settings(self, action_object = None, identifier: InputIdentifier = None, state: int = None, index: int = None, settings: _Dict = None):
         action_dict = self.get_action_dict(action_object, identifier, state, index)
         action_dict["settings"] = settings
         self.set_action_dict(action_object, identifier, state, index, action_dict)
@@ -707,7 +741,15 @@ class Page:
     def reload_similar_pages(self, identifier: InputIdentifier = None, reload_self: bool = False,
                              load_brightness: bool = True, load_screensaver: bool = True, load_background: bool = True, load_inputs: bool = True,
                              load_dials: bool = True, load_touchscreens: bool = True):
-        
+
+        # Not redundant now that the siblings share this page's dict. Callers
+        # that edit the dict and then come straight here (a pasted key, a
+        # pasted dial) have no other save in the call, and the reload below
+        # re-reads the file into the document -- so without this the edit
+        # would be overwritten by the version on disk that never got it. The
+        # save marks the page, the read barrier inside the reload writes the
+        # mark out, and the re-read then returns the edit rather than erasing
+        # it.
         self.save()
         for page in self.get_pages_with_same_json(get_self=reload_self):
             page.load(load_from_file=True)
@@ -746,7 +788,9 @@ class Page:
     
     # Configuration
     def _get_dict_value(self, keys: list[str]):
-        value = self.dict
+        # Any, not dict: the walk descends out of the page's mapping into
+        # whatever the leaf holds -- which is the AttributeError caught below.
+        value: Any = self.dict
         for i, key in enumerate(keys):
             fallback: dict | None = {}
             if i == len(keys) - 1:
@@ -768,8 +812,6 @@ class Page:
                 d = d.setdefault(key, {})
 
         self.save()
-        if gl.page_manager is not None:
-            gl.page_manager.update_dict_of_pages_with_path(self.json_path)
 
     def update_key_image(self, coords: str | tuple[int, int], state: int) -> None:
         #TODO: Move to DeckController

@@ -68,6 +68,10 @@ EXTRA_MODULES = (
     # so it carries the closure's floor contract. Its only Page annotations
     # are TYPE_CHECKING-only.
     os.path.join(_REPO_ROOT, "src", "backend", "PageManagement", "page_flush.py"),
+    # The page document: Page holds one and reads every byte of its content
+    # through it, so it inherits the engine closure's floor contract too. It
+    # names no application type at all -- globals and stdlib only.
+    os.path.join(_REPO_ROOT, "src", "backend", "PageManagement", "page_document.py"),
 )
 
 # Runs in the floor interpreter, one module per argument. Prints one
