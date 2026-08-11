@@ -9,6 +9,10 @@ bundle as a release asset.
 
 ### Fixed
 
+- Asking a deck over the D-Bus interface to show the page it is already
+  showing now does nothing, instead of reloading the deck. Scripts that set a
+  page on every event — a window rule, a home-automation trigger — made the
+  deck re-render all of its keys each time.
 - Switching to a page while several pages are already cached no longer lands
   you on a dead one. With enough pages open the app could discard a page in
   the moment between picking it and showing it, leaving a deck whose keys

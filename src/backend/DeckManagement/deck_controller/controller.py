@@ -69,7 +69,7 @@ from src.backend.DeckManagement.deck_controller.media_writer import (
 )
 from src.backend.PageManagement.Page import Page
 from src.backend.mem_telemetry import page_switches
-from src.backend import startup_queue, ui_port
+from src.backend import control_plane, startup_queue, ui_port
 from src.api import notify_active_page_changed
 from src.Signals import Signals
 
@@ -332,7 +332,26 @@ class DeckController:
             self.allow_interaction = False
             self.screen_saver.show()
         else:
-            self.load_default_page()
+            # Which failures may cost the deck its registration, and which
+            # may not. This constructor runs inside the connect path's retry
+            # helper, so an exception escaping here means no controller AND
+            # the threads already started above (media writer, load pool,
+            # ticker) left running with nobody holding them.
+            #
+            # A TRANSPORT failure says the device itself is not usable, and
+            # the connect path owns that case: its retry arm closes the deck,
+            # reopens it and runs the whole init again -- which is how a deck
+            # whose serial read flakes during a boot storm still comes up. Let
+            # it through. Anything else (a render, a plugin, a logic error) is
+            # about the PAGE, not the device: register the deck, because the
+            # page it wanted is still on disk and the next load_default_page
+            # for this deck retries it.
+            try:
+                self.load_default_page()
+            except StreamDeck.TransportError:
+                raise
+            except Exception as e:
+                log.error(f"Deck {self.serial_number()} registered without its boot page applied: {e}")
 
     def init_inputs(self):
         # Build-then-swap: the media writer reads
@@ -736,60 +755,23 @@ class DeckController:
 
         # Handle state change requests: peeked now, resolved at the tail, so a
         # failure in between leaves it parked (src/backend/startup_queue.py).
+        # The rules the request is judged by are the control plane's, shared
+        # with every other transport that can ask for a state change; only an
+        # unexpected exception (a load that raises) escapes, which is what
+        # leaves the request parked for the next load to retry.
         state_request = queue.peek_state_request(self.serial_number())
         if state_request is not None:
-            page_name = state_request["page_name"]
-            coords = state_request["coords"]
-            state = state_request["state"]
-            
-            # Get the page path for the specified page
-            requested_page_path = gl.page_manager.find_matching_page_path(page_name)
-            
-            if requested_page_path is None:
-                # Page not found - log available pages
-                available_pages = [os.path.splitext(os.path.basename(p))[0] for p in gl.page_manager.get_pages()]
-                log.error(f"State change failed: Page '{page_name}' not found for device {self.serial_number()}. Available pages: {', '.join(available_pages)}")
+            result = control_plane.get().change_state_on(
+                self,
+                state_request["page_name"],
+                state_request["coords"],
+                state_request["state"],
+            )
+            if result.ok:
+                log.info(result.message)
             else:
-                # Load the requested page if it's different from the current
-                # one. Snapshot + None-guard: active_page can be None here (a
-                # racing close()/clear, or the load above deferred by a
-                # showing screensaver) -- no current page means the requested
-                # one is trivially "different", so proceed with the load.
-                active_page = self.active_page
-                if active_page is None or os.path.abspath(requested_page_path) != os.path.abspath(active_page.json_path):
-                    requested_page = gl.page_manager.get_page(requested_page_path, self)
-                    self.load_page(requested_page)
-                
-                # Parse coordinates and change state with enhanced error handling
-                try:
-                    x, y = map(int, coords.split(','))
-                    
-                    # Validate coordinates are within bounds
-                    rows, cols = self.deck.key_layout()
-                    if x < 0 or x >= cols or y < 0 or y >= rows:
-                        log.error(f"State change failed: Coordinates ({x},{y}) out of bounds for device {self.serial_number()}. Valid range: x=0-{cols-1}, y=0-{rows-1}")
-                    else:
-                        identifier = Input.Key(f"{x}x{y}")
-                        c_input = self.get_input(identifier)
-                        
-                        if c_input is None:
-                            log.error(f"State change failed: No input found at coordinates ({x},{y}) on device {self.serial_number()}")
-                        elif state < 0 or state >= len(c_input.states):
-                            max_state = len(c_input.states) - 1
-                            if max_state == 0:
-                                log.error(f"State change failed: Position ({x},{y}) on device {self.serial_number()} only has 1 state (state 0). Requested state {state} does not exist")
-                            else:
-                                log.error(f"State change failed: Position ({x},{y}) on device {self.serial_number()} has states 0-{max_state}. Requested state {state} does not exist")
-                        else:
-                            # Successfully change state
-                            c_input.set_state(state)
-                            log.info(f"Successfully changed state of position ({x},{y}) to state {state} on device {self.serial_number()}")
-                            
-                except (ValueError, AttributeError) as e:
-                    log.error(f"State change failed: Invalid coordinate format '{coords}' for device {self.serial_number()}. Expected format: 'x,y' (e.g., '0,0'). Exception: {e}")
-                except Exception as e:
-                    log.error(f"State change failed: Unexpected error for device {self.serial_number()}: {e}")
-            
+                log.error(f"State change failed on device {self.serial_number()}: {result.message}")
+
             # Remove the request after processing
             queue.resolve_state_request(self.serial_number())
 
@@ -987,8 +969,12 @@ class DeckController:
                 self.background.image.close()
                 self.background.image = None
 
+    # `page` is Optional because None means "clear the deck" -- the branch a
+    # few lines down. The page store also answers None for a page it could not
+    # build, and every caller of that pair has always handed the answer
+    # straight here.
     @log.catch
-    def load_page(self, page: Page, load_brightness: bool = True, load_screensaver: bool = True, load_background: bool = True, load_inputs: bool = True, allow_reload: bool = True):
+    def load_page(self, page: Page | None, load_brightness: bool = True, load_screensaver: bool = True, load_background: bool = True, load_inputs: bool = True, allow_reload: bool = True):
         if not self.get_alive(): return
         if self._closing:
             # A straggling caller (screensaver follow-up, plugin hook, DBus

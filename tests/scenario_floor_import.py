@@ -61,6 +61,11 @@ COMPAT_SHIM = os.path.join(_REPO_ROOT, "src", "backend", "DeckManagement", "Deck
 EXTRA_MODULES = (
     # The app-ready deferral protocol: imports globals + stdlib only.
     os.path.join(_REPO_ROOT, "src", "backend", "startup_queue.py"),
+    # The control plane: the deck controller asks it whether a parked state
+    # request is valid, so it carries the engine closure's floor contract. It
+    # imports globals + the input identifiers + stdlib, and every application
+    # type it names is TYPE_CHECKING-only.
+    os.path.join(_REPO_ROOT, "src", "backend", "control_plane.py"),
     # The typed gl accessors: imports globals + stdlib only, and every type it
     # names is TYPE_CHECKING-only -- precisely the shape this check exists for.
     os.path.join(_REPO_ROOT, "src", "backend", "services.py"),

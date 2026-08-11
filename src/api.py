@@ -31,6 +31,7 @@ from gi.repository import GLib
 
 import appinfo
 import globals as gl
+from src.backend import control_plane
 
 WindowInfo = namedtuple("WindowInfo", ["name", "wm_class"])
 
@@ -87,18 +88,22 @@ class ControllerInstanceAPI:
     # ── Methods ──────────────────────────────────────────────────────
 
     def SetActivePage(self, name: Str) -> None:
-        """Set the active page on this controller."""
+        """Set the active page on this controller.
+
+        A rendering of the control plane's answer, nothing more: the rules
+        are shared with every other transport, which is how this method
+        gained the same-page no-op the others already had. It still answers
+        the bus with nothing and raises nothing -- a caller learns of a bad
+        page name from the log, as it always has.
+        """
         serial = self._controller.serial_number()
         log.info(f"DBus API [{serial}]: SetActivePage called – name={name!r}")
         try:
-            if gl.page_manager is not None:
-                page_path = gl.page_manager.find_matching_page_path(name)
-                if page_path is None:
-                    log.warning(f"DBus API [{serial}]: SetActivePage – page not found: {name}")
-                    return
-                page = gl.page_manager.get_page(page_path, self._controller)
-                self._controller.load_page(page)
+            result = control_plane.get().change_page_on(self._controller, name)
+            if result.ok:
                 self._active_page_name = name
+            else:
+                log.warning(f"DBus API [{serial}]: SetActivePage – {result.message}")
         except Exception as e:
             log.error(f"DBus API [{serial}]: SetActivePage error: {e}")
 
