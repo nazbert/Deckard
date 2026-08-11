@@ -23,7 +23,7 @@ import sys
 # against a loop; the MALLOC_ARENA_MAX check lets a packaged launcher
 # (flatpak/launch.sh) set the vars itself and skip this re-exec entirely.
 # sys.orig_argv (not sys.argv) preserves interpreter flags like -X/-O.
-# Must run before quit_running()/make_api_calls() in main() -- execve
+# Must run before the instance gate/make_api_calls() in main() -- execve
 # replaces this process outright, so there is no double DBus send.
 if "MALLOC_ARENA_MAX" not in os.environ and "SC_REEXEC" not in os.environ:
     os.environ["MALLOC_ARENA_MAX"] = "2"
@@ -77,10 +77,9 @@ cv2.setNumThreads(2)
 # Import globals
 import globals as gl
 
-from gi.repository import Gio, GLib
-
 # Import own modules
 from src.app import App
+from src.api import start_dbus_service
 from src.backend.DeckManagement.DeckManager import DeckManager
 from locales.LocaleManager import LocaleManager
 from src.backend.MediaManager import MediaManager
@@ -104,8 +103,7 @@ from src.backend.PresenceMonitor.PresenceMonitor import PresenceMonitor
 from src.tray import TrayIcon
 from src.backend.Logger import Logger, LoggerConfig, Loglevel
 from src.backend.log_hooks import install_exception_hooks, redirect_faulthandler
-from src.backend import cli_forward, single_instance
-from src.backend.cli_forward import DBUS_CALL_TIMEOUT_MS
+from src.backend import cli_forward, instance_gate
 
 # Migration
 from src.backend.Migration.MigrationManager import MigrationManager
@@ -173,22 +171,6 @@ def config_logger():
     )
 
     gl.loggers["plugins"] = plugin_logger
-
-class Main:
-    def __init__(self, application_id, deck_manager):
-        # Launch gtk application
-        self.app = App(application_id=application_id, deck_manager=deck_manager)
-
-        gl.app = self.app
-
-        self.app.run(gl.argparser.parse_args().app_args)
-
-@log.catch
-def load():
-    log.info("Loading app")
-    gl.deck_manager = DeckManager()
-    gl.deck_manager.load_decks()
-    gl.main = Main(application_id=appinfo.APP_ID, deck_manager=gl.deck_manager)
 
 @log.catch
 def create_cache_folder():
@@ -275,157 +257,6 @@ def update_assets():
     # Show toast in ui
     gl.notify.info(f"{number_of_installed_updates} assets updated")
 
-
-def name_has_owner(session_bus: Gio.DBusConnection, name: str) -> bool:
-    """Is `name` owned on the session bus right now?
-
-    Asking the bus daemon (and with NO_AUTO_START) is what keeps a probe a
-    probe: addressing a well-known name directly would D-Bus-activate it.
-    """
-    return session_bus.call_sync(
-        "org.freedesktop.DBus",
-        "/org/freedesktop/DBus",
-        "org.freedesktop.DBus",
-        "NameHasOwner",
-        GLib.Variant("(s)", (name,)),
-        GLib.VariantType("(b)"),
-        Gio.DBusCallFlags.NO_AUTO_START,
-        DBUS_CALL_TIMEOUT_MS,
-        None
-    ).unpack()[0]
-
-
-def activate_action(session_bus: Gio.DBusConnection, name: str, object_path: str,
-                    action: str, parameter: GLib.Variant = None) -> None:
-    """Invoke one of the running instance's GActions over org.gtk.Actions."""
-    session_bus.call_sync(
-        name,
-        object_path,
-        "org.gtk.Actions",
-        "Activate",
-        GLib.Variant("(sava{sv})", (action, [] if parameter is None else [parameter], {})),
-        None,
-        Gio.DBusCallFlags.NO_AUTO_START,
-        DBUS_CALL_TIMEOUT_MS,
-        None
-    )
-
-
-def is_no_reply(error: GLib.Error) -> bool:
-    """The peer took the call and never answered.
-
-    Two distinct shapes carry that meaning: a NoReply the bus hands back, and
-    the timeout GDBus raises client-side when the reply never lands. Both
-    leave the caller in the same position, so both are matched here.
-    """
-    if Gio.DBusError.get_remote_error(error) == "org.freedesktop.DBus.Error.NoReply":
-        return True
-    return error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.TIMED_OUT)
-
-
-def quit_running():
-    log.info("Checking if another instance is running")
-    session_bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-    running = False
-    try:
-        running = name_has_owner(session_bus, appinfo.APP_ID)
-    except GLib.Error as e:
-        # A probe that cannot complete reads as "nobody home", exactly as a
-        # failed lookup did before: booting is the safer outcome than refusing
-        # to start over a bus hiccup.
-        log.debug(e)
-    if not running:
-        # Expected path on every normal launch -- not an error.
-        log.info("No other instance running, continuing")
-
-    if running:
-        if gl.argparser.parse_args().close_running:
-            log.info("Closing running instance")
-            try:
-                activate_action(session_bus, appinfo.APP_ID, appinfo.DBUS_OBJECT_PATH, "quit")
-            except GLib.Error as e:
-                if is_no_reply(e):
-                    log.error("Could not close running instance: " + str(e))
-                    sys.exit(0)
-            time.sleep(5)
-
-        else:
-            activate_action(session_bus, appinfo.APP_ID, appinfo.DBUS_OBJECT_PATH, "reopen")
-            log.info("Already running, exiting")
-            sys.exit(0)
-
-    # Transition guard for the rename (docs/rename-deckard-plan.md, Phase 2):
-    # a pre-rename build still owning the old bus name is invisible to the
-    # gate above, and this boot would go on to open decks it still holds.
-    # Probe with NameHasOwner, and never address the old name directly:
-    # a plain call to a well-known name activates it, which for the old id
-    # could START an upstream install via its D-Bus service file -- the very
-    # race this guard exists to prevent. NameHasOwner==False (the normal case)
-    # is also the effective sunset: once nothing owns the old name, this is a
-    # single cheap no-op round trip per launch.
-    try:
-        if not name_has_owner(session_bus, appinfo.OLD_APP_ID):
-            return
-    except GLib.Error as e:
-        log.debug(f"Could not probe the pre-rename bus name: {e}")
-        return
-    log.warning("Pre-rename StreamController instance detected on the session bus; asking it to quit")
-    try:
-        activate_action(session_bus, appinfo.OLD_APP_ID, appinfo.OLD_DBUS_OBJECT_PATH, "quit")
-    except GLib.Error as e:
-        log.error(f"Could not close the pre-rename instance: {e}")
-        return
-    # Poll (bounded) for it to drop the name instead of a flat 5s sleep.
-    for _ in range(25):
-        try:
-            if not name_has_owner(session_bus, appinfo.OLD_APP_ID):
-                break
-        except GLib.Error:
-            break
-        time.sleep(0.2)
-
-def hand_off_to_lock_owner(closing: bool = False):
-    """Called when single_instance.claim() lost the race: another
-    launch is booting right now. Poll for it to finish; if it instead DIES
-    mid-boot (releases the lock without ever owning the app name), take the
-    lock over and continue booting -- RETURNING from this function means
-    "proceed as the single instance". Every other outcome exits the process.
-
-    `closing` (--close-running): the user asked to CLOSE the running
-    instance, so if it is still alive after the grace period, fail loudly
-    instead of presenting its window."""
-    log.info("Another launch holds the single-instance lock; handing off")
-    session_bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-    owner_seen = False
-    for _ in range(50):  # up to 10 s for the winner to finish booting
-        try:
-            if name_has_owner(session_bus, appinfo.APP_ID):
-                owner_seen = True
-                break
-        except GLib.Error:
-            break
-        # The winner may have crashed mid-boot and released the lock (its
-        # connection died): take it over rather than stranding the user's
-        # session with zero instances. This cannot steal from a live winner
-        # -- the claim only succeeds once the holder's connection is gone.
-        if single_instance.claim(appinfo.APP_ID):
-            log.warning("Lock holder vanished before owning the app name; taking over as the single instance")
-            return
-        time.sleep(0.2)
-    if not owner_seen:
-        # Never address an ownerless well-known name: it would D-Bus-
-        # activate a service file if one ever ships (same rule as the
-        # pre-rename probe in quit_running()).
-        log.error("Timed out waiting for the winning launch to appear; exiting with no instance running")
-        sys.exit(1)
-    if closing:
-        log.error("--close-running: the running instance did not exit within the grace period")
-        sys.exit(1)
-    try:
-        activate_action(session_bus, appinfo.APP_ID, appinfo.DBUS_OBJECT_PATH, "reopen")
-    except GLib.Error as e:
-        log.warning(f"Could not hand off to the winning instance: {e}")
-    sys.exit(0)
 
 def handle_listing_commands():
     """
@@ -613,7 +444,7 @@ def main():
     if make_api_calls():
         return
 
-    # Sinks up before the dbus probe / deck reset / migrations, so the
+    # Sinks up before the instance gate and the migrations, so the
     # earliest startup phase reaches logs.log + the ring (deep-audit §4 App
     # shell: this phase used to be stderr-only). Deliberately AFTER the two
     # early returns above: a short-lived CLI invocation must not open (and
@@ -626,16 +457,33 @@ def main():
         log.warning('Should you get an Gtk X11 error preventing the app from starting please add '
                     'GSK_RENDERER=ngl to your "/etc/environment" file')
 
-    # Dbus
-    quit_running()
-    # quit_running() catches a fully-booted instance; two launches booting
-    # at the same moment (login autostart + session restore) both pass its
-    # probe. The lock claim is the atomic tie-breaker, and it must happen
-    # BEFORE any deck is opened so a losing launch never grabs hardware the
-    # winner is initializing (field incident 2026-07-16).
-    closing = gl.argparser.parse_args().close_running
-    if not single_instance.claim(appinfo.APP_ID, wait_seconds=10.0 if closing else 0.0):
-        hand_off_to_lock_owner(closing=closing)
+    # The application object exists before anything it will own: registering
+    # it is what decides whether this launch is the instance, and that verdict
+    # has to come before the first expensive or exclusive thing happens.
+    app = App(application_id=appinfo.APP_ID)
+
+    try:
+        decision = instance_gate.establish(
+            app,
+            publish=start_dbus_service,
+            close_running=gl.argparser.parse_args().close_running,
+        )
+    except instance_gate.LaunchAborted as e:
+        log.error(str(e))
+        sys.exit(1)
+
+    if decision is instance_gate.Decision.REMOTE:
+        # The running instance takes it from here: GApplication forwards this
+        # activation to it, and its own activate handler presents the window.
+        # Best-effort on purpose -- if the primary dies between the two calls
+        # the forward errors, and there is still nothing for this process to
+        # do but leave.
+        try:
+            app.activate()
+        except Exception as e:
+            log.warning(f"Could not present the running instance's window: {e}")
+        log.info("Already running, exiting")
+        sys.exit(0)
 
     migration_manager = MigrationManager()
     # Add migrators
@@ -659,7 +507,27 @@ def main():
     from src.backend.mem_telemetry import start_if_enabled as start_mem_telemetry
     start_mem_telemetry()
 
-    load()
+    log.info("Loading app")
+    gl.deck_manager = DeckManager()
+    gl.deck_manager.load_decks()
+
+    # Every global on_quit dereferences now exists -- the deck manager last of
+    # them, and unguarded (stop_boot_rescan). Installing the handlers any
+    # earlier would turn a TERM arriving in the gap into an AttributeError that
+    # aborts the teardown before the plugin backends are terminated, and the
+    # re-entry latch would send every later quit route to its early return: the
+    # orphan this teardown exists to prevent, reachable only by force_quit.
+    # Still before run(), so PyGObject's register_sigint_fallback finds the
+    # custom SIGINT handler and stays inert.
+    app.register_signal_handlers()
+
+    # Published just before the loop starts, not at construction: everything
+    # that reports to the user during boot (plugin load notifications) checks
+    # this slot and defers onto the startup queue while it is None. Setting it
+    # earlier would route that traffic through an application whose window does
+    # not exist yet.
+    gl.app = app
+    app.run(gl.argparser.parse_args().app_args)
 
 if __name__ == "__main__":
     main()

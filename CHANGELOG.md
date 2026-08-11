@@ -64,9 +64,24 @@ bundle as a release asset.
   trying to draw to the deck it never got. Repeated attempts piled them up, so
   a deck that would not come up cost idle CPU and memory until Deckard was
   restarted.
+- Launching Deckard while it is still starting up now waits for that startup
+  and brings the window up when it finishes, instead of giving up after ten
+  seconds and exiting with an error — which also lost a `--change-page` sent
+  in that window. A startup slower than the session bus's own call timeout
+  still outlasts the wait.
 
 ### Changed
 
+- A second launch now hands off to the running Deckard through the application
+  framework itself, instead of the app deciding for itself whether one was
+  already running. Two launches starting at the same moment — a session
+  autostart alongside a restored session — can no longer both reach the decks.
+- `--close-running` that does not manage to close the running Deckard now
+  exits with an error instead of reporting success, and it waits for the
+  instance to actually let go rather than for a fixed five seconds. Against an
+  instance that is itself still starting up it waits until that instance can
+  answer before asking it to quit, so the two can no longer leave you with
+  nothing running at all.
 - Dragging a key onto another position now changes the page in one step. The
   two keys used to be exchanged one at a time with a save around each stage,
   so the page file was written three times for one drag and a write landing
