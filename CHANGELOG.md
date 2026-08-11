@@ -57,6 +57,13 @@ bundle as a release asset.
   at all. Recovering the picture after a dropped device write is handled by
   the existing repaint retry instead, which also covers a rare blank deck on
   screensaver entry that the per-second repaint had been masking.
+- A deck that fails to connect no longer leaves background work running for
+  the rest of the session. Every failed attempt — a deck whose USB link flakes
+  while the session is starting, or one already claimed by another instance —
+  stranded the threads that had been started for it, including one still
+  trying to draw to the deck it never got. Repeated attempts piled them up, so
+  a deck that would not come up cost idle CPU and memory until Deckard was
+  restarted.
 
 ### Changed
 
