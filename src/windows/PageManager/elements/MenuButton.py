@@ -27,6 +27,7 @@ import json
 import os
 
 from src.backend.atomic_json import atomic_write_json
+from src.backend.PageManagement import page_flush
 
 from loguru import logger as log 
 from src.windows.PageManager.Importer.Importer import Importer
@@ -120,7 +121,13 @@ class MenuButton(Gtk.MenuButton):
 
     def export_page_callback(self, selected_file):
         page_json = {}
-        with open(self.pageEditor.active_page_path, "r") as f:
+        # One read of the path, so the flush and the open cannot target
+        # different files if the editor's selection moves under us.
+        page_path = self.pageEditor.active_page_path
+        # Read barrier: the export reads the file directly, so an edit still
+        # in flight would be missing from what the user exports.
+        page_flush.get().flush_path(page_path)
+        with open(page_path, "r") as f:
             page_json = json.load(f)
 
         atomic_write_json(selected_file.get_path(), page_json)

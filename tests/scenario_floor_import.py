@@ -64,6 +64,10 @@ EXTRA_MODULES = (
     # The typed gl accessors: imports globals + stdlib only, and every type it
     # names is TYPE_CHECKING-only -- precisely the shape this check exists for.
     os.path.join(_REPO_ROOT, "src", "backend", "services.py"),
+    # The page flush seam: Page imports it, and Page is in the engine closure,
+    # so it carries the closure's floor contract. Its only Page annotations
+    # are TYPE_CHECKING-only.
+    os.path.join(_REPO_ROOT, "src", "backend", "PageManagement", "page_flush.py"),
 )
 
 # Runs in the floor interpreter, one module per argument. Prints one
