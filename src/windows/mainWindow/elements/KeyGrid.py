@@ -254,36 +254,38 @@ class KeyButton(Gtk.Frame):
         active_page = self.key_grid.deck_controller.active_page
         if active_page is None:
             return
-        
-        ## Fetch own key_dict
-        target_key_dict = active_page.dict.get(self.identifier.input_type, {}).get(self.identifier.json_identifier, {})
 
-        ## Fetch dropped key_dict
         dropped_button = drop.get_value()
         if dropped_button is None:
             return
         dropped_identifier = dropped_button.identifier
-        dropped_key_dict = active_page.dict.get(dropped_identifier.input_type, {}).get(dropped_identifier.json_identifier, {})
 
-        ## Swap keys in the page dict
-        # Set own dict
-        active_page.dict.setdefault(self.identifier.input_type, {})
-        active_page.dict[self.identifier.input_type][self.identifier.json_identifier] = dropped_key_dict
+        # The swap is ONE edit of the page, not two assignments with saves
+        # around them. Both halves are read and put back inside the block, so
+        # nothing can write the page while one key holds the other's content
+        # and its own is not filed anywhere yet -- the state that reached disk
+        # when a deferred write landed between the two assignments. Both
+        # sections are also read under the same lock, so a page edit arriving
+        # from a plugin thread cannot be swapped back out by a half-stale copy.
+        # Nothing here touches the file: the reloads below are outside the
+        # block, where the lock is not held.
+        with active_page.edit() as page_dict:
+            own_section = page_dict.setdefault(self.identifier.input_type, {})
+            dropped_section = page_dict.setdefault(dropped_identifier.input_type, {})
+            target_key_dict = own_section.get(self.identifier.json_identifier, {})
+            dropped_key_dict = dropped_section.get(dropped_identifier.json_identifier, {})
 
-        # Set dropped dict
-        active_page.dict.setdefault(dropped_identifier.input_type, {})
-        active_page.dict[dropped_identifier.input_type][dropped_identifier.json_identifier] = target_key_dict
-
-        active_page.save()
+            own_section[self.identifier.json_identifier] = dropped_key_dict
+            dropped_section[dropped_identifier.json_identifier] = target_key_dict
 
         active_page.switch_actions_of_inputs(self.identifier, dropped_identifier)
 
+        # Both keys repaint, one identifier at a time, exactly as before. Each
+        # reload writes the page out before re-reading it, so the swap is on
+        # disk once these return -- and a save after them only wrote back the
+        # content the last reload had just read off the file.
         active_page.reload_similar_pages(self.identifier, reload_self=True)
         active_page.reload_similar_pages(dropped_identifier, reload_self=True)
-
-        page_id = id(active_page)
-
-        active_page.save()
 
         # Reload sidebar
         if gl.app is not None:

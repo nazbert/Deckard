@@ -20,6 +20,7 @@ import time
 import globals as gl
 
 from loguru import logger as log
+from contextlib import contextmanager
 from copy import copy
 
 # Import globals
@@ -30,7 +31,7 @@ import globals as gl
 from src.backend.PluginManager.ActionCore import ActionCore
 from src.backend.DeckManagement.InputIdentifier import Input, InputEvent, InputIdentifier
 # Import typing
-from typing import Any, TYPE_CHECKING
+from typing import Any, Iterator, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.backend.DeckManagement.deck_controller.inputs import ControllerInput, ControllerInputState
     from src.backend.DeckManagement.deck_controller.label_engine import LabelManager
@@ -122,6 +123,28 @@ class Page:
         # NOW -- a page switch, a deck closing, quit, or any read of the page
         # file -- asks the seam for it.
         page_flush.get().mark_dirty(self)
+
+    @contextmanager
+    def edit(self) -> Iterator[_Dict[str, Any]]:
+        """Change this page's content as ONE edit, and have it reach the file.
+
+        The mutation seam for a caller that holds a Page rather than a path
+        (the document's ``edit`` is the same block reached by path). Several
+        changes that only make sense together -- swapping two keys, taking a
+        state out of an input -- go inside one block: they are applied with
+        the file's lock held, so a write in flight cannot snapshot the page
+        halfway through them, and they are marked once on the way out instead
+        of once per step.
+
+        NOTHING INSIDE THE BLOCK MAY TOUCH A PAGE FILE OR THE GTK MAIN LOOP.
+        The lock is the file's only one and it is a leaf: reading a page (the
+        read barrier takes it), reloading one onto a deck, or marshalling to
+        the main thread from in here is a deadlock rather than a slow path.
+        Mutate the content; reload after the block, exactly where the reload
+        used to be.
+        """
+        with self._document.edit() as data:
+            yield data
 
     def flush(self) -> str:
         """Write this page's file NOW rather than on its debounce timer, and

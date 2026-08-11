@@ -385,13 +385,19 @@ class Dial(Gtk.Frame):
             return
 
         dial = controller.get_input(self.identifier)
-        
-        states = self.identifier.get_states(active_page)
-        if str(dial.state) not in states:
+
+        state_key = str(dial.state)
+        if state_key not in self.identifier.get_states(active_page):
             return
 
-        del states[str(dial.state)]
-        active_page.save()
+        # Taking the state out IS the save: inside the block the page's own
+        # lock is held, so the removal cannot be snapshotted halfway by a
+        # write in flight, and it is marked once on the way out. Re-read
+        # inside rather than reusing the dict the check above looked at,
+        # which was read without the lock.
+        with active_page.edit():
+            self.identifier.get_states(active_page).pop(state_key, None)
+
         active_page.load()
 
         active_page.reload_similar_pages(identifier=self.identifier, reload_self=True)

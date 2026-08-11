@@ -184,9 +184,10 @@ def main() -> None:
             f"gesture bleed onto page B on press 2: {bleed_recorder.received}"
 
         # ---- Press 3: origin page evicted MID-GESTURE ---- #
-        # mark_page_ready_to_clear(True) runs when the DOWN callback returns,
-        # not at gesture end, so the origin page is genuinely evictable while
-        # the key is still down. The snapshot pins the action objects across
+        # The key handler holds the pressed page only for the length of the
+        # callback, not to gesture end, so the origin page is genuinely
+        # evictable while the key is still down. The snapshot pins the action
+        # objects across
         # ActionCore.teardown (clean_up: _cleaned_up=True, page=None) -- the
         # dispatch loop must skip the corpses, and still serve any healthy
         # snapshot member. `sentinel` stands in for the healthy member: it
@@ -207,7 +208,6 @@ def main() -> None:
         assert fixtures.wait_until(lambda: controller.active_page is page_b)
 
         # Evict page A through the real path (cache-budget eviction).
-        page_a.ready_to_clear = True
         old_max_pages = gl.page_manager.max_pages
         gl.page_manager.max_pages = 0
         # The sentinel leaves the page before eviction (see above).

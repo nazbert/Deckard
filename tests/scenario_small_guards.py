@@ -351,32 +351,51 @@ def check_ready_to_clear_key_handler(controller) -> int:
         print("FAIL(setup): switch target resolved to the pressed page")
         return 1
 
-    # The baseline the bracket must return to. Not necessarily zero: the
-    # fetch above reserves the page it returns, and the tick loop brackets
-    # the active page on its own clock.
-    holders_before = gl.page_manager.pins.count(pressed_page)
-
     # Inject the page switch mid-callback: event_callback calls self.update()
     # at line 3709, AFTER mark_page_ready_to_clear(False) (3706) and BEFORE
     # mark_page_ready_to_clear(True, pressed_page) (3737). A press that changes
     # the page does exactly this.
     real_update = key.update
     switched = {"done": False}
+    held_mid_callback = {"count": -1}
 
     def switching_update(*a, **k):
         if not switched["done"]:
             switched["done"] = True
+            # Sampled here because here is INSIDE the bracket: the hold must
+            # exist while the callback runs, not merely balance out by the
+            # end of it. Balance alone is satisfied by a key site that takes
+            # no hold at all, which is the whole protection this asserts.
+            held_mid_callback["count"] = gl.page_manager.pins.count(pressed_page)
             controller.active_page = switched_to  # the page change the press caused
         return real_update(*a, **k)
 
     key.update = switching_update
     try:
+        # The baseline the bracket must return to, and the floor the sample
+        # above must clear. Not necessarily zero: the fetch above reserves the
+        # page it returns, and the tick loop brackets the active page on its
+        # own clock. That second holder is why the baseline is taken HERE
+        # rather than earlier -- it comes and goes once a second, so the two
+        # samples must be adjacent or a tick window straddling only one of
+        # them shifts the comparison. Both directions are real: a tick window
+        # covering only the mid-callback sample hides a missing key hold, one
+        # covering only the baseline fails a sound one. Adjacent, the exposure
+        # is the microseconds of the call below in which the tick loop would
+        # have to enter or leave its bracket.
+        holders_before = gl.page_manager.pins.count(pressed_page)
         key.event_callback(press_state=True)  # key DOWN
     finally:
         key.update = real_update
 
     if not switched["done"]:
         print("FAIL(setup): the mid-callback switch injection never ran")
+        return 1
+    if held_mid_callback["count"] <= holders_before:
+        print(f"FAIL(b-key): mid-callback the pressed page had "
+              f"{held_mid_callback['count']} holders against a pre-press "
+              f"{holders_before} -- the key handler took NO hold on it, so a "
+              f"press that outlives a page switch is evictable mid-gesture")
         return 1
     if not fixtures.wait_until(
             lambda: gl.page_manager.pins.count(pressed_page) <= holders_before):

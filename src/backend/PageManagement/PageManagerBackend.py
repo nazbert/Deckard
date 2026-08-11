@@ -65,16 +65,10 @@ class PageManagerBackend:
         # One document per page file, keyed the way every other per-page
         # registry in the process is keyed (the flush seam's canonical_path),
         # so a page reached by two spellings is one document with one save
-        # lock and one pending record rather than two of each.
-        #
-        # Never pruned, and unlike the lock and pending registries an entry
-        # here is a whole page dict -- ~16 KB for a fully populated deck's
-        # page, so a session that visits fifty pages holds on the order of a
-        # megabyte it will not give back. That is the price of the guarantee:
-        # the registry is the only thing that can promise a path has ONE
-        # content, and an entry dropped while any Page still reads through it
-        # would hand the next Page a second copy -- silently, which is the
-        # failure this exists to remove. A page deleted and later recreated
+        # lock and one pending record rather than two of each. Never pruned:
+        # page_document's header carries why an entry can never be dropped
+        # while a Page might still read through it, and what holding a whole
+        # page dict per visited path costs. A page deleted and later recreated
         # under the same name reuses its document, which the load that mints
         # the new Page fills from the new file.
         self._documents: dict[str, PageDocument] = {}
@@ -481,6 +475,10 @@ class PageManagerBackend:
                 if entry is not None:
                     # Outside the lock, same rationale as the teardown below.
                     entry["page"].clear_action_objects()
+                # The reservation the stash was carrying to hide() has nowhere
+                # left to arrive: the request is dropped and its entry popped,
+                # so nothing installs the page and nothing else retires it.
+                self.pins.release_fetch(controller)
 
             active_page = controller.active_page
 
@@ -504,29 +502,32 @@ class PageManagerBackend:
 
             if new_page:
                 controller.load_page(new_page)
+            else:
+                # No replacement to install, so the install that would have
+                # retired this deck's outstanding fetch never happens -- and
+                # that fetch may be the page being deleted, held against
+                # eviction until the deck asks for another one.
+                self.pins.release_fetch(controller)
 
             # Remove the page from the created pages cache for this controller
             with self._pages_lock:
                 controller_pages = self.pages.get(controller, {})
                 entry = controller_pages.pop(page_path, None)
             if entry is not None:
-                # Unlike eviction, this teardown needs NO _page_is_live guard:
-                # it can never gut a live page. The cache is keyed
-                # per-controller with a distinct Page object per (controller,
-                # path), so popping THIS controller's entry can't touch
-                # another controller's live page. For this controller, we only
-                # reach here when its active_page was on page_path (guard at
-                # the top of the loop) and load_page() above already switched
-                # active_page onto new_page at a DIFFERENT path (the default/
-                # fallback both exclude page_path) -- so entry["page"] is not
-                # active_page. And a controller showing its screensaver is
-                # skipped by that same top guard (its active_page is the
-                # screensaver page, path mismatch), so entry["page"] is never
-                # its _screensaver_pending_page either.
+                # No _page_is_live guard, unlike eviction: this cannot gut a
+                # page another controller is showing, because the cache holds
+                # a distinct Page per (controller, path) and this pops only
+                # THIS controller's. For this controller the page is either no
+                # longer active (load_page above moved it to a different path
+                # -- the default and the fallback both exclude page_path) or
+                # there was no page left to move it to, and the file is being
+                # deleted either way. A controller showing its screensaver
+                # never reaches here (the top guard's path mismatch), so this
+                # is never its pending page either.
                 #
                 # Outside the lock: clear_action_objects() may run plugin
-                # hooks (D1), which must not stall a concurrent close()/
-                # get_page() waiting on _pages_lock from another thread.
+                # hooks, which must not stall a concurrent close()/get_page()
+                # waiting on _pages_lock from another thread.
                 entry["page"].clear_action_objects()
                 # Remove the controller entry entirely if it no longer has cached pages
                 if not controller_pages:
@@ -752,12 +753,10 @@ class PageManagerBackend:
         return document
 
     def get_page_data(self, path: str, use_backup: bool = True) -> dict:
-        """
-        Loads the whole page settings and returns the dictionary.
-        :param path: Path to the settings file.
-        :param use_backup: Whether to use a backup file or not.
-        :return: The dict containing the page settings.
-        """
+        """One page file's whole content, read from disk. A primary that is
+        missing or unreadable is substituted from ``pages/backups/`` -- the
+        missing case only when `use_backup`, the corrupt case always, for the
+        reason spelled out at the heal below."""
         if path is None:
             return {}
 
