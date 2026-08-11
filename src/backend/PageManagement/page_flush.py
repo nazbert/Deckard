@@ -26,9 +26,17 @@ can move away from the first without any mutator noticing.
 
 THE READ BARRIER
 
-Anything that reads a page file from disk must call ``flush_path`` first --
-``PageManagerBackend.get_page_data``, the asset sweep's per-file read, and the
-page export. A reader that skips it reads the file, not the page.
+Anything that reads a page file from disk must call ``flush_path`` first, or
+it reads the file rather than the page. The barriers installed today are the
+ones that matter while the flush is synchronous -- the page manager's
+``get_page_data``, the asset sweep's per-file read, and the page export. They
+are NOT the whole reader set: several more read a page file directly (a
+duplicate's read-back, the page move's copy, the boot backup zip, the
+importers' read-backs, the video cache sweeper's pass over every page), and
+they need barriers of their own once a flush can still be outstanding when
+they run. The full reader map, and which of those the deferral widens the
+window for, lives in the write-scheduling plan rather than in this docstring,
+which cannot stay honest about a list that long.
 
 THREAD CONTRACT
 
@@ -123,6 +131,10 @@ class PageFlush:
         either waits on the lock and finds the work done, or finds a mark
         that landed mid-write and does it again.
         """
+        # Deliberately unguarded: a containment test is atomic, and losing
+        # the race against a mark means the reader got here before the edit
+        # it is not waiting for. Everything that decides anything re-reads
+        # `_pending` under the guard below.
         if path not in self._pending:
             return
 
