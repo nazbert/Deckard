@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 import signal
 import threading
 import time
+from typing import TYPE_CHECKING
+
 import gi
 
 from src.windows.Store.ResponsibleNotesDialog import ResponsibleNotesDialog
@@ -49,7 +51,10 @@ from src.windows.Onboarding.OnboardingWindow import OnboardingWindow
 from src.windows.Permissions.FlatpakPermissionRequest import FlatpakPermissionRequestWindow
 
 from src.Signals import Signals
-from src.api import start_dbus_service, stop_dbus_service
+from src.api import stop_dbus_service
+
+if TYPE_CHECKING:
+    from src.backend.DeckManagement.DeckManager import DeckManager
 
 # Import globals
 import globals as gl
@@ -98,12 +103,11 @@ def unix_signal_add(priority, signum, callback) -> bool:
 
 
 class App(Adw.Application):
-    def __init__(self, deck_manager, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.deck_manager = deck_manager
 
-        # Re-entry latch for on_quit. Set before the handlers are
-        # registered below so the very first signal already sees it.
+        # Re-entry latch for on_quit. Set at construction so the very first
+        # signal already sees it, whenever the handlers go up.
         self._quit_started = False
 
         # When the first Ctrl+C was seen, for _on_sigint's escalation; None
@@ -116,7 +120,12 @@ class App(Adw.Application):
         # raise here.
         self._ui_adapter = None
 
-        self.register_signal_handlers()
+        # Both are filled by on_activate, and both are reached through gl.app
+        # by other windows -- which is published before the loop starts, so an
+        # attribute that did not exist yet would be an AttributeError rather
+        # than the None those readers can see coming.
+        self.deck_manager: "DeckManager" = None  # type: ignore[assignment]  # late-init: on_activate
+        self.style_manager: Adw.StyleManager = None  # type: ignore[assignment]  # late-init: on_activate
 
         self.connect("activate", self.on_activate)
 
@@ -126,20 +135,6 @@ class App(Adw.Application):
 
         icon_theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
         icon_theme.add_search_path(os.path.join(gl.top_level_dir, "Assets", "icons"))
-
-        app_settings = gl.settings_manager.app()
-
-        allow_white_mode = app_settings.allow_white_mode
-
-        # increment app launches
-        app_settings.app_launches = app_settings.app_launches + 1
-        app_settings.save()
-
-        self.style_manager = self.get_style_manager()
-        if allow_white_mode:
-            self.style_manager.set_color_scheme(Adw.ColorScheme.PREFER_DARK)
-        else:
-            self.style_manager.set_color_scheme(Adw.ColorScheme.FORCE_DARK) # Not everything looks good in light mode at the moment #TODO
 
     def on_activate(self, app):
         log.trace("running: on_activate")
@@ -162,6 +157,30 @@ class App(Adw.Application):
             # stays False and the next activation retries the full build.
             self.on_reopen()
             return
+
+        # Everything from here down needs the global objects, and this
+        # application is constructed before any of them exist -- it has to be,
+        # because registering it is what decides whether this launch boots at
+        # all. By the time the main loop starts and activates it, the deck
+        # manager and the settings manager are both up.
+        self.deck_manager = gl.deck_manager
+
+        app_settings = gl.settings_manager.app()
+
+        allow_white_mode = app_settings.allow_white_mode
+
+        # increment app launches. Below the re-activation return above, so a
+        # second launch presenting this window through the framework counts as
+        # the reopen it is rather than as a launch of its own.
+        app_settings.app_launches = app_settings.app_launches + 1
+        app_settings.save()
+
+        self.style_manager = self.get_style_manager()
+        if allow_white_mode:
+            self.style_manager.set_color_scheme(Adw.ColorScheme.PREFER_DARK)
+        else:
+            self.style_manager.set_color_scheme(Adw.ColorScheme.FORCE_DARK) # Not everything looks good in light mode at the moment #TODO
+
         # Install the engine->UI adapter BEFORE constructing the window
         # first: every boot-time add_page runs INSIDE MainWindow's
         # constructor (build() -> leftArea -> deck_stack.add_pages()), so an
@@ -209,9 +228,6 @@ class App(Adw.Application):
         # (ownership rules in src/backend/startup_queue.py).
         gl.app = self
         startup_queue.get().drain_app_ready()
-
-        # Start DBus API service
-        start_dbus_service()
 
         # Eagerly warm plugin backends: async on its own daemon
         # thread, so backend subprocess launches can never block this GTK
@@ -324,8 +340,10 @@ class App(Adw.Application):
         # (autostart followed by an immediate logout, or a startup crash-loop
         # kill) would raise AttributeError here and abort teardown *before*
         # terminate_all_backends() below -- exactly the orphan this issue is
-        # about. Everything else on this path is created in main.py before
-        # App exists, or is internally guarded.
+        # about. Everything else on this path is either internally guarded or
+        # in place before the signal handlers exist to route a quit here:
+        # main() installs them only once every global this method dereferences
+        # has been published, which is what keeps this the only guard needed.
         self._destroy_main_window()
 
         # Force quit if normal quit is not possible.

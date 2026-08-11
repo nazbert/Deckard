@@ -171,8 +171,7 @@ FROZEN_SLOTS: dict[str, str] = {
     "gnome_extensions": "GNOME extension bridge",
     "settings_manager": "settings manager",
     "app": "the App instance, absent until it activates",
-    "main": "the Main wrapper that owns App; write-only, kept for parity",
-    "deck_manager": "deck manager, published by main.load()",
+    "deck_manager": "deck manager, published by main() before the loop starts",
     "plugin_manager": "plugin manager",
     "icon_pack_manager": "icon pack manager",
     "wallpaper_pack_manager": "wallpaper pack manager",
@@ -223,7 +222,7 @@ IMPORTED: frozenset[str] = frozenset({
     "SDPlusBarWallpaperPackManager", "StoreBackend", "Notify", "SignalManager",
     "WindowGrabber", "Wayland", "GnomeExtensions", "Store",
     "FlatpakPermissionManager", "PageManager", "LockScreenManager",
-    "PresenceMonitor", "TrayIcon", "Logger", "Main",
+    "PresenceMonitor", "TrayIcon", "Logger",
 })
 
 # Module machinery: not state, not imported, not assignable.
