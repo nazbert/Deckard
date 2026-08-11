@@ -270,88 +270,104 @@ class DeckController:
         self._full_repaint_pending: bool = False
         self._last_full_repaint_ts: float = 0.0
 
-        # Start media player thread
         self.media_player = MediaPlayerThread(deck_controller=self)
         self.media_player.start()
-        # Register the sole expected device writer for the owner-assertion
-        # tooling (DECKARD_ASSERT_DEVICE_OWNER; BetterDeck.py). A
-        # no-op unless that env var is set -- harness/dev tooling only.
-        self.deck.set_expected_writer(self.media_player)
 
-        # Bounded thread pool for action callbacks (tick/update/ready/event),
-        # sized so every input can run its on_tick concurrently.
-        total_inputs = sum(len(inputs) for inputs in self.inputs.values())
-        # Nulled by close() step 9 (asserted by scenario_deck_close), so every
-        # reader either getattr-defaults or None-checks before submitting.
-        self.action_executor: ThreadPoolExecutor | None = ThreadPoolExecutor(
-            max_workers=max(8, total_inputs + 4),
-            thread_name_prefix="action_cb",
-        )
+        # Everything below can still fail, and holds threads only this half-built object owns.
+        try:
+            # Register the sole expected device writer for the owner-assertion
+            # tooling (DECKARD_ASSERT_DEVICE_OWNER; BetterDeck.py). A
+            # no-op unless that env var is set -- harness/dev tooling only.
+            self.deck.set_expected_writer(self.media_player)
 
-        # Persistent per-deck loader pool for load_all_inputs (plan P1.5):
-        # sized so every input can load concurrently -- a fixed small pool
-        # would serialize an XL's 32 inputs several-deep *on the media-player
-        # thread* (load_all_inputs runs there via media_player.add_task), so
-        # its deadline waits would block the sole writer. Replaced wholesale
-        # (see load_all_inputs) on deadline expiry with stuck tasks, instead
-        # of being torn down and rebuilt on every single page switch like the
-        # throwaway executor this replaces.
-        self.load_executor: ThreadPoolExecutor | None = ThreadPoolExecutor(
-            max_workers=max(8, total_inputs),
-            thread_name_prefix=f"load_{self.serial_number()}",
-        )
+            # Bounded thread pool for action callbacks (tick/update/ready/event),
+            # sized so every input can run its on_tick concurrently.
+            total_inputs = sum(len(inputs) for inputs in self.inputs.values())
+            # Nulled by close() step 9 (asserted by scenario_deck_close), so every
+            # reader either getattr-defaults or None-checks before submitting.
+            self.action_executor: ThreadPoolExecutor | None = ThreadPoolExecutor(
+                max_workers=max(8, total_inputs + 4),
+                thread_name_prefix="action_cb",
+            )
 
-        self.keep_actions_ticking = True
-        self.TICK_DELAY = 1
-        # Lets close() interrupt tick_actions' sleep immediately instead of
-        # waiting out up to a full TICK_DELAY before the loop notices
-        # keep_actions_ticking went False (plan P1.3 step 4 needs a prompt,
-        # bounded join -- see tick_actions).
-        self._tick_stop_event = threading.Event()
-        self.tick_thread = Thread(target=self.tick_actions, name="tick_actions")
-        self.tick_thread.start()
+            # Persistent per-deck loader pool for load_all_inputs (plan P1.5):
+            # sized so every input can load concurrently -- a fixed small pool
+            # would serialize an XL's 32 inputs several-deep *on the media-player
+            # thread* (load_all_inputs runs there via media_player.add_task), so
+            # its deadline waits would block the sole writer. Replaced wholesale
+            # (see load_all_inputs) on deadline expiry with stuck tasks, instead
+            # of being torn down and rebuilt on every single page switch like the
+            # throwaway executor this replaces.
+            self.load_executor: ThreadPoolExecutor | None = ThreadPoolExecutor(
+                max_workers=max(8, total_inputs),
+                thread_name_prefix=f"load_{self.serial_number()}",
+            )
 
-        self.page_auto_loaded: bool = False
-        self.last_manual_loaded_page_path: str | None = None
+            self.keep_actions_ticking = True
+            self.TICK_DELAY = 1
+            # Lets close() interrupt tick_actions' sleep immediately instead of
+            # waiting out up to a full TICK_DELAY before the loop notices
+            # keep_actions_ticking went False (plan P1.3 step 4 needs a prompt,
+            # bounded join -- see tick_actions).
+            self._tick_stop_event = threading.Event()
+            self.tick_thread = Thread(target=self.tick_actions, name="tick_actions")
+            self.tick_thread.start()
 
-        deck_settings = self.get_deck_settings()
+            self.page_auto_loaded: bool = False
+            self.last_manual_loaded_page_path: str | None = None
 
-        # None so the first set_brightness() below always writes to the device,
-        # even when the stored value equals the skip-write guard's default.
-        self.brightness = None
-        brightness = deck_settings.get("brightness", {}).get("value", 75)
-        self.set_brightness(brightness)
+            deck_settings = self.get_deck_settings()
 
-        # self.rotation = 270
-        # rotation = deck_settings.get("rotation", {}).get("value", self.rotation)
-        # self.set_rotation(rotation)
+            # None so the first set_brightness() below always writes to the device,
+            # even when the stored value equals the skip-write guard's default.
+            self.brightness = None
+            brightness = deck_settings.get("brightness", {}).get("value", 75)
+            self.set_brightness(brightness)
 
+            # If screen is locked start the screensaver - this happens when the deck gets reconnected during the screensaver
+            if gl.screen_locked and gl.settings_manager.app().lock_on_lock_screen:
+                self.allow_interaction = False
+                self.screen_saver.show()
+            else:
+                # Which failures may cost the deck its registration, and which
+                # may not. A TRANSPORT failure says the device is not usable,
+                # and the connect path owns that case: its retry arm reopens
+                # the deck and runs the whole init again -- which is how a deck
+                # whose serial read flakes during a boot storm still comes up.
+                # Anything else (a render, a plugin, a logic error) is about the
+                # PAGE: register the deck, the next load_default_page retries it.
+                try:
+                    self.load_default_page()
+                except StreamDeck.TransportError:
+                    raise
+                except Exception as e:
+                    log.error(f"Deck {self.serial_number()} registered without its boot page applied: {e}")
+        except Exception:  # release them, then let it leave unchanged -- the connect path judges the failure
+            self._teardown_failed_init()
+            raise
 
-        # If screen is locked start the screensaver - this happens when the deck gets reconnected during the screensaver
-        if gl.screen_locked and gl.settings_manager.app().lock_on_lock_screen:
-            self.allow_interaction = False
-            self.screen_saver.show()
-        else:
-            # Which failures may cost the deck its registration, and which
-            # may not. This constructor runs inside the connect path's retry
-            # helper, so an exception escaping here means no controller AND
-            # the threads already started above (media writer, load pool,
-            # ticker) left running with nobody holding them.
-            #
-            # A TRANSPORT failure says the device itself is not usable, and
-            # the connect path owns that case: its retry arm closes the deck,
-            # reopens it and runs the whole init again -- which is how a deck
-            # whose serial read flakes during a boot storm still comes up. Let
-            # it through. Anything else (a render, a plugin, a logic error) is
-            # about the PAGE, not the device: register the deck, because the
-            # page it wanted is still on disk and the next load_default_page
-            # for this deck retries it.
+    def _teardown_failed_init(self) -> None:
+        """Releases what the guarded tail of __init__ started, so a deck that
+        fails to initialize leaves no writer, ticker or pool behind. Not close():
+        that assumes a REGISTERED controller (plugin hooks, UI detach, page
+        deregistration), and this object was never handed to anyone. Nothing here
+        writes to the device; the handle is released only once the writer is
+        confirmed stopped, because a writer wedged mid-frame holds the device
+        lock and waiting on it is the hang this exists to avoid. Raises nothing."""
+        self.keep_actions_ticking = False
+        if getattr(self, "tick_thread", None) is not None and self.tick_thread.is_alive():
+            self._tick_stop_event.set()  # exists by the same statement pair as the thread
+            self.tick_thread.join(2.0)
+        self.media_player.stop(timeout=2.0)
+        for pool in (getattr(self, "action_executor", None), getattr(self, "load_executor", None)):
+            if pool is not None:
+                pool.shutdown(wait=False, cancel_futures=True)
+        if not self.media_player.running:  # else the handle stays open, as it does today
             try:
-                self.load_default_page()
-            except StreamDeck.TransportError:
-                raise
-            except Exception as e:
-                log.error(f"Deck {self.serial_number()} registered without its boot page applied: {e}")
+                self.deck.stop_read_thread()  # its resume loop would reopen what close() releases
+                self.deck.close()
+            except Exception:
+                log.opt(exception=True).warning("Failed to release the deck handle after a failed init")
 
     def init_inputs(self):
         # Build-then-swap: the media writer reads
@@ -1187,8 +1203,6 @@ class DeckController:
 
         if not self.get_alive(): return
         self.load_page(self.active_page)
-        # self.update_all_inputs()
-
 
     def tick_actions(self) -> None:
         # Event-based wait (mirrors MediaPlayerThread's _wake_event in
