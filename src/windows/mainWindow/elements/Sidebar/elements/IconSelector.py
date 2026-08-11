@@ -134,8 +134,9 @@ class IconSelector(Gtk.Box):
         if page is None:
             return
 
+        # No save of our own: the setter persists what it sets, so the second
+        # one only marked the page a second time for the same change.
         page.set_media_path(identifier=self.active_identifier, state=self.active_state, path=path)
-        page.save()
 
         # Update remove button visibility
         self.remove_button.set_visible(path not in [None, ""])

@@ -4,8 +4,8 @@ Scenario: page-cache eviction must not gut a live page.
 clear_old_cached_pages snapshotted evictable pages under _pages_lock, then
 ran clear_action_objects() + pop OUTSIDE it, with three windows:
 
-  1. A controller's screensaver-pending page (non-active, ready_to_clear,
-     held for the whole screensaver duration) was invisible to the guards:
+  1. A controller's screensaver-pending page (non-active and unheld,
+     stashed for the whole screensaver duration) was invisible to the guards:
      evicted, ScreenSaver.hide() then loaded a page whose every action was
      dead.
   2. Activation TOCTOU: a page activated between the snapshot and the
@@ -42,7 +42,6 @@ def fill_cache(controller, n: int, prefix: str):
     for i in range(n):
         path = seed_page(f"{prefix}{i}")
         page = gl.page_manager.get_page(path, controller)
-        page.ready_to_clear = True
         pages.append(page)
     return pages
 

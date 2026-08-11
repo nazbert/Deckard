@@ -100,7 +100,11 @@ def idle_tick_costs_nothing(controller, deck, key_count) -> None:
 
     # Liveness probe: tick_actions brackets each iteration between a
     # False-call and a True-call of this, so two marks is one iteration.
-    # Key presses call it too, hence the same per-thread attribution.
+    # Attributed per thread because this counts iterations of the tick loop
+    # specifically; nothing else on this controller drives this method (the
+    # key handler holds its page through page_pins.holding instead), so the
+    # attribution is what keeps the count a statement about the tick thread
+    # rather than about brackets in general.
     original_mark = controller.mark_page_ready_to_clear
 
     def counting_mark(*args, **kwargs):

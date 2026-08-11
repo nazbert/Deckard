@@ -32,6 +32,12 @@ bundle as a release asset.
 
 ### Changed
 
+- Dragging a key onto another position now changes the page in one step. The
+  two keys used to be exchanged one at a time with a save around each stage,
+  so the page file was written three times for one drag and a write landing
+  mid-swap could put one key's actions under both positions until the next
+  save corrected it. Choosing an icon for a key no longer saves the page a
+  second time on top of the save that setting it already made.
 - Page edits are written in the background about a second after the last
   change, instead of once per keystroke. Typing a label used to write the
   whole page file — with two disk syncs — for every character, on the same

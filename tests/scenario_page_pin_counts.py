@@ -33,8 +33,14 @@ Legs:
      it, with the stash's own reservation already retired by a later fetch.
   7. the tick loop's bracket releases its page even when the tick body
      raises -- the second bracket site, which cannot use the context manager.
+  8. deleting a page that a deck is holding as its screensaver-pending change
+     retires that deck's reservation: the request is dropped, so nothing will
+     ever install the page and no other release names it.
+  9. deleting the last page retires it too, on the branch where there is no
+     replacement to install -- installing a page is what normally retires a
+     reservation, and that branch installs nothing.
 
-Legs 1-2 run on lightweight stub controllers plus the REAL
+Legs 1-2 and 8-9 run on lightweight stub controllers plus the REAL
 PageManagerBackend over gl, the pattern scenario_eviction_revalidate.py uses.
 Legs 3-5 need a real DeckController: the releases live on the load path.
 """
@@ -424,6 +430,102 @@ def leg_tick_bracket_releases_on_error() -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Legs 8-9: deleting a page retires the deck's outstanding fetch on the two
+# branches of remove_page that install nothing in its place. Installing a page
+# is what normally retires a reservation, so a branch that never installs one
+# leaves the deleted page reserved -- unevictable on that deck until it
+# happens to fetch again, and the fetch it is reserving is a page whose file
+# has just been removed.
+#
+# The two branches are mutually exclusive per controller (the pending drop
+# `continue`s before the active-page handling), so each leg exercises exactly
+# one release and stays red for exactly one deleted line.
+# ---------------------------------------------------------------------------
+def reservation_of(controller):
+    """The deck's outstanding fetch, resolved. None when it has none.
+
+    Reaching into the table on purpose: `count` says the page is not held any
+    more, this says the deck is no longer reserving it -- a release that
+    unpinned without retiring the entry would leave a stale deck->page slot
+    for a later release to unpin a second time."""
+    reference = gl.page_manager.pins._reservations.get(controller)
+    return reference() if reference is not None else None
+
+
+def leg_delete_pending_page_retires_reservation() -> int:
+    reset_world()
+    controller = fresh_controller("pin-rm-pending")
+    pins = gl.page_manager.pins
+    gl.page_manager.max_pages = 100
+
+    # The deck is showing something else; the doomed page is fetched LAST, so
+    # it is the deck's one outstanding reservation -- the state load_page's
+    # screensaver deferral leaves behind (leg 4 pins that it is kept there).
+    controller.active_page = gl.page_manager.get_page(seed_page("RmPendingHome"),
+                                                      controller)
+    doomed_path = seed_page("RmPendingDoomed")
+    doomed = gl.page_manager.get_page(doomed_path, controller)
+    controller._screensaver_pending_page = doomed
+
+    if pins.count(doomed) != 1 or reservation_of(controller) is not doomed:
+        print("FAIL(8-setup): the stashed page is not the deck's outstanding "
+              "fetch, so there is nothing for the delete to retire")
+        return 1
+
+    gl.page_manager.remove_page(doomed_path)
+
+    if controller._screensaver_pending_page is not None:
+        print("FAIL(8-setup): the delete did not drop the pending request")
+        return 1
+    if pins.count(doomed) != 0 or reservation_of(controller) is doomed:
+        print(f"FAIL(8): deleting a deck's screensaver-pending page left it "
+              f"reserved (holders={pins.count(doomed)}, "
+              f"reservation={reservation_of(controller)}) -- nothing will ever "
+              f"install it, so nothing else retires it either")
+        return 1
+    print("PASS(8): deleting a deck's screensaver-pending page retires that "
+          "deck's reservation")
+    return 0
+
+
+def leg_delete_last_page_retires_reservation() -> int:
+    reset_world()
+    controller = fresh_controller("pin-rm-last")
+    pins = gl.page_manager.pins
+    gl.page_manager.max_pages = 100
+
+    doomed_path = seed_page("RmLastOnly")
+    doomed = gl.page_manager.get_page(doomed_path, controller)
+    controller.active_page = doomed
+
+    if pins.count(doomed) != 1 or reservation_of(controller) is not doomed:
+        print("FAIL(9-setup): the page is not the deck's outstanding fetch")
+        return 1
+
+    # The branch under test is "no page left to switch to". Every other leg
+    # seeds pages into the shared data dir, so the emptiness has to be stated
+    # here rather than arranged on disk; the deck has no default page, so
+    # remove_page takes the fallback and finds this list empty once it has
+    # taken the doomed path out of it.
+    real_get_pages = gl.page_manager.get_pages
+    gl.page_manager.get_pages = lambda *args, **kwargs: [doomed_path]
+    try:
+        gl.page_manager.remove_page(doomed_path)
+    finally:
+        gl.page_manager.get_pages = real_get_pages
+
+    if pins.count(doomed) != 0 or reservation_of(controller) is doomed:
+        print(f"FAIL(9): deleting the last page left it reserved on its deck "
+              f"(holders={pins.count(doomed)}, "
+              f"reservation={reservation_of(controller)}) -- there was no "
+              f"replacement to install, and installing is what releases")
+        return 1
+    print("PASS(9): deleting the last page retires the deck's reservation on "
+          "the branch that installs no replacement")
+    return 0
+
+
 def main() -> int:
     start_watchdog(60, "page_pin_counts")
     fixtures._install_integration_globals()
@@ -431,6 +533,8 @@ def main() -> int:
     rc = 0
     rc |= leg_fetched_page_survives_pressure()
     rc |= leg_abandoned_fetches_do_not_accumulate()
+    rc |= leg_delete_pending_page_retires_reservation()
+    rc |= leg_delete_last_page_retires_reservation()
 
     # The remaining legs drive the real load path, so they need a real
     # controller rather than the stubs above.
