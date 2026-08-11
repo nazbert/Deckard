@@ -5,8 +5,8 @@ main.py's quit_running() handles the visible case: a fully-booted instance
 owns the app bus name, so a new launch forwards "reopen" and exits. What it
 cannot catch is two launches booting at the same moment (login autostart +
 session restore, field incident 2026-07-16): neither owns the app name yet,
-both pass the probe 3 ms apart, and both proceed to USB-reset and fight over
-the decks.
+both pass the probe 3 ms apart, and both proceed to open and fight over the
+decks.
 
 RequestName with DO_NOT_QUEUE is serialized by the D-Bus daemon, so exactly
 one of any number of concurrent launches becomes the primary owner of the
@@ -19,7 +19,7 @@ remote instance.
 
 RequestName goes out as a plain synchronous call_sync, not via
 Gio.bus_own_name(): claim() must return a verdict inline on the boot path,
-before reset_all_decks(), and bus_own_name only reports acquired/lost through
+before any deck is opened, and bus_own_name only reports acquired/lost through
 main-loop callbacks that nothing is running to dispatch yet.
 """
 

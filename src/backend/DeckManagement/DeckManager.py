@@ -19,8 +19,6 @@ from StreamDeck.DeviceManager import DeviceManager
 from StreamDeck.Devices import StreamDeck
 from loguru import logger as log
 from usbmonitor import USBMonitor
-import usb.core
-import usb.util
 import os
 
 
@@ -451,28 +449,6 @@ class DeckManager:
 
     def stop_usb_monitoring(self):
         self.usb_monitor.stop_monitoring(timeout=2)
-
-    def reset_all_decks(self):
-        # Find all USB devices
-        devices = usb.core.find(find_all=True)
-        for device in devices:
-            try:
-                # Check if it's a StreamDeck
-                if device.idVendor == DeviceManager.USB_VID_ELGATO and device.idProduct in [
-                    DeviceManager.USB_PID_STREAMDECK_ORIGINAL,
-                    DeviceManager.USB_PID_STREAMDECK_ORIGINAL_V2,
-                    DeviceManager.USB_PID_STREAMDECK_MINI,
-                    DeviceManager.USB_PID_STREAMDECK_XL,
-                    DeviceManager.USB_PID_STREAMDECK_MK2,
-                    DeviceManager.USB_PID_STREAMDECK_PEDAL,
-                    DeviceManager.USB_PID_STREAMDECK_PLUS,
-                    DeviceManager.USB_PID_STREAMDECK_NEO
-                ]:
-                    # Reset deck
-                    usb.util.dispose_resources(device)
-                    device.reset()
-            except (usb.core.USBError, NotImplementedError):
-                log.error("Failed to reset deck, maybe it's already connected to another instance? Skipping...")
 
     def get_connected_serials(self) -> list[str]:
         return [controller.serial_number() for controller in self.deck_controller]

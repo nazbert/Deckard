@@ -3,7 +3,7 @@ Regression test: the single-instance launch lock must be ATOMIC.
 
 Field incident 2026-07-16: login autostart + KDE session restore launched two
 instances in the same second; both passed quit_running()'s check-then-continue
-probe 3 ms apart, and both proceeded to USB-reset and fight over the deck.
+probe 3 ms apart, and both proceeded to open and fight over the deck.
 src/backend/single_instance.py replaces that gap with RequestName(DO_NOT_QUEUE),
 which the D-Bus daemon serializes -- exactly one connection can win.
 
