@@ -27,6 +27,7 @@ from src.backend.DeckManagement.deck_controller.controller import DeckController
 
 # Import own modules
 from src.backend.PageManagement.Page import Page
+from src.backend.PageManagement import page_flush
 from src.backend.DeckManagement.HelperMethods import natural_sort_by_filenames
 from src.backend.atomic_json import atomic_write_json
 
@@ -559,9 +560,20 @@ class PageManagerBackend:
     def update_dict_of_pages_with_path(self, path: str) -> None:
         # Re-reading from disk can't lose unsaved in-memory edits: every
         # in-tree Page.dict mutator persists via save() in the same call.
+        # A path with a pending flush is the one case where that invariant
+        # is suspended, and there the dirty Page -- not the file -- is the
+        # authority: propagating its snapshot is what re-reading a file the
+        # flush has already written would have returned anyway, without the
+        # round trip.
+        source = page_flush.get().pending_page(path)
         pages = self.get_pages_with_path(path)
         for page in pages:
-            page.update_dict()
+            if source is None:
+                page.update_dict()
+            elif page is not source:
+                # A snapshot per sibling: every Page owns its dict outright,
+                # exactly as a per-page disk read handed it one.
+                page.dict = source.get_without_action_objects()
 
     def get_page_data(self, path: str, use_backup: bool = True) -> dict:
         """
@@ -572,6 +584,10 @@ class PageManagerBackend:
         """
         if path is None:
             return {}
+
+        # Read barrier: edits still in flight for this page belong on disk
+        # before anything reads the file. One dict lookup when there are none.
+        page_flush.get().flush_path(path)
 
         backup_path = os.path.join(self.PAGE_PATH, "backups", os.path.basename(path))
 
@@ -629,6 +645,10 @@ class PageManagerBackend:
             # the corrupt bytes, the last good copy survives in pages/backups/
             # (the next get_page_data heals from it), and page_had_asset stays
             # False here so nothing is written back over the poison page.
+            #
+            # Read barrier first: this sweep reads past get_page_data, so it
+            # is the one place that has to ask for the flush itself.
+            page_flush.get().flush_path(page_path)
             page_dict = self.settings_manager.load_settings_from_file(page_path)
 
             # Safely get keys dictionary from page data

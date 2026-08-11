@@ -26,7 +26,7 @@ import shutil
 
 # Import globals
 from src.backend.PluginManager.EventAssigner import EventAssigner
-from src.backend.atomic_json import atomic_write_json
+from src.backend.PageManagement import page_flush
 import globals as gl
 
 from src.backend.PluginManager.ActionCore import ActionCore
@@ -37,20 +37,6 @@ if TYPE_CHECKING:
     from src.backend.DeckManagement.deck_controller.inputs import ControllerInput, ControllerInputState
     from src.backend.DeckManagement.deck_controller.label_engine import LabelManager
     from src.backend.PluginManager.ActionHolder import ActionHolder
-
-
-# One save lock per page json path, shared across every Page object for that
-# path: each controller showing the same page holds its OWN Page instance, so
-# a per-object lock/semaphore can never order two controllers' saves of the
-# same file. Grows one entry per distinct page path and never
-# prunes -- bounded by the user's page count (tens), so no eviction is needed.
-_save_locks: dict[str, threading.Lock] = {}
-_save_locks_guard = threading.Lock()
-
-
-def _get_save_lock(json_path: str) -> threading.Lock:
-    with _save_locks_guard:
-        return _save_locks.setdefault(json_path, threading.Lock())
 
 
 def _snapshot_json_tree(value):
@@ -116,20 +102,13 @@ class Page:
         end = time.time()
         log.debug(f"Loaded page {self.get_name()} in {end - start:.2f} seconds")
 
-    def save(self):
-        # Keyed by json_path, not per-object: two controllers showing the
-        # same page must not interleave their backup/write on one file.
-        with _get_save_lock(self.json_path):
-            # Make backup in case something goes wrong
-            self.make_backup()
-
-            without_objects = self.get_without_action_objects()
-            # Make keys last element
-            for type in Input.KeyTypes:
-                self.move_key_to_end(without_objects, type)
-            # Atomic replace, so an interrupted write can't leave a
-            # truncated page.
-            atomic_write_json(self.json_path, without_objects)
+    def save(self) -> None:
+        # Persist through the flush seam, which owns the per-path lock and
+        # the write itself. Marked and flushed back to back, so the page is
+        # on disk by the time this returns.
+        flush = page_flush.get()
+        flush.mark_dirty(self)
+        flush.flush_path(self.json_path)
 
     def make_backup(self):
         os.makedirs(os.path.join(gl.DATA_PATH, "pages","backups"), exist_ok=True)
