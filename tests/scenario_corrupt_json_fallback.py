@@ -48,6 +48,7 @@ from unittest import mock
 
 import globals as gl
 from fixtures import seed_page, start_watchdog
+from src.backend.PageManagement import page_flush
 
 
 def corrupt(path: str) -> None:
@@ -172,6 +173,11 @@ def check_set_page_settings_no_gut() -> int:
 
     gl.page_manager.set_page_settings(path, {"brightness": 42})
 
+    # A settings write is an edit of the page, marked with the flush seam and
+    # written on its timer -- and the heal has just left this path with no
+    # primary at all (the loader quarantined it), so the file only exists
+    # again once that write goes out.
+    page_flush.get().flush_path(path)
     with open(path) as f:
         after = json.load(f)
     if "keys" not in after or "background" not in after:

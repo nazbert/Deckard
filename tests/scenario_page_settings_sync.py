@@ -23,9 +23,15 @@ import json
 
 import fixtures
 import globals as gl
+from src.backend.PageManagement import page_flush
 
 
 def read_json(path: str):
+    # Through the read barrier, like every reader of a page file: a settings
+    # write and a Page.save() are both edits of the page now, marked with the
+    # flush seam and written on its timer, so reading the bytes without
+    # asking for the write reads the page as it was before them.
+    page_flush.get().flush_path(path)
     with open(path) as f:
         return json.load(f)
 

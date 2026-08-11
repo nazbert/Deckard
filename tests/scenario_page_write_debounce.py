@@ -180,7 +180,7 @@ class CountingFlush:
     def mark_dirty(self, page) -> None:
         self.calls.append(("mark_dirty", page.json_path))
 
-    def pending_page(self, path):
+    def pending_source(self, path):
         return None
 
     def flush_path(self, path) -> None:
@@ -204,7 +204,7 @@ def install_write_recorder() -> None:
     real_write = page_flush.atomic_write_json
 
     def recording_write(path, data):
-        WRITES.append((path, page_flush.get().pending_page(path) is not None, VT.now))
+        WRITES.append((path, page_flush.get().pending_source(path) is not None, VT.now))
         real_write(path, data)
 
     page_flush.atomic_write_json = recording_write
@@ -300,7 +300,7 @@ def check_burst_is_one_write(controller) -> None:
         f"the write landed at {WRITES[0][2] - started:.2f}s, not one debounce "
         f"after the last edit")
     assert read_page(path)["debounce-marker"] == 11, "the write is not the last edit"
-    assert page_flush.get().pending_page(path) is None, "the written page is still pending"
+    assert page_flush.get().pending_source(path) is None, "the written page is still pending"
     print("PASS: a burst of edits is one write, one debounce after the last of them")
 
 
@@ -321,7 +321,7 @@ def check_read_barrier_sees_pending_edits(controller) -> None:
         "the pending record was retired BEFORE the bytes were written -- a "
         "concurrent reader would take the barrier's fast path and read the "
         "file as it was")
-    assert page_flush.get().pending_page(path) is None, (
+    assert page_flush.get().pending_source(path) is None, (
         "the pending record survived its own write")
     assert not vt.armed, (
         "the flush left its timer armed: it would fire again with nothing to do")
@@ -415,7 +415,7 @@ def check_mid_write_mark_survives(controller) -> None:
         page_flush.atomic_write_json = recorder
         release.set()
 
-    assert page_flush.get().pending_page(path) is not None, (
+    assert page_flush.get().pending_source(path) is not None, (
         "the write retired a pending record it did not write -- the edit made "
         "while it was serializing is now unreachable, and nothing will raise "
         "or log about it")
@@ -426,7 +426,7 @@ def check_mid_write_mark_survives(controller) -> None:
     scheduler.fire(second_handle)
     assert read_page(path)["debounce-marker"] == "during-the-write", (
         "the edit made during the write never reached disk")
-    assert page_flush.get().pending_page(path) is None
+    assert page_flush.get().pending_source(path) is None
     print("PASS: an edit made during a write keeps its own record and its own "
           "timer, and lands")
 
@@ -486,7 +486,7 @@ def check_page_switch_flushes(controller) -> None:
     assert written_paths() == [old_path], (
         f"leaving a page did not write its pending edits: {WRITES}")
     assert read_page(old_path)["debounce-marker"] == "left-behind"
-    assert page_flush.get().pending_page(old_path) is None
+    assert page_flush.get().pending_source(old_path) is None
     assert not vt.armed, "the switch flushed but left the timer armed"
     print("PASS: switching page writes the outgoing page")
 
@@ -525,7 +525,7 @@ def check_deck_close_flushes() -> None:
         assert written in written_paths(), (
             f"closing the deck did not write {os.path.basename(written)}: {WRITES}")
         assert read_page(written)["debounce-marker"] == marker
-        assert page_flush.get().pending_page(written) is None
+        assert page_flush.get().pending_source(written) is None
     assert not vt.armed
     print("PASS: closing a deck writes every page it still holds")
 
@@ -547,7 +547,7 @@ def check_flush_all_covers_quit(controller) -> None:
         f"flush_all did not write every dirty page: {WRITES}")
     for path, name in zip(paths, ("QuitA", "QuitB")):
         assert read_page(path)["debounce-marker"] == f"unsaved-{name}"
-        assert page_flush.get().pending_page(path) is None
+        assert page_flush.get().pending_source(path) is None
     assert not vt.armed
     print("PASS: flush_all writes every page with edits outstanding")
 
@@ -621,7 +621,7 @@ def check_move_flushes_then_discards(controller) -> None:
         "the renamed page arrived without the edits that were still pending")
     assert not os.path.exists(old_path)
     assert page.json_path == new_path, "the cached Page was not re-pointed"
-    assert page_flush.get().pending_page(old_path) is None, (
+    assert page_flush.get().pending_source(old_path) is None, (
         "a write is still pending for the file the move removed")
 
     vt.fire_all()
@@ -652,7 +652,7 @@ def check_delete_discards(controller) -> None:
     gl.page_manager.remove_page(path)
 
     assert not os.path.exists(path)
-    assert page_flush.get().pending_page(path) is None, (
+    assert page_flush.get().pending_source(path) is None, (
         "the deleted page still has a write pending")
     assert [p for p in written_paths() if p == path] == [], (
         f"the delete wrote the page it was deleting: {WRITES}")
@@ -890,7 +890,7 @@ def check_quarantined_primary_is_written_back(controller) -> None:
             "missing primary, so nothing the user does to this page can be "
             "saved for the rest of the session")
         assert read_page(path)["debounce-marker"] == "written-after-the-quarantine"
-        assert page_flush.get().pending_page(path) is None, (
+        assert page_flush.get().pending_source(path) is None, (
             "the edit is still pending after its write")
         assert backups_of(path) == [], "a primary that was not there was copied"
         assert read_page(backup) == last_good, (
@@ -1067,7 +1067,7 @@ def check_eviction_keeps_pending_edits(controller) -> None:
 
         cached = gl.page_manager.pages.get(controller, {}).get(path)
         assert cached is None, "the page under test was not evicted"
-        pending = page_flush.get().pending_page(path)
+        pending = page_flush.get().pending_source(path)
         assert pending is not None, (
             "the evicted page's pending edits were dropped -- the flush seam "
             "must hold a strong reference to a page whose file is behind")

@@ -18,7 +18,8 @@ import os
 import shutil
 import threading
 import zipfile
-from typing import TypedDict
+from contextlib import contextmanager
+from typing import Any, Iterator, TypedDict
 
 from loguru import logger as log
 
@@ -561,7 +562,22 @@ class PageManagerBackend:
 
         # An imported or duplicated page arrives with its settings already in
         # page_dict, rule included, so this is a rule-adding path.
+        #
+        # The FILE is new; the pending key is not. A delete discards that
+        # path's outstanding write, but cannot stop the Page and document
+        # that held it from marking it again afterwards (a screensaver-pending
+        # reference, a widget, a plugin thread finishing a save) -- and the
+        # read barrier then turns that straggler into a resurrection: the
+        # refresh below reads the page, the barrier writes the outstanding
+        # edits out first, and the deleted page lands on top of the file just
+        # created, which the document adopts. So discard first, the way an
+        # import does before replacing a page wholesale, and refresh after:
+        # the document survives a delete too (the registry never drops one --
+        # a Page may still be reading through it), so without the re-read the
+        # new page's first edit writes the old page back out under its name.
+        page_flush.get().discard_path(path)
         atomic_write_json(path, page_dict)
+        self.refresh_document(path)
 
         self.refresh_window_watch_state()
         return path
@@ -649,20 +665,30 @@ class PageManagerBackend:
                 self._documents[key] = document
             return document
 
+    def existing_document(self, path: str) -> PageDocument | None:
+        """The document holding `path`, or None -- never minting one.
+
+        For callers that have something to say to a page only if this process
+        is holding it: the asset sweep, which otherwise reads and writes the
+        file, and the refresh below. Minting here instead would keep a whole
+        page dict alive for every page file the sweep walks past.
+        """
+        with self._documents_guard:
+            return self._documents.get(canonical_path(path))
+
     def refresh_document(self, path: str) -> None:
         """Re-read `path` into the document holding it, if there is one.
 
         For the writers that put bytes in a page file without going through
-        the page that owns it -- an import, a whole-settings write, the asset
-        sweep. Every Page on that path is looking at the document, so one
-        re-read is the whole propagation.
+        the page that owns it -- an import, a page created under a name whose
+        document still holds a deleted page's content. Every Page on that path
+        is looking at the document, so one re-read is the whole propagation.
 
         A path this process has never held is left alone rather than loaded:
         there is no in-memory content to correct, and the load that mints its
         first Page reads the file anyway.
         """
-        with self._documents_guard:
-            document = self._documents.get(canonical_path(path))
+        document = self.existing_document(path)
         if document is None:
             return
         document.refresh_from_disk()
@@ -701,7 +727,7 @@ class PageManagerBackend:
         with self._documents_guard:
             moved = self._documents.pop(old_key, None)
             if moved is not None:
-                moved.path = new_path
+                moved.json_path = new_path
                 self._documents[new_key] = moved
                 return moved
             document = self._documents.get(new_key)
@@ -755,14 +781,46 @@ class PageManagerBackend:
         return data
 
     def set_page_data(self, path: str, data: dict, reload_brightness: bool = True, reload_screensaver: bool = True, reload_background: bool = True, reload_inputs: bool = True):
-        self.settings_manager.save_settings_to_file(path, data)
-        self.refresh_document(path)
+        """Replace a whole page with `data` -- the editor that hands back a
+        page json rather than a change to one.
+
+        Through the document, not over the file: writing the file left the
+        page itself holding whatever it held before, so an edit of that page
+        still on its timer wrote the pre-replacement content back over this
+        one moments later. Replacing the content instead makes the two the
+        same thing.
+        """
+        self.get_document(path).replace(data)
         if any([reload_brightness, reload_screensaver, reload_background, reload_inputs]):
             self.reload_pages_with_path(path,
                                         brightness=reload_brightness,
                                         screensaver=reload_screensaver,
                                         background=reload_background,
                                         inputs=reload_inputs)
+
+    @staticmethod
+    def _strip_asset(page_dict: dict, abs_target_path: str) -> bool:
+        """Drop every reference to one asset out of one page's content.
+
+        Returns whether the page referenced it at all -- the sweep below only
+        writes the pages that did.
+        """
+        page_had_asset = False
+
+        # Every section is read defensively: a page json need not carry keys,
+        # states or media at all.
+        for key, key_data in page_dict.get("keys", {}).items():
+            for state, state_data in key_data.get("states", {}).items():
+                dict_path = state_data.get("media", {}).get("path")
+                if dict_path is None:
+                    continue
+
+                # Compare absolute paths; if match, remove asset reference
+                if os.path.abspath(dict_path) == abs_target_path:
+                    page_had_asset = True
+                    state_data["media"]["path"] = None  # Remove the asset path
+
+        return page_had_asset
 
     def remove_asset_from_all_pages(self, path: str):
         # Validate input path; reject empty or None
@@ -774,57 +832,63 @@ class PageManagerBackend:
 
         # Iterate over all page files (paths)
         for page_path in self.get_pages():
-            page_had_asset = False  # Flag to track if this page had the asset
+            # A page this process is holding is edited where it lives. The
+            # sweep used to read every page file and write the changed ones
+            # back, which for a page a deck is showing meant writing round
+            # the outside of the very content that page keeps editing --
+            # whichever of the two finished second won the whole file. Only
+            # pages already held go this way: minting a document for every
+            # page file the sweep walks would keep all of them in memory for
+            # the rest of the session to strip an asset out of a handful.
+            document = self.existing_document(page_path)
+            if document is not None:
+                # Asked of a snapshot, not of the live content: this walks
+                # every key of a page a deck may be editing at the same
+                # moment, and iterating a dict another thread adds a key to
+                # raises. Only the pages that answer yes are then edited, so a
+                # sweep does not mark every page a deck happens to be showing
+                # as needing a write; both passes are idempotent, the second
+                # finding whatever the first left.
+                page_had_asset = self._strip_asset(
+                    document.get_without_action_objects(), abs_target_path)
+                if page_had_asset:
+                    with document.edit() as page_dict:
+                        self._strip_asset(page_dict, abs_target_path)
+            else:
+                # No Page and no document: nothing in this process is holding
+                # this page's content, so there is nothing to serialize
+                # against and the file is the only copy. Read barrier first
+                # anyway, because this sweep reads past get_page_data.
+                #
+                # Via the settings loader so one corrupt page (loads {})
+                # skips instead of raising and aborting the sweep for every
+                # remaining page.
+                #
+                # NOTE: the loader quarantines a corrupt file as a side effect
+                # of ANY read -- so this read-oriented sweep may move a
+                # corrupt page aside (to <path>.corrupt) even though it
+                # changes nothing about that page's assets. That is
+                # non-destructive: the sidecar keeps the corrupt bytes, the
+                # last good copy survives in pages/backups/ (the next
+                # get_page_data heals from it), and page_had_asset stays False
+                # here so nothing is written back over the poison page.
+                page_flush.get().flush_path(page_path)
+                page_dict = self.settings_manager.load_settings_from_file(page_path)
+                page_had_asset = self._strip_asset(page_dict, abs_target_path)
+                if page_had_asset:
+                    # Write updated page data back to file (atomically)
+                    atomic_write_json(page_path, page_dict)
 
-            # Open and load JSON page data. Via the settings loader so one
-            # corrupt page (loads {}) skips instead of raising and aborting
-            # the sweep for every remaining page.
-            #
-            # NOTE: the loader quarantines a corrupt file as a side effect of
-            # ANY read -- so this read-oriented sweep may move a corrupt page
-            # aside (to <path>.corrupt) even though it changes nothing about
-            # that page's assets. That is non-destructive: the sidecar keeps
-            # the corrupt bytes, the last good copy survives in pages/backups/
-            # (the next get_page_data heals from it), and page_had_asset stays
-            # False here so nothing is written back over the poison page.
-            #
-            # Read barrier first: this sweep reads past get_page_data, so it
-            # is the one place that has to ask for the flush itself.
-            page_flush.get().flush_path(page_path)
-            page_dict = self.settings_manager.load_settings_from_file(page_path)
+                    # A deck can have started showing this page while the
+                    # bytes were going down; the mint that did it read the
+                    # file, so tell whatever now holds it about the write.
+                    self.refresh_document(page_path)
 
-            # Safely get keys dictionary from page data
-            keys = page_dict.get("keys", {})
-
-            # Iterate over each key and its data
-            for key, key_data in keys.items():
-                # Get all states for this key
-                states = key_data.get("states", {})
-
-                # Iterate through each state and its data
-                for state, state_data in states.items():
-                    # Get media dictionary from state data
-                    media = state_data.get("media", {})
-                    dict_path = media.get("path")
-
-                    # If no media path defined, skip
-                    if dict_path is None:
-                        continue
-
-                    # Compare absolute paths; if match, remove asset reference
-                    if os.path.abspath(dict_path) == abs_target_path:
-                        page_had_asset = True
-                        state_data["media"]["path"] = None  # Remove the asset path
-
-            # If any asset was removed, update page file and reload pages
+            # Reload any loaded Page objects corresponding to this file.
+            # Outside any edit above: a reload takes the controller's
+            # page-load lock and reads the page file, both of which sit above
+            # the lock an edit holds.
             if page_had_asset:
-                # Write updated page data back to file (atomically)
-                atomic_write_json(page_path, page_dict)
-
-                # Bring the in-memory page in line with the file just written
-                self.refresh_document(page_path)
-
-                # Reload any loaded Page objects corresponding to this file
                 pages = self.get_pages_with_path(page_path)
                 for page in pages:
                     # Reload the page if it is currently active on its controller
@@ -911,6 +975,32 @@ class PageManagerBackend:
         data = self.get_page_data(path, False)
         return data.get("settings", {})
 
+    @contextmanager
+    def edit_page_settings(self, path: str) -> Iterator[dict[str, Any]]:
+        """Change one page's settings section, in the page itself.
+
+        The funnel every override row goes through. Each of them used to read
+        the whole page file, change the settings dict it got back, and write
+        the whole file again -- so a page edit landing in between (a plugin
+        calling set_settings, a key edit, anything reaching Page.save) either
+        lost its own change or, once the page was told to re-read, took this
+        one down with it. Here the settings ARE the page's settings: the
+        mutation happens in the content every deck showing this page is
+        already reading, under the file's lock, and the file catches up
+        through the flush seam like any other page edit.
+
+        Read-modify-write inside one block on purpose. The overrides are
+        partial edits ("just the brightness value") over a section the rest of
+        which has to survive, and doing the reading in the same hold as the
+        writing is what leaves no gap to lose the other half in.
+        """
+        with self.get_document(path).edit() as data:
+            settings = data.get("settings")
+            if not isinstance(settings, dict):
+                settings = {}
+                data["settings"] = settings
+            yield settings
+
     def set_page_settings(self, path: str, settings: dict):
         """
         Sets the whole settings section of the page json
@@ -921,19 +1011,8 @@ class PageManagerBackend:
         if path is None:
             return
 
-        data = self.get_page_data(path, False)
-        data["settings"] = settings
-        self.settings_manager.save_settings_to_file(path, data)
-
-        # This wrote the file behind the page's back, so the page has to be
-        # told. Every Page on this path reads through the one document, so
-        # this reaches the cached-but-not-active ones too -- and those are the
-        # ones that mattered: such a Page kept its pre-edit dict, and the next
-        # Page.save() from any trigger (plugin set_settings, key/state edits,
-        # ...) rewrote the file from it, silently erasing the just-saved
-        # settings section (auto-change, screensaver, brightness, background
-        # overrides).
-        self.refresh_document(path)
+        with self.get_document(path).edit() as data:
+            data["settings"] = settings
 
     def any_auto_change_rule_enabled(self) -> bool:
         """True when at least one page has its window auto-change switched on.
@@ -992,38 +1071,36 @@ class PageManagerBackend:
         return page_settings.get("auto-change", {})
 
     def set_auto_change_settings(self, path: str, enable: bool = False, wm_class: str = "", regex_title: str = "", stay_on_page: bool = False, decks: list[str] = None):
-        settings = self.get_page_settings(path)
-
         decks = decks or []
 
-        settings["auto-change"] = {
-            "enable": enable,
-            "wm-class": wm_class,
-            "title": regex_title,
-            "stay-on-page": stay_on_page,
-            "decks": decks
-        }
+        with self.edit_page_settings(path) as settings:
+            settings["auto-change"] = {
+                "enable": enable,
+                "wm-class": wm_class,
+                "title": regex_title,
+                "stay-on-page": stay_on_page,
+                "decks": decks
+            }
 
-        self.set_page_settings(path, settings)
+        # Outside the block: the watcher gate re-reads every page, and every
+        # read of a page file takes the lock the block above is holding.
         self.refresh_window_watch_state()
 
     def overwrite_auto_change_settings(self, path: str, enable: bool = None, wm_class: str = None, regex_title: str = None, stay_on_page: bool = None, decks: list[str] = None):
-        settings = self.get_page_settings(path)
-        auto_change_settings = settings.get("auto-change", {})
+        with self.edit_page_settings(path) as settings:
+            auto_change_settings = settings.setdefault("auto-change", {})
 
-        if enable is not None:
-            auto_change_settings["enable"] = enable
-        if wm_class is not None:
-            auto_change_settings["wm-class"] = wm_class
-        if regex_title is not None:
-            auto_change_settings["title"] = regex_title
-        if stay_on_page is not None:
-            auto_change_settings["stay-on-page"] = stay_on_page
-        if decks is not None:
-            auto_change_settings["decks"] = decks
+            if enable is not None:
+                auto_change_settings["enable"] = enable
+            if wm_class is not None:
+                auto_change_settings["wm-class"] = wm_class
+            if regex_title is not None:
+                auto_change_settings["title"] = regex_title
+            if stay_on_page is not None:
+                auto_change_settings["stay-on-page"] = stay_on_page
+            if decks is not None:
+                auto_change_settings["decks"] = decks
 
-        settings["auto-change"] = auto_change_settings
-        self.set_page_settings(path, settings)
         self.refresh_window_watch_state()
 
     def get_screensaver_settings(self, path: str):
@@ -1031,102 +1108,84 @@ class PageManagerBackend:
         return page_settings.get("screensaver", {})
 
     def set_screensaver_settings(self, path: str, overwrite: bool = False, enable: bool = False, time_delay: int = 5, loop: bool = True, fps: int = 30, brightness: float = 75, media_path: str = ""):
-        settings = self.get_page_settings(path)
-
-        settings["screensaver"] = {
-            "overwrite": overwrite,
-            "enable": enable,
-            "time-delay": time_delay,
-            "loop": loop,
-            "fps": fps,
-            "brightness": brightness,
-            "media-path": media_path
-        }
-
-        self.set_page_settings(path, settings)
+        with self.edit_page_settings(path) as settings:
+            settings["screensaver"] = {
+                "overwrite": overwrite,
+                "enable": enable,
+                "time-delay": time_delay,
+                "loop": loop,
+                "fps": fps,
+                "brightness": brightness,
+                "media-path": media_path
+            }
 
     def overwrite_screensaver_settings(self, path: str, overwrite: bool = None, enable: bool = None, time_delay: int = None, loop: bool = None, fps: int = None, brightness: float = None, media_path: str = None):
-        settings = self.get_page_settings(path)
-        screensaver_settings = settings.get("screensaver", {})
+        with self.edit_page_settings(path) as settings:
+            screensaver_settings = settings.setdefault("screensaver", {})
 
-        if overwrite is not None:
-            screensaver_settings["overwrite"] = overwrite
-        if enable is not None:
-            screensaver_settings["enable"] = enable
-        if time_delay is not None:
-            screensaver_settings["time-delay"] = time_delay
-        if loop is not None:
-            screensaver_settings["loop"] = loop
-        if fps is not None:
-            screensaver_settings["fps"] = fps
-        if brightness is not None:
-            screensaver_settings["brightness"] = brightness
-        if media_path is not None:
-            screensaver_settings["media-path"] = media_path
-
-        settings["screensaver"] = screensaver_settings
-        self.set_page_settings(path, settings)
+            if overwrite is not None:
+                screensaver_settings["overwrite"] = overwrite
+            if enable is not None:
+                screensaver_settings["enable"] = enable
+            if time_delay is not None:
+                screensaver_settings["time-delay"] = time_delay
+            if loop is not None:
+                screensaver_settings["loop"] = loop
+            if fps is not None:
+                screensaver_settings["fps"] = fps
+            if brightness is not None:
+                screensaver_settings["brightness"] = brightness
+            if media_path is not None:
+                screensaver_settings["media-path"] = media_path
 
     def get_brightness_settings(self, path: str):
         page_settings = self.get_page_settings(path)
         return page_settings.get("brightness", {})
 
     def set_brightness_settings(self, path: str, overwrite: bool = False, brightness: float = 75):
-        settings = self.get_page_settings(path)
-
-        settings["brightness"] = {
-            "overwrite": overwrite,
-            "value": brightness
-        }
-
-        self.set_page_settings(path, settings)
+        with self.edit_page_settings(path) as settings:
+            settings["brightness"] = {
+                "overwrite": overwrite,
+                "value": brightness
+            }
 
     def overwrite_brightness_settings(self, path: str, overwrite: bool = None, brightness: float = None):
-        settings = self.get_page_settings(path)
-        brightness_settings = settings.get("brightness", {})
+        with self.edit_page_settings(path) as settings:
+            brightness_settings = settings.setdefault("brightness", {})
 
-        if overwrite is not None:
-            brightness_settings["overwrite"] = overwrite
-        if brightness is not None:
-            brightness_settings["value"] = brightness
-
-        settings["brightness"] = brightness_settings
-        self.set_page_settings(path, settings)
+            if overwrite is not None:
+                brightness_settings["overwrite"] = overwrite
+            if brightness is not None:
+                brightness_settings["value"] = brightness
 
     def get_background_settings(self, path: str):
         page_settings = self.get_page_settings(path)
         return page_settings.get("background", {})
 
     def set_background_settings(self, path: str, overwrite: bool = False, show: bool = False, fps: int = 30, loop: bool = False, media_path: str = "", extend_to_touchscreen: bool = False):
-        settings = self.get_page_settings(path)
-
-        settings["background"] = {
-            "overwrite": overwrite,
-            "show": show,
-            "fps": fps,
-            "loop": loop,
-            "media-path": media_path,
-            "extend-to-touchscreen": extend_to_touchscreen
-        }
-
-        self.set_page_settings(path, settings)
+        with self.edit_page_settings(path) as settings:
+            settings["background"] = {
+                "overwrite": overwrite,
+                "show": show,
+                "fps": fps,
+                "loop": loop,
+                "media-path": media_path,
+                "extend-to-touchscreen": extend_to_touchscreen
+            }
 
     def overwrite_background_settings(self, path: str, overwrite: bool = None, show: bool = None, fps: int = None, loop: bool = None, media_path: str = None, extend_to_touchscreen: bool = None):
-        settings = self.get_page_settings(path)
-        background_settings = settings.get("background", {})
+        with self.edit_page_settings(path) as settings:
+            background_settings = settings.setdefault("background", {})
 
-        if overwrite is not None:
-            background_settings["overwrite"] = overwrite
-        if show is not None:
-            background_settings["show"] = show
-        if fps is not None:
-            background_settings["fps"] = fps
-        if loop is not None:
-            background_settings["loop"] = loop
-        if media_path is not None:
-            background_settings["media-path"] = media_path
-        if extend_to_touchscreen is not None:
-            background_settings["extend-to-touchscreen"] = extend_to_touchscreen
-
-        settings["background"] = background_settings
-        self.set_page_settings(path, settings)
+            if overwrite is not None:
+                background_settings["overwrite"] = overwrite
+            if show is not None:
+                background_settings["show"] = show
+            if fps is not None:
+                background_settings["fps"] = fps
+            if loop is not None:
+                background_settings["loop"] = loop
+            if media_path is not None:
+                background_settings["media-path"] = media_path
+            if extend_to_touchscreen is not None:
+                background_settings["extend-to-touchscreen"] = extend_to_touchscreen
