@@ -19,6 +19,13 @@ is only safe if two things hold, and this scenario holds them:
      that proves it: pending edits for a deleted page are DISCARDED, because
      flushing them would write the file back into existence.
 
+  3. THE COPY IN pages/backups/ IS THE FILE AS THE SESSION FOUND IT. One copy
+     per page per session, taken before the first write and never refreshed
+     by a later one -- so it is the state before this session's edits, which
+     is what a heal wants and what a per-write copy stopped being. A file
+     handed to another writer (deleted, moved, imported over) opens a fresh
+     session for that path; an unparseable primary is never copied at all.
+
 Timing is driven, never waited on: the flush's scheduler and clock are
 constructor arguments, so this runs in virtual time with no sleeps -- the
 trailing delay, the re-arm and the max-dirty-age cap are assertions about
@@ -54,9 +61,16 @@ SDUI_IMPORTER_PY = os.path.join(SRC, "windows", "PageManager", "Importer", "Stre
 # (path, path_still_marked_pending_while_writing, virtual_time).
 WRITES: list[tuple[str, bool, float]] = []
 
+# Every copy into pages/backups/, as (source page path, destination).
+BACKUPS: list[tuple[str, str]] = []
+
 
 def written_paths() -> list[str]:
     return [path for path, _pending, _at in WRITES]
+
+
+def backups_of(path: str) -> list[tuple[str, str]]:
+    return [copy for copy in BACKUPS if copy[0] == path]
 
 
 class VirtualTime:
@@ -194,16 +208,50 @@ def install_write_recorder() -> None:
     page_flush.atomic_write_json = recording_write
 
 
+def install_backup_recorder() -> None:
+    """Counts the copies into pages/backups/.
+
+    Hooked at shutil.copy2 rather than at Page.make_backup, because half of
+    what is asserted below is a copy that must NOT happen: make_backup is
+    entered for a corrupt primary and declines, so counting calls to it would
+    count a backup that was never taken.
+    """
+    real_copy2 = shutil.copy2
+    backups_dir = os.path.join("pages", "backups")
+
+    def recording_copy2(src, dst, *args, **kwargs):
+        if os.path.dirname(str(dst)).endswith(backups_dir):
+            BACKUPS.append((str(src), str(dst)))
+        return real_copy2(src, dst, *args, **kwargs)
+
+    shutil.copy2 = recording_copy2
+
+
+def backup_path_of(path: str) -> str:
+    return os.path.join(gl.page_manager.PAGE_PATH, "backups", os.path.basename(path))
+
+
+def write_page(path: str, data: dict) -> None:
+    """A page file written by somebody other than the flush seam -- an
+    importer, a migrator, the boot restore."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f)
+
+
 def fresh_flush() -> VirtualTime:
     """A clean flush seam on virtual time, installed process-wide.
 
     Every production caller reaches the seam through `page_flush.get()`, so
-    replacing the singleton is the injection point for the whole process.
+    replacing the singleton is the injection point for the whole process. A
+    new seam is also a new session as far as the backups are concerned --
+    which is what lets each check below own its own "once".
     """
     global VT
     VT = VirtualTime()
     page_flush._flush = page_flush.PageFlush(scheduler=VT, clock=VT)
     WRITES.clear()
+    BACKUPS.clear()
     return VT
 
 
@@ -614,6 +662,161 @@ def check_delete_discards(controller) -> None:
           "resurrects it")
 
 
+def check_backup_is_once_per_session(controller) -> None:
+    """One copy into pages/backups/ per page per session, holding the file as
+    the session found it.
+
+    The copy used to be taken on every save, which made it a chase: a full
+    re-parse of the file plus a byte copy per keystroke, for a backup that
+    trailed the primary by a fraction of a second. Once per session is both
+    the cheap version and the useful one -- a backup is only ever read when
+    the primary will not parse, and the interesting state to have kept then
+    is the one from before this session started editing.
+    """
+    vt = fresh_flush()
+    path = seed_page("SessionBackup")
+    backup = backup_path_of(path)
+    opening_state = read_page(path)
+    page = gl.page_manager.get_page(path, controller)
+
+    edit(page, "first-write")
+    vt.advance(page_flush.DEBOUNCE_S)
+
+    assert len(WRITES) == 1, f"expected one write, got {WRITES}"
+    assert len(backups_of(path)) == 1, (
+        f"the first write of a page took {len(backups_of(path))} backups "
+        f"instead of one")
+    assert read_page(backup) == opening_state, (
+        "the backup was taken AFTER the write it protects against: it holds "
+        "the bytes the write put down, not the ones it replaced")
+
+    edit(page, "second-write")
+    vt.advance(page_flush.DEBOUNCE_S)
+
+    assert len(WRITES) == 2, f"expected a second write, got {WRITES}"
+    assert len(backups_of(path)) == 1, (
+        f"the second write took another backup ({len(backups_of(path))} in "
+        f"total): the copy is per session, not per write")
+    assert read_page(backup) == opening_state, (
+        "a later write refreshed the backup, so it now holds this session's "
+        "own output instead of the state the session opened with")
+    assert read_page(path)["debounce-marker"] == "second-write"
+    print("PASS: a page is copied into pages/backups/ once per session, "
+          "before the first write, and later writes leave that copy alone")
+
+
+def check_discard_reopens_the_backup(controller) -> None:
+    """A discard hands the file to another writer, so the next flush of that
+    path backs up what THEY left there.
+
+    Every discard means the page at this path is not the page the backup
+    describes: it was deleted, moved away, or imported over. Carrying the
+    "already backed up" record across that would leave pages/backups/ holding
+    a page that no longer exists at this name -- and a heal would restore it
+    over the one that does.
+    """
+    vt = fresh_flush()
+
+    # The shape of an import: the pending state is discarded (a flush would
+    # land after the import and undo it) and the file is replaced wholesale.
+    path = seed_page("DiscardImportedOver")
+    backup = backup_path_of(path)
+    page = gl.page_manager.get_page(path, controller)
+
+    edit(page, "before-the-import")
+    vt.advance(page_flush.DEBOUNCE_S)
+    assert len(backups_of(path)) == 1, "the first write took no backup"
+
+    imported = {"keys": {}, "dials": {}, "touchscreens": {}, "imported": True}
+    page_flush.get().discard_path(path)
+    write_page(path, imported)
+
+    edit(page, "after-the-import")
+    vt.advance(page_flush.DEBOUNCE_S)
+
+    assert len(backups_of(path)) == 2, (
+        "the write after an import reused the session's backup record, so "
+        "pages/backups/ still holds the page the import replaced -- a heal "
+        "would undo the import")
+    assert read_page(backup) == imported, (
+        "the backup taken after the import is not what the import left on "
+        "disk")
+
+    # The shape of a delete: the file goes away and a new page takes the
+    # name, so the old backup describes a page that no longer exists.
+    deleted_path = seed_page("DiscardDeleted")
+    deleted_backup = backup_path_of(deleted_path)
+    old_page = gl.page_manager.get_page(deleted_path, controller)
+    assert controller.active_page is not old_page
+    edit(old_page, "the-page-that-was-deleted")
+    vt.advance(page_flush.DEBOUNCE_S)
+    assert len(backups_of(deleted_path)) == 1
+
+    gl.page_manager.remove_page(deleted_path)
+    recreated = {"keys": {}, "dials": {}, "touchscreens": {}, "recreated": True}
+    assert gl.page_manager.add_page("DiscardDeleted", recreated) == deleted_path
+    new_page = gl.page_manager.get_page(deleted_path, controller)
+    edit(new_page, "the-page-that-took-the-name")
+    vt.advance(page_flush.DEBOUNCE_S)
+
+    assert len(backups_of(deleted_path)) == 2, (
+        "the re-created page was written over without a backup of its own: "
+        "pages/backups/ still holds the deleted page, and healing this name "
+        "would bring that one back")
+    assert read_page(deleted_backup) == recreated, (
+        "the backup of the re-created page is not the page that was created")
+    print("PASS: a delete, a move or an import reopens the backup, and the "
+          "next write copies what the new owner left on disk")
+
+
+def check_corrupt_primary_is_never_backed_up(controller) -> None:
+    """A primary that will not parse is not copied over the backup, and that
+    refusal stands for the session.
+
+    The backup is what a corrupt page is healed FROM, so copying the
+    corruption over it is the one move that loses the page for good -- hence
+    the re-parse before the copy. Asking again on the next write would find
+    the primary parseable, because this seam wrote it a moment ago, and put a
+    duplicate of the live file over the last copy taken before the damage.
+    """
+    vt = fresh_flush()
+    path = seed_page("CorruptPrimary")
+    backup = backup_path_of(path)
+    page = gl.page_manager.get_page(path, controller)
+
+    # A good copy from an earlier session, and a primary damaged since --
+    # truncated mid-object, the way a full disk or a killed writer that is
+    # not this one leaves a file.
+    last_good = {"keys": {}, "dials": {}, "touchscreens": {}, "from": "before the damage"}
+    write_page(backup, last_good)
+    with open(path, "w") as f:
+        f.write('{"keys": {"0x0": ')
+
+    edit(page, "written-over-the-damage")
+    vt.advance(page_flush.DEBOUNCE_S)
+
+    assert len(WRITES) == 1, f"the write did not happen: {WRITES}"
+    assert backups_of(path) == [], (
+        "the unparseable primary was copied into pages/backups/ -- the only "
+        "readable copy of the page has been replaced by the corruption it "
+        "exists to survive")
+    assert read_page(backup) == last_good
+    assert read_page(path)["debounce-marker"] == "written-over-the-damage", (
+        "refusing the backup also cost the write it was guarding")
+
+    edit(page, "and-again")
+    vt.advance(page_flush.DEBOUNCE_S)
+
+    assert len(WRITES) == 2
+    assert backups_of(path) == [], (
+        "a later write took the backup the corrupt primary was refused")
+    assert read_page(backup) == last_good, (
+        "the last copy taken before the corruption was replaced by a "
+        "duplicate of the file that is already on disk")
+    print("PASS: an unparseable primary is never copied over its backup, and "
+          "the refusal is not revisited later in the session")
+
+
 def call_sites_in(module_path: str, func_name: str) -> list[tuple[int, str]]:
     """(line, source) for every call in one function, outermost call first."""
     with open(module_path) as f:
@@ -723,6 +926,7 @@ def check_eviction_keeps_pending_edits(controller) -> None:
 def main() -> None:
     start_watchdog(WATCHDOG_SECONDS, label="scenario_page_write_debounce")
     install_write_recorder()
+    install_backup_recorder()
     controller = make_headless_controller(serial="debounce-1", page_name="Main")
     try:
         check_burst_is_one_write(controller)
@@ -736,6 +940,9 @@ def main() -> None:
         check_quit_flush_placement()
         check_move_flushes_then_discards(controller)
         check_delete_discards(controller)
+        check_backup_is_once_per_session(controller)
+        check_discard_reopens_the_backup(controller)
+        check_corrupt_primary_is_never_backed_up(controller)
         check_eviction_keeps_pending_edits(controller)
         check_every_reader_takes_the_barrier()
     finally:

@@ -23,8 +23,10 @@ Afterwards the parent inspects the child's surviving data dir:
     `.save-*.tmp` prefix a later write to that target reaps -- nothing
     partial under the page's real name,
   * `pages/backups/<page>.json`, which `get_page_data` heals a corrupt page
-    from, still holds that same complete JSON. A crashed flush leaves the
-    recovery path exactly as it found it.
+    from, still holds the complete page this session found on disk. The copy
+    is taken once, before the session's first write, so a crash inside a
+    later write is not in it and cannot be half of it -- a crashed flush
+    leaves the recovery path exactly as it found it.
 """
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
 
@@ -60,6 +62,10 @@ def run_child() -> None:
 
     fixtures._install_integration_globals()
     path = fixtures.seed_page("Crash")
+    # The state the session opens with: what the backup taken before this
+    # session's first write has to hold afterwards.
+    with open(path) as f:
+        opening = json.load(f)
     page = Page(json_path=path, deck_controller=StubController("flush-crash-1"))
 
     # Pre-burst state, made durable the ordinary way: mark, then ask for the
@@ -72,6 +78,7 @@ def run_child() -> None:
 
     print("PAGE_PATH " + path, flush=True)
     print("PRE_BURST " + json.dumps(pre_burst), flush=True)
+    print("OPENING " + json.dumps(opening), flush=True)
 
     # Armed BEFORE the edits, so there is no window in which a write could
     # slip through: from here on the first fsync anywhere is fatal, and the
@@ -116,11 +123,13 @@ def main() -> None:
     marked = [line for line in lines if line == "MARKED"]
     page_path_lines = [line for line in lines if line.startswith("PAGE_PATH ")]
     pre_burst_lines = [line for line in lines if line.startswith("PRE_BURST ")]
-    assert page_path_lines and pre_burst_lines, (
+    opening_lines = [line for line in lines if line.startswith("OPENING ")]
+    assert page_path_lines and pre_burst_lines and opening_lines, (
         f"child never got as far as its pre-burst state: {proc.stdout}\n{proc.stderr}")
 
     page_path = page_path_lines[-1].removeprefix("PAGE_PATH ")
     pre_burst = json.loads(pre_burst_lines[-1].removeprefix("PRE_BURST "))
+    opening = json.loads(opening_lines[-1].removeprefix("OPENING "))
     data_path = os.path.dirname(os.path.dirname(page_path))
 
     try:
@@ -165,13 +174,19 @@ def main() -> None:
             "primary loadable, so nothing has cause to")
 
         # 3. The heal path is untouched: get_page_data recovers a corrupt
-        #    page from this file, and it still holds the last durable state.
+        #    page from this file, and it still holds the complete page this
+        #    session found on disk. The copy is taken once, before the
+        #    session's first write, so the crashed write is neither in it nor
+        #    half of it.
         backup_path = os.path.join(pages_dir, "backups", basename)
         with open(backup_path) as f:
             backup = json.load(f)
-        assert backup == pre_burst, (
+        assert backup == opening, (
             f"the backup the corrupt-page heal reads from was left holding "
-            f"something other than the last durable page: {backup}")
+            f"something other than the page this session opened with: {backup}")
+        assert backup.get("flush-marker") is None, (
+            "a write of this session reached the backup: the copy is taken "
+            "before the first of them and is not refreshed by any")
     finally:
         shutil.rmtree(data_path, ignore_errors=True)
 

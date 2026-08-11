@@ -14,8 +14,9 @@ WHAT THIS MODULE OWNS
 
 * the per-path save lock registry (below), so two controllers showing the same
   page cannot interleave their backup/write on one file,
-* a per-path record of which Page still has edits the file has not seen, and
-* the timer that turns a burst of edits into a single write.
+* a per-path record of which Page still has edits the file has not seen,
+* the timer that turns a burst of edits into a single write, and
+* which page files this process has already copied into ``pages/backups/``.
 
 THE PROTOCOL, IN FOUR CALLS
 
@@ -45,6 +46,28 @@ take longer than the user's typing gaps, it degrades toward one write per
 edit -- the pre-debounce behaviour, and the safe direction to degrade in,
 since the alternative (restarting the clock on every mark) would buy back the
 coalescing by widening exactly the loss window the cap exists to bound.
+
+THE BACKUP
+
+Before this process first overwrites a page file, the file as this session
+found it is copied to ``pages/backups/<name>.json`` -- the copy the page
+manager heals from when the primary reads back corrupt. That copy is taken
+ONCE per path per session, not once per write: it is a full re-parse of the
+file plus a byte copy, and taken per keystroke it bought a backup whose
+contents chased the primary a fraction of a second behind.
+
+Holding the session's opening state rather than the last saved one is the
+point of doing it once, not the price of it. A backup is only ever read when
+the primary is unreadable, and nothing here can make it unreadable: every
+page file this process writes goes out as ``atomic_write_json``'s
+temporary-then-replace, so a write that dies mid-flight leaves the previous
+complete page, never half of two. Corruption therefore arrives from outside
+-- a filesystem fault, a full disk, another program editing the file -- and
+against that, a copy from before this session's edits is as serviceable as a
+copy from a second ago, while being the only one that predates whatever went
+wrong. History older than this session is somebody else's job and already
+done: the boot backup zips every page file into a timestamped archive and
+keeps the last few of them.
 
 Marking never writes. Every deferred write happens on a timer thread, which
 is the point: the fsync pair leaves the GTK main thread. What a user
@@ -78,10 +101,11 @@ THREAD CONTRACT
 All of it is callable from any thread: saves originate on the GTK main thread
 (every editor widget), on plugin and action threads (through
 ``ActionCore.set_settings``), and on ad-hoc threads (the permission manager's
-reload). ``_pending`` is guarded by its own lock, taken only inside the
-per-path save lock or on its own -- never the other way round, so the two can
-never deadlock against each other. The write itself is never done under
-``_pending_guard``, so marking an edit never waits on a flush.
+reload). ``_pending`` and the backup record are guarded by one lock, taken
+only inside the per-path save lock or on its own -- never the other way
+round, so the two can never deadlock against each other. Neither the write
+nor the backup copy is done under ``_pending_guard``, so marking an edit
+never waits on a flush.
 
 FAILURE
 
@@ -209,6 +233,13 @@ class PageFlush:
         # writable -- the next mint of that path reads the file through the
         # barrier, so it picks up exactly what this reference kept alive.
         self._pending: dict[str, _Pending] = {}
+        # Page files this process has already copied into pages/backups/. The
+        # copy keeps the state a file was in BEFORE this seam overwrote it,
+        # which is a property of the session and not of any one write, so it
+        # is taken once per path. Grows one entry per distinct page path and
+        # never prunes -- bounded by the user's page count, like the lock
+        # registry above.
+        self._backed_up: set[str] = set()
         self._pending_guard = threading.Lock()
         self._scheduler: Scheduler = scheduler if scheduler is not None else TimerWheelScheduler()
         self._clock: Callable[[], float] = clock if clock is not None else time.monotonic
@@ -302,8 +333,7 @@ class PageFlush:
             page = entry.page
 
             try:
-                # Make backup in case something goes wrong
-                page.make_backup(path)
+                self._back_up_once(path, page)
 
                 without_objects = page.get_without_action_objects()
                 # Make keys last element
@@ -329,6 +359,39 @@ class PageFlush:
                             # done it has nothing left to find.
                             self._scheduler.cancel(entry.handle)
 
+    def _back_up_once(self, path: str, page: "Page") -> None:
+        """Copy `path` into pages/backups/ unless this session already has.
+
+        Runs under the path's save lock and before the write it guards, so
+        what lands in pages/backups/ is the file exactly as this seam found
+        it -- and no other flush of the same file can slip between the check
+        and the copy.
+
+        A REFUSAL COUNTS AS DONE. make_backup declines to copy a primary it
+        cannot parse, which is the one case where copying would destroy the
+        very thing the backup is for. Asking again on the next write would
+        find that primary parseable -- this seam wrote it a moment ago -- and
+        put a duplicate of the current file over the last copy that predates
+        the corruption, which is the only copy worth having. So the first
+        write of a path in a session settles that path's backup either way,
+        and only a make_backup that raises (nothing was read, nothing was
+        overwritten) leaves the question open for the next write.
+
+        `path`, never page.json_path: a page move re-points that attribute in
+        place, and the file whose previous state has to be kept is the one
+        this call locked and is about to overwrite.
+        """
+        with self._pending_guard:
+            if path in self._backed_up:
+                return
+        # The copy itself is outside the guard: it re-parses and duplicates a
+        # whole page file, and the guard is also taken by every mark_dirty on
+        # the GTK main thread. Two flushes of one path cannot both be here
+        # regardless -- the save lock is held for the length of this call.
+        page.make_backup(path)
+        with self._pending_guard:
+            self._backed_up.add(path)
+
     def flush_all(self) -> None:
         """Put every path's pending edits on disk now.
 
@@ -351,9 +414,21 @@ class PageFlush:
         For a page that is going away: flushing a deleted page would write
         the file back into existence, and flushing the source of a move would
         write a file the move is about to remove.
+
+        The backup record goes with them. Every caller of this hands the file
+        to somebody else -- a delete, a move, an import -- so whatever stands
+        at this path afterwards is content this seam has never overwritten
+        and no backup in pages/backups/ describes: the old copy is of a page
+        that is gone, or of the version an import just replaced, and a heal
+        from it would put that page back over the one the user has now. So
+        the next flush of this path takes its own copy, which keeps the rule
+        exactly what it says it is -- the backup is the file as it was before
+        this seam first wrote it -- with "before" starting again each time
+        somebody else takes the file over wholesale.
         """
         with self._pending_guard:
             entry = self._pending.pop(path, None)
+            self._backed_up.discard(path)
         if entry is not None and entry.handle is not None:
             self._scheduler.cancel(entry.handle)
 
