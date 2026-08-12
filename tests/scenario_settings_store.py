@@ -541,6 +541,114 @@ def check_corrupt_library_boots() -> None:
     print("PASS: a corrupt asset library index quarantines, boots empty, and the library still works")
 
 
+def check_pages_surface_edit_and_read() -> None:
+    """The page-manager settings surface: read-modify-write through ``edit()``,
+    plain reads through ``read()``, one file for every caller."""
+    pages_path = settings_store.PAGES.path()
+    if os.path.exists(pages_path):
+        os.remove(pages_path)
+
+    # An absent surface reads as an empty dict, not a crash.
+    assert store().read(settings_store.PAGES) == {}, "an absent pages surface must read as {}"
+
+    # edit() creates and serializes the read-modify-write.
+    with store().edit(settings_store.PAGES) as data:
+        data.setdefault("default-pages", {})["DECK-1"] = "/pages/a.json"
+    with store().edit(settings_store.PAGES) as data:
+        data.setdefault("default-pages", {})["DECK-2"] = "/pages/b.json"
+
+    got = store().read(settings_store.PAGES)
+    assert got["default-pages"] == {"DECK-1": "/pages/a.json", "DECK-2": "/pages/b.json"}, (
+        f"the two edits did not both land: {got!r}"
+    )
+
+    # Concurrent edits of the surface lose nothing (the DECK leg proves the
+    # mechanism; this proves the PAGES surface is wired to the same lock).
+    threads_n, per_thread, hold = 3, 4, 0.01
+    with store().edit(settings_store.PAGES) as data:
+        data["counter"] = 0
+
+    def bump() -> None:
+        for _ in range(per_thread):
+            with store().edit(settings_store.PAGES) as data:
+                current = data["counter"]
+                time.sleep(hold)
+                data["counter"] = current + 1
+
+    workers = [threading.Thread(target=bump) for _ in range(threads_n)]
+    for t in workers:
+        t.start()
+    for t in workers:
+        t.join(timeout=30)
+        assert not t.is_alive(), "a PAGES edit() worker never finished"
+    assert store().read(settings_store.PAGES)["counter"] == threads_n * per_thread, (
+        "edit() of the pages surface lost an update"
+    )
+    print("PASS: the pages surface reads empty when absent and serializes its read-modify-writes")
+
+
+def check_ui_asset_manager_schema() -> None:
+    """The asset chooser's UI state: two toggles that default ON, read through
+    the surface schema, written sparse through ``edit()``."""
+    ui_path = settings_store.UI_ASSET_MANAGER.path()
+    if os.path.exists(ui_path):
+        os.remove(ui_path)
+
+    # Absent: both toggles default True, from the schema, without a write.
+    view = store().view(settings_store.UI_ASSET_MANAGER)
+    assert view.get("video-toggle") is True and view.get("image-toggle") is True, (
+        "the asset-manager toggles must default ON from the schema"
+    )
+    assert not os.path.exists(ui_path), "reading the defaults must not create the file"
+
+    # A toggle write is sparse: it stores its own key and leaves the other
+    # following the schema.
+    with store().edit(settings_store.UI_ASSET_MANAGER) as data:
+        data["video-toggle"] = False
+    on_disk = json.loads(read_raw(ui_path))
+    assert on_disk == {"video-toggle": False}, (
+        f"the toggle write was not sparse -- it wrote a default it should have left absent: {on_disk!r}"
+    )
+    view = store().view(settings_store.UI_ASSET_MANAGER)
+    assert view.get("video-toggle") is False, "the stored toggle did not read back"
+    assert view.get("image-toggle") is True, "the untouched toggle stopped following the schema"
+    print("PASS: the asset-manager UI toggles default ON and persist sparsely through the surface")
+
+
+def check_static_surface_roundtrip() -> None:
+    """The static settings surface: the data-path override file, read and
+    written through the store rather than raw.
+
+    The real static file lives OUTSIDE the data path -- it is the file that
+    CHOOSES the data path -- so this points the surface at an isolated temp
+    file for the duration. It must never touch the user's real one.
+    """
+    original = gl.STATIC_SETTINGS_FILE_PATH
+    static_path = probe_path("static-settings.json")
+    for stale in (static_path, static_path + ".corrupt", static_path + ".corrupt.1"):
+        if os.path.exists(stale):
+            os.remove(stale)
+
+    gl.STATIC_SETTINGS_FILE_PATH = static_path
+    try:
+        assert settings_store.STATIC.path() == static_path, (
+            "the STATIC surface must resolve gl.STATIC_SETTINGS_FILE_PATH at call time"
+        )
+        assert gl.settings_manager.get_static_settings() == {}, "an absent static file reads as {}"
+
+        gl.settings_manager.save_static_settings({"data-path": "/somewhere/else"})
+        assert gl.settings_manager.get_static_settings() == {"data-path": "/somewhere/else"}, (
+            "the static settings did not round-trip through the store"
+        )
+        # A corrupt static file heals to {} rather than raising out of the accessor.
+        write_raw(static_path, GARBAGE)
+        assert gl.settings_manager.get_static_settings() == {}, "a corrupt static file must heal to {}"
+        assert read_raw(static_path + ".corrupt") == GARBAGE, "the corrupt static file was not preserved"
+    finally:
+        gl.STATIC_SETTINGS_FILE_PATH = original
+    print("PASS: the static settings surface round-trips and heals through the store")
+
+
 def check_valid_library_untouched_by_load() -> None:
     path = library_path()
     entry = [{"name": "kept", "id": "kept-id", "internal-path": None, "thumbnail": None}]
@@ -574,6 +682,9 @@ def main() -> int:
     check_edit_serializes()
     check_edit_does_not_write_on_failure()
     check_key_discipline()
+    check_pages_surface_edit_and_read()
+    check_ui_asset_manager_schema()
+    check_static_surface_roundtrip()
     check_corrupt_library_boots()
     check_valid_library_untouched_by_load()
 

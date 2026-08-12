@@ -21,11 +21,11 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Gdk, GLib
 
 # Import python modules
-import os
 from loguru import logger as log
 
 # Import own modules
 from GtkHelper.GtkHelper import run_on_main
+from src.backend import settings_store
 from src.windows.AssetManager.ChooserPage import ChooserPage
 from src.windows.AssetManager.CustomAssets.FlowBox import CustomAssetChooserFlowBox
 
@@ -165,28 +165,29 @@ class CustomAssetChooser(ChooserPage):
         show_now()
 
     def on_video_toggled(self, button):
-        settings = gl.settings_manager.load_settings_from_file(os.path.join(gl.DATA_PATH, "settings", "ui", "AssetManager.json"))
-        settings["video-toggle"] = button.get_active()
-        gl.settings_manager.save_settings_to_file(os.path.join(gl.DATA_PATH, "settings", "ui", "AssetManager.json"), settings)
+        # Read-modify-write serialized against the other toggle, so flipping
+        # both in quick succession cannot lose one.
+        with settings_store.get().edit(settings_store.UI_ASSET_MANAGER) as settings:
+            settings["video-toggle"] = button.get_active()
 
         # Update ui
         if self.asset_chooser is not None:
             self.asset_chooser.refresh()
 
     def on_image_toggled(self, button):
-        settings = gl.settings_manager.load_settings_from_file(os.path.join(gl.DATA_PATH, "settings", "ui", "AssetManager.json"))
-        settings["image-toggle"] = button.get_active()
-        gl.settings_manager.save_settings_to_file(os.path.join(gl.DATA_PATH, "settings", "ui", "AssetManager.json"), settings)
+        with settings_store.get().edit(settings_store.UI_ASSET_MANAGER) as settings:
+            settings["image-toggle"] = button.get_active()
 
         # Update ui
         if self.asset_chooser is not None:
             self.asset_chooser.refresh()
 
     def load_defaults(self):
-        settings = gl.settings_manager.load_settings_from_file(os.path.join(gl.DATA_PATH, "settings", "ui", "AssetManager.json"))
+        # Both toggles default ON; the True defaults live in the surface schema.
+        settings = settings_store.get().view(settings_store.UI_ASSET_MANAGER)
         # Called from the build worker: toggle writes are GTK calls too.
-        run_on_main(self.video_button.set_active, settings.get("video-toggle", True))
-        run_on_main(self.image_button.set_active, settings.get("image-toggle", True))
+        run_on_main(self.video_button.set_active, settings.get("video-toggle"))
+        run_on_main(self.image_button.set_active, settings.get("image-toggle"))
 
     def on_search_changed(self, entry):
         if self.asset_chooser is not None:
