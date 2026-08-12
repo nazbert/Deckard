@@ -31,6 +31,11 @@ bundle as a release asset.
 - Selecting pages in the page manager no longer makes the page editor's
   screensaver brightness slider write its own displayed value back to each
   page it visits, and reapply it to the deck.
+- Changing a default font in the settings window no longer reverts other
+  general settings that changed while that window was open. The font was
+  saved correctly, and then the window's picture of the settings file — taken
+  when it opened — was written on top of it, putting back the hold time and
+  the rest as they had been at that moment.
 - A deck plugged in after Deckard has started now appears on the D-Bus
   interface, and a deck that is unplugged disappears from it. Only the decks
   present at launch were ever published, so scripts driving Deckard over

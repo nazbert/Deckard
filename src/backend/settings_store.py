@@ -29,6 +29,13 @@ A ``SurfaceSpec`` says four things about one file, and nothing else knows them:
   out a deep copy per read, so a caller may mutate what it got without
   reaching anything else, and its entry is dropped the moment the store writes
   that path.
+* ``shared`` -- whether a cached surface hands out the cached object ITSELF
+  instead of a copy of it. The app settings are one dict that many holders
+  read, mutate in place, and save back, and every one of them has to be
+  looking at the same one: hand each reader its own copy and a write through
+  one view becomes invisible to the reader that is about to persist another.
+  A surface is shared because its callers were written that way, not because
+  sharing is cheaper. Only a cached surface can be one.
 * ``schema`` -- the table of defaults its readers fall back to, or None for a
   surface whose keys the app does not describe. A surface that has one is
   read through a ``SchemaView`` (below): defaults applied at read, unknown
@@ -149,6 +156,16 @@ class SurfaceSpec:
     cached: bool = False
     #: Whether ``path_fn`` takes a key.
     keyed: bool = False
+    #: Hand every reader the cached object itself rather than a copy (see the
+    #: module docstring). Requires ``cached``.
+    shared: bool = False
+
+    def __post_init__(self) -> None:
+        # Fails at import, where the spec is written, rather than at the first
+        # read: an uncached surface has nothing to share, so asking for it is a
+        # mistake about what the surface is, not a runtime condition.
+        if self.shared and not self.cached:
+            raise ValueError(f"the {self.name} surface is shared but not cached: there is nothing to share")
 
     def path(self, key: str | None = None) -> str:
         """This surface's file, for ``key`` where it has one.
@@ -259,6 +276,106 @@ ASSET_LIBRARY = SurfaceSpec(
 )
 
 
+# Every app-settings default, defined exactly once. Callers read through
+# AppSettings instead of repeating `.get(section, {}).get(key, default)`.
+APP_DEFAULTS: dict[str, dict] = {
+    "general": {
+        "hold-time": 0.5,
+        "rolling-labels": True,
+        "app-launches": 0,
+        "show-donate-window": True,
+        "default-font": {},
+    },
+    "ui": {
+        "tray-icon": True,
+        "allow-white-mode": False,
+        "show-notifications": True,
+        "auto-open-action-config": True,
+    },
+    "key-grid": {
+        "emulate-at-double-click": True,
+    },
+    "warnings": {
+        "enable-fps-warnings": True,
+    },
+    "system": {
+        # Tri-state: None means "never asked", which is what makes
+        # mainWindow.on_close raise the KeepRunningDialog.
+        "keep-running": None,
+        "autostart": True,
+        "lock-on-lock-screen": True,
+    },
+    "performance": {
+        "n-cached-pages": 3,
+        "cache-videos": True,
+        # Quiescence gating. "screensaver" is today's behavior
+        # exactly (the deck screensaver's own transition already releases the
+        # underlying page's media, so nothing extra engages); "system-idle"
+        # also pauses deck animations while the session is idle or locked.
+        "animation-pause-mode": "screensaver",
+        "animation-idle-minutes": 5,
+    },
+    "store": {
+        "auto-update": True,
+        "responsibility-notes-agreed": False,
+        "enable-custom-stores": False,
+        "enable-custom-plugins": False,
+        "custom-stores": [],
+        "custom-plugins": [],
+    },
+    "dev": {
+        "n-fake-decks": 0,
+        "n-remote-decks": 0,
+    },
+}
+
+
+def _fallback_font() -> str:
+    # Resolved lazily: gl.fallback_font runs a system font scan on first
+    # access (globals.py __getattr__), so it must not be evaluated while
+    # this module is being imported.
+    return gl.fallback_font
+
+
+# general.default-font subkeys. Deliberately NOT the schema of a section:
+# these use `or` fallback semantics (a stored value that is falsy falls back
+# too, because an empty family or a zero size is a half-written font, not a
+# choice), and one of them is resolved by calling it. A schema answers "this
+# key is absent"; this table answers "there is no usable value here", and
+# folding the second into the first would either start honouring a zero size
+# or give every schema in the app a second meaning. It lives next to
+# APP_DEFAULTS because it describes the same file, and it is read only through
+# ``AppSettings.font_default``.
+APP_FONT_DEFAULTS: dict = {
+    "font-family": _fallback_font,
+    "font-size": 15,
+    "font-weight": 400,
+    "font-style": "normal",
+    "font-color": (255, 255, 255, 255),
+    # 255, not 1: this feeds color_values_to_gdk (0-255 on all four channels)
+    # and the render fallback is (0,0,0,255) -- the old value 1 only looked
+    # opaque because an earlier clamp rounded any alpha >=1 up.
+    "outline-color": (0, 0, 0, 255),
+    "outline-width": 2,
+}
+
+#: The app's own settings. Shared rather than copied per read: its holders
+#: were written around one process-wide dict -- the settings dialog's rows,
+#: the store pages and the launch counter all read it, write into it and save
+#: it back -- and splitting that into a copy per reader would lose whichever
+#: write was not the last one saved. The one caller that must NOT join it is
+#: the settings dialog's construction snapshot, which reads through
+#: ``read_fresh`` for exactly that reason.
+APP = SurfaceSpec(
+    name="app settings",
+    path_fn=lambda: os.path.join(gl.DATA_PATH, "settings", "settings.json"),
+    root=dict,
+    schema=APP_DEFAULTS,
+    cached=True,
+    shared=True,
+)
+
+
 def _copied(value: Any) -> Any:
     """A value safe to hand out: containers are copied, scalars are not.
 
@@ -281,11 +398,29 @@ class SchemaView:
 
     A view is the unit of "one read": build it once at the top of a load path
     and destructure it, rather than asking the store per key.
+
+    WHAT A READ HANDS BACK
+
+    A stored value is handed back as a COPY here, matching the surfaces whose
+    store reads are copies: the caller mutates what it got and saves it back,
+    and two callers must not be able to reach each other's half-made edits.
+    An ALIASING view (``shared=True``) hands the stored value back by
+    reference instead, because the surface it reads is one object every holder
+    writes into -- see ``AppSettings``. The sharing has to hold at every level
+    or it is not sharing: a view that handed out the top dict by reference and
+    a list inside it by copy would accept ``view.custom_stores.append(x)``
+    followed by a save and persist nothing.
+
+    A DEFAULT is copied either way. There is nothing stored to alias, and
+    handing out the schema's own container is how one holder mutating what it
+    read poisons every later reader of that key.
     """
 
-    def __init__(self, data: dict, schema: Mapping[str, Any]):
+    def __init__(self, data: dict, schema: Mapping[str, Any], shared: bool = False):
         self.data: dict = data
         self.schema: Mapping[str, Any] = schema
+        #: Hand stored values back by reference rather than as copies.
+        self.shared: bool = shared
 
     # -- reads --------------------------------------------------------- #
 
@@ -298,21 +433,23 @@ class SchemaView:
         """
         if key is None:
             default = self._top_level(name)
-            return _copied(self.data[name]) if name in self.data else _copied(default)
+            return self._stored_value(self.data[name]) if name in self.data else _copied(default)
         defaults = self._section_defaults(name)
         if key not in defaults:
             raise KeyError(f"{name}.{key} is not in this schema")
         stored = self._stored_section(name)
-        return _copied(stored[key]) if key in stored else _copied(defaults[key])
+        return self._stored_value(stored[key]) if key in stored else _copied(defaults[key])
 
     def section(self, name: str) -> dict[str, Any]:
         """Section ``name`` with every absent key filled from the schema.
 
-        The shape a load path destructures. A copy, and deliberately so:
-        mutating it reaches neither the schema nor the stored settings, and
-        saving it back would persist exactly the defaults it just filled in.
-        Keys stored but not described are kept -- this fills gaps, it does not
-        prune a file it did not write.
+        The shape a load path destructures. A copy, and deliberately so --
+        on an aliasing view as much as a copying one, because this is the
+        destructuring shape and not a handle on the settings: mutating it
+        reaches neither the schema nor the stored settings, and saving it back
+        would persist exactly the defaults it just filled in. Keys stored but
+        not described are kept -- this fills gaps, it does not prune a file it
+        did not write.
         """
         merged = {k: _copied(v) for k, v in self._section_defaults(name).items()}
         merged.update(copy.deepcopy(dict(self._stored_section(name))))
@@ -340,6 +477,11 @@ class SchemaView:
         self.data[name] = value
 
     # -- internals ----------------------------------------------------- #
+
+    def _stored_value(self, value: Any) -> Any:
+        """A stored value on its way out: by reference on an aliasing view, as
+        a copy on a copying one (see the class docstring)."""
+        return value if self.shared else _copied(value)
 
     def _section_defaults(self, name: str) -> Mapping[str, Any]:
         try:
@@ -372,6 +514,11 @@ class DeckSettings(SchemaView):
     Built by the settings-manager facade: ``deck(serial)`` reads the file and
     can save back to it, ``deck_view(settings)`` wraps settings a caller
     already has and cannot.
+
+    A COPYING view: the deck surface hands out a deep copy per store read, so
+    the dict underneath this one is already the caller's alone, and what this
+    hands back out of it is copied for the same reason -- one caller's edits
+    are its own until it saves them.
     """
 
     def __init__(self, data: dict, serial: str | None = None):
@@ -387,6 +534,258 @@ class DeckSettings(SchemaView):
                 "this deck-settings view wraps a dict, not a deck: it has no file to save to"
             )
         get().write(DECK, self.data, self.serial)
+
+
+class AppSettings(SchemaView):
+    """The app's own settings, read through ``APP_DEFAULTS``.
+
+    Wraps *any* app-settings mapping and copies nothing: the shared dict the
+    settings manager hands out, or the settings dialog's private snapshot.
+    Which one it wraps decides who sees a write before it is saved, and that
+    is the caller's decision to make, not this class's.
+
+    An ALIASING view, always -- a stored list or dict comes back by reference,
+    so ``settings.custom_stores.append(entry)`` followed by a save persists
+    the entry, and the font-defaults dict the label engine holds is the one
+    inside the settings rather than a snapshot of it. Copying there would
+    accept both and silently keep neither. Absent keys still read as copies of
+    the table's defaults: there is nothing stored to alias, and the table must
+    survive the first holder that mutates what it read.
+
+    Named accessors rather than raw keys, one per setting, because the same
+    key used to carry a different inline default in every module that read it.
+    """
+
+    def __init__(self, data: dict):
+        super().__init__(data, APP_DEFAULTS, shared=True)
+
+    def save(self) -> None:
+        """Persist the whole wrapped dict, atomically, dropping the shared
+        copy so the next reader loads what was just written."""
+        get().write(APP, self.data)
+
+    # -- general -------------------------------------------------------
+    @property
+    def hold_time(self) -> float:
+        return self.get("general", "hold-time")
+
+    @hold_time.setter
+    def hold_time(self, value: float) -> None:
+        self.set("general", "hold-time", value)
+
+    @property
+    def rolling_labels(self) -> bool:
+        return self.get("general", "rolling-labels")
+
+    @rolling_labels.setter
+    def rolling_labels(self, value: bool) -> None:
+        self.set("general", "rolling-labels", value)
+
+    @property
+    def app_launches(self) -> int:
+        return self.get("general", "app-launches")
+
+    @app_launches.setter
+    def app_launches(self, value: int) -> None:
+        self.set("general", "app-launches", value)
+
+    @property
+    def show_donate_window(self) -> bool:
+        return self.get("general", "show-donate-window")
+
+    @show_donate_window.setter
+    def show_donate_window(self, value: bool) -> None:
+        self.set("general", "show-donate-window", value)
+
+    @property
+    def default_font(self) -> dict:
+        return self.get("general", "default-font")
+
+    @default_font.setter
+    def default_font(self, value: dict) -> None:
+        self.set("general", "default-font", value)
+
+    def font_default(self, key: str) -> Any:
+        """A general.default-font subkey, with its `or` fallback applied."""
+        default = APP_FONT_DEFAULTS[key]
+        if callable(default):
+            default = default()
+        return self.default_font.get(key) or default
+
+    # -- ui ------------------------------------------------------------
+    @property
+    def tray_icon(self) -> bool:
+        return self.get("ui", "tray-icon")
+
+    @tray_icon.setter
+    def tray_icon(self, value: bool) -> None:
+        self.set("ui", "tray-icon", value)
+
+    @property
+    def allow_white_mode(self) -> bool:
+        return self.get("ui", "allow-white-mode")
+
+    @allow_white_mode.setter
+    def allow_white_mode(self, value: bool) -> None:
+        self.set("ui", "allow-white-mode", value)
+
+    @property
+    def show_notifications(self) -> bool:
+        return self.get("ui", "show-notifications")
+
+    @show_notifications.setter
+    def show_notifications(self, value: bool) -> None:
+        self.set("ui", "show-notifications", value)
+
+    @property
+    def auto_open_action_config(self) -> bool:
+        return self.get("ui", "auto-open-action-config")
+
+    @auto_open_action_config.setter
+    def auto_open_action_config(self, value: bool) -> None:
+        self.set("ui", "auto-open-action-config", value)
+
+    # -- key-grid ------------------------------------------------------
+    @property
+    def emulate_at_double_click(self) -> bool:
+        return self.get("key-grid", "emulate-at-double-click")
+
+    @emulate_at_double_click.setter
+    def emulate_at_double_click(self, value: bool) -> None:
+        self.set("key-grid", "emulate-at-double-click", value)
+
+    # -- warnings ------------------------------------------------------
+    @property
+    def enable_fps_warnings(self) -> bool:
+        return self.get("warnings", "enable-fps-warnings")
+
+    @enable_fps_warnings.setter
+    def enable_fps_warnings(self, value: bool) -> None:
+        self.set("warnings", "enable-fps-warnings", value)
+
+    # -- system --------------------------------------------------------
+    @property
+    def keep_running(self) -> bool | None:
+        return self.get("system", "keep-running")
+
+    @keep_running.setter
+    def keep_running(self, value: bool | None) -> None:
+        self.set("system", "keep-running", value)
+
+    @property
+    def autostart(self) -> bool:
+        return self.get("system", "autostart")
+
+    @autostart.setter
+    def autostart(self, value: bool) -> None:
+        self.set("system", "autostart", value)
+
+    @property
+    def lock_on_lock_screen(self) -> bool:
+        return self.get("system", "lock-on-lock-screen")
+
+    @lock_on_lock_screen.setter
+    def lock_on_lock_screen(self, value: bool) -> None:
+        self.set("system", "lock-on-lock-screen", value)
+
+    # -- performance ---------------------------------------------------
+    @property
+    def n_cached_pages(self) -> int:
+        return self.get("performance", "n-cached-pages")
+
+    @n_cached_pages.setter
+    def n_cached_pages(self, value: int) -> None:
+        self.set("performance", "n-cached-pages", value)
+
+    @property
+    def cache_videos(self) -> bool:
+        return self.get("performance", "cache-videos")
+
+    @cache_videos.setter
+    def cache_videos(self, value: bool) -> None:
+        self.set("performance", "cache-videos", value)
+
+    @property
+    def animation_pause_mode(self) -> str:
+        return self.get("performance", "animation-pause-mode")
+
+    @animation_pause_mode.setter
+    def animation_pause_mode(self, value: str) -> None:
+        self.set("performance", "animation-pause-mode", value)
+
+    @property
+    def animation_idle_minutes(self) -> int:
+        return self.get("performance", "animation-idle-minutes")
+
+    @animation_idle_minutes.setter
+    def animation_idle_minutes(self, value: int) -> None:
+        self.set("performance", "animation-idle-minutes", value)
+
+    # -- store ---------------------------------------------------------
+    @property
+    def auto_update(self) -> bool:
+        return self.get("store", "auto-update")
+
+    @auto_update.setter
+    def auto_update(self, value: bool) -> None:
+        self.set("store", "auto-update", value)
+
+    @property
+    def responsibility_notes_agreed(self) -> bool:
+        return self.get("store", "responsibility-notes-agreed")
+
+    @responsibility_notes_agreed.setter
+    def responsibility_notes_agreed(self, value: bool) -> None:
+        self.set("store", "responsibility-notes-agreed", value)
+
+    @property
+    def enable_custom_stores(self) -> bool:
+        return self.get("store", "enable-custom-stores")
+
+    @enable_custom_stores.setter
+    def enable_custom_stores(self, value: bool) -> None:
+        self.set("store", "enable-custom-stores", value)
+
+    @property
+    def enable_custom_plugins(self) -> bool:
+        return self.get("store", "enable-custom-plugins")
+
+    @enable_custom_plugins.setter
+    def enable_custom_plugins(self, value: bool) -> None:
+        self.set("store", "enable-custom-plugins", value)
+
+    @property
+    def custom_stores(self) -> list:
+        return self.get("store", "custom-stores")
+
+    @custom_stores.setter
+    def custom_stores(self, value: list) -> None:
+        self.set("store", "custom-stores", value)
+
+    @property
+    def custom_plugins(self) -> list:
+        return self.get("store", "custom-plugins")
+
+    @custom_plugins.setter
+    def custom_plugins(self, value: list) -> None:
+        self.set("store", "custom-plugins", value)
+
+    # -- dev -----------------------------------------------------------
+    @property
+    def n_fake_decks(self) -> int:
+        return self.get("dev", "n-fake-decks")
+
+    @n_fake_decks.setter
+    def n_fake_decks(self, value: int) -> None:
+        self.set("dev", "n-fake-decks", value)
+
+    @property
+    def n_remote_decks(self) -> int:
+        return self.get("dev", "n-remote-decks")
+
+    @n_remote_decks.setter
+    def n_remote_decks(self, value: int) -> None:
+        self.set("dev", "n-remote-decks", value)
 
 
 class SettingsStore:
@@ -411,6 +810,28 @@ class SettingsStore:
         # again". Bounded like the edit locks: one entry per settings file
         # ever WRITTEN through the store.
         self._invalidations: dict[str, int] = {}
+        # Raw path -> the resolved path it is cached under, for reads served
+        # from memory. Resolving is an lstat walk of every component, and
+        # paying it per read puts a syscall chain in front of what is
+        # otherwise a dict lookup -- the app settings are read from the label
+        # engine and the media caches, not once per load, and measured 30x the
+        # cost of the plain shared dict they replaced.
+        #
+        # What remembering it costs, exactly: symlink retargeting moves from
+        # the set of outside changes the store followed correctly into the set
+        # it is blind to until the next write -- joining outside rewrites of
+        # the file, which the content cache never followed. Resolving per read
+        # meant a repointed link changed the cache key, so the very next read
+        # missed and parsed the new target; now the old target's content is
+        # served until something resolves again.
+        #
+        # Every write, edit and invalidation still resolves for real -- nothing
+        # is ever written, locked or invalidated under a remembered name -- and
+        # any write through the store drops the whole memo, so the blindness
+        # self-heals at the next write. The shape to have in mind is a managed
+        # config tree (stow, chezmoi) re-linking these files while the app is
+        # running.
+        self._resolved: dict[str, str] = {}
         self._cache_lock = threading.Lock()
         # Resolved path -> the lock edit() serializes on. Created on demand and
         # kept, because a settings file is edited again and the map is bounded
@@ -425,7 +846,9 @@ class SettingsStore:
 
         A cached surface answers from memory with a deep copy, so mutating the
         result reaches nothing else and is not persisted -- pair it with
-        ``write`` exactly as an uncached read must be.
+        ``write`` exactly as an uncached read must be. A SHARED surface is the
+        exception, and answers with the one object every other reader of it
+        holds; mutating that one is seen by all of them, still unpersisted.
         """
         data, _corrupt = self.read_reporting_corruption(spec, key)
         return data
@@ -449,10 +872,10 @@ class SettingsStore:
         if not spec.cached:
             return self.load_file(path, root=spec.root)
 
-        resolved = _resolve(path)
+        resolved = self._resolve_for_read(path)
         with self._cache_lock:
             if resolved in self._cache:
-                return copy.deepcopy(self._cache[resolved]), False
+                return self._handout(spec, self._cache[resolved]), False
             # The invalidation count as of the miss. Recorded under the same
             # lock the miss was decided under, so a write that lands from here
             # on is guaranteed to move it.
@@ -464,14 +887,35 @@ class SettingsStore:
 
         with self._cache_lock:
             if self._invalidations.get(resolved, 0) == generation:
-                self._cache[resolved] = data
+                # setdefault, not assignment: two readers can miss the same
+                # cold surface at once, and the one that finishes second must
+                # adopt the entry the first left rather than replace it. The
+                # two parsed the same bytes -- an intervening write would have
+                # moved the count -- so for a copying surface this is a
+                # formality, but for a SHARED one it is what makes "every
+                # reader holds the same object" true rather than usually true.
+                data = self._cache.setdefault(resolved, data)
             # Otherwise a write landed while this read was in the file: what
             # was just parsed is the content from BEFORE that write, and
             # caching it would leave every later reader on the old settings
             # with nothing to correct it. Dropped instead -- this caller still
             # gets the content it read, which is a read that happened before
             # the write, and the next reader loads afresh.
-        return copy.deepcopy(data), corrupt
+        return self._handout(spec, data), corrupt
+
+    def read_fresh(self, spec: SurfaceSpec, key: str | None = None) -> Any:
+        """This surface as it is ON DISK right now, as a copy of its own.
+
+        For the caller shape a cache cannot serve: an editor that takes a
+        snapshot, changes several things against it, and writes the whole
+        snapshot back when it is done. It must not join a shared surface --
+        its half-finished edits would read as settled to everyone else -- and
+        it must not be served a cache entry, because what it eventually writes
+        has to be what it was shown. Corruption heals exactly as in any other
+        read; a cached surface's entry is neither read nor filled.
+        """
+        data, _corrupt = self.load_file(spec.path(key), root=spec.root)
+        return data
 
     def write(self, spec: SurfaceSpec, data: Any, key: str | None = None) -> None:
         """Persist this surface atomically and drop its cached entry."""
@@ -566,6 +1010,10 @@ class SettingsStore:
         resolved = _resolve(file_path)
         with self._cache_lock:
             self._cache.pop(resolved, None)
+            # Resolutions are remembered for the read fast path only, and only
+            # between writes: a link that has moved is followed again from
+            # here on, and the entry it used to point at is already gone.
+            self._resolved.clear()
             # Counted even when nothing was cached: a reader may be between
             # its miss and its store right now, holding content this write has
             # just superseded, and dropping an entry that does not exist yet
@@ -573,6 +1021,27 @@ class SettingsStore:
             self._invalidations[resolved] = self._invalidations.get(resolved, 0) + 1
 
     # -- internals ----------------------------------------------------- #
+
+    def _resolve_for_read(self, file_path: str) -> str:
+        """The cache key for a read, remembered per raw path (see ``_resolved``).
+
+        Deliberately outside the cache lock and deliberately not guarded by
+        one of its own: two readers racing here compute the same answer, and
+        one of them writing it twice costs a dict store. Only reads come
+        through this -- writes, edits and invalidations resolve for real.
+        """
+        try:
+            return self._resolved[file_path]
+        except KeyError:
+            resolved = _resolve(file_path)
+            self._resolved[file_path] = resolved
+            return resolved
+
+    @staticmethod
+    def _handout(spec: SurfaceSpec, data: Any) -> Any:
+        """What a reader of a cached surface receives: the cached object
+        itself for a shared surface, a deep copy of it for every other."""
+        return data if spec.shared else copy.deepcopy(data)
 
     def _edit_lock(self, file_path: str) -> threading.Lock:
         resolved = _resolve(file_path)
