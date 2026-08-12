@@ -137,28 +137,20 @@ class BackgroundMediaRow(Adw.PreferencesRow):
             self.on_map_tasks.append(lambda: self.load_defaults())
             return
         self.disconnect_signals()
-        original_values = gl.settings_manager.get_deck_settings(self.deck_serial_number)
-
-        # Set defaut values
-        original_values.setdefault("background", {})
-        path = original_values["background"].setdefault("media-path", "")
-        enable = original_values["background"].setdefault("enable", False)
-        loop = original_values["background"].setdefault("loop", True)
-        fps = original_values["background"].setdefault("fps", 30)
-        extend_touchscreen = original_values["background"].setdefault("extend-to-touchscreen", False)
-
-        # Save if changed
-        if original_values != gl.settings_manager.get_deck_settings(self.deck_serial_number):
-            gl.settings_manager.save_deck_settings(self.deck_serial_number, original_values)
+        # One read, and read-only: the missing keys show the deck-settings
+        # schema's defaults without being written into the file. Persisting
+        # them here is what made a deck background loop or not depending on
+        # whether anyone had ever opened this page.
+        config = gl.settings_manager.deck(self.deck_serial_number).section("background")
 
         # Update ui
-        self.enable_switch.set_active(enable)
-        self.config_box.set_visible(enable)
-        self.loop_switch.set_active(loop)
-        self.fps_spinner.set_value(fps)
-        self.extend_touchscreen_switch.set_active(extend_touchscreen)
+        self.enable_switch.set_active(config["enable"])
+        self.config_box.set_visible(config["enable"])
+        self.loop_switch.set_active(config["loop"])
+        self.fps_spinner.set_value(config["fps"])
+        self.extend_touchscreen_switch.set_active(config["extend-to-touchscreen"])
         self.extend_touchscreen_box.set_visible(self.settings_page.deck_controller.deck.is_touch())
-        self.set_thumbnail(path)
+        self.set_thumbnail(config["media-path"])
 
         self.connect_signals()
 
@@ -193,58 +185,55 @@ class BackgroundMediaRow(Adw.PreferencesRow):
         self.set_thumbnail(file_path)
 
     def on_toggle_enable(self, toggle_switch, state):
-        config = gl.settings_manager.get_deck_settings(self.deck_serial_number)
-        config["background"]["enable"] = state
+        config = gl.settings_manager.deck(self.deck_serial_number)
+        config.set("background", "enable", state)
         # Save
-        gl.settings_manager.save_deck_settings(self.deck_serial_number, config)
+        config.save()
         # Update
         self.config_box.set_visible(state)
         # Update
         self.settings_page.deck_controller.load_background(page=self.settings_page.deck_controller.active_page)
 
     def on_toggle_loop(self, toggle_switch, state):
-        settings = gl.settings_manager.get_deck_settings(self.deck_serial_number)
-        settings["background"]["loop"] = state
+        settings = gl.settings_manager.deck(self.deck_serial_number)
+        settings.set("background", "loop", state)
 
         # Save
-        gl.settings_manager.save_deck_settings(self.deck_serial_number, settings)
+        settings.save()
 
         # Update
         self.settings_page.deck_controller.load_background(page=self.settings_page.deck_controller.active_page)
 
     def on_toggle_extend_touchscreen(self, toggle_switch, state):
-        settings = gl.settings_manager.get_deck_settings(self.deck_serial_number)
-        settings["background"]["extend-to-touchscreen"] = state
+        settings = gl.settings_manager.deck(self.deck_serial_number)
+        settings.set("background", "extend-to-touchscreen", state)
 
         # Save
-        gl.settings_manager.save_deck_settings(self.deck_serial_number, settings)
+        settings.save()
 
         # Update
         self.settings_page.deck_controller.load_background(page=self.settings_page.deck_controller.active_page)
 
     def on_change_fps(self, spinner):
-        settings = gl.settings_manager.get_deck_settings(self.deck_serial_number)
-        settings["background"]["fps"] = spinner.get_value_as_int()
+        settings = gl.settings_manager.deck(self.deck_serial_number)
+        settings.set("background", "fps", spinner.get_value_as_int())
 
         # Save
-        gl.settings_manager.save_deck_settings(self.deck_serial_number, settings)
+        settings.save()
 
         # Update
         self.settings_page.deck_controller.load_background(page=self.settings_page.deck_controller.active_page)
 
     def on_choose_image(self, button):
-        settings = gl.settings_manager.get_deck_settings(self.deck_serial_number)
-        settings.setdefault("background", {})
-        media_path = settings["background"].setdefault("media-path", None)
+        media_path = gl.settings_manager.deck(self.deck_serial_number).get("background", "media-path")
 
         gl.app.let_user_select_asset(default_path=media_path, callback_func=self.update_image)
 
     def update_image(self, file_path):
         self.set_thumbnail(file_path)   
-        settings = gl.settings_manager.get_deck_settings(self.deck_serial_number)
-        settings.setdefault("background", {})
-        settings["background"]["media-path"] = file_path
-        gl.settings_manager.save_deck_settings(self.deck_serial_number, settings)
+        settings = gl.settings_manager.deck(self.deck_serial_number)
+        settings.set("background", "media-path", file_path)
+        settings.save()
 
         controller = self.settings_page.deck_controller
         controller.load_background(page=controller.active_page)

@@ -9,6 +9,28 @@ bundle as a release asset.
 
 ### Fixed
 
+- Screensaver and brightness settings now show the values the deck actually
+  uses. A page's screensaver brightness slider read 75 for a screensaver that
+  had never been given one, while the deck dimmed to 30; a deck's own settings
+  page offered 50 as the brightness for a deck that was running at 75. Decks
+  that already have these values chosen keep them exactly as they are.
+- Opening a deck's settings no longer changes or rewrites its configuration.
+  The page used to fill in every setting the deck had never been given and
+  save the result — which, for brightness, also dimmed the deck on the spot,
+  and froze that day's defaults into the deck's configuration so that later
+  improvements to them never reached it.
+- Deck-level background media without an explicit loop setting now loops,
+  instead of playing once and holding its last frame for as long as the page
+  is up. Page-level background media is unchanged: it still plays once by
+  default.
+- A deck plugged in while the session is locked now shows the screensaver it
+  is configured with, at the brightness it is configured with, instead of a
+  blank panel at a brightness nothing had chosen.
+- Opening the settings of a deck that has been rotated no longer re-saves and
+  re-applies that rotation, with the full page reload that comes with it.
+- Selecting pages in the page manager no longer makes the page editor's
+  screensaver brightness slider write its own displayed value back to each
+  page it visits, and reapply it to the deck.
 - A deck plugged in after Deckard has started now appears on the D-Bus
   interface, and a deck that is unplugged disappears from it. Only the decks
   present at launch were ever published, so scripts driving Deckard over

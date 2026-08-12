@@ -29,11 +29,28 @@ A ``SurfaceSpec`` says four things about one file, and nothing else knows them:
   out a deep copy per read, so a caller may mutate what it got without
   reaching anything else, and its entry is dropped the moment the store writes
   that path.
-* ``schema`` -- the table of defaults its readers fall back to. Reserved: no
-  surface registered here carries one yet, and nothing in this module reads
-  the field. A surface that gains one gains defaults applied at read and
-  unknown keys refused at write, which is a decision per surface rather than
-  one this module makes for all of them.
+* ``schema`` -- the table of defaults its readers fall back to, or None for a
+  surface whose keys the app does not describe. A surface that has one is
+  read through a ``SchemaView`` (below): defaults applied at read, unknown
+  keys refused at write. Whether to describe a surface is a decision per
+  surface rather than one this module makes for all of them.
+
+DEFAULTS ARE APPLIED AT READ, AND STORAGE STAYS SPARSE
+
+A settings file holds only what was actually chosen. Everything else comes
+from the surface's schema, at the moment it is read, and is never written
+back. That is the whole difference between a default and a value: filling a
+missing key on a load path -- ``setdefault`` and save, the shape this replaced
+-- persists it, so the first person to open a settings page freezes today's
+default into their config and the day the default changes they are the only
+ones who do not get it. It also means a load path that writes, which is how a
+settings pane came to dim a deck to a number nobody chose.
+
+So ``read`` hands back exactly what is on disk (its callers mutate it and save
+it back; materializing defaults into that dict would persist the whole table
+on the next save), and a ``SchemaView`` applies the defaults on the way out.
+A view is built from ONE read and destructured from there: asking the store
+per key pays for a read per key.
 
 CORRUPT IS NOT FATAL, AND CORRUPT IS NOT DISCARDED
 
@@ -89,7 +106,7 @@ import os
 import threading
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from loguru import logger as log
@@ -122,8 +139,12 @@ class SurfaceSpec:
     #: for an array-rooted one. Missing and corrupt both read as ``root()``.
     root: type[dict[str, Any]] | type[list[Any]] = dict
     #: Defaults table, or None for a surface whose keys the app does not
-    #: describe. Nothing here reads it yet (see the module docstring).
-    schema: Mapping[str, Any] | None = None
+    #: describe. Read through a ``SchemaView``, never merged into the stored
+    #: content (see the module docstring). Out of the hash (a table is a
+    #: mapping, and a mapping is unhashable) but still part of equality: two
+    #: specs describing the same file under different schemas are different
+    #: specs, and a spec must stay usable as a dict key.
+    schema: Mapping[str, Any] | None = field(default=None, hash=False)
     #: Serve reads from memory, deep-copied per call, dropped on write.
     cached: bool = False
     #: Whether ``path_fn`` takes a key.
@@ -149,6 +170,71 @@ class SurfaceSpec:
 # The registered surfaces                                               #
 # --------------------------------------------------------------------- #
 
+# Every deck-settings default, defined exactly once. Each of these used to be
+# an inline literal at the four or five places that read the key, and they had
+# drifted: the device dimmed an idle deck to one number while the page editor
+# showed another, and the settings pane wrote a third into the file the first
+# time it was opened.
+#
+# A name here maps either to a SECTION (its own table of keys) or to a
+# top-level setting stored as a bare value.
+DECK_DEFAULTS: dict[str, Any] = {
+    "brightness": {
+        # What the deck runs at when nothing has chosen a brightness. The
+        # device layer and the page-level brightness UI have always used 75;
+        # the deck settings pane said 50 and applied it on open, which is the
+        # one surface that had to move.
+        "value": 75,
+    },
+    "screensaver": {
+        "enable": False,
+        "media-path": None,
+        # Loop ON. A screensaver video or GIF whose config predates the loop
+        # toggle otherwise plays exactly one pass and then holds its last
+        # frame on the device for the whole idle window -- a frozen deck,
+        # never what "screensaver" means. True is also what every media layer
+        # already defaults to (ScreenSaver.loop, Background.set_from_path /
+        # prebuild_from_path, BackgroundVideo/GifBackground), so the toggle
+        # can no longer show OFF while the media loops.
+        "loop": True,
+        "fps": 30,
+        # Minutes of no input before it shows.
+        "time-delay": 5,
+        # 30, not the 75 the running brightness defaults to: a screensaver
+        # that "dims" to the normal brightness is no screensaver. 30 is also
+        # what the device has actually applied to every config without the
+        # key, so this is the number those decks were already using -- the
+        # page editor was the surface displaying a value the deck ignored.
+        "brightness": 30,
+    },
+    "background": {
+        "enable": False,
+        "media-path": None,
+        # Loop ON, for the screensaver's reason: a deck-level background is
+        # the "leave it running" case, and a config predating the toggle would
+        # otherwise freeze on its last frame. A PAGE-level background keeps
+        # its own literal False where the page arm reads it -- a one-shot
+        # flourish on page entry is a real use there, and this table describes
+        # the deck.
+        "loop": True,
+        "fps": 30,
+        "extend-to-touchscreen": False,
+    },
+    "display": {
+        # A strict no-op factor: every application site compares against it
+        # before doing any enhancement work. The clamp and the non-finite
+        # rejection stay with the reader that feeds an ImageEnhance factor and
+        # a cache key -- a defaults table describes absence, not validity.
+        "saturation": 1.0,
+    },
+    # Degrees. Stored as a bare int rather than a section, which is why it is
+    # read and written without a key.
+    "rotation": 0,
+    # Deliberately absent: "key-layout". A fake deck's layout is decided by
+    # whoever constructs the deck and passed in as that caller's own fallback,
+    # so there is no one shape this table could name for it.
+}
+
 #: Per-deck settings, one file per serial. Cached because the render path
 #: reads them repeatedly and the read is a JSON parse; deep-copied per read
 #: because most callers mutate what they get and save it back.
@@ -156,6 +242,7 @@ DECK = SurfaceSpec(
     name="deck settings",
     path_fn=lambda serial: os.path.join(gl.DATA_PATH, "settings", "decks", f"{serial}.json"),
     root=dict,
+    schema=DECK_DEFAULTS,
     cached=True,
     keyed=True,
 )
@@ -170,6 +257,136 @@ ASSET_LIBRARY = SurfaceSpec(
     path_fn=lambda: os.path.join(gl.DATA_PATH, "Assets", "AssetManager", "Assets.json"),
     root=list,
 )
+
+
+def _copied(value: Any) -> Any:
+    """A value safe to hand out: containers are copied, scalars are not.
+
+    Nothing may ever receive the schema's own container -- ``font_defaults``
+    is mutated in place by its holder, and one shared default would poison
+    every later read of it.
+    """
+    return copy.deepcopy(value) if isinstance(value, (dict, list)) else value
+
+
+class SchemaView:
+    """A settings dict read through its schema.
+
+    Wraps a mapping somebody already read -- it copies nothing, so a writer
+    that still holds the same dict stays valid. Absent keys read as the
+    schema's default; reading never fills one in, because a filled key is a
+    persisted key the next save would write (see the module docstring).
+    Writing a key the schema does not describe raises, because a misspelled
+    one would otherwise be written silently and never read back.
+
+    A view is the unit of "one read": build it once at the top of a load path
+    and destructure it, rather than asking the store per key.
+    """
+
+    def __init__(self, data: dict, schema: Mapping[str, Any]):
+        self.data: dict = data
+        self.schema: Mapping[str, Any] = schema
+
+    # -- reads --------------------------------------------------------- #
+
+    def get(self, name: str, key: str | None = None) -> Any:
+        """One setting: what is stored, or the schema's default for it.
+
+        ``key`` names a setting inside the section ``name``; omit it for a
+        top-level one. A name the schema does not describe raises here rather
+        than reading as None for the rest of the program's life.
+        """
+        if key is None:
+            default = self._top_level(name)
+            return _copied(self.data[name]) if name in self.data else _copied(default)
+        defaults = self._section_defaults(name)
+        if key not in defaults:
+            raise KeyError(f"{name}.{key} is not in this schema")
+        stored = self._stored_section(name)
+        return _copied(stored[key]) if key in stored else _copied(defaults[key])
+
+    def section(self, name: str) -> dict[str, Any]:
+        """Section ``name`` with every absent key filled from the schema.
+
+        The shape a load path destructures. A copy, and deliberately so:
+        mutating it reaches neither the schema nor the stored settings, and
+        saving it back would persist exactly the defaults it just filled in.
+        Keys stored but not described are kept -- this fills gaps, it does not
+        prune a file it did not write.
+        """
+        merged = {k: _copied(v) for k, v in self._section_defaults(name).items()}
+        merged.update(copy.deepcopy(dict(self._stored_section(name))))
+        return merged
+
+    # -- writes -------------------------------------------------------- #
+
+    def set(self, name: str, key: str, value: Any) -> None:
+        """Store one setting inside section ``name``. Sparse: nothing else is
+        written, so every key still absent keeps following the schema."""
+        if key not in self._section_defaults(name):
+            raise KeyError(f"{name}.{key} is not in this schema")
+        section = self.data.get(name)
+        if not isinstance(section, dict):
+            # Absent, or a scalar left by a hand edit: either way there is no
+            # section to add to, and the value being written is the one the
+            # caller has now chosen.
+            section = {}
+            self.data[name] = section
+        section[key] = value
+
+    def set_value(self, name: str, value: Any) -> None:
+        """Store one top-level setting -- the ones held as a bare value."""
+        self._top_level(name)
+        self.data[name] = value
+
+    # -- internals ----------------------------------------------------- #
+
+    def _section_defaults(self, name: str) -> Mapping[str, Any]:
+        try:
+            section = self.schema[name]
+        except KeyError:
+            raise KeyError(f"{name} is not in this schema") from None
+        if not isinstance(section, Mapping):
+            raise KeyError(f"{name} is a top-level setting in this schema, not a section")
+        return section
+
+    def _top_level(self, name: str) -> Any:
+        try:
+            default = self.schema[name]
+        except KeyError:
+            raise KeyError(f"{name} is not in this schema") from None
+        if isinstance(default, Mapping):
+            raise KeyError(f"{name} is a section in this schema: name a key inside it")
+        return default
+
+    def _stored_section(self, name: str) -> Mapping[str, Any]:
+        stored = self.data.get(name)
+        # A hand-edited or half-written file can leave a scalar where a
+        # section belongs. The schema's answer is the right one then.
+        return stored if isinstance(stored, Mapping) else {}
+
+
+class DeckSettings(SchemaView):
+    """One deck's settings, read through ``DECK_DEFAULTS``.
+
+    Built by the settings-manager facade: ``deck(serial)`` reads the file and
+    can save back to it, ``deck_view(settings)`` wraps settings a caller
+    already has and cannot.
+    """
+
+    def __init__(self, data: dict, serial: str | None = None):
+        super().__init__(data, DECK_DEFAULTS)
+        self.serial: str | None = serial
+
+    def save(self) -> None:
+        """Persist what was set through this view -- the same write the
+        settings manager's ``save_deck_settings`` performs, atomically and
+        invalidating this deck's cached copy."""
+        if self.serial is None:
+            raise ValueError(
+                "this deck-settings view wraps a dict, not a deck: it has no file to save to"
+            )
+        get().write(DECK, self.data, self.serial)
 
 
 class SettingsStore:
