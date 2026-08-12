@@ -288,7 +288,10 @@ class DeckManager:
 
     def load_fake_decks(self):
         old_n_fake_decks = len(self.fake_deck_controller)
-        n_fake_decks = int(gl.settings_manager.load_settings_from_file(os.path.join(gl.DATA_PATH, "settings", "settings.json")).get("dev", {}).get("n-fake-decks", 0))
+        # int(): the spin row writes an int, but a hand-edited settings file
+        # can leave a float or a numeric string here and the comparisons below
+        # are counts.
+        n_fake_decks = int(gl.settings_manager.app().n_fake_decks)
 
         if n_fake_decks > old_n_fake_decks:
             log.info(f"Loading {n_fake_decks - old_n_fake_decks} fake deck(s)")

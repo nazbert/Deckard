@@ -74,12 +74,15 @@ class Settings(Adw.PreferencesWindow):
         return AppSettings(self.settings_json)
 
     def load_json(self):
-        # Load settings from file
-        settings = gl.settings_manager.load_settings_from_file(os.path.join(gl.DATA_PATH, "settings", "settings.json"))
-        self.settings_json = settings
+        # A snapshot read from disk, deliberately NOT the shared app-settings
+        # dict: this dialog edits its own picture of the file and writes the
+        # whole picture back (see the batch-save note on `app` above), so
+        # joining what other writers are mutating would publish half-made
+        # edits to them.
+        self.settings_json = gl.settings_manager.app_snapshot().data
 
     def save_json(self):
-        gl.settings_manager.save_settings_to_file(os.path.join(gl.DATA_PATH, "settings", "settings.json"), self.settings_json)
+        gl.settings_manager.save_app_settings(self.settings_json)
 
 
 class UIPage(Adw.PreferencesPage):
@@ -485,8 +488,13 @@ class FontRow(Adw.ActionRow):
 
         self.font_page_group.settings.app.default_font = gl.settings_manager.font_defaults
         gl.settings_manager.save_font_defaults()
-
-        self.font_page_group.settings.save_json()
+        # No save_json() here, unlike the toggle rows: save_font_defaults has
+        # already merged the font into the shared settings -- the copy every
+        # write refreshes -- and written that. Writing this dialog's
+        # construction-time snapshot on top would put back every
+        # general.* value as it stood when the window opened, reverting
+        # anything changed on disk since -- by another window, or by the app
+        # itself.
 
         self.font_page_group.request_page_reload()
 

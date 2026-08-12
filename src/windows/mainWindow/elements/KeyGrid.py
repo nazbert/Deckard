@@ -27,7 +27,6 @@ from gi.repository import Gtk, Gdk, GLib, Gio
 
 # Import Python modules 
 from loguru import logger as log
-import os
 
 # Imort globals
 import globals as gl
@@ -443,8 +442,7 @@ class KeyButton(Gtk.Frame):
 
     def simulate_press(self):
         ## Check if double click to emulate is turned on in the settings
-        settings = gl.settings_manager.load_settings_from_file(os.path.join(gl.DATA_PATH, "settings", "settings.json"))
-        if not settings.get("key-grid", {}).get("emulate-at-double-click", True):
+        if not gl.settings_manager.app().emulate_at_double_click:
             return
         
         self.key_grid.deck_controller.event_callback(self.identifier, True)
