@@ -92,7 +92,6 @@ GRANDFATHER: dict[str, int] = {
     "src/backend/DeckManagement/deck_controller/controller.py": 1667,
     "src/backend/DeckManagement/deck_controller/inputs.py": 2155,
     "src/backend/DeckManagement/deck_controller/media_writer.py": 1212,
-    "src/backend/PluginManager/PluginBase.py": 1234,
     "src/backend/Store/StoreBackend.py": 2300,
 }
 

@@ -3,12 +3,13 @@ One owner for the app's settings files.
 
 A settings surface is a JSON file the app itself owns: the deck settings under
 ``settings/decks/``, the asset library index, the app settings, the page
-manager's own bookkeeping. Each of them needs the same three answers -- where
-does it live, what happens when it is corrupt, and who may write it -- and each
-of them used to answer separately. The answers had drifted: one surface was
-healed and quarantined by a loader, another was read with a bare ``json.load``
-inside a constructor and took the whole app down with it, and a third was
-written straight past the cache that other readers were served from.
+manager's own bookkeeping, the file a plugin's settings are kept in. Each of
+them needs the same three answers -- where does it live, what happens when it
+is corrupt, and who may write it -- and each of them used to answer
+separately. The answers had drifted: one surface was healed and quarantined by
+a loader, another was read with a bare ``json.load`` inside a constructor and
+took the whole app down with it, and a third was written straight past the
+cache that other readers were served from.
 
 This module is where those answers live now.
 
@@ -73,7 +74,9 @@ or not the file could be moved.
 
 An unreadable-but-present file (permissions, a dead mount) is NOT corrupt and
 is NOT quarantined: the read raises, because the content is unknown and
-pretending it is empty would invite a write that destroys it.
+pretending it is empty would invite a write that destroys it. One surface
+answers that differently and says why it does: ``PluginSettings``, where a
+raise costs the user the whole plugin.
 
 WRITES GO THROUGH THE ATOMIC WRITER, AND INVALIDATE BY PATH
 
@@ -786,6 +789,127 @@ class AppSettings(SchemaView):
     @n_remote_decks.setter
     def n_remote_decks(self, value: int) -> None:
         self.set("dev", "n-remote-decks", value)
+
+
+#: One plugin's settings file, keyed by the path the plugin resolved for itself
+#: rather than by its id: that path is decided once in ``PluginBase.__init__``
+#: (which migrates a legacy folder-name directory to the manifest-id one), and
+#: rederiving it here would give the store a second opinion about where a
+#: plugin's settings live. Schema-less by design -- the app owns the envelope
+#: and nothing inside it, so a defaults table could only describe keys the
+#: plugin alone knows about, and its write-side tripwire would reject every one
+#: of them. Uncached: a cache would buy a parse nothing repeats and owe a
+#: coherence answer for a backend running in another process.
+PLUGIN = SurfaceSpec(
+    name="plugin settings",
+    path_fn=lambda settings_path: settings_path,
+    root=dict,
+    keyed=True,
+)
+
+#: The envelope version this app writes: it keeps the plugin's own keys under
+#: ``settings``. Anything else IS the settings, from before the envelope
+#: existed, and is migrated the first time it is read.
+PLUGIN_FILE_VERSION = "2.0"
+
+
+class PluginSettings:
+    """One plugin's settings file: the app's envelope around the plugin's keys.
+
+    A plugin owns everything inside ``settings``; the app owns the file it sits
+    in -- where it lives, the ``file-version`` envelope, and what happens when
+    it cannot be read. The asset manager keeps a second top-level key
+    (``assets``) there, which is why the whole document is reachable here.
+
+    UNREADABLE IS NOT EMPTY ANYWHERE ELSE -- IT IS HERE
+
+    Every other surface lets an OSError out, because the content is unknown and
+    pretending it is empty invites a write that destroys it. This one swallows
+    it, deliberately and as it always has: these reads run inside plugin
+    ``__init__`` and inside the plugin settings dialog, where raising costs the
+    user the whole plugin -- or the dialog -- over a file they may never have
+    put anything in. The plugin starts with none and says so loudly instead.
+
+    A DECODE failure IS quarantined by the loader: the bytes are there and
+    unusable, and the next save would otherwise overwrite the only copy of a
+    configuration nobody can retype. Plugin SOURCE files (manifest.json,
+    about.json) are neither -- the app never writes them, so nothing overwrites
+    a corrupt one, and moving one would mutate a developer's working tree.
+
+    LOCKING: none of its own. ``PluginBase`` serializes get/set_settings on its
+    per-plugin lock and calls in here holding it, so the tree has exactly one
+    order -- the plugin's lock outside, the store's leaf cache lock inside,
+    never the reverse; ``SettingsStore.edit`` here would take it in that order.
+    """
+
+    def __init__(self, settings_path: str) -> None:
+        self.path: str = settings_path
+
+    def document(self) -> dict[str, Any] | None:
+        """The file's entire content, or None when there is nothing to read.
+
+        None is every way this file can fail to yield a document: absent,
+        quarantined by this very read, unreadable, or not a JSON object.
+        Callers treat all four the same -- start empty -- but none is an EMPTY
+        DOCUMENT, which is a real file the app migrates and rewrites.
+        """
+        try:
+            content, corrupt = get().read_reporting_corruption(PLUGIN, self.path)
+        except OSError as e:
+            log.opt(exception=e).error(
+                f"Could not read plugin settings file {self.path} -- treating it as "
+                f"empty; whatever is saved next replaces it"
+            )
+            return None
+        if corrupt:
+            return None
+        if not content and not os.path.isfile(self.path):
+            # Absent -- or moved aside by another reader mid-read, which is why
+            # this is checked after the read and not before: a file quarantined
+            # under this one reads as "nothing there" rather than as an empty
+            # document, which would be migrated back into existence.
+            return None
+        if not isinstance(content, dict):
+            log.error(
+                f"Plugin settings file {self.path} does not contain a JSON object "
+                f"-- treating it as empty"
+            )
+            return None
+        return content
+
+    def save_document(self, document: dict[str, Any]) -> None:
+        """Replace the file with ``document``, atomically."""
+        get().write(PLUGIN, document, self.path)
+
+    def read(self) -> dict[str, Any]:
+        """The plugin's settings, unwrapped, migrating a pre-envelope file once."""
+        document = self.document()
+        if document is None:
+            return {}
+        if document.get("file-version") == PLUGIN_FILE_VERSION:
+            return document.get("settings", {})
+        # Pre-envelope: the whole file WAS the settings. Rewrite it wrapped, and
+        # hand back what it held either way -- a migration that cannot be
+        # written must not also cost the plugin its settings for this run.
+        try:
+            self.save_document({"file-version": PLUGIN_FILE_VERSION, "settings": document})
+        except OSError as e:
+            log.opt(exception=e).error(
+                f"Could not migrate plugin settings file {self.path} to the current format"
+            )
+        return document
+
+    def write(self, settings: Any) -> None:
+        """Store ``settings`` as the plugin's own keys, atomically."""
+        document = self.document()
+        if document is None or document.get("file-version") != PLUGIN_FILE_VERSION:
+            # Nothing usable, or a pre-envelope file whose own keys ARE the
+            # settings being replaced: this write becomes the envelope and none
+            # of it survives. What survives on an already wrapped file is what
+            # the app keeps beside them -- the asset overrides.
+            document = {"file-version": PLUGIN_FILE_VERSION}
+        document["settings"] = settings
+        self.save_document(document)
 
 
 class SettingsStore:

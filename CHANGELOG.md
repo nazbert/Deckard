@@ -31,6 +31,11 @@ bundle as a release asset.
 - Selecting pages in the page manager no longer makes the page editor's
   screensaver brightness slider write its own displayed value back to each
   page it visits, and reapply it to the deck.
+- A plugin whose settings file cannot be read no longer breaks that plugin's
+  settings window. Choosing an icon or a colour there failed outright when the
+  file was present but unreadable — a permissions change, a disconnected drive
+  — instead of treating it as empty the way every other read of that file
+  already did.
 - Changing a default font in the settings window no longer reverts other
   general settings that changed while that window was open. The font was
   saved correctly, and then the window's picture of the settings file — taken

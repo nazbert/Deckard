@@ -36,54 +36,7 @@ import globals as gl
 from locales.LegacyLocaleManager import LegacyLocaleManager
 from src.backend.PluginManager.ActionHolder import ActionHolder
 from src.backend.PluginManager.EventHolder import EventHolder
-from src.backend.atomic_json import atomic_write_json, prune_corrupt_sidecars, quarantine_corrupt_file
-
-
-def _quarantine_corrupt_json(file_path: str, context: str, error: Exception) -> None:
-    """Move an APP-WRITTEN plugin JSON file that failed to DECODE aside, loudly.
-
-    The same failure class SettingsManager.load_settings_reporting_corruption
-    handles for pages/app settings, applied to the disjoint plugin file set.
-    A file whose content cannot be parsed is
-    indistinguishable from "no settings" to every caller, so it used to sit
-    in place until the next set_settings()/save overwrote the only surviving
-    copy of the user's plugin configuration -- silent data loss on top of a
-    silent fallback. Renamed aside it stays recoverable by hand; plugin
-    settings have no backup to heal from, so preserving the file plus a loud
-    diagnostic IS the recovery path here.
-
-    ONLY for files the app itself writes -- i.e. settings.json under
-    DATA_PATH. Plugin SOURCE files (manifest.json, about.json) are never
-    quarantined: the app never writes them, so nothing is going to overwrite
-    a corrupt one, and renaming a file out of a plugin's source tree would
-    mean the app mutating a git working tree (dev plugins are symlinks into
-    ~/dev) to fix a problem that does not exist there. Those sites log and
-    leave the file alone.
-
-    DECODE failures only. An OSError (EACCES, EIO, a directory in the way,
-    ...) means the file could not be READ -- not that its content is bad --
-    and quarantining then would move a perfectly healthy file out of the
-    user's way the moment permissions hiccup. Those keep their old behavior.
-    """
-    moved, dest = quarantine_corrupt_file(file_path)
-    if moved:
-        log.error(f"{context} {file_path} contains invalid JSON: {error} -- preserved at {dest}")
-        # Bounded retention, scoped to this one file and only on the path that
-        # just added a sidecar -- no startup-wide sweep. The copy just
-        # made is protected: it inherits the corrupt primary's mtime, which
-        # can be older than every sidecar already on disk.
-        for pruned in prune_corrupt_sidecars(file_path, protect=dest):
-            log.info(f"Pruned old quarantined copy {pruned}")
-    else:
-        # Either the rename genuinely failed (read-only fs, permissions) or a
-        # concurrent reader quarantined the same file first and won the race
-        # -- the primitive reports both as not-moved, and the caller's
-        # recovery is identical either way, so do not claim which happened.
-        log.error(
-            f"{context} {file_path} contains invalid JSON: {error} -- it was NOT moved "
-            f"aside here (rename failed, or another thread quarantined it first); if it "
-            f"is still in place, the next save will overwrite it"
-        )
+from src.backend.settings_store import PluginSettings
 
 
 class PluginBase(rpyc.Service):
@@ -121,9 +74,11 @@ class PluginBase(rpyc.Service):
         # on_ready in parallel since the pool-based page load, so concurrent
         # read-modify-write cycles lost updates (the atomic write only
         # prevents torn files). Plain Lock: each accessor takes it exactly
-        # once -- neither re-acquires it nor calls the other while holding it,
-        # and atomic_write_json is pure filesystem I/O with no callback back
-        # into locked code.
+        # once -- neither re-acquires it nor calls the other while holding it
+        # -- and what runs underneath is filesystem I/O plus the settings
+        # store's leaf cache lock, with no callback back into locked code.
+        # That is also the one lock order this file has: this lock outside,
+        # the store's inside, never the reverse.
         self._settings_lock = threading.Lock()
 
         self.locale_manager: LegacyLocaleManager | LocaleManager
@@ -608,65 +563,13 @@ class PluginBase(rpyc.Service):
         Returns:
             dict: The settings stored in the settings file. If the settings file does not exist, an empty dictionary is returned.
         """
+        # The file's layout, its corrupt-and-unreadable policy and the
+        # migration off the pre-envelope format all live at the settings
+        # store, with every other settings file the app owns. What lives HERE
+        # is the lock.
         with self._get_settings_lock():
-            if not os.path.exists(self.settings_path):
-                return {}
-            # A corrupt settings file (e.g. truncated by a crash) must not raise:
-            # this runs inside register()/plugin __init__, where an exception used
-            # to kill the whole plugin -- empty action list with no explanation.
-            try:
-                with open(self.settings_path, "r") as f:
-                    settings = json.load(f)
-            except ValueError as e:
-                # Corrupt, not merely unreadable: move it aside so the next
-                # set_settings() cannot overwrite the only copy that is left
-                # (plugin settings have no backup to heal from).
-                # ValueError rather than JSONDecodeError: a file of garbage
-                # bytes raises UnicodeDecodeError while decoding, which is a
-                # ValueError but NOT a JSON error, so it used to escape every
-                # one of these handlers -- the loudest corruption was the one
-                # kind that bypassed quarantine. JSONDecodeError is a
-                # ValueError subclass, so one clause covers both.
-                _quarantine_corrupt_json(
-                    self.settings_path,
-                    f"Plugin {self.plugin_name or self.PATH}: settings file",
-                    e,
-                )
-                return {}
-            except OSError as e:
-                log.opt(exception=e).error(
-                    f"Plugin {self.plugin_name or self.PATH}: could not read settings file "
-                    f"{self.settings_path} -- falling back to empty settings"
-                )
-                return {}
+            return PluginSettings(self.settings_path).read()
 
-            if not isinstance(settings, dict):
-                log.error(
-                    f"Plugin {self.plugin_name or self.PATH}: settings file {self.settings_path} "
-                    f"does not contain a JSON object -- falling back to empty settings"
-                )
-                return {}
-
-            if settings.get("file-version") == "2.0":
-                # Is newest version, return settings
-                return settings.get("settings", {})
-
-            else:
-                # Is the old format, convert it
-                new_settings = {
-                    "file-version": "2.0",
-                    "settings": settings
-                }
-                try:
-                    atomic_write_json(self.settings_path, new_settings)
-                except OSError as e:
-                    log.opt(exception=e).error(
-                        f"Plugin {self.plugin_name or self.PATH}: could not migrate settings file "
-                        f"{self.settings_path} to the new format"
-                    )
-
-                return settings
-                
     def get_manifest(self):
         """
         Retrieves the content of the manifest file from the plugin's directory if it exists.
@@ -734,8 +637,9 @@ class PluginBase(rpyc.Service):
             except ValueError as e:
                 # Degrade to the missing-file result instead of raising into
                 # the about window. NOT quarantined: about.json is a plugin
-                # SOURCE file the app never writes -- see
-                # _quarantine_corrupt_json's docstring.
+                # SOURCE file the app never writes, so no save is going to
+                # destroy a corrupt one, and moving it aside would mean
+                # renaming a file out of the developer's working tree.
                 log.error(
                     f"Plugin about file {about_path} contains invalid JSON: {e} -- treating "
                     f"it as empty and leaving it in place (the app never writes plugin "
@@ -762,44 +666,11 @@ class PluginBase(rpyc.Service):
         Returns:
             None
         """
+        # Read-modify-write of one file, under the same lock the read side
+        # takes: the store wraps what is passed here in the envelope, keeping
+        # whatever else the file holds, and writes it atomically.
         with self._get_settings_lock():
-            content = {}
-            if os.path.isfile(self.settings_path):
-                # A corrupt existing file must not make saving impossible --
-                # same failure class get_settings guards against.
-                try:
-                    with open(self.settings_path, "r") as f:
-                        content = json.load(f)
-                except ValueError as e:
-                    # THE data-loss moment: the atomic write below replaces the
-                    # corrupt file wholesale. Preserve it first.
-                    _quarantine_corrupt_json(
-                        self.settings_path,
-                        f"Plugin {self.plugin_name or self.PATH}: settings file",
-                        e,
-                    )
-                    content = {}
-                except OSError as e:
-                    log.opt(exception=e).error(
-                        f"Plugin {self.plugin_name or self.PATH}: could not read settings file "
-                        f"{self.settings_path} before saving -- rewriting it"
-                    )
-                    content = {}
-            if not isinstance(content, dict):
-                content = {}
-
-            if content.get("file-version") == "2.0":
-                new_content = content
-                new_content["settings"] = settings
-            else:
-                new_content = {
-                    "file-version": "2.0",
-                    "settings": settings
-                }
-
-            # Atomic write: an interrupted save must not truncate the plugin's
-            # settings file.
-            atomic_write_json(self.settings_path, new_content)
+            PluginSettings(self.settings_path).write(settings)
 
 
     def add_css_stylesheet(self, path):

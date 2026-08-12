@@ -32,7 +32,7 @@ from fixtures import make_headless_controller, wait_until, start_watchdog
 
 from src.backend.DeckManagement.InputIdentifier import Input
 from src.backend.PluginManager.ActionCore import ActionCore
-import src.backend.PluginManager.PluginBase as pb_mod
+import src.backend.settings_store as settings_store
 from src.backend.PluginManager.PluginBase import PluginBase
 
 
@@ -221,7 +221,9 @@ def check_settings_serialization() -> int:
     plugin = make_plugin(settings_path)
 
     in_window = threading.Event()
-    real_write = pb_mod.atomic_write_json
+    # The plugin accessors persist through the settings store, so the
+    # conversion write to hold open is the store's.
+    real_write = settings_store.atomic_write_json
     first_call = [True]
 
     def slow_first_write(path, content):
@@ -234,7 +236,7 @@ def check_settings_serialization() -> int:
             time.sleep(0.4)
         real_write(path, content)
 
-    pb_mod.atomic_write_json = slow_first_write
+    settings_store.atomic_write_json = slow_first_write
     try:
         results = {}
 
@@ -255,7 +257,7 @@ def check_settings_serialization() -> int:
             print("FAIL(b): settings accessor deadlock")
             return 1
     finally:
-        pb_mod.atomic_write_json = real_write
+        settings_store.atomic_write_json = real_write
 
     final = plugin.get_settings()
     if final.get("new-key") != 2:
