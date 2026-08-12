@@ -34,6 +34,7 @@ from src.backend.PageManagement.page_document import PageDocument
 from src.backend.PageManagement.page_pins import PagePins
 from src.backend.DeckManagement.HelperMethods import natural_sort_by_filenames
 from src.backend.atomic_json import atomic_write_json
+from src.backend import settings_store
 
 # Import globals
 import globals as gl
@@ -95,7 +96,6 @@ class PageManagerBackend:
 
         self.MAX_BACKUPS = 5
         self.PAGE_PATH = os.path.join(gl.DATA_PATH, "pages")
-        self.PAGE_SETTINGS_PATH = os.path.join(gl.DATA_PATH, "settings", "pages.json")
 
     def load_page(self, path: str, deck_controller: "DeckController") -> Page | None:
         """
@@ -339,7 +339,7 @@ class PageManagerBackend:
         return False
 
     def get_default_page(self, deck_serial_number: str):
-        page_settings = self.settings_manager.load_settings_from_file(self.PAGE_SETTINGS_PATH)
+        page_settings = settings_store.get().read(settings_store.PAGES)
         page_path = page_settings.get("default-pages", {}).get(deck_serial_number, None)
 
         if page_path and os.path.isfile(page_path):
@@ -350,15 +350,17 @@ class PageManagerBackend:
     # path=None is the documented "clear this deck's default page" value --
     # get_all_default_page_serial_numbers skips falsy entries by design.
     def set_default_page(self, deck_serial_number: str, path: str | None):
-        page_settings = self.settings_manager.load_settings_from_file(self.PAGE_SETTINGS_PATH)
-        page_settings.setdefault("default-pages", {})
-        page_settings["default-pages"][deck_serial_number] = path
-        self.settings_manager.save_settings_to_file(self.PAGE_SETTINGS_PATH, page_settings)
+        # Read-modify-write serialized against every other edit of pages.json:
+        # the store's per-file edit lock is the ONLY lock this takes, and it is
+        # never held while _pages_lock is acquired (see remove_page/move_page).
+        with settings_store.get().edit(settings_store.PAGES) as page_settings:
+            page_settings.setdefault("default-pages", {})
+            page_settings["default-pages"][deck_serial_number] = path
 
     def get_all_default_page_serial_numbers(self) -> list[str]:
         serial_numbers = []
 
-        page_settings = self.settings_manager.load_settings_from_file(self.PAGE_SETTINGS_PATH)
+        page_settings = settings_store.get().read(settings_store.PAGES)
         for serial_number, page_path in page_settings.get("default-pages", {}).items():
             if not page_path:
                 continue
@@ -369,7 +371,7 @@ class PageManagerBackend:
     def get_serial_numbers_from_page(self, path: str) -> list[str]:
         serial_numbers = []
 
-        page_settings = self.settings_manager.load_settings_from_file(self.PAGE_SETTINGS_PATH)
+        page_settings = settings_store.get().read(settings_store.PAGES)
         for serial_number, page_path in page_settings.get("default-pages", {}).items():
             if path != page_path:
                 continue
@@ -407,9 +409,6 @@ class PageManagerBackend:
         # edits included -- out of their reach.
         document = self.rename_document(old_path, new_path)
 
-        page_settings = gl.settings_manager.load_settings_from_file(self.PAGE_SETTINGS_PATH)
-        default_pages = page_settings.get("default-pages", {})
-
         # Update Path in Objects
         for controller in (gl.deck_manager.deck_controller if gl.deck_manager is not None else []):
             if controller.active_page is None:
@@ -426,15 +425,17 @@ class PageManagerBackend:
             # so this fetch retires on the spot.
             self.pins.release_fetch(controller)
 
-        # Update path in Settings file
-        for serial_number, path in default_pages.items():
-            if path != old_path:
-                continue
-            default_pages[serial_number] = new_path
-
-        # Save updated default pages
-        page_settings["default-pages"] = default_pages
-        gl.settings_manager.save_settings_to_file(self.PAGE_SETTINGS_PATH, page_settings)
+        # Update the path in the page-manager settings, serialized against every
+        # other edit of pages.json. The store's edit lock is taken AFTER the
+        # controller loop above has released _pages_lock, never while holding it:
+        # this is the one lock order for the two locks.
+        with settings_store.get().edit(settings_store.PAGES) as page_settings:
+            default_pages = page_settings.get("default-pages", {})
+            for serial_number, path in default_pages.items():
+                if path != old_path:
+                    continue
+                default_pages[serial_number] = new_path
+            page_settings["default-pages"] = default_pages
 
         # Retire any write still pending for the file about to disappear --
         # a timer firing after the removal would write the moved-from page
@@ -451,10 +452,6 @@ class PageManagerBackend:
         self.refresh_window_watch_state()
 
     def remove_page(self, page_path: str):
-        settings_path = os.path.join(gl.DATA_PATH, "settings", "pages.json")
-        settings = gl.settings_manager.load_settings_from_file(settings_path)
-        default_pages = settings.get("default-pages", {})
-
         # Iterate over all deck controllers to handle any that are using the page to be removed
         for controller in (gl.deck_manager.deck_controller if gl.deck_manager is not None else []):
             # A page change requested while the screensaver owns the deck is
@@ -545,14 +542,15 @@ class PageManagerBackend:
         if os.path.exists(page_path):
             os.remove(page_path)
 
-        # Remove any references to this page in the default-pages setting
-        new_default_pages = {}
-        for serial, path in default_pages.items():
-            if path != page_path:
-                new_default_pages[serial] = path
-
-        settings["default-pages"] = new_default_pages
-        gl.settings_manager.save_settings_to_file(settings_path, settings)
+        # Remove any references to this page in the default-pages setting.
+        # Serialized against every other edit of pages.json; taken here, after
+        # the controller loop above has released _pages_lock, never while it is
+        # held -- the one lock order for the store edit lock and _pages_lock.
+        with settings_store.get().edit(settings_store.PAGES) as settings:
+            default_pages = settings.get("default-pages", {})
+            settings["default-pages"] = {
+                serial: path for serial, path in default_pages.items() if path != page_path
+            }
 
         # Deleting the page that carried the only rule takes the rule with
         # it, so the watcher has to be re-gated here too.

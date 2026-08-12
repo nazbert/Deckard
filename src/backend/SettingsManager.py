@@ -13,7 +13,6 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 # Import own modules
-import globals as gl
 from src.backend import settings_store
 
 # The app-settings table, its font subtable and its typed view live with the
@@ -145,12 +144,17 @@ class SettingsManager:
 
     def get_static_settings(self) -> dict:
         """
-        Returns always the same settings, no matter what the data path is set to
+        Returns always the same settings, no matter what the data path is set to.
+
+        The store's STATIC surface reads the same fixed file the data-path
+        override lives in. The one reader of it that does NOT come through here
+        is globals.py's bootstrap read, which runs before this (or anything)
+        is importable and is the read that defines the data path.
         """
-        return self.load_settings_from_file(gl.STATIC_SETTINGS_FILE_PATH)
-    
+        return settings_store.get().read(settings_store.STATIC)
+
     def save_static_settings(self, settings: dict) -> None:
-        self.save_settings_to_file(gl.STATIC_SETTINGS_FILE_PATH, settings)
+        settings_store.get().write(settings_store.STATIC, settings)
 
     def load_font_defaults(self) -> None:
         self.font_defaults = self.app().default_font

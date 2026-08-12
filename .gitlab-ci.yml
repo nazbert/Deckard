@@ -63,6 +63,12 @@ variables:
 # slots globals.py declares, and checks that nothing assigns a slot outside it,
 # so growing the shared namespace is a deliberate two-file edit rather than a
 # line nobody notices. The inventory and the rules live in that script.
+#
+# The settings-json ratchet is the same shape once more: it fails on any
+# json.load/json.dump of a settings file outside a per-file allowlist, so adding
+# a raw reader (instead of routing it through the settings store, which heals a
+# corrupt file and writes atomically) is a deliberate, reviewed edit. Its
+# allowlist and rules live in that script; --self-test proves it goes red.
 test:compile:
   stage: test
   image: python:3.13-slim   # 3.13 = the runtime python req2flatpak targets
@@ -72,6 +78,7 @@ test:compile:
     - python -m compileall -q *.py src GtkHelper tests scripts
     - python scripts/check_module_sizes.py
     - python scripts/check_gl_slots.py
+    - python scripts/check_settings_json.py
 
 # Lint gate. Rule selection lives in pyproject.toml and is an explicit
 # allowlist -- no rule is enabled until its population is clean, so this job
