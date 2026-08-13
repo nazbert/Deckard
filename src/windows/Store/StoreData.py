@@ -78,11 +78,34 @@ class LicenceData:
     license: str | None = None # The actual licence
     license_descriptions: dict[str, str] | None = field(default_factory=dict) # Translations for the Licence Description
 
+# Each concrete class below names its id/name/version triple differently
+# (plugin_id, icon_id, wallpaper_id, bare id ...). The canonical asset_id /
+# asset_name / asset_version properties give shared backend code and log lines
+# one name for that triple, so the pipelines that used to getattr a per-type
+# field name read a property instead. Read-only by design -- the per-type
+# fields stay the writable source of truth.
+#
+# The name asset_id is overloaded inside StoreBackend: this catalog *Data
+# property is the manifest id, distinct from InstalledAsset.asset_id (an
+# install-directory name) and UpdateCheck.asset_id (the matched install's id).
+
 @dataclass
 class PluginData(StoreData, ImageData, LicenceData):
     plugin_name: str | None = None # Name of the Plugin
     plugin_version: str | None = None # Version of the Plugin
     plugin_id: str | None = None # Plugin ID in the com.author.name format
+
+    @property
+    def asset_id(self) -> str | None:
+        return self.plugin_id
+
+    @property
+    def asset_name(self) -> str | None:
+        return self.plugin_name
+
+    @property
+    def asset_version(self) -> str | None:
+        return self.plugin_version
 
 @dataclass
 class IconData(StoreData, ImageData, LicenceData):
@@ -90,14 +113,50 @@ class IconData(StoreData, ImageData, LicenceData):
     icon_version: str | None = None # Version of the icons
     icon_id: str | None = None # Icon ID in the com.author.name format
 
+    @property
+    def asset_id(self) -> str | None:
+        return self.icon_id
+
+    @property
+    def asset_name(self) -> str | None:
+        return self.icon_name
+
+    @property
+    def asset_version(self) -> str | None:
+        return self.icon_version
+
 @dataclass
 class WallpaperData(StoreData, ImageData, LicenceData):
     wallpaper_name: str | None = None # Name of the wallpaper
     wallpaper_version: str | None = None # Version of the wallpaper
     wallpaper_id: str | None = None # Icon ID in the com.author.name format
 
+    @property
+    def asset_id(self) -> str | None:
+        return self.wallpaper_id
+
+    @property
+    def asset_name(self) -> str | None:
+        return self.wallpaper_name
+
+    @property
+    def asset_version(self) -> str | None:
+        return self.wallpaper_version
+
 @dataclass
 class SDPlusBarWallpaperData(StoreData, ImageData, LicenceData):
     name: str | None = None # Name of the SD+ Bar wallpaper
     version: str | None = None # Version of the SD+ Bar wallpaper
     id: str | None = None # SD+ Bar wallpaper ID in the com.author.name format
+
+    @property
+    def asset_id(self) -> str | None:
+        return self.id
+
+    @property
+    def asset_name(self) -> str | None:
+        return self.name
+
+    @property
+    def asset_version(self) -> str | None:
+        return self.version

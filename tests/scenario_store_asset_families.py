@@ -26,6 +26,16 @@ Two structural properties are pinned here on purpose:
     field names. They are NOT read off the descriptor, so a descriptor whose
     field names drift disagrees with them and the matrix goes red.
 
+The same collapse now also drives install/uninstall, get_*_to_update and
+update_all_* off one descriptor. Those legs are pinned here too: the
+five-branch update decision per type, update_all_* counting only real
+successes across both success dialects (True for plugins, 200 for the three),
+update_everything summing every leg by its public name, the per-type install
+directory and expected_id handed to download_repo, and the canonical
+asset_id/asset_name/asset_version property trio. These reddens the two
+declared descriptor mutations -- flipping an install_ok and swapping two
+base_dir_attrs.
+
 All network-free.
 """
 import dataclasses
@@ -98,6 +108,42 @@ TYPES = [
     ("wallpaper", "prepare_wallpaper", WallpaperData, "wallpaper_id", "wallpaper_name", "wallpaper_version", False),
     ("sd_plus", "prepare_sd_plus_bar_wallpaper", SDPlusBarWallpaperData,
      "id", "name", "version", False),
+]
+
+# The install/update side of the collapse. The public method names and each
+# type's install SUCCESS value are hard-coded here, NOT read off the
+# descriptor: a descriptor whose *_attr or install_ok drifts breaks the
+# dispatch these drive and reddens the matrix. The success value carries the
+# two success dialects explicitly -- a plugin install reports True, the three
+# data-only installers report the HTTP-style 200.
+# (key, data_cls, id_field, get_all, get_to_update, update_all, install, install_success).
+UPDATE_TYPES = [
+    ("plugin", PluginData, "plugin_id", "get_all_plugins", "get_plugins_to_update",
+     "update_all_plugins", "install_plugin", True),
+    ("icon", IconData, "icon_id", "get_all_icons", "get_icons_to_update",
+     "update_all_icons", "install_icon", 200),
+    ("wallpaper", WallpaperData, "wallpaper_id", "get_all_wallpapers", "get_wallpapers_to_update",
+     "update_all_wallpapers", "install_wallpaper", 200),
+    ("sd_plus", SDPlusBarWallpaperData, "id", "get_all_sd_plus_bar_wallpapers",
+     "get_sd_plus_bar_wallpapers_to_update", "update_all_sd_plus_bar_wallpapers",
+     "install_sd_plus_bar_wallpaper", 200),
+]
+
+# The five update-decision branches, exercised against one fixture set per
+# type. Only the last -- installed, a newer known sha, compatible -- is offered
+# for update. The "no known target" branch (installed, commit_sha None) is
+# reachable for EVERY type -- a non-plugin entry with a "branch" key or a null
+# version map reaches it through check_entry_for_update -- but non-observable:
+# a None target can never install successfully, so skipping it (rather than
+# attempting a doomed download) leaves the count and on-disk state unchanged.
+# It is pinned for every type.
+# (tag, local_sha, commit_sha, is_compatible, offered_for_update).
+DECISION_FIXTURES = [
+    ("not_installed", None, "newsha", True, False),
+    ("up_to_date", "samesha", "samesha", True, False),
+    ("no_known_target", "oldsha", None, True, False),
+    ("incompatible", "oldsha", "nextmajorsha", False, False),
+    ("update", "oldsha", "newsha", True, True),
 ]
 
 
@@ -440,6 +486,208 @@ def test_no_compatible_version_sentinel_is_filtered_by_process_store_data() -> N
     )
 
 
+def test_canonical_properties_map_to_per_type_fields() -> None:
+    """The asset_id/asset_name/asset_version property trio reads each type's own
+    id/name/version fields -- the single name shared backend code and log lines
+    now use instead of getattr-ing the per-type field name."""
+    cases = [
+        (PluginData(plugin_id="pi", plugin_name="pn", plugin_version="pv"), "pi", "pn", "pv"),
+        (IconData(icon_id="ii", icon_name="in", icon_version="iv"), "ii", "in", "iv"),
+        (WallpaperData(wallpaper_id="wi", wallpaper_name="wn", wallpaper_version="wv"), "wi", "wn", "wv"),
+        (SDPlusBarWallpaperData(id="si", name="sn", version="sv"), "si", "sn", "sv"),
+    ]
+    for data, want_id, want_name, want_version in cases:
+        label = type(data).__name__
+        assert data.asset_id == want_id, f"{label}.asset_id = {data.asset_id!r}, want {want_id!r}"
+        assert data.asset_name == want_name, f"{label}.asset_name = {data.asset_name!r}, want {want_name!r}"
+        assert data.asset_version == want_version, (
+            f"{label}.asset_version = {data.asset_version!r}, want {want_version!r}"
+        )
+
+
+def test_update_decision_matrix_per_type() -> None:
+    """The five-branch update decision -- not-installed / up-to-date /
+    no-known-target / incompatible / update -- run against one fixture set for
+    every type through the real get_*_to_update. Only the compatible, newer,
+    known-sha entry is offered; the identity is read back off the canonical
+    asset_id property, pinning it too."""
+    _stub_globals()
+    sb = _make_backend()
+
+    for key, data_cls, id_field, get_all, get_to_update, *_rest in UPDATE_TYPES:
+        assets = [
+            data_cls(**{id_field: f"com_acme_{tag}", "github": URL,
+                        "local_sha": local, "commit_sha": commit, "is_compatible": compat})
+            for tag, local, commit, compat, _offered in DECISION_FIXTURES
+        ]
+        setattr(sb, get_all, lambda include_images=True, _a=assets: _a)
+
+        to_update = getattr(sb, get_to_update)()
+        assert not isinstance(to_update, NoConnectionError), f"{key}: catalog must resolve"
+        got = sorted(a.asset_id for a in to_update)
+        want = sorted(f"com_acme_{tag}" for tag, _l, _c, _cmp, offered in DECISION_FIXTURES if offered)
+        assert got == want, f"{key}: only the compatibly-outdated entry may update; got {got}, want {want}"
+
+
+def test_update_all_counts_only_successful_installs_per_dialect() -> None:
+    """update_all_* counts a reinstall only when desc.install_ok accepts the
+    install result -- True for plugins, 200 for the three -- so the two success
+    dialects are both exercised. BOTH failure shapes are present: a 404 (TRUTHY)
+    and a NoConnectionError (FALSY). Neither may be counted -- which is what
+    separates narrowing from truthiness: a `if result:` regression would count
+    the 404 as a success, so the truthy failure is the load-bearing leg here."""
+    _stub_globals()
+    sb = _make_backend()
+
+    for key, data_cls, id_field, get_all, _get_to_update, update_all, install, success in UPDATE_TYPES:
+        def _asset(tag, _cls=data_cls, _f=id_field):
+            return _cls(**{_f: f"com_acme_{tag}", "github": URL,
+                           "local_sha": "old", "commit_sha": "new", "is_compatible": True})
+
+        good, bad_404, bad_conn = _asset("Good"), _asset("Bad404"), _asset("BadConn")
+        setattr(sb, get_all, lambda include_images=True, _a=[good, bad_404, bad_conn]: _a)
+
+        installed: list = []
+
+        def fake_install(data, auto_update=False, _s=success, _installed=installed,
+                         _good=good, _b404=bad_404):
+            _installed.append(data.asset_id)
+            if data is _good:
+                return _s
+            if data is _b404:
+                return 404  # a TRUTHY failure -- counted iff the check is truthiness, not install_ok
+            return NoConnectionError()  # a FALSY failure
+
+        setattr(sb, install, fake_install)
+
+        n = getattr(sb, update_all)()
+        assert n == 1, (
+            f"{key}: only the successful reinstall may be counted; a 404 and a "
+            f"NoConnectionError are both failures, got {n!r}"
+        )
+        assert installed == ["com_acme_Good", "com_acme_Bad404", "com_acme_BadConn"], (
+            f"{key}: every outdated entry is attempted, got {installed}"
+        )
+
+
+def test_update_everything_dispatches_every_update_all_leg() -> None:
+    """update_everything sums every class's update_all_* leg, reached by its
+    public name in ASSET_TYPES order -- pinning the loop, its order (plugins
+    reload first), and each descriptor's update_all_attr wiring."""
+    _stub_globals()
+    sb = _make_backend()
+
+    called: list = []
+    for name, ret in (("update_all_plugins", 2), ("update_all_icons", 1),
+                      ("update_all_wallpapers", 3), ("update_all_sd_plus_bar_wallpapers", 4)):
+        setattr(sb, name, lambda _n=name, _r=ret: (called.append(_n), _r)[1])
+
+    total = sb.update_everything()
+    assert total == 10, f"update_everything must sum every leg (2+1+3+4), got {total!r}"
+    assert called == [
+        "update_all_plugins", "update_all_icons",
+        "update_all_wallpapers", "update_all_sd_plus_bar_wallpapers",
+    ], (
+        "the update_all_* legs must dispatch in ASSET_TYPES order -- plugins "
+        f"first, the only leg that reloads the plugin manager, got {called}"
+    )
+
+
+def test_install_passes_right_dir_and_expected_id_per_type() -> None:
+    """Every installer hands download_repo the per-type install directory and
+    the asset id as expected_id. This is what scenario_store_b06_pack_survival
+    pins for two types, now for all four -- and it reddens a base_dir_attr swap
+    (the directory would name the wrong type's tree)."""
+    _stub_globals()
+    sb = _make_backend()
+
+    captured: dict = {}
+
+    def fake_download(**kwargs):
+        captured.clear()
+        captured.update(kwargs)
+        return NoConnectionError()  # early-return; keeps the plugin body off the reload path
+
+    sb.download_repo = fake_download
+
+    cases = [
+        ("plugin", "install_plugin", PluginData, "plugin_id", gl.PLUGIN_DIR),
+        ("icon", "install_icon", IconData, "icon_id", sb.icons_dir()),
+        ("wallpaper", "install_wallpaper", WallpaperData, "wallpaper_id", sb.wallpapers_dir()),
+        ("sd_plus", "install_sd_plus_bar_wallpaper", SDPlusBarWallpaperData, "id",
+         sb.sd_plus_bar_wallpapers_dir()),
+    ]
+    for key, install, data_cls, id_field, base_dir in cases:
+        asset_id = f"com_acme_{key}"
+        data = data_cls(**{id_field: asset_id, "github": URL, "commit_sha": COMMIT_SHA})
+        getattr(sb, install)(data)
+        assert captured.get("repo_url") == URL, f"{key}: repo_url {captured.get('repo_url')!r}"
+        assert captured.get("expected_id") == asset_id, (
+            f"{key}: expected_id must be the asset id {asset_id!r}, got {captured.get('expected_id')!r}"
+        )
+        assert captured.get("directory") == os.path.join(base_dir, asset_id), (
+            f"{key}: directory must be {os.path.join(base_dir, asset_id)!r}, "
+            f"got {captured.get('directory')!r}"
+        )
+
+
+def test_install_refuses_unsafe_id_and_missing_url_per_type() -> None:
+    """The three data-only installers reject a traversal id and a url-less entry
+    with 400, before any download -- the shared guard the collapse must keep."""
+    _stub_globals()
+    sb = _make_backend()
+
+    def exploding_download(**kwargs):
+        raise AssertionError("download_repo must not run for a refused install")
+
+    sb.download_repo = exploding_download
+
+    cases = [
+        ("icon", "install_icon", IconData, "icon_id"),
+        ("wallpaper", "install_wallpaper", WallpaperData, "wallpaper_id"),
+        ("sd_plus", "install_sd_plus_bar_wallpaper", SDPlusBarWallpaperData, "id"),
+    ]
+    for key, install, data_cls, id_field in cases:
+        unsafe = data_cls(**{id_field: "../../../etc", "github": URL})
+        assert getattr(sb, install)(unsafe) == 400, f"{key}: an unsafe id must return 400"
+
+        no_url = data_cls(**{id_field: f"com_acme_{key}", "github": None})
+        assert getattr(sb, install)(no_url) == 400, f"{key}: a url-less entry must return 400"
+
+
+def test_uninstall_removes_right_dir_and_preserves_returns() -> None:
+    """The three data-only uninstallers rmtree the per-type directory and
+    return None, or 400 (touching nothing) for an unsafe id -- the 400-vs-None
+    contract kept byte-identical, and another base_dir_attr-swap tripwire."""
+    _stub_globals()
+    sb = _make_backend()
+    _reset_dirs(sb)
+
+    cases = [
+        ("icon", "uninstall_icon", IconData, "icon_id", sb.icons_dir()),
+        ("wallpaper", "uninstall_wallpaper", WallpaperData, "wallpaper_id", sb.wallpapers_dir()),
+        ("sd_plus", "uninstall_sd_plus_bar_wallpaper", SDPlusBarWallpaperData, "id",
+         sb.sd_plus_bar_wallpapers_dir()),
+    ]
+    for key, uninstall, data_cls, id_field, base_dir in cases:
+        asset_id = f"com_acme_{key}"
+        asset_path = os.path.join(base_dir, asset_id)
+        os.makedirs(asset_path, exist_ok=True)
+        with open(os.path.join(asset_path, "art.png"), "w") as f:
+            f.write("installed art")
+
+        result = getattr(sb, uninstall)(data_cls(**{id_field: asset_id}))
+        assert result is None, f"{key}: a normal uninstall returns None, got {result!r}"
+        assert not os.path.exists(asset_path), f"{key}: the installed dir must be removed"
+
+        unsafe_path = os.path.join(base_dir, "keepme")
+        os.makedirs(unsafe_path, exist_ok=True)
+        assert getattr(sb, uninstall)(data_cls(**{id_field: "../../../etc"})) == 400, (
+            f"{key}: an unsafe id must return 400"
+        )
+        assert os.path.isdir(unsafe_path), f"{key}: a refused uninstall must delete nothing"
+
+
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_store_asset_families")
     test_full_view_matrix_is_identical_across_types()
@@ -453,6 +701,13 @@ def main() -> None:
     test_manifest_connection_error_propagates()
     test_unparseable_url_and_missing_url_become_none()
     test_no_compatible_version_sentinel_is_filtered_by_process_store_data()
+    test_canonical_properties_map_to_per_type_fields()
+    test_update_decision_matrix_per_type()
+    test_update_all_counts_only_successful_installs_per_dialect()
+    test_update_everything_dispatches_every_update_all_leg()
+    test_install_passes_right_dir_and_expected_id_per_type()
+    test_install_refuses_unsafe_id_and_missing_url_per_type()
+    test_uninstall_removes_right_dir_and_preserves_returns()
     print("scenario_store_asset_families: PASS")
 
 

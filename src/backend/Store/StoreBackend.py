@@ -49,6 +49,7 @@ from src.Signals import Signals
 import globals as gl
 from src.windows.Store.StoreData import PluginData, IconData, SDPlusBarWallpaperData, WallpaperData
 from src.backend.Store.asset_types import (
+    ASSET_TYPES,
     AssetTypeDescriptor,
     ICON,
     PLUGIN,
@@ -1762,82 +1763,67 @@ class StoreBackend:
                     controller.active_page.load_action_objects()
                     controller.load_page(controller.active_page)
 
-    # The (un)install pairs below all join a manifest-supplied id under a
-    # data dir and rmtree/replace the result -- every one of them must reject
-    # unsafe ids (icon/wallpaper packs are data-only; a traversal id would
-    # hand them filesystem-wide delete with no code execution involved).
+    # The three data-only pack types (icon / wallpaper / SD+ bar wallpaper)
+    # share one install/uninstall pair, selected by descriptor. Each joins a
+    # manifest-supplied id under a data dir and rmtree/replaces the result, so
+    # every one must reject unsafe ids (a traversal id would hand a data-only
+    # pack filesystem-wide delete with no code execution involved). The plugin
+    # (un)install pair stays bespoke above -- it runs pip, __install__.py, and
+    # the plugin-manager deregister/reload wiring the packs have no equivalent
+    # of.
+
+    def _install_asset(self, data, desc: AssetTypeDescriptor):
+        """Download one data-only asset into its per-type directory. Returns
+        download_repo's result (200 success / 404 hard failure / 400 bad-tree /
+        NoConnectionError), or 400 for an unsafe id or a missing url -- the same
+        contract each per-type installer carried.
+
+        No pre-delete (B-06): download_repo stages and validates the new tree
+        and only swaps it over the installed one at the end, so a failed
+        download leaves the installed pack untouched (the old uninstall-first
+        flow permanently lost the pack when the download failed mid-update)."""
+        asset_id = data.asset_id
+        if not self.is_safe_asset_id(asset_id):
+            log.error(f"Refusing to install {desc.display_name} with unsafe id {asset_id!r} from {data.github}")
+            return 400
+
+        github = data.github
+        if github is None:
+            log.error(f"Refusing to install {desc.display_name} {asset_id!r}: no repository url")
+            return 400
+
+        asset_path = os.path.join(getattr(self, desc.base_dir_attr)(), asset_id)
+        return self.download_repo(repo_url=github, directory=asset_path, commit_sha=data.commit_sha, expected_id=asset_id)
+
+    def _uninstall_asset(self, data, desc: AssetTypeDescriptor):
+        """Delete one data-only asset's installed directory. Returns 400 for an
+        unsafe id, otherwise None -- byte-identical to the per-type
+        uninstallers it replaced."""
+        asset_id = data.asset_id
+        if not self.is_safe_asset_id(asset_id):
+            log.error(f"Refusing to uninstall {desc.display_name} with unsafe id {asset_id!r}")
+            return 400
+        asset_path = os.path.join(getattr(self, desc.base_dir_attr)(), asset_id)
+        if os.path.exists(asset_path):
+            shutil.rmtree(asset_path)
 
     def install_icon(self, icon_data:IconData):
-        if not self.is_safe_asset_id(icon_data.icon_id):
-            log.error(f"Refusing to install icon pack with unsafe id {icon_data.icon_id!r} from {icon_data.github}")
-            return 400
-
-        icon_path = os.path.join(gl.DATA_PATH, "icons", icon_data.icon_id)
-
-        github = icon_data.github
-        if github is None:
-            log.error(f"Refusing to install icon pack {icon_data.icon_id!r}: no repository url")
-            return 400
-
-        # No pre-delete (B-06): download_repo stages and validates the new
-        # pack and only replaces the installed one at swap time -- the old
-        # uninstall-first flow permanently lost the pack when the download
-        # failed mid-update.
-        return self.download_repo(repo_url=github, directory=icon_path, commit_sha=icon_data.commit_sha, expected_id=icon_data.icon_id)
+        return self._install_asset(icon_data, ICON)
 
     def uninstall_icon(self, icon_data:IconData):
-        folder_name = icon_data.icon_id
-        if not self.is_safe_asset_id(folder_name):
-            log.error(f"Refusing to uninstall icon pack with unsafe id {folder_name!r}")
-            return 400
-        if os.path.exists(os.path.join(gl.DATA_PATH, "icons", folder_name)):
-            shutil.rmtree(os.path.join(gl.DATA_PATH, "icons", folder_name))
+        return self._uninstall_asset(icon_data, ICON)
 
     def install_wallpaper(self, wallpaper_data:WallpaperData):
-        if not self.is_safe_asset_id(wallpaper_data.wallpaper_id):
-            log.error(f"Refusing to install wallpaper with unsafe id {wallpaper_data.wallpaper_id!r} from {wallpaper_data.github}")
-            return 400
-
-        wallpaper_path = os.path.join(gl.DATA_PATH, "wallpapers", wallpaper_data.wallpaper_id)
-
-        github = wallpaper_data.github
-        if github is None:
-            log.error(f"Refusing to install wallpaper {wallpaper_data.wallpaper_id!r}: no repository url")
-            return 400
-
-        # No pre-delete (B-06) -- see install_icon.
-        return self.download_repo(repo_url=github, directory=wallpaper_path, commit_sha=wallpaper_data.commit_sha, expected_id=wallpaper_data.wallpaper_id)
+        return self._install_asset(wallpaper_data, WALLPAPER)
 
     def uninstall_wallpaper(self, wallpaper_data:WallpaperData):
-        folder_name = wallpaper_data.wallpaper_id
-        if not self.is_safe_asset_id(folder_name):
-            log.error(f"Refusing to uninstall wallpaper with unsafe id {folder_name!r}")
-            return 400
-        if os.path.exists(os.path.join(gl.DATA_PATH, "wallpapers", folder_name)):
-            shutil.rmtree(os.path.join(gl.DATA_PATH, "wallpapers", folder_name))
+        return self._uninstall_asset(wallpaper_data, WALLPAPER)
 
     def install_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper_data:SDPlusBarWallpaperData):
-        if not self.is_safe_asset_id(sd_plus_bar_wallpaper_data.id):
-            log.error(f"Refusing to install SD+ bar wallpaper with unsafe id {sd_plus_bar_wallpaper_data.id!r} from {sd_plus_bar_wallpaper_data.github}")
-            return 400
-
-        wallpaper_path = os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", sd_plus_bar_wallpaper_data.id)
-
-        github = sd_plus_bar_wallpaper_data.github
-        if github is None:
-            log.error(f"Refusing to install SD+ bar wallpaper {sd_plus_bar_wallpaper_data.id!r}: no repository url")
-            return 400
-
-        # No pre-delete (B-06) -- see install_icon.
-        return self.download_repo(repo_url=github, directory=wallpaper_path, commit_sha=sd_plus_bar_wallpaper_data.commit_sha, expected_id=sd_plus_bar_wallpaper_data.id)
+        return self._install_asset(sd_plus_bar_wallpaper_data, SD_PLUS_BAR)
 
     def uninstall_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper_data:SDPlusBarWallpaperData):
-        folder_name = sd_plus_bar_wallpaper_data.id
-        if not self.is_safe_asset_id(folder_name):
-            log.error(f"Refusing to uninstall SD+ bar wallpaper with unsafe id {folder_name!r}")
-            return 400
-        if os.path.exists(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", folder_name)):
-            shutil.rmtree(os.path.join(gl.DATA_PATH, "sd_plus_bar_wallpapers", folder_name))
+        return self._uninstall_asset(sd_plus_bar_wallpaper_data, SD_PLUS_BAR)
 
     def get_plugin_for_id(self, plugin_id):
         plugins = self.get_all_plugins()
@@ -1846,220 +1832,117 @@ class StoreBackend:
                 return plugin
             
     ## Updates
-    def get_plugins_to_update(self):
-        # The update-check view: no thumbnails, and no request at all for a
-        # catalog entry the user never installed.
-        plugins = self.get_all_plugins(include_images=False)
-        if isinstance(plugins, NoConnectionError):
-            return plugins
+    def _get_assets_to_update(self, desc: AssetTypeDescriptor):
+        """The installed assets of one class that have a newer, compatible,
+        known-target version -- the shared update-check decision. The
+        update-check view fetches no thumbnails and makes no request for a
+        catalog entry that was never installed. Dispatches through the public
+        ``get_all_*`` name so a test stub of it is honoured."""
+        assets = getattr(self, desc.get_all_attr)(include_images=False)
+        if isinstance(assets, NoConnectionError):
+            return assets
 
-        plugins_to_update: list[PluginData] = []
-
-        for plugin in plugins:
-            if plugin.local_sha is None:
-                # Plugin is not installed
+        to_update: list = []
+        for asset in assets:
+            if asset.local_sha is None:
+                # Not installed.
                 continue
-            if plugin.local_sha == plugin.commit_sha:
-                # Up to date
+            if asset.local_sha == asset.commit_sha:
+                # Already up to date.
                 continue
-            if plugin.commit_sha is None:
-                # Unresolved remote tip (branch-pinned plugin whose
-                # get_last_commit returned None -- 429/empty). There is no
-                # known sha to update to; auto-updating would only hard-404.
+            if asset.commit_sha is None:
+                # No known target: a branch-pinned plugin whose tip did not
+                # resolve, or -- any type -- an entry with a "branch" key or null
+                # version map (check_entry_for_update reads a branch for every
+                # type). Non-observable: a None target can never install, so the
+                # skip only avoids a doomed download; count and disk are unchanged.
                 continue
-            if plugin.is_compatible is False:
-                # When no compatible version exists, prepare_plugin pins the
-                # newest INCOMPATIBLE commit (so the store can still list the
-                # entry). Auto-updating onto it would replace a working
-                # plugin with a build for a different app major -- skip and
-                # report instead. PluginPreview.get_install_state_for makes
-                # the same call for the store UI's update button.
+            if asset.is_compatible is False:
+                # prepare pins the newest INCOMPATIBLE commit when no compatible
+                # version exists (so the store can still list the entry).
+                # Auto-updating onto it would replace a working asset with a
+                # build for a different app major -- skip and report instead.
+                # The store UI's update button reads the same verdict.
                 log.warning(
-                    f"Skipping update of plugin {plugin.plugin_id}: pinned version "
-                    f"{plugin.commit_sha} is not compatible with app version {gl.app_version}"
+                    f"Skipping update of {desc.display_name} {asset.asset_id}: pinned version "
+                    f"{asset.commit_sha} is not compatible with app version {gl.app_version}"
                 )
                 continue
-            plugins_to_update.append(plugin)
+            to_update.append(asset)
 
-        return plugins_to_update
-    
-    def update_all_plugins(self) -> "int | NoConnectionError":
-        """
-        Returns number of SUCCESSFULLY updated plugins
-        """
-        plugins_to_update = self.get_plugins_to_update()
-        if isinstance(plugins_to_update, NoConnectionError):
-            return plugins_to_update
+        return to_update
+
+    def _update_all(self, desc: AssetTypeDescriptor) -> "int | NoConnectionError":
+        """Reinstall every out-of-date asset of one class; return how many
+        reinstalls actually succeeded, or NoConnectionError if the catalog was
+        unreachable. Reinstalling goes entirely through the install method, so
+        this never deregisters anything itself -- for plugins the bespoke
+        installer deregisters the old version only AFTER a good download, so a
+        failed update leaves the old version on disk AND registered."""
+        to_update = getattr(self, desc.get_to_update_attr)()
+        if isinstance(to_update, NoConnectionError):
+            return to_update
+
         n_updated = 0
-        for plugin in plugins_to_update:
-            # install_plugin deregisters the old version only after its
-            # download succeeded -- a failed update leaves the old version
-            # on disk AND registered, so no recovery pass is needed.
-            result = self.install_plugin(plugin)
-            if result is True:
+        install = getattr(self, desc.install_attr)
+        for asset in to_update:
+            result = install(asset)
+            # desc.install_ok reads the install call's raw success value. A
+            # plugin install answers True; the three data-only installers
+            # answer the HTTP-style 200. That split is the one success dialect
+            # the collapse cannot yet erase -- it lives as descriptor data and
+            # is removed once the install boundary returns a single success
+            # value.
+            if desc.install_ok(result):
                 n_updated += 1
             else:
-                log.error(f"Failed to update plugin {plugin.plugin_id}: {result!r}")
+                log.error(f"Failed to update {desc.display_name} {asset.asset_id}: {result!r}")
 
         return n_updated
+
+    def get_plugins_to_update(self):
+        return self._get_assets_to_update(PLUGIN)
+
+    def update_all_plugins(self) -> "int | NoConnectionError":
+        """Returns number of SUCCESSFULLY updated plugins"""
+        return self._update_all(PLUGIN)
 
     def get_icons_to_update(self):
-        icons = self.get_all_icons(include_images=False)
-        if isinstance(icons, NoConnectionError):
-            return icons
+        return self._get_assets_to_update(ICON)
 
-        icons_to_update: list[IconData] = []
-
-        for icon in icons:
-            if icon.local_sha is None:
-                # Icon pack is not installed
-                continue
-            if icon.local_sha == icon.commit_sha:
-                # Up to date
-                continue
-            if icon.is_compatible is False:
-                # prepare_icon pins the newest INCOMPATIBLE commit when no
-                # compatible version exists (so the store can still list it).
-                # Auto-updating onto it would replace a working pack with a
-                # build for a different app major -- skip and report, exactly
-                # like the plugin update path.
-                log.warning(
-                    f"Skipping update of icon pack {icon.icon_id}: pinned version "
-                    f"{icon.commit_sha} is not compatible with app version {gl.app_version}"
-                )
-                continue
-            icons_to_update.append(icon)
-
-        return icons_to_update
-    
     def update_all_icons(self) -> "int | NoConnectionError":
-        """
-        Returns number of SUCCESSFULLY updated icons
-        """
-        icons_to_update = self.get_icons_to_update()
-        if isinstance(icons_to_update, NoConnectionError):
-            return icons_to_update
-        n_updated = 0
-        for icon in icons_to_update:
-            result = self.install_icon(icon)
-            if result == 200:
-                n_updated += 1
-            else:
-                log.error(f"Failed to update icon pack {icon.icon_id}: {result!r}")
+        """Returns number of SUCCESSFULLY updated icon packs"""
+        return self._update_all(ICON)
 
-        return n_updated
-    
     def get_wallpapers_to_update(self):
-        wallpapers = self.get_all_wallpapers(include_images=False)
-        if isinstance(wallpapers, NoConnectionError):
-            return wallpapers
-
-        wallpapers_to_update: list[WallpaperData] = []
-
-        for wallpaper in wallpapers:
-            if wallpaper.local_sha is None:
-                # Wallpaper is not installed
-                continue
-            if wallpaper.local_sha == wallpaper.commit_sha:
-                # Up to date
-                continue
-            if wallpaper.is_compatible is False:
-                # prepare_wallpaper pins the newest INCOMPATIBLE commit when
-                # no compatible version exists (so the store can still list
-                # it). Auto-updating onto it would replace a working pack
-                # with a build for a different app major -- skip and report,
-                # exactly like the plugin update path.
-                log.warning(
-                    f"Skipping update of wallpaper {wallpaper.wallpaper_id}: pinned version "
-                    f"{wallpaper.commit_sha} is not compatible with app version {gl.app_version}"
-                )
-                continue
-            wallpapers_to_update.append(wallpaper)
-
-        return wallpapers_to_update
+        return self._get_assets_to_update(WALLPAPER)
 
     def update_all_wallpapers(self) -> "int | NoConnectionError":
-        """
-        Returns number of SUCCESSFULLY updated wallpapers
-        """
-        wallpapers_to_update = self.get_wallpapers_to_update()
-        if isinstance(wallpapers_to_update, NoConnectionError):
-            return wallpapers_to_update
-        n_updated = 0
-        for wallpaper in wallpapers_to_update:
-            result = self.install_wallpaper(wallpaper)
-            if result == 200:
-                n_updated += 1
-            else:
-                log.error(f"Failed to update wallpaper {wallpaper.wallpaper_id}: {result!r}")
-
-        return n_updated
+        """Returns number of SUCCESSFULLY updated wallpapers"""
+        return self._update_all(WALLPAPER)
 
     def get_sd_plus_bar_wallpapers_to_update(self):
-        wallpapers = self.get_all_sd_plus_bar_wallpapers(include_images=False)
-        if isinstance(wallpapers, NoConnectionError):
-            return wallpapers
-
-        wallpapers_to_update: list[SDPlusBarWallpaperData] = []
-
-        for wallpaper in wallpapers:
-            if wallpaper.local_sha is None:
-                # Wallpaper is not installed
-                continue
-            if wallpaper.local_sha == wallpaper.commit_sha:
-                # Up to date
-                continue
-            if wallpaper.is_compatible is False:
-                # prepare_sd_plus_bar_wallpaper pins the newest INCOMPATIBLE
-                # commit when no compatible version exists (so the store can
-                # still list it). Auto-updating onto it would replace a
-                # working pack with a build for a different app major -- skip
-                # and report, exactly like the plugin update path.
-                log.warning(
-                    f"Skipping update of SD+ bar wallpaper {wallpaper.id}: pinned version "
-                    f"{wallpaper.commit_sha} is not compatible with app version {gl.app_version}"
-                )
-                continue
-            wallpapers_to_update.append(wallpaper)
-
-        return wallpapers_to_update
+        return self._get_assets_to_update(SD_PLUS_BAR)
 
     def update_all_sd_plus_bar_wallpapers(self) -> "int | NoConnectionError":
-        """
-        Returns number of SUCCESSFULLY updated SD+ bar wallpapers
-        """
-        wallpapers_to_update = self.get_sd_plus_bar_wallpapers_to_update()
-        if isinstance(wallpapers_to_update, NoConnectionError):
-            return wallpapers_to_update
-        n_updated = 0
-        for wallpaper in wallpapers_to_update:
-            result = self.install_sd_plus_bar_wallpaper(wallpaper)
-            if result == 200:
-                n_updated += 1
-            else:
-                log.error(f"Failed to update SD+ bar wallpaper {wallpaper.id}: {result!r}")
-
-        return n_updated
+        """Returns number of SUCCESSFULLY updated SD+ bar wallpapers"""
+        return self._update_all(SD_PLUS_BAR)
 
     def update_everything(self) -> "int | NoConnectionError":
         """
         Returns number of SUCCESSFULLY updated assets, or NoConnectionError
         """
-        n_plugins = self.update_all_plugins()
-        n_icons = self.update_all_icons()
-        n_wallpapers = self.update_all_wallpapers()
-        # SD+ bar wallpaper packs used to have NO update leg at all -- they
-        # were installed once and never auto-updated.
-        n_sd_plus = self.update_all_sd_plus_bar_wallpapers()
-
-        # Every leg must be checked -- a NoConnectionError leaking into the
-        # sum below used to raise TypeError (and n_wallpapers wasn't checked
-        # at all).
-        if (isinstance(n_plugins, NoConnectionError) or isinstance(n_icons, NoConnectionError)
-                or isinstance(n_wallpapers, NoConnectionError) or isinstance(n_sd_plus, NoConnectionError)):
+        # Run every class's update leg first -- dispatched through the public
+        # update_all_* names so a test stub of any of them is honoured -- THEN
+        # check. A NoConnectionError leaking into the sum used to raise
+        # TypeError, and one leg used to go unchecked entirely. (SD+ bar
+        # wallpaper packs used to have no update leg at all -- installed once
+        # and never auto-updated.)
+        results = [getattr(self, desc.update_all_attr)() for desc in ASSET_TYPES]
+        if any(isinstance(result, NoConnectionError) for result in results):
             return NoConnectionError()
 
-        return n_plugins + n_icons + n_wallpapers + n_sd_plus
+        return sum(results)
 
 class NoCompatibleVersion:
     pass
