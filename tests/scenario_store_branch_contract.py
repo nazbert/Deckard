@@ -32,7 +32,8 @@ from types import SimpleNamespace
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl
 
-from src.backend.Store.StoreBackend import StoreBackend, NoConnectionError
+from src.backend.Store.StoreBackend import StoreBackend
+from src.backend.Store.store_result import StoreFetchError
 from src.backend.Store.StoreURL import parse_repo_url
 
 
@@ -58,7 +59,7 @@ def _make_backend() -> StoreBackend:
 
 
 def _fetch_fail(url):
-    return NoConnectionError()
+    raise StoreFetchError(url, "offline")
 
 
 def test_branch_is_str_when_offline_and_uncached() -> None:
@@ -176,7 +177,7 @@ def test_catalog_survives_unparseable_custom_urls() -> None:
     results = sb.process_store_data(
         StoreBackend.PLUGIN_FILE, fake_prepare, sb.get_custom_plugins, _Item
     )
-    assert not isinstance(results, NoConnectionError), (
+    assert results is not None, (
         "one unusable custom url must not fail the whole catalog load"
     )
     assert prepared == ["https://github.com/someone/plugin"], (

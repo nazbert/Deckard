@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl
 
-from src.backend.Store.StoreBackend import StoreBackend, NoConnectionError
+from src.backend.Store.StoreBackend import StoreBackend
 from src.windows.Store.StoreData import IconData, SDPlusBarWallpaperData, WallpaperData
 
 
@@ -43,7 +43,7 @@ def _stub_asset_fetches(sb: StoreBackend, manifest: dict) -> None:
         return dict(manifest)
 
     def fake_image(url, path, branch="main"):
-        return NoConnectionError()
+        return None
 
     def fake_attribution(url, commit):
         return {}
@@ -122,7 +122,7 @@ def test_catalog_keeps_entry_with_failed_thumbnail() -> None:
 
     def fake_image(url, path, branch="main"):
         if "PoisonPack" in url:
-            return NoConnectionError()
+            return None
         return FakeImage()
 
     def fake_attribution(url, commit):
@@ -136,7 +136,7 @@ def test_catalog_keeps_entry_with_failed_thumbnail() -> None:
     gl.lm = SimpleNamespace(get_custom_translation=lambda d: None)
 
     results = sb.process_store_data(StoreBackend.ICON_FILE, sb.prepare_icon, None, IconData)
-    assert not isinstance(results, NoConnectionError)
+    assert results is not None
     ids = sorted(icon.icon_id for icon in results)
     assert ids == ["com_example_GoodPack", "com_example_PoisonPack"], (
         f"the entry with the failed thumbnail must stay in the catalog, got {ids}"

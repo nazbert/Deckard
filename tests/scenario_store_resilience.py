@@ -29,7 +29,7 @@ from types import SimpleNamespace
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl  # noqa: F401
 
-from src.backend.Store.StoreBackend import StoreBackend, NoConnectionError
+from src.backend.Store.StoreBackend import StoreBackend
 from src.backend.Store.StoreCache import StoreCache
 from src.backend.Store.store_result import StoreFetchError
 
@@ -58,7 +58,7 @@ def test_fanout_survives_poison_entry() -> None:
     sb.fetch_and_parse_store_json = fake_fetch_and_parse
 
     results = sb.process_store_data("Plugins.json", fake_prepare, None, Item)
-    assert not isinstance(results, NoConnectionError), "healthy entries must survive"
+    assert results is not None, "healthy entries must survive"
     names = sorted(item.name for item in results)
     assert names == ["good-1", "good-2"], (
         f"expected the two healthy entries to survive the poison one, got {names}"
@@ -76,7 +76,7 @@ def test_remote_file_falls_back_to_cache() -> None:
         return Resp()
 
     def fetch_fail(url):
-        return NoConnectionError()
+        raise StoreFetchError(url, "429 rate limit")
 
     # Seed the cache through a successful force_refetch...
     sb.request_from_url = fetch_ok
@@ -111,7 +111,7 @@ def test_fallback_respects_content_age() -> None:
         return Resp()
 
     def fetch_fail(url):
-        return NoConnectionError()
+        raise StoreFetchError(url, "429 rate limit")
 
     sb.request_from_url = fetch_ok
     first = sb.get_remote_file(repo, "AgeBound.json", "main", force_refetch=True)
@@ -158,7 +158,7 @@ def test_prepare_plugin_survives_failed_thumbnail() -> None:
                 "version": "1.0", "descriptions": {}, "short-descriptions": {}}
 
     def fake_image(url, path, branch="main"):
-        return NoConnectionError()
+        return None
 
     def fake_attribution(url, commit):
         return {}
@@ -209,7 +209,7 @@ def test_fetches_run_concurrently() -> None:
     finally:
         sb_module.http_client.get = real_get
 
-    assert all(not isinstance(r, NoConnectionError) for r in results)
+    assert all(isinstance(r, FakeResponse) for r in results)
     # Liveness/non-serialization ceiling, deliberately generous: what this
     # proves is that the 10 x 0.2s blocking fetches did NOT serialize behind
     # the limiter (fully serial would be >=2.0s). Any ceiling comfortably

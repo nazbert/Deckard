@@ -18,9 +18,10 @@ from src.windows.Store.StoreData import WallpaperData
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk
+from gi.repository import Gtk, GLib
 
 # Import python modules
+from loguru import logger as log
 
 # Import own modules
 from src.windows.Store.StorePage import StorePage
@@ -95,9 +96,28 @@ class WallpaperPreview(StorePreview):
             description = self.wallpaper_data.description
         self.set_description(description)
 
-    def install(self):
-        self.store.backend.install_wallpaper(wallpaper_data=self.wallpaper_data)
-        self.set_install_state(1)
+    def install(self) -> bool:
+        """Runs on the store's download worker thread; returns whether the
+        install actually succeeded. A failed install (Err) leaves the button in
+        its previous state instead of flipping it to 'installed' -- the fix for
+        a 400/404/offline download silently reading as installed."""
+        backend = self.store.backend
+        if backend is None:
+            log.error(f"Store backend unavailable; cannot install {self.wallpaper_data.wallpaper_id}")
+            self.notify_install_failure()
+            return False
+        result = backend.install_wallpaper(wallpaper_data=self.wallpaper_data)
+        if isinstance(result, Err):
+            log.error(f"Failed to install wallpaper {self.wallpaper_data.wallpaper_id}: {result!r}")
+            self.notify_install_failure()
+            return False
+        GLib.idle_add(self.set_install_state, 1)
+        return True
+
+    def notify_install_failure(self):
+        name = self.wallpaper_data.wallpaper_name or self.wallpaper_data.wallpaper_id
+        gl.notify.error(f"The wallpaper {name} could not be installed",
+                        title="Wallpaper install failed")
 
     def uninstall(self):
         self.store.backend.uninstall_wallpaper(wallpaper_data=self.wallpaper_data)

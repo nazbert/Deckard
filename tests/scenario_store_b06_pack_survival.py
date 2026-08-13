@@ -17,8 +17,8 @@ the installed one, and the three pack installers no longer pre-delete
 a failing download must leave the installed pack byte-identical on disk.
 It sat in run_all.py's EXPECTED_FAIL_UNTIL_M1 while B-06 was open.
 
-No network: download_repo is stubbed to return NoConnectionError (the exact
-value a real mid-stream fetch fault produces), so the test isolates the
+No network: download_repo is stubbed to return an Err (the typed failure a
+real mid-stream fetch fault produces), so the test isolates the
 "delete-then-fail" ordering, not the download itself.
 """
 import os
@@ -26,7 +26,8 @@ import os
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl
 
-from src.backend.Store.StoreBackend import StoreBackend, NoConnectionError
+from src.backend.Store.StoreBackend import StoreBackend
+from src.backend.Store.store_result import Err, ErrReason
 from src.windows.Store.StoreData import IconData, WallpaperData, SDPlusBarWallpaperData
 
 
@@ -68,12 +69,12 @@ def check_icon_pack_survives_failed_update() -> None:
     pack = _seed_pack("icons", data.icon_id)
 
     def failing_download(**kwargs):
-        return NoConnectionError()
+        return Err(ErrReason.NO_CONNECTION, "offline")
 
     sb.download_repo = failing_download
 
     result = sb.install_icon(data)
-    assert isinstance(result, NoConnectionError), (
+    assert isinstance(result, Err), (
         f"the failed download must surface, got {result!r}"
     )
     _assert_pack_survived(pack, "icon")
@@ -87,7 +88,7 @@ def check_wallpaper_pack_survives_failed_update() -> None:
     pack = _seed_pack("wallpapers", data.wallpaper_id)
 
     def failing_download(**kwargs):
-        return NoConnectionError()
+        return Err(ErrReason.NO_CONNECTION, "offline")
 
     sb.download_repo = failing_download
 
@@ -103,7 +104,7 @@ def check_sd_plus_pack_survives_failed_update() -> None:
     pack = _seed_pack("sd_plus_bar_wallpapers", data.id)
 
     def failing_download(**kwargs):
-        return NoConnectionError()
+        return Err(ErrReason.NO_CONNECTION, "offline")
 
     sb.download_repo = failing_download
 

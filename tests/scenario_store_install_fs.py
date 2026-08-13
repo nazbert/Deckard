@@ -38,7 +38,8 @@ import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl
 
 import src.backend.Store.StoreBackend as store_mod
-from src.backend.Store.StoreBackend import StoreBackend, NoConnectionError
+from src.backend.Store.StoreBackend import StoreBackend
+from src.backend.Store.store_result import Ok, Err, ErrReason
 
 
 CACHE_DIR = os.path.join(gl.DATA_PATH, "cache")
@@ -163,7 +164,7 @@ def test_successful_install_cleans_cache_and_writes_version() -> None:
     finally:
         _restore_get(prev)
 
-    assert result == 200, f"a well-formed install must return 200, got {result!r}"
+    assert isinstance(result, Ok), f"a well-formed install must succeed, got {result!r}"
     assert os.path.isfile(os.path.join(dest, "manifest.json")), "files not moved into destination"
     assert os.path.isfile(os.path.join(dest, "VERSION")), "VERSION file not written"
     with open(os.path.join(dest, "VERSION")) as f:
@@ -193,7 +194,7 @@ def test_network_fault_midstream_removes_partial_zip() -> None:
     finally:
         _restore_get(prev)
 
-    assert isinstance(result, NoConnectionError), (
+    assert isinstance(result, Err), (
         f"a mid-stream network fault must surface as NoConnectionError, got {result!r}"
     )
     assert _cache_zips() == [], (
@@ -217,7 +218,7 @@ def test_http_error_before_open_creates_no_archive() -> None:
     finally:
         _restore_get(prev)
 
-    assert isinstance(result, NoConnectionError)
+    assert isinstance(result, Err)
     assert _cache_zips() == [], f"archive created despite an HTTP error: {_cache_zips()}"
     print("PASS: an HTTP error before the body opens no archive")
 
@@ -234,7 +235,7 @@ def test_fault_before_first_chunk_removes_zero_byte_archive() -> None:
     finally:
         _restore_get(prev)
 
-    assert isinstance(result, NoConnectionError)
+    assert isinstance(result, Err)
     assert _cache_zips() == [], (
         f"zero-byte archive left in cache after a fault before the first "
         f"chunk: {_cache_zips()}"
@@ -257,7 +258,7 @@ def test_corrupt_archive_returns_error_and_cleans_up() -> None:
     finally:
         _restore_get(prev)
 
-    assert isinstance(result, NoConnectionError), (
+    assert isinstance(result, Err), (
         f"a corrupt archive must surface as NoConnectionError, got {result!r}"
     )
     assert _cache_zips() == [], f"corrupt zip left in cache: {_cache_zips()}"
@@ -277,7 +278,7 @@ def test_traversal_member_is_refused() -> None:
     finally:
         _restore_get(prev)
 
-    assert isinstance(result, NoConnectionError), (
+    assert isinstance(result, Err), (
         f"an archive with a traversal member must be refused, got {result!r}"
     )
     # The escaping member must not have been written outside the cache.
@@ -308,7 +309,7 @@ def test_download_fault_leaves_existing_install_intact() -> None:
     finally:
         _restore_get(prev)
 
-    assert isinstance(result, NoConnectionError)
+    assert isinstance(result, Err)
     assert os.path.isfile(sentinel), (
         "download_repo deleted the existing install before the download "
         "succeeded -- the pack is gone on failure"
@@ -358,7 +359,7 @@ def test_swap_failure_restores_existing_install() -> None:
         store_mod.os.replace = real_replace
         _restore_get(prev)
 
-    assert isinstance(result, NoConnectionError), (
+    assert isinstance(result, Err), (
         f"a failed swap must surface as a failure, got {result!r}"
     )
     assert os.path.isfile(sentinel), (
@@ -390,7 +391,9 @@ def test_manifest_id_mismatch_refused_old_install_intact() -> None:
     finally:
         _restore_get(prev)
 
-    assert result == 400, f"an id-mismatched tree must be refused with 400, got {result!r}"
+    assert isinstance(result, Err) and result.reason is ErrReason.INVALID_ASSET, (
+        f"an id-mismatched tree must be refused with INVALID_ASSET, got {result!r}"
+    )
     assert os.path.isfile(sentinel), "old install lost over a refused (mismatched) download"
     with open(sentinel) as f:
         assert f.read() == "previous good install"
@@ -432,7 +435,7 @@ def test_update_replaces_pack_and_stamps_version_in_staging() -> None:
     finally:
         _restore_get(prev)
 
-    assert result == 200, f"a well-formed update must return 200, got {result!r}"
+    assert isinstance(result, Ok), f"a well-formed update must succeed, got {result!r}"
     assert staged_version == [SHA], "swap ran without a VERSION-stamped staging tree"
     assert not os.path.exists(sentinel), "old install contents survived the replace"
     assert os.path.isfile(os.path.join(dest, "new.txt")), "new tree not swapped in"

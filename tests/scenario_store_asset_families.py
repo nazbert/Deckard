@@ -8,9 +8,9 @@ the constructed *Data field-for-field against a literal expected table -- the
 proof standard for a pure-refactor collapse is mutation-grade equivalence,
 not red->green. Both views are covered (the full store-window view with
 include_image=True, and the update-check view with include_image=False),
-plus the error legs (manifest NoConnectionError propagates; an unparseable
-url and a url-less plugin entry become None; no compatible version becomes
-the NoCompatibleVersion class, which process_store_data filters out).
+plus the error legs (a failed manifest fetch raises and propagates; an
+unparseable url and a url-less plugin entry become None; no compatible version
+also becomes None, which process_store_data filters out).
 
 Two structural properties are pinned here on purpose:
 
@@ -51,9 +51,9 @@ import globals as gl
 
 from PIL import Image
 
-from src.backend.Store.StoreBackend import StoreBackend, NoCompatibleVersion, NoConnectionError
+from src.backend.Store.StoreBackend import StoreBackend
 from src.backend.Store.StoreCache import StoreCache
-from src.backend.Store.store_result import Ok, StoreFetchError
+from src.backend.Store.store_result import Ok, Err, ErrReason, StoreFetchError
 from src.windows.Store.StoreData import (
     IconData,
     PluginData,
@@ -111,23 +111,22 @@ TYPES = [
      "id", "name", "version", False),
 ]
 
-# The install/update side of the collapse. The public method names and each
-# type's install SUCCESS value are hard-coded here, NOT read off the
-# descriptor: a descriptor whose *_attr or install_ok drifts breaks the
-# dispatch these drive and reddens the matrix. The success value carries the
-# two success dialects explicitly -- a plugin install reports True, the three
-# data-only installers report the HTTP-style 200.
+# The install/update side of the collapse. The public method names are
+# hard-coded here, NOT read off the descriptor: a descriptor whose *_attr
+# drifts breaks the dispatch these drive and reddens the matrix. Every install
+# now answers the single Ok(None) success value -- the old True/200 dialect
+# split is gone -- so the success column is one value for all four types.
 # (key, data_cls, id_field, get_all, get_to_update, update_all, install, install_success).
 UPDATE_TYPES = [
     ("plugin", PluginData, "plugin_id", "get_all_plugins", "get_plugins_to_update",
-     "update_all_plugins", "install_plugin", True),
+     "update_all_plugins", "install_plugin", Ok(None)),
     ("icon", IconData, "icon_id", "get_all_icons", "get_icons_to_update",
-     "update_all_icons", "install_icon", 200),
+     "update_all_icons", "install_icon", Ok(None)),
     ("wallpaper", WallpaperData, "wallpaper_id", "get_all_wallpapers", "get_wallpapers_to_update",
-     "update_all_wallpapers", "install_wallpaper", 200),
+     "update_all_wallpapers", "install_wallpaper", Ok(None)),
     ("sd_plus", SDPlusBarWallpaperData, "id", "get_all_sd_plus_bar_wallpapers",
      "get_sd_plus_bar_wallpapers_to_update", "update_all_sd_plus_bar_wallpapers",
-     "install_sd_plus_bar_wallpaper", 200),
+     "install_sd_plus_bar_wallpaper", Ok(None)),
 ]
 
 # The five update-decision branches, exercised against one fixture set per
@@ -348,7 +347,7 @@ def test_failed_thumbnail_lists_without_image() -> None:
     sb = _make_backend()
     _reset_dirs(sb)
     _stub_fetch_layer(sb)
-    sb.get_web_image = lambda url, path, branch="main": NoConnectionError()
+    sb.get_web_image = lambda url, path, branch="main": None
 
     for key, method, data_cls, _id, _name, _version, _is_plugin in TYPES:
         row = getattr(sb, method)(_catalog_entry(), include_image=True, verified=False)
@@ -467,10 +466,10 @@ def test_unparseable_url_and_missing_url_become_none() -> None:
     )
 
 
-def test_no_compatible_version_sentinel_is_filtered_by_process_store_data() -> None:
-    """When no version resolves at all, prepare returns the NoCompatibleVersion
-    class -- kept byte-identical -- and process_store_data's isinstance filter
-    drops it, so the catalog list simply omits the entry."""
+def test_no_compatible_version_is_filtered_by_process_store_data() -> None:
+    """When no version resolves at all, prepare returns None and
+    process_store_data's isinstance filter drops it, so the catalog list simply
+    omits the entry."""
     _stub_globals()
     sb = _make_backend()
     _reset_dirs(sb)
@@ -481,8 +480,8 @@ def test_no_compatible_version_sentinel_is_filtered_by_process_store_data() -> N
     sb.get_newest_version = lambda versions: None
 
     entry = _catalog_entry()
-    assert sb.prepare_icon(entry, include_image=True, verified=False) is NoCompatibleVersion, (
-        "no resolvable version must return the NoCompatibleVersion class sentinel"
+    assert sb.prepare_icon(entry, include_image=True, verified=False) is None, (
+        "no resolvable version must drop the entry (prepare returns None)"
     )
 
     # And driven through the real process_store_data, the sentinel is filtered.
@@ -491,7 +490,7 @@ def test_no_compatible_version_sentinel_is_filtered_by_process_store_data() -> N
     sb.fetch_and_parse_store_json = lambda url, filename, branch, n_errors=0: ([entry], n_errors)
     result = sb.get_all_icons()
     assert result == Ok([]), (
-        f"the NoCompatibleVersion sentinel must be filtered by process_store_data, got {result!r}"
+        f"a no-compatible-version entry (prepare returns None) must be filtered by process_store_data, got {result!r}"
     )
 
 
@@ -529,22 +528,21 @@ def test_update_decision_matrix_per_type() -> None:
                         "local_sha": local, "commit_sha": commit, "is_compatible": compat})
             for tag, local, commit, compat, _offered in DECISION_FIXTURES
         ]
-        setattr(sb, get_all, lambda include_images=True, _a=assets: _a)
+        setattr(sb, get_all, lambda include_images=True, _a=assets: Ok(_a))
 
         to_update = getattr(sb, get_to_update)()
-        assert not isinstance(to_update, NoConnectionError), f"{key}: catalog must resolve"
-        got = sorted(a.asset_id for a in to_update)
+        assert not isinstance(to_update, Err), f"{key}: catalog must resolve"
+        got = sorted(a.asset_id for a in to_update.value)
         want = sorted(f"com_acme_{tag}" for tag, _l, _c, _cmp, offered in DECISION_FIXTURES if offered)
         assert got == want, f"{key}: only the compatibly-outdated entry may update; got {got}, want {want}"
 
 
-def test_update_all_counts_only_successful_installs_per_dialect() -> None:
-    """update_all_* counts a reinstall only when desc.install_ok accepts the
-    install result -- True for plugins, 200 for the three -- so the two success
-    dialects are both exercised. BOTH failure shapes are present: a 404 (TRUTHY)
-    and a NoConnectionError (FALSY). Neither may be counted -- which is what
-    separates narrowing from truthiness: a `if result:` regression would count
-    the 404 as a success, so the truthy failure is the load-bearing leg here."""
+def test_update_all_counts_only_successful_installs() -> None:
+    """update_all_* counts a reinstall only when the install answers Ok -- the
+    single success value now that the True/200 dialect is gone. BOTH failure
+    legs return an Err, and an Err is TRUTHY: a `if result:` regression would
+    count one, so this pins narrowing (isinstance Err), not truthiness, as the
+    protocol -- the truthy failure is the load-bearing leg here."""
     _stub_globals()
     sb = _make_backend()
 
@@ -553,28 +551,30 @@ def test_update_all_counts_only_successful_installs_per_dialect() -> None:
             return _cls(**{_f: f"com_acme_{tag}", "github": URL,
                            "local_sha": "old", "commit_sha": "new", "is_compatible": True})
 
-        good, bad_404, bad_conn = _asset("Good"), _asset("Bad404"), _asset("BadConn")
-        setattr(sb, get_all, lambda include_images=True, _a=[good, bad_404, bad_conn]: _a)
+        good, bad_hard, bad_conn = _asset("Good"), _asset("BadHard"), _asset("BadConn")
+        setattr(sb, get_all, lambda include_images=True, _a=[good, bad_hard, bad_conn]: Ok(_a))
 
         installed: list = []
 
         def fake_install(data, auto_update=False, _s=success, _installed=installed,
-                         _good=good, _b404=bad_404):
+                         _good=good, _bhard=bad_hard):
             _installed.append(data.asset_id)
             if data is _good:
                 return _s
-            if data is _b404:
-                return 404  # a TRUTHY failure -- counted iff the check is truthiness, not install_ok
-            return NoConnectionError()  # a FALSY failure
+            if data is _bhard:
+                # A TRUTHY failure -- an Err is truthy, so it is counted iff the
+                # check is truthiness rather than narrowing on Ok.
+                return Err(ErrReason.INSTALL_FAILED, "404-shaped")
+            return Err(ErrReason.NO_CONNECTION, "offline")
 
         setattr(sb, install, fake_install)
 
-        n = getattr(sb, update_all)()
-        assert n == 1, (
-            f"{key}: only the successful reinstall may be counted; a 404 and a "
-            f"NoConnectionError are both failures, got {n!r}"
+        result = getattr(sb, update_all)()
+        assert isinstance(result, Ok) and result.value == 1, (
+            f"{key}: only the successful reinstall may be counted; two Err legs "
+            f"are both failures, got {result!r}"
         )
-        assert installed == ["com_acme_Good", "com_acme_Bad404", "com_acme_BadConn"], (
+        assert installed == ["com_acme_Good", "com_acme_BadHard", "com_acme_BadConn"], (
             f"{key}: every outdated entry is attempted, got {installed}"
         )
 
@@ -589,10 +589,12 @@ def test_update_everything_dispatches_every_update_all_leg() -> None:
     called: list = []
     for name, ret in (("update_all_plugins", 2), ("update_all_icons", 1),
                       ("update_all_wallpapers", 3), ("update_all_sd_plus_bar_wallpapers", 4)):
-        setattr(sb, name, lambda _n=name, _r=ret: (called.append(_n), _r)[1])
+        setattr(sb, name, lambda _n=name, _r=ret: (called.append(_n), Ok(_r))[1])
 
     total = sb.update_everything()
-    assert total == 10, f"update_everything must sum every leg (2+1+3+4), got {total!r}"
+    assert isinstance(total, Ok) and total.value == 10, (
+        f"update_everything must sum every leg (2+1+3+4), got {total!r}"
+    )
     assert called == [
         "update_all_plugins", "update_all_icons",
         "update_all_wallpapers", "update_all_sd_plus_bar_wallpapers",
@@ -615,7 +617,8 @@ def test_install_passes_right_dir_and_expected_id_per_type() -> None:
     def fake_download(**kwargs):
         captured.clear()
         captured.update(kwargs)
-        return NoConnectionError()  # early-return; keeps the plugin body off the reload path
+        # Err early-return -- keeps the plugin body off the reload path.
+        return Err(ErrReason.NO_CONNECTION, "offline")
 
     sb.download_repo = fake_download
 
@@ -642,7 +645,8 @@ def test_install_passes_right_dir_and_expected_id_per_type() -> None:
 
 def test_install_refuses_unsafe_id_and_missing_url_per_type() -> None:
     """The three data-only installers reject a traversal id and a url-less entry
-    with 400, before any download -- the shared guard the collapse must keep."""
+    with Err(INVALID_ASSET), before any download -- the shared guard the
+    collapse must keep."""
     _stub_globals()
     sb = _make_backend()
 
@@ -658,10 +662,16 @@ def test_install_refuses_unsafe_id_and_missing_url_per_type() -> None:
     ]
     for key, install, data_cls, id_field in cases:
         unsafe = data_cls(**{id_field: "../../../etc", "github": URL})
-        assert getattr(sb, install)(unsafe) == 400, f"{key}: an unsafe id must return 400"
+        r_unsafe = getattr(sb, install)(unsafe)
+        assert isinstance(r_unsafe, Err) and r_unsafe.reason is ErrReason.INVALID_ASSET, (
+            f"{key}: an unsafe id must be refused with INVALID_ASSET, got {r_unsafe!r}"
+        )
 
         no_url = data_cls(**{id_field: f"com_acme_{key}", "github": None})
-        assert getattr(sb, install)(no_url) == 400, f"{key}: a url-less entry must return 400"
+        r_no_url = getattr(sb, install)(no_url)
+        assert isinstance(r_no_url, Err) and r_no_url.reason is ErrReason.INVALID_ASSET, (
+            f"{key}: a url-less entry must be refused with INVALID_ASSET, got {r_no_url!r}"
+        )
 
 
 def test_uninstall_removes_right_dir_and_preserves_returns() -> None:
@@ -709,10 +719,10 @@ def main() -> None:
     test_full_prepare_backfills_the_origin_stamp()
     test_manifest_fetch_error_propagates()
     test_unparseable_url_and_missing_url_become_none()
-    test_no_compatible_version_sentinel_is_filtered_by_process_store_data()
+    test_no_compatible_version_is_filtered_by_process_store_data()
     test_canonical_properties_map_to_per_type_fields()
     test_update_decision_matrix_per_type()
-    test_update_all_counts_only_successful_installs_per_dialect()
+    test_update_all_counts_only_successful_installs()
     test_update_everything_dispatches_every_update_all_leg()
     test_install_passes_right_dir_and_expected_id_per_type()
     test_install_refuses_unsafe_id_and_missing_url_per_type()

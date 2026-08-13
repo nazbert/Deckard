@@ -9,6 +9,11 @@ bundle as a release asset.
 
 ### Fixed
 
+- The store no longer marks an icon pack or wallpaper as installed when its
+  download actually failed. An install button used to flip to "installed" over
+  a pack that a 404, a rejected file, or an unreachable store had never
+  written; now a failed install leaves the button as it was and reports the
+  failure, so it can be retried.
 - Installing a plugin from a missing-action row or from the onboarding
   recommendations no longer hangs when the store cannot be reached. The button
   used to spin forever on its "installing" label with no way back; now an

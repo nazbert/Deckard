@@ -19,7 +19,8 @@ installed-but-incompatibly-outdated plugin as state 1 (installed), never 2.
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl  # noqa: F401
 
-from src.backend.Store.StoreBackend import StoreBackend, NoConnectionError
+from src.backend.Store.StoreBackend import StoreBackend
+from src.backend.Store.store_result import Ok, Err
 from src.windows.Store.StoreData import PluginData
 
 
@@ -48,13 +49,13 @@ def test_get_plugins_to_update_skips_incompatible() -> None:
     sb = _make_backend()
 
     def fake_get_all_plugins(include_images: bool = True):
-        return _catalog()
+        return Ok(_catalog())
 
     sb.get_all_plugins = fake_get_all_plugins
 
     to_update = sb.get_plugins_to_update()
-    assert not isinstance(to_update, NoConnectionError)
-    ids = [p.plugin_id for p in to_update]
+    assert not isinstance(to_update, Err)
+    ids = [p.plugin_id for p in to_update.value]
     assert ids == ["com_b_Outdated"], (
         f"only the compatibly-outdated plugin may be offered for update, got {ids}"
     )
@@ -65,7 +66,7 @@ def test_update_all_plugins_never_installs_incompatible() -> None:
     sb = _make_backend()
 
     def fake_get_all_plugins(include_images: bool = True):
-        return _catalog()
+        return Ok(_catalog())
 
     uninstalled: list[str] = []
     installed: list[str] = []
@@ -75,14 +76,16 @@ def test_update_all_plugins_never_installs_incompatible() -> None:
 
     def fake_install(plugin_data, auto_update=False):
         installed.append(plugin_data.plugin_id)
-        return True
+        return Ok(None)
 
     sb.get_all_plugins = fake_get_all_plugins
     sb.uninstall_plugin = fake_uninstall
     sb.install_plugin = fake_install
 
-    n = sb.update_all_plugins()
-    assert n == 1, f"exactly the one compatible update may be counted, got {n!r}"
+    result = sb.update_all_plugins()
+    assert isinstance(result, Ok) and result.value == 1, (
+        f"exactly the one compatible update may be counted, got {result!r}"
+    )
     assert installed == ["com_b_Outdated"], (
         f"the incompatible plugin must never be installed, got installs {installed}"
     )

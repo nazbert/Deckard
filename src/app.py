@@ -42,6 +42,7 @@ from src.backend import timer_wheel
 from src.backend import ui_port
 from src.backend import startup_queue
 from src.backend.PageManagement import page_flush
+from src.backend.Store.store_result import Err, Ok
 from src.windows.ui_adapter import GtkUIAdapter
 from src.windows.mainWindow.mainWindow import MainWindow
 from src.windows.AssetManager.AssetManager import AssetManager
@@ -676,11 +677,11 @@ class App(Adw.Application):
 
         self.set_working(False)
 
-        # update_everything returns the number of successfully updated
-        # assets, or NoConnectionError -- don't toast success on failure.
-        if isinstance(result, int):
+        # update_everything returns Ok(count) or an Err -- don't toast success
+        # on failure.
+        if isinstance(result, Ok):
             gl.app.send_notification("dialog-information-symbolic", "Assets updated",
-                                     f"{result} assets have been updated")
+                                     f"{result.value} assets have been updated")
         else:
             gl.app.send_notification("dialog-information-symbolic", "Asset update failed",
                                      "Could not reach the store to update assets")
@@ -705,10 +706,10 @@ class App(Adw.Application):
             self.set_working(False)
             return
 
-        success = store_backend.install_plugin(plugin)
-        # Success is exactly True -- failure returns include truthy ints
-        # (404/400), which "if not success" misread as installed.
-        if success is not True:
+        result = store_backend.install_plugin(plugin)
+        # install_plugin answers a StoreResult -- an Err is a failure, anything
+        # else is the single Ok success. Narrowing, not truthiness.
+        if isinstance(result, Err):
             self.send_notification("dialog-information-symbolic", "Failed to install plugin",
                                    f"The plugin {plugin_id} could not be installed")
         else:

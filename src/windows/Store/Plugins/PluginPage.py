@@ -117,9 +117,9 @@ class PluginPreview(StorePreview):
 
     def install(self) -> bool:
         """Runs on the store's download worker thread; returns whether the
-        install actually succeeded. Success is `result is True` -- failure
-        returns (404/400 ints, NoConnectionError) used to be discarded and
-        the button flipped to 'installed' anyway."""
+        install actually succeeded. Success is anything but an Err -- a failed
+        install used to be discarded and the button flipped to 'installed'
+        anyway."""
         backend = self.store.backend
         if backend is None:
             log.error("Store backend unavailable; cannot install "
@@ -127,7 +127,7 @@ class PluginPreview(StorePreview):
             self.notify_install_failure()
             return False
         result = backend.install_plugin(plugin_data=self.plugin_data)
-        if result is not True:
+        if isinstance(result, Err):
             log.error(f"Failed to install plugin {self.plugin_data.plugin_id}: {result!r}")
             self.notify_install_failure()
             # Leave the button in its previous state so the user can retry.

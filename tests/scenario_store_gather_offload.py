@@ -26,8 +26,8 @@ import globals as gl  # noqa: F401
 import requests
 
 import src.backend.Store.StoreBackend as sb_module
-from src.backend.Store.StoreBackend import StoreBackend, NoConnectionError
-from src.backend.Store.store_result import StoreFetchError
+from src.backend.Store.StoreBackend import StoreBackend
+from src.backend.Store.store_result import Err, ErrReason, StoreFetchError
 
 
 class FakeResponse:
@@ -163,8 +163,8 @@ def test_network_failure_raises_store_fetch_error() -> None:
 
 def test_download_repo_guards_unresolved_sha() -> None:
     """download_repo's branch path resolves the sha through get_last_commit;
-    a NoConnectionError or None sha must fail the download up front instead
-    of interpolating the object into the archive URL."""
+    a raised StoreFetchError or a None sha must fail the download up front
+    instead of interpolating the object into the archive URL."""
     def get_must_not_be_called(*args, **kwargs):
         raise AssertionError("no archive fetch may be attempted for an unresolved sha")
 
@@ -175,11 +175,13 @@ def test_download_repo_guards_unresolved_sha() -> None:
     try:
         sb = _make_backend()
 
-        sb.get_last_commit = lambda repo_url, branch_name="main": NoConnectionError()
+        def _raise_offline(repo_url, branch_name="main"):
+            raise StoreFetchError(repo_url, "offline")
+        sb.get_last_commit = _raise_offline
         result = sb.download_repo(
             "https://github.com/Example/Repo", "/nonexistent/target", branch_name="main"
         )
-        assert isinstance(result, NoConnectionError), (
+        assert isinstance(result, Err), (
             f"an unresolvable sha (offline) must propagate, got {result!r}"
         )
 
@@ -187,8 +189,8 @@ def test_download_repo_guards_unresolved_sha() -> None:
         result = sb.download_repo(
             "https://github.com/Example/Repo", "/nonexistent/target", branch_name="main"
         )
-        assert result == 404, (
-            f"a branch with no commits must be a hard 404, got {result!r}"
+        assert isinstance(result, Err) and result.reason is ErrReason.INSTALL_FAILED, (
+            f"a branch with no commits must be a hard install failure, got {result!r}"
         )
     finally:
         sb_module.http_client.get = real_get

@@ -23,6 +23,7 @@ from loguru import logger as log
 from GtkHelper.GtkHelper import LoadingScreen, run_on_main
 from autostart import is_flatpak
 from src.backend.DeckManagement.HelperMethods import open_web
+from src.backend.Store.store_result import Err
 from src.windows.Onboarding.PluginRecommendations import PluginRecommendations
 
 gi.require_version("Gtk", "4.0")
@@ -347,7 +348,7 @@ class OnboardingScreen5(Gtk.Box):
                 failed.append(plugin_data.plugin_name)
                 continue
             result = gl.store_backend.install_plugin(plugin)
-            if result is not True:
+            if isinstance(result, Err):
                 log.error(f"Onboarding: failed to install {plugin_data.plugin_name}: {result!r}")
                 failed.append(plugin_data.plugin_name)
                 GLib.idle_add(self.onboarding_window.loading_box.progress_bar.set_text,

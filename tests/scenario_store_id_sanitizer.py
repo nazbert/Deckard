@@ -20,6 +20,7 @@ import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl
 
 from src.backend.Store.StoreBackend import StoreBackend
+from src.backend.Store.store_result import Ok, Err, ErrReason
 from src.windows.Store.StoreData import PluginData, IconData, WallpaperData
 
 
@@ -81,7 +82,9 @@ def test_install_plugin_rejects_traversal_id() -> None:
     for evil in ["../../..", "/etc", "../sibling", None]:
         data = PluginData(github="https://github.com/evil/evil", plugin_id=evil)
         result = sb.install_plugin(data)
-        assert result == 400, f"unsafe plugin id {evil!r} must be refused, got {result!r}"
+        assert isinstance(result, Err) and result.reason is ErrReason.INVALID_ASSET, (
+            f"unsafe plugin id {evil!r} must be refused, got {result!r}"
+        )
 
     assert download_calls == [], (
         f"download must never start for an unsafe id, got {download_calls}"
@@ -151,7 +154,7 @@ def test_install_script_runs_without_shell() -> None:
     finally:
         backend_module.subprocess.run = real_run
 
-    assert result is True, f"clean install must succeed, got {result!r}"
+    assert isinstance(result, Ok), f"clean install must succeed, got {result!r}"
     assert len(captured) == 1, f"expected exactly the __install__.py invocation, got {captured}"
     argv, kwargs = captured[0]
     assert isinstance(argv, list), f"install script must run as an argv list, got {argv!r}"
@@ -240,7 +243,9 @@ def test_clone_repo_rejects_injection_and_never_shells() -> None:
     result = sb.clone_repo("https://github.com/evil/evil",
                            os.path.join(gl.PLUGIN_DIR, "victim"),
                            commit_sha=None, branch_name=injected_branch)
-    assert result == 400, f"injected branch must be refused, got {result!r}"
+    assert isinstance(result, Err) and result.reason is ErrReason.INVALID_ASSET, (
+        f"injected branch must be refused, got {result!r}"
+    )
     assert calls == [], f"no git call may happen for an injected branch, got {calls}"
     assert not os.path.exists(marker), "injected command must never create its marker"
 
@@ -248,7 +253,9 @@ def test_clone_repo_rejects_injection_and_never_shells() -> None:
     result = sb.clone_repo("https://github.com/evil/evil",
                            os.path.join(gl.PLUGIN_DIR, "victim"),
                            commit_sha=f"deadbeef; touch {marker}", branch_name=None)
-    assert result == 400, f"injected commit sha must be refused, got {result!r}"
+    assert isinstance(result, Err) and result.reason is ErrReason.INVALID_ASSET, (
+        f"injected commit sha must be refused, got {result!r}"
+    )
     assert not os.path.exists(marker), "injected command must never create its marker"
 
     # 3) A CLEAN branch reaches git only as an argv list (no shell). git is
@@ -267,7 +274,7 @@ def test_clone_repo_rejects_injection_and_never_shells() -> None:
                                commit_sha=None, branch_name="release/1.5.0")
     finally:
         backend_module.shutil.which = real_which
-    assert result == 200, f"clean clone must succeed, got {result!r}"
+    assert isinstance(result, Ok), f"clean clone must succeed, got {result!r}"
     checkout_calls = [c for c in calls if len(c) >= 4 and c[3] == "checkout"]
     assert checkout_calls, f"expected an argv 'git checkout' call, got {calls}"
     argv = checkout_calls[0]

@@ -19,7 +19,8 @@ import time
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl  # noqa: F401
 
-from src.backend.Store.StoreBackend import StoreBackend, NoConnectionError
+from src.backend.Store.StoreBackend import StoreBackend
+from src.backend.Store.store_result import StoreFetchError
 from src.backend.Store.StoreCache import StoreCache
 
 REPO = "https://github.com/StreamController/StreamController-Store"
@@ -119,7 +120,7 @@ def test_stale_fallback_serves_last_good_content() -> None:
         return Resp()
 
     def fetch_fail(url):
-        return NoConnectionError()
+        raise StoreFetchError(url, "429 rate limit")
 
     sb.request_from_url = fetch_ok
     first = sb.get_remote_file(REPO, "Wallpapers.json", "main", force_refetch=True)
