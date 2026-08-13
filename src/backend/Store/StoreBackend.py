@@ -48,12 +48,30 @@ from src.Signals import Signals
 # Import globals
 import globals as gl
 from src.windows.Store.StoreData import PluginData, IconData, SDPlusBarWallpaperData, WallpaperData
+from src.backend.Store.asset_types import (
+    AssetTypeDescriptor,
+    ICON,
+    PLUGIN,
+    SD_PLUS_BAR,
+    WALLPAPER,
+)
 
 
 class NoConnectionError:
     # Falsy so callers can treat any error result as a failed operation.
     def __bool__(self) -> bool:
         return False
+
+
+class _ResolvedVersion(NamedTuple):
+    """What version resolution decides before an entry is fetched: whether a
+    compatible release exists, which commit to fetch, and (plugins only) the
+    branch a custom entry pins. _prepare_asset distinguishes this from the
+    two early-out sentinels version resolution can also produce -- the
+    NoCompatibleVersion class and a NoConnectionError -- by its type."""
+    compatible: bool
+    commit: str | None
+    branch: str | None
 
 
 def same_repository(a: RepoRef | None, b: RepoRef | None) -> bool:
@@ -594,129 +612,180 @@ class StoreBackend:
         except (json.decoder.JSONDecodeError, TypeError) as e:
             return {}
 
-    def prepare_plugin(self, plugin, include_image: bool = True, verified: bool = False):
+    def _resolve_asset_version(self, entry: dict, desc: AssetTypeDescriptor, url: str):
+        """Decide the commit an entry should be fetched at.
+
+        Non-plugin entries always pin a version map; a plugin entry may omit
+        it (a branch-pinned custom plugin), and only a plugin entry resolves a
+        branch tip. Returns a _ResolvedVersion, or one of the two early-out
+        values its callers already understand: the NoCompatibleVersion class
+        when no version resolves at all, or a NoConnectionError when a branch
+        tip cannot be reached.
+        """
+        compatible = True
+        commit: str | None = None
+        if not desc.is_plugin or "commits" in entry:
+            newest = self.get_newest_compatible_version(entry["commits"])
+            if newest is None:
+                compatible = False
+                newest = self.get_newest_version(list(entry["commits"].keys()))
+                if newest is None:
+                    return NoCompatibleVersion
+            commit = entry["commits"][newest]
+
+        branch: str | None = None
+        if desc.is_plugin:
+            branch = entry.get("branch")
+            if branch is not None:
+                commit = self.get_last_commit(url, branch)
+                if isinstance(commit, NoConnectionError):
+                    # NoConnectionError is falsy: letting it fall through would
+                    # fetch the manifest at `branch` but store the error object
+                    # as the entry's commit_sha (poisoning sha comparisons).
+                    log.error(f"Could not resolve the last commit of {url}@{branch} due to NoConnectionError")
+                    return commit
+
+        return _ResolvedVersion(compatible, commit, branch)
+
+    def _fetch_thumbnail(self, url: str, thumbnail_path: Any, ref: Any) -> "Image.Image | None":
+        fetched = self.get_web_image(url, thumbnail_path, ref)
+        # A missing/rate-limited thumbnail must not drop the asset from the
+        # catalog -- list it without an image.
+        return None if isinstance(fetched, NoConnectionError) else fetched
+
+    def _translate_descriptions(self, manifest: dict) -> "tuple[Any, Any]":
+        return (
+            gl.lm.get_custom_translation(manifest.get("descriptions", {})),
+            gl.lm.get_custom_translation(manifest.get("short-descriptions", {})),
+        )
+
+    def _prepare_asset(self, entry, desc: AssetTypeDescriptor, include_image: bool = True, verified: bool = False):
+        """Turn one catalog entry into the descriptor's dataclass -- the single
+        implementation of what prepare_plugin/icon/wallpaper/sd_plus each used
+        to do line for line.
+
+        include_image picks the view: False builds only what the update check
+        reads (see check_entry_for_update) and fetches nothing to display; True
+        builds the full store-window row (manifest, then thumbnail, then
+        attribution). Everything type-specific -- the install dir, the
+        dataclass, its id/name/version field names, whether a branch applies --
+        is read off `desc`.
+        """
+        base_dir = getattr(self, desc.base_dir_attr)()
         if not include_image:
-            checked = self.check_entry_for_update(plugin, gl.PLUGIN_DIR)
+            # The update-check view: only the fields get_*_to_update reads and
+            # install_* needs. Every field left unset here (name, descriptions,
+            # tags, licence, thumbnail) would cost a request and is only ever
+            # displayed.
+            checked = self.check_entry_for_update(entry, base_dir)
             if not isinstance(checked, UpdateCheck):
                 return checked
-            # The update-check view: only the fields get_plugins_to_update
-            # reads and install_plugin needs. Every field left unset here
-            # (name, descriptions, tags, licence, thumbnail) would cost a
-            # request and is only ever displayed.
-            return PluginData(
-                github=checked.url,
-                author=checked.ref.user,
-                repository_name=checked.ref.repo,
-                commit_sha=checked.commit_sha,
-                branch=checked.branch,
-                local_sha=checked.local_sha,
-                plugin_id=checked.asset_id,
-                is_compatible=checked.compatible,
-                verified=verified,
-            )
+            fields: dict[str, Any] = {
+                "github": checked.url,
+                "author": checked.ref.user,
+                "repository_name": checked.ref.repo,
+                "commit_sha": checked.commit_sha,
+                "local_sha": checked.local_sha,
+                desc.id_field: checked.asset_id,
+                "is_compatible": checked.compatible,
+                "verified": verified,
+            }
+            if desc.is_plugin:
+                fields["branch"] = checked.branch
+            return desc.data_cls(**fields)
 
-        url = plugin["url"]
+        if "url" not in entry:
+            # A uniform diagnostic for a url-less entry of any type: the three
+            # non-plugin types already dropped one here silently, and the
+            # plugin path reached this point as an opaque KeyError instead.
+            log.error(f"Skipping store entry without a url: {entry!r}")
+            return None
+        url = entry["url"]
         ref = self.repo_ref_for_entry(url)
         if ref is None:
             return None
 
-        # Check if suitable version is available
-        compatible = True
-        commit: str | None = None
-        if "commits" in plugin:
-            version = self.get_newest_compatible_version(plugin["commits"])
-            if version is None:
-                compatible = False
-                version = self.get_newest_version(list(plugin["commits"].keys()))
-                if version is None:
-                    return NoCompatibleVersion #TODO
-            commit = plugin["commits"][version]
+        resolved = self._resolve_asset_version(entry, desc, url)
+        if not isinstance(resolved, _ResolvedVersion):
+            # NoCompatibleVersion (dropped by process_store_data's isinstance
+            # filter) or a NoConnectionError from an unreachable branch tip.
+            return resolved
+        compatible, commit, branch = resolved
+        # Any because a plugin entry with neither a version map nor a branch
+        # leaves this None, yet get_manifest/get_attribution/get_web_image all
+        # declare `commit: str`; they genuinely receive None here and cope. The
+        # fetch layer's honest retype is a later change's job.
+        ref_for_fetch: Any = commit or branch
 
-        branch = plugin.get("branch")
-        if branch is not None:
-            commit = self.get_last_commit(url, branch)
-            if isinstance(commit, NoConnectionError):
-                # NoConnectionError is falsy: letting it fall through would
-                # fetch the manifest at `branch` but store the error object
-                # as the entry's commit_sha (poisoning sha comparisons).
-                log.error(f"Could not resolve the last commit of {url}@{branch} due to NoConnectionError")
-                return commit
-
-        manifest = self.get_manifest(url, commit or branch)
+        manifest = self.get_manifest(url, ref_for_fetch)
         if isinstance(manifest, NoConnectionError):
-            log.error(f"manifest failed to load due to NoConnectionError for repository {url}")
             return manifest
         if not manifest:
             log.error(f"manifest failed to load for repository {url}")
-            return
+            return None
 
-        image: "Image.Image | None" = None
         thumbnail_path: Any = manifest.get("thumbnail")
-        if include_image:
-            fetched = self.get_web_image(url, thumbnail_path, commit or branch)
-            # A missing/rate-limited thumbnail must not drop the plugin --
-            # list it without an image.
-            image = None if isinstance(fetched, NoConnectionError) else fetched
-        
-        attribution = self.get_attribution(url, commit or branch)
-        if isinstance(attribution, NoConnectionError):
-            return attribution
-        attribution = attribution.get("generic", {}) #TODO: Choose correct attribution
+        image = self._fetch_thumbnail(url, thumbnail_path, ref_for_fetch)
+        attribution = self.get_attribution(url, ref_for_fetch).get("generic", {})  # TODO: Choose correct attribution
 
-        stargazers = self.get_stargazers(url)
+        translated_description, translated_short_description = self._translate_descriptions(manifest)
 
         author = ref.user
 
-        translated_description = gl.lm.get_custom_translation(manifest.get("descriptions", {}))
-        translated_short_description = gl.lm.get_custom_translation(manifest.get("short-descriptions", {}))
-
         # JSON-derived values: the manifest/attribution documents are untyped,
         # and each "missing -> None" below feeds a StoreData field that is
-        # declared non-Optional in src/windows/Store/StoreData.py. Bound
-        # through Any locals rather than restating a type they do not have.
+        # declared non-Optional in src/windows/Store/StoreData.py. Bound through
+        # Any locals rather than restating a type they do not have.
         descriptions: Any = manifest.get("descriptions") or None
         short_descriptions: Any = manifest.get("short-descriptions") or None
         tags: Any = manifest.get("tags") or None
         license_descriptions: Any = attribution.get("licence-descriptions", attribution.get("descriptions")) or None
 
-        # This entry was identified the expensive way -- its remote
-        # manifest -- so record the link while it is known: the update
-        # check then identifies the same install without any fetch.
-        self.note_installed_origin(gl.PLUGIN_DIR, manifest.get("id"), url)
+        # This entry was identified the expensive way -- its remote manifest --
+        # so record the link while it is known: the update check then
+        # identifies the same install without any fetch.
+        self.note_installed_origin(base_dir, manifest.get("id"), url)
 
-        return PluginData(
-            descriptions=descriptions,
-            short_descriptions=short_descriptions,
-            description=translated_description or manifest.get("description"),
-            short_description=translated_short_description or manifest.get("short-description"),
+        fields = {
+            "descriptions": descriptions,
+            "short_descriptions": short_descriptions,
+            "description": translated_description or manifest.get("description"),
+            "short_description": translated_short_description or manifest.get("short-description"),
 
-            github=url or None,
-            author=author or None, # Formerly: user_name
-            official=author in self.official_authors or False,
-            commit_sha=commit,
-            branch=branch,
-            local_sha=self.get_local_sha_for_id(gl.PLUGIN_DIR, manifest.get("id")),
-            minimum_app_version=manifest.get("minimum-app-version") or None,
-            app_version=manifest.get("app-version") or None,
-            repository_name=ref.repo,
-            tags=tags,
+            "github": url or None,
+            "author": author or None,  # Formerly: user_name
+            "official": author in self.official_authors or False,
+            "commit_sha": commit,
+            "local_sha": self.get_local_sha_for_id(base_dir, manifest.get("id")),
+            "minimum_app_version": manifest.get("minimum-app-version") or None,
+            "app_version": manifest.get("app-version") or None,
+            "repository_name": ref.repo,
+            "tags": tags,
 
-            thumbnail=thumbnail_path or None,
-            image=image or None,
+            "thumbnail": thumbnail_path or None,
+            # _fetch_thumbnail already collapses a failed fetch to None, so it
+            # is the single guard here -- no redundant second `or None`.
+            "image": image,
 
-            copyright=attribution.get("copyright") or None,
-            original_url=attribution.get("original-url") or None,
-            license=attribution.get("licence") or None,
-            license_descriptions=license_descriptions,
+            "copyright": attribution.get("copyright") or None,
+            "original_url": attribution.get("original-url") or None,
+            "license": attribution.get("licence") or None,
+            "license_descriptions": license_descriptions,
 
-            plugin_name=manifest.get("name") or None,
-            plugin_version=manifest.get("version") or None,
-            plugin_id=manifest.get("id") or None,
+            desc.name_field: manifest.get("name") or None,
+            desc.version_field: manifest.get("version") or None,
+            desc.id_field: manifest.get("id") or None,
 
-            is_compatible=compatible,
-            verified=verified
-        )
-    
+            "is_compatible": compatible,
+            "verified": verified,
+        }
+        if desc.is_plugin:
+            fields["branch"] = branch
+        return desc.data_cls(**fields)
+
+    def prepare_plugin(self, plugin, include_image: bool = True, verified: bool = False):
+        return self._prepare_asset(plugin, PLUGIN, include_image, verified)
+
     def get_current_git_commit_hash_without_git(self, repo_path: str) -> str:
         try:
             # Construct the path to the FETCH_HEAD file
@@ -736,6 +805,9 @@ class StoreBackend:
         except Exception as e:
             raise RuntimeError(f"Unable to retrieve git commit hash: {e}")
     
+    def plugins_dir(self) -> str:
+        return gl.PLUGIN_DIR
+
     def icons_dir(self) -> str:
         return os.path.join(gl.DATA_PATH, "icons")
 
@@ -1121,316 +1193,13 @@ class StoreBackend:
             return f.read().strip()
     
     def prepare_icon(self, icon, include_image: bool = True, verified: bool = False):
-        if not include_image:
-            # The update-check view -- see prepare_plugin.
-            checked = self.check_entry_for_update(icon, self.icons_dir())
-            if not isinstance(checked, UpdateCheck):
-                return checked
-            return IconData(
-                github=checked.url,
-                author=checked.ref.user,
-                repository_name=checked.ref.repo,
-                commit_sha=checked.commit_sha,
-                local_sha=checked.local_sha,
-                icon_id=checked.asset_id,
-                is_compatible=checked.compatible,
-                verified=verified,
-            )
-        if "url" not in icon:
-            return None
+        return self._prepare_asset(icon, ICON, include_image, verified)
 
-        url = icon["url"]
-        ref = self.repo_ref_for_entry(url)
-        if ref is None:
-            return None
-
-        # Check if suitable version is available
-        compatible = True
-        version = self.get_newest_compatible_version(icon["commits"])
-        if version is None:
-            compatible = False
-            version = self.get_newest_version(list(icon["commits"].keys()))
-            if version is None:
-                return NoCompatibleVersion
-        commit = icon["commits"][version]
-
-        manifest = self.get_manifest(url, commit)
-        if isinstance(manifest, NoConnectionError):
-            return manifest
-        if not manifest:
-            log.error(f"manifest failed to load for repository {url}")
-            return None
-        attribution = self.get_attribution(url, commit)
-        if isinstance(attribution, NoConnectionError):
-            return attribution
-        attribution = attribution.get("generic", {}) #TODO: Choose correct attribution
-
-        thumbnail_path: Any = manifest.get("thumbnail")
-        fetched = self.get_web_image(url, thumbnail_path, commit)
-        # A missing/rate-limited thumbnail must not drop the pack from
-        # the catalog -- list it without an image, like prepare_plugin.
-        image: "Image.Image | None" = None if isinstance(fetched, NoConnectionError) else fetched
-
-        author = ref.user
-
-        stargazers = self.get_stargazers(url)
-        if isinstance(stargazers, NoConnectionError):
-            return stargazers
-        
-        translated_description = gl.lm.get_custom_translation(manifest.get("descriptions", {}))
-        translated_short_description = gl.lm.get_custom_translation(manifest.get("short-descriptions", {}))
-
-        # JSON-derived values: the manifest/attribution documents are untyped,
-        # and each "missing -> None" below feeds a StoreData field that is
-        # declared non-Optional in src/windows/Store/StoreData.py. Bound
-        # through Any locals rather than restating a type they do not have.
-        descriptions: Any = manifest.get("descriptions") or None
-        short_descriptions: Any = manifest.get("short-descriptions") or None
-        tags: Any = manifest.get("tags") or None
-        license_descriptions: Any = attribution.get("licence-descriptions", attribution.get("descriptions")) or None
-
-        # This entry was identified the expensive way -- its remote
-        # manifest -- so record the link while it is known: the update
-        # check then identifies the same install without any fetch.
-        self.note_installed_origin(self.icons_dir(), manifest.get("id"), url)
-
-        return IconData(
-            description=translated_description or manifest.get("description"),
-            short_description=translated_short_description or manifest.get("short-description"),
-
-            github=url or None,
-            descriptions=descriptions,
-            short_descriptions=short_descriptions,
-            author=author or None,  # Formerly: user_name
-            official=author in self.official_authors or False,
-            commit_sha=commit,
-            local_sha=self.get_local_sha_for_id(self.icons_dir(), manifest.get("id")),
-            minimum_app_version=manifest.get("minimum-app-version") or None,
-            app_version=manifest.get("app-version") or None,
-            repository_name=ref.repo,
-            tags=tags,
-
-            thumbnail=thumbnail_path or None,
-            image=image or None,
-
-            copyright=attribution.get("copyright") or None,
-            original_url=attribution.get("original-url") or None,
-            license=attribution.get("licence") or None,
-            license_descriptions=license_descriptions,
-
-            icon_name=manifest.get("name") or None,
-            icon_version=manifest.get("version") or None,
-            icon_id=manifest.get("id") or None,
-
-            is_compatible=compatible,
-            verified=verified
-        )
-
-    
     def prepare_wallpaper(self, wallpaper, include_image: bool = True, verified: bool = False):
-        if not include_image:
-            # The update-check view -- see prepare_plugin.
-            checked = self.check_entry_for_update(wallpaper, self.wallpapers_dir())
-            if not isinstance(checked, UpdateCheck):
-                return checked
-            return WallpaperData(
-                github=checked.url,
-                author=checked.ref.user,
-                repository_name=checked.ref.repo,
-                commit_sha=checked.commit_sha,
-                local_sha=checked.local_sha,
-                wallpaper_id=checked.asset_id,
-                is_compatible=checked.compatible,
-                verified=verified,
-            )
-        if "url" not in wallpaper:
-            return None
-
-        url = wallpaper["url"]
-        ref = self.repo_ref_for_entry(url)
-        if ref is None:
-            return None
-
-        # Check if suitable version is available
-        compatible = True
-        version = self.get_newest_compatible_version(wallpaper["commits"])
-        if version is None:
-            compatible = False
-            version = self.get_newest_version(list(wallpaper["commits"].keys()))
-            if version is None:
-                return NoCompatibleVersion
-        commit = wallpaper["commits"][version]
-
-        manifest = self.get_manifest(url, commit)
-        if isinstance(manifest, NoConnectionError):
-            return manifest
-        if not manifest:
-            log.error(f"manifest failed to load for repository {url}")
-            return None
-
-        thumbnail_path: Any = manifest.get("thumbnail")
-        fetched = self.get_web_image(url, thumbnail_path, commit)
-        # A missing/rate-limited thumbnail must not drop the wallpaper
-        # from the catalog -- list it without an image, like
-        # prepare_plugin.
-        image: "Image.Image | None" = None if isinstance(fetched, NoConnectionError) else fetched
-        attribution = self.get_attribution(url, commit)
-        if isinstance(attribution, NoConnectionError):
-            return attribution
-        attribution = attribution.get("generic", {}) #TODO: Choose correct attribution
-
-        author = ref.user
-
-        translated_description = gl.lm.get_custom_translation(manifest.get("descriptions", {}))
-        translated_short_description = gl.lm.get_custom_translation(manifest.get("short-descriptions", {}))
-
-        # JSON-derived values: the manifest/attribution documents are untyped,
-        # and each "missing -> None" below feeds a StoreData field that is
-        # declared non-Optional in src/windows/Store/StoreData.py. Bound
-        # through Any locals rather than restating a type they do not have.
-        descriptions: Any = manifest.get("descriptions") or None
-        short_descriptions: Any = manifest.get("short-descriptions") or None
-        tags: Any = manifest.get("tags") or None
-        license_descriptions: Any = attribution.get("licence-descriptions", attribution.get("descriptions")) or None
-
-        # This entry was identified the expensive way -- its remote
-        # manifest -- so record the link while it is known: the update
-        # check then identifies the same install without any fetch.
-        self.note_installed_origin(self.wallpapers_dir(), manifest.get("id"), url)
-
-        return WallpaperData(
-            description=translated_description or manifest.get("description"),
-            short_description=translated_short_description or manifest.get("short-description"),
-
-            github=url or None,
-            descriptions=descriptions,
-            short_descriptions=short_descriptions,
-            author=author or None,  # Formerly: user_name
-            official=author in self.official_authors or False,
-            commit_sha=commit,
-            local_sha=self.get_local_sha_for_id(self.wallpapers_dir(), manifest.get("id")),
-            minimum_app_version=manifest.get("minimum-app-version") or None,
-            app_version=manifest.get("app-version") or None,
-            repository_name=ref.repo,
-            tags=tags,
-
-            thumbnail=thumbnail_path or None,
-            image=image or None,
-
-            copyright=attribution.get("copyright") or None,
-            original_url=attribution.get("original-url") or None,
-            license=attribution.get("licence") or None,
-            license_descriptions=license_descriptions,
-
-            wallpaper_name=manifest.get("name") or None,
-            wallpaper_version=manifest.get("version") or None,
-            wallpaper_id=manifest.get("id") or None,
-
-            is_compatible=compatible,
-            verified=verified
-        )
+        return self._prepare_asset(wallpaper, WALLPAPER, include_image, verified)
 
     def prepare_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper, include_image: bool = True, verified: bool = False):
-        if not include_image:
-            # The update-check view -- see prepare_plugin.
-            checked = self.check_entry_for_update(sd_plus_bar_wallpaper, self.sd_plus_bar_wallpapers_dir())
-            if not isinstance(checked, UpdateCheck):
-                return checked
-            return SDPlusBarWallpaperData(
-                github=checked.url,
-                author=checked.ref.user,
-                repository_name=checked.ref.repo,
-                commit_sha=checked.commit_sha,
-                local_sha=checked.local_sha,
-                id=checked.asset_id,
-                is_compatible=checked.compatible,
-                verified=verified,
-            )
-        if "url" not in sd_plus_bar_wallpaper:
-            return None
-
-        url = sd_plus_bar_wallpaper["url"]
-        ref = self.repo_ref_for_entry(url)
-        if ref is None:
-            return None
-        
-        compatible = True
-        version = self.get_newest_compatible_version(sd_plus_bar_wallpaper["commits"])
-        if version is None:
-            compatible = False
-            version = self.get_newest_version(list(sd_plus_bar_wallpaper["commits"].keys()))
-            if version is None:
-                return NoCompatibleVersion
-        commit = sd_plus_bar_wallpaper["commits"][version]
-        
-        manifest = self.get_manifest(url, commit)
-        if isinstance(manifest, NoConnectionError):
-            return manifest
-        if not manifest:
-            log.error(f"manifest failed to load for repository {url}")
-            return None
-
-        thumbnail_path: Any = manifest.get("thumbnail")
-        fetched = self.get_web_image(url, thumbnail_path, commit)
-        # A missing/rate-limited thumbnail must not drop the SD+ bar
-        # wallpaper from the catalog -- list it without an image, like
-        # prepare_plugin.
-        image: "Image.Image | None" = None if isinstance(fetched, NoConnectionError) else fetched
-        attribution = self.get_attribution(url, commit)
-        if isinstance(attribution, NoConnectionError):
-            return attribution
-        attribution = attribution.get("generic", {}) #TODO: Choose correct attribution
-
-        author = ref.user
-
-        translated_description = gl.lm.get_custom_translation(manifest.get("descriptions", {}))
-        translated_short_description = gl.lm.get_custom_translation(manifest.get("short-descriptions", {}))
-
-        # JSON-derived values: the manifest/attribution documents are untyped,
-        # and each "missing -> None" below feeds a StoreData field that is
-        # declared non-Optional in src/windows/Store/StoreData.py. Bound
-        # through Any locals rather than restating a type they do not have.
-        descriptions: Any = manifest.get("descriptions") or None
-        short_descriptions: Any = manifest.get("short-descriptions") or None
-        tags: Any = manifest.get("tags") or None
-        license_descriptions: Any = attribution.get("licence-descriptions", attribution.get("descriptions")) or None
-
-        # This entry was identified the expensive way -- its remote
-        # manifest -- so record the link while it is known: the update
-        # check then identifies the same install without any fetch.
-        self.note_installed_origin(self.sd_plus_bar_wallpapers_dir(), manifest.get("id"), url)
-
-        return SDPlusBarWallpaperData(
-            description=translated_description or manifest.get("description"),
-            short_description=translated_short_description or manifest.get("short-description"),
-
-            github=url or None,
-            descriptions=descriptions,
-            short_descriptions=short_descriptions,
-            author=author or None,  # Formerly: user_name
-            official=author in self.official_authors or False,
-            commit_sha=commit,
-            local_sha=self.get_local_sha_for_id(self.sd_plus_bar_wallpapers_dir(), manifest.get("id")),
-            minimum_app_version=manifest.get("minimum-app-version") or None,
-            app_version=manifest.get("app-version") or None,
-            repository_name=ref.repo,
-            tags=tags,
-
-            thumbnail=thumbnail_path or None,
-            image=image or None,
-
-            copyright=attribution.get("copyright") or None,
-            original_url=attribution.get("original-url") or None,
-            license=attribution.get("licence") or None,
-            license_descriptions=license_descriptions,
-
-            name=manifest.get("name") or None,
-            version=manifest.get("version") or None,
-            id=manifest.get("id") or None,    
-
-            is_compatible=compatible,
-            verified=verified
-        )
+        return self._prepare_asset(sd_plus_bar_wallpaper, SD_PLUS_BAR, include_image, verified)
 
     def get_web_image(self, url: str, path: str, branch: str = "main") -> "Image.Image | NoConnectionError | None":
         # `except Exception` so a pool worker still honours SystemExit and
@@ -1448,10 +1217,6 @@ class StoreBackend:
             log.warning(f"Could not decode image {path} from {url}: {e}")
             return None
     
-    def get_stargazers(self, repo_url: str) -> int:
-        "Deactivated for now because of rate limits"
-        return 0
-
     def get_user_name(self, repo_url:str) -> str:
         ref = parse_repo_url(repo_url)
         if ref is None:
