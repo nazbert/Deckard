@@ -53,6 +53,8 @@ class AssetTypeDescriptor:
     name_field: str              # the data_cls field holding the display name
     version_field: str           # the data_cls field holding the version
     get_all_attr: str            # backend method NAME: list every entry
+    get_to_update_attr: str      # backend method NAME: list the outdated ones
+    update_all_attr: str         # backend method NAME: reinstall the outdated
     install_attr: str            # backend method NAME: install one entry
     get_custom_attr: str | None  # backend method NAME for user-added entries
     # Whether an install call reported success. Plugins answer True, the
@@ -75,6 +77,8 @@ PLUGIN = AssetTypeDescriptor(
     name_field="plugin_name",
     version_field="plugin_version",
     get_all_attr="get_all_plugins",
+    get_to_update_attr="get_plugins_to_update",
+    update_all_attr="update_all_plugins",
     install_attr="install_plugin",
     get_custom_attr="get_custom_plugins",
     install_ok=lambda result: result is True,
@@ -90,6 +94,8 @@ ICON = AssetTypeDescriptor(
     name_field="icon_name",
     version_field="icon_version",
     get_all_attr="get_all_icons",
+    get_to_update_attr="get_icons_to_update",
+    update_all_attr="update_all_icons",
     install_attr="install_icon",
     get_custom_attr=None,
     install_ok=lambda result: result == 200,
@@ -105,6 +111,8 @@ WALLPAPER = AssetTypeDescriptor(
     name_field="wallpaper_name",
     version_field="wallpaper_version",
     get_all_attr="get_all_wallpapers",
+    get_to_update_attr="get_wallpapers_to_update",
+    update_all_attr="update_all_wallpapers",
     install_attr="install_wallpaper",
     get_custom_attr=None,
     install_ok=lambda result: result == 200,
@@ -120,6 +128,8 @@ SD_PLUS_BAR = AssetTypeDescriptor(
     name_field="name",
     version_field="version",
     get_all_attr="get_all_sd_plus_bar_wallpapers",
+    get_to_update_attr="get_sd_plus_bar_wallpapers_to_update",
+    update_all_attr="update_all_sd_plus_bar_wallpapers",
     install_attr="install_sd_plus_bar_wallpaper",
     get_custom_attr=None,
     install_ok=lambda result: result == 200,
