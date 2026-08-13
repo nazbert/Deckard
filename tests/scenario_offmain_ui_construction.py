@@ -27,6 +27,8 @@ from gi.repository import GLib
 
 from fixtures import start_watchdog
 
+from src.backend.Store.store_result import Ok
+
 
 def pump_until(condition, timeout: float, what: str) -> None:
     context = GLib.MainContext.default()
@@ -69,7 +71,7 @@ def check_store_page() -> int:
 
     plugin = types.SimpleNamespace(is_compatible=True)
     page.store = types.SimpleNamespace(backend=types.SimpleNamespace(
-        get_all_plugins=lambda: [plugin, plugin]))
+        get_all_plugins=lambda: Ok([plugin, plugin])))
 
     try:
         worker = threading.Thread(target=page.load, daemon=True)
@@ -110,7 +112,7 @@ def check_recommendations() -> int:
     import globals as gl
     plugin = types.SimpleNamespace(is_compatible=True, plugin_id="x")
     real_backend = getattr(gl, "store_backend", None)
-    gl.store_backend = types.SimpleNamespace(get_all_plugins=lambda: [plugin])
+    gl.store_backend = types.SimpleNamespace(get_all_plugins=lambda: Ok([plugin]))
 
     rec = pr_mod.PluginRecommendations.__new__(pr_mod.PluginRecommendations)
     rec.defaults = []

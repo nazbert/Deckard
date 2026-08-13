@@ -5,7 +5,7 @@ from loguru import logger as log
 from GtkHelper.GtkHelper import BetterPreferencesGroup, LoadingScreen
 
 import globals as gl
-from src.backend.Store.StoreBackend import NoConnectionError
+from src.backend.Store.store_result import Err
 from src.windows.Store.StoreData import PluginData
 
 class PluginRecommendations(Gtk.Box):
@@ -91,19 +91,21 @@ class PluginRecommendations(Gtk.Box):
         # process-fatal off-main-GTK construction class, racing
         # the carousel on every first launch.
         #
-        # The fetch returns a NoConnectionError SENTINEL when every store is
-        # unreachable (offline, GitHub rate limit); iterating it raised
-        # TypeError, killing this thread with the spinner still up on a
-        # fresh install. Exceptions get the same error state.
+        # The fetch returns an Err when every store is unreachable (offline,
+        # GitHub rate limit); iterating the old NoConnectionError sentinel
+        # raised TypeError, killing this thread with the spinner still up on a
+        # fresh install. Err and any raising fetch get the same error state.
         try:
-            plugins = gl.store_backend.get_all_plugins()
+            result = gl.store_backend.get_all_plugins()
         except Exception as e:
             log.opt(exception=e).error("Onboarding: plugin recommendations fetch failed")
-            plugins = None
-
-        if plugins is None or isinstance(plugins, NoConnectionError):
             self.show_connection_error()
             return
+
+        if isinstance(result, Err):
+            self.show_connection_error()
+            return
+        plugins = result.value
 
         def build_rows():
             for plugin in plugins:

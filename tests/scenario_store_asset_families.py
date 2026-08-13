@@ -53,6 +53,7 @@ from PIL import Image
 
 from src.backend.Store.StoreBackend import StoreBackend, NoCompatibleVersion, NoConnectionError
 from src.backend.Store.StoreCache import StoreCache
+from src.backend.Store.store_result import Ok, StoreFetchError
 from src.windows.Store.StoreData import (
     IconData,
     PluginData,
@@ -422,19 +423,26 @@ def test_full_prepare_backfills_the_origin_stamp() -> None:
             assert f.read().strip() == URL, f"{key}: the stamp must name the entry's url"
 
 
-def test_manifest_connection_error_propagates() -> None:
-    """A NoConnectionError from the manifest fetch propagates unchanged out of
-    every wrapper (process_store_data drops it)."""
+def test_manifest_fetch_error_propagates() -> None:
+    """A StoreFetchError from the manifest fetch propagates unchanged out of
+    every wrapper -- process_store_data's per-future collect drops just that
+    entry (the raising contract that replaced the returned sentinel)."""
     _stub_globals()
     sb = _make_backend()
     _reset_dirs(sb)
-    _stub_fetch_layer(sb, manifest=NoConnectionError())
+    _stub_fetch_layer(sb)
+
+    def raise_fetch_error(url, commit):
+        raise StoreFetchError(url, "manifest unreachable")
+
+    sb.get_manifest = raise_fetch_error
 
     for key, method, _cls, _id, _name, _version, _is_plugin in TYPES:
-        result = getattr(sb, method)(_catalog_entry(), include_image=True, verified=False)
-        assert isinstance(result, NoConnectionError), (
-            f"manifest-error/{key}: must propagate NoConnectionError, got {result!r}"
-        )
+        try:
+            getattr(sb, method)(_catalog_entry(), include_image=True, verified=False)
+            raise AssertionError(f"manifest-error/{key}: must propagate StoreFetchError")
+        except StoreFetchError:
+            pass
 
 
 def test_unparseable_url_and_missing_url_become_none() -> None:
@@ -478,10 +486,11 @@ def test_no_compatible_version_sentinel_is_filtered_by_process_store_data() -> N
     )
 
     # And driven through the real process_store_data, the sentinel is filtered.
+    # get_all_* now returns a StoreResult: the filtered catalog is Ok([]).
     sb.get_stores = lambda: [(URL, "main")]
     sb.fetch_and_parse_store_json = lambda url, filename, branch, n_errors=0: ([entry], n_errors)
     result = sb.get_all_icons()
-    assert result == [], (
+    assert result == Ok([]), (
         f"the NoCompatibleVersion sentinel must be filtered by process_store_data, got {result!r}"
     )
 
@@ -698,7 +707,7 @@ def main() -> None:
     test_failed_thumbnail_lists_without_image()
     test_all_three_fetches_receive_the_resolved_ref()
     test_full_prepare_backfills_the_origin_stamp()
-    test_manifest_connection_error_propagates()
+    test_manifest_fetch_error_propagates()
     test_unparseable_url_and_missing_url_become_none()
     test_no_compatible_version_sentinel_is_filtered_by_process_store_data()
     test_canonical_properties_map_to_per_type_fields()

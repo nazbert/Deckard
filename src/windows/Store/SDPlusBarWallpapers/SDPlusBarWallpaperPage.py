@@ -25,7 +25,7 @@ from gi.repository import Gtk
 # Import own modules
 from src.windows.Store.StorePage import StorePage
 from src.windows.Store.Preview import StorePreview
-from src.backend.Store.StoreBackend import NoConnectionError
+from src.backend.Store.store_result import Err
 
 # Import globals
 import globals as gl
@@ -45,10 +45,11 @@ class SDPlusBarWallpaperPage(StorePage):
     # show the error page and re-arm the tab for a retry.
     def load(self):
         self.set_loading()
-        wallpapers = self.store.backend.get_all_sd_plus_bar_wallpapers()
-        if isinstance(wallpapers, NoConnectionError):
+        result = self.store.backend.get_all_sd_plus_bar_wallpapers()
+        if isinstance(result, Err):
             self.show_connection_error()
             return
+        wallpapers = result.value
         for wallpaper in wallpapers:
             if wallpaper.is_compatible:
                 section = self.compatible_section

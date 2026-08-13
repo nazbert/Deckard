@@ -25,7 +25,7 @@ from gi.repository import Gtk
 # Import own modules
 from src.windows.Store.StorePage import StorePage
 from src.windows.Store.Preview import StorePreview
-from src.backend.Store.StoreBackend import NoConnectionError
+from src.backend.Store.store_result import Err
 
 # Typing
 from typing import TYPE_CHECKING
@@ -47,10 +47,11 @@ class IconPage(StorePage):
     # show the error page and re-arm the tab for a retry.
     def load(self):
         self.set_loading()
-        icons: list[IconData] = self.store.backend.get_all_icons()
-        if isinstance(icons, NoConnectionError):
+        result = self.store.backend.get_all_icons()
+        if isinstance(result, Err):
             self.show_connection_error()
             return
+        icons: list[IconData] = result.value
         for icon in icons:
             if icon.is_compatible:
                 section = self.compatible_section

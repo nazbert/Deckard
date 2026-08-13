@@ -10,8 +10,8 @@ rest of the codebase now depends on:
      by IP; the catalog fetch used to give up on the first 429 and fall back
      to the stale cache).
   2. Once the retries are exhausted the FINAL response is returned, NOT an
-     exception -- that is what keeps StoreBackend.request_from_url mapping a
-     still-429 fetch to NoConnectionError, and therefore keeps
+     exception -- that is what lets StoreBackend.request_from_url turn a
+     still-429 fetch into a StoreFetchError, and therefore keeps
      get_remote_file's stale-cache fallback working exactly as before.
   3. The session really pools: consecutive fetches ride one TCP connection
      instead of paying a fresh handshake each (~150 of them per store page
@@ -172,9 +172,9 @@ def test_respects_retry_after(server, base) -> None:
 def test_exhausted_retries_return_the_response(server, base) -> None:
     """The property the store's stale-cache fallback rests on: a still-429
     fetch comes back as a RESPONSE with status 429, never as a raised
-    RetryError. request_from_url maps it to NoConnectionError, and
-    get_remote_file then serves the cached copy exactly as it did before the
-    session existed."""
+    RetryError. request_from_url turns that non-200 into a StoreFetchError, and
+    get_remote_file catches it and serves the cached copy exactly as it did
+    before the session existed."""
     response = http_client.get(f"{base}/always-429", timeout=5)
 
     assert response.status_code == 429, (
@@ -249,16 +249,21 @@ def test_non_200_returns_the_connection_to_the_pool(server, base) -> None:
     CLOSES the socket, so a catalog's routine 404s (attribution.json is
     optional for most entries) would cost the next fetch a fresh TCP + TLS
     handshake -- defeating the pooled session this module exists to provide."""
-    from src.backend.Store.StoreBackend import NoConnectionError, StoreBackend
+    from src.backend.Store.StoreBackend import StoreBackend
+    from src.backend.Store.store_result import StoreFetchError
 
     sb = StoreBackend.__new__(StoreBackend)  # skip __init__ (spawns threads)
     sb._fetch_limiter = threading.Semaphore(http_client.POOL_MAXSIZE)
 
     assert sb.request_from_url(f"{base}/pooled").status_code == 200
-    answer = sb.request_from_url(f"{base}/absent")
-    assert isinstance(answer, NoConnectionError), (
-        f"a 404 must still map to NoConnectionError, got {answer!r}"
-    )
+    # A 404 now RAISES StoreFetchError (was: a returned NoConnectionError), but
+    # only after draining the error body -- which is what keeps the socket in
+    # the pool, the property this test pins.
+    try:
+        sb.request_from_url(f"{base}/absent")
+        raise AssertionError("a 404 must raise StoreFetchError")
+    except StoreFetchError:
+        pass
     assert sb.request_from_url(f"{base}/pooled").status_code == 200
 
     ports = _ports(server, "/pooled") + _ports(server, "/absent")

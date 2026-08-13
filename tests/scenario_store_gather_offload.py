@@ -27,6 +27,7 @@ import requests
 
 import src.backend.Store.StoreBackend as sb_module
 from src.backend.Store.StoreBackend import StoreBackend, NoConnectionError
+from src.backend.Store.store_result import StoreFetchError
 
 
 class FakeResponse:
@@ -124,11 +125,11 @@ def test_lookup_respects_fetch_limiter() -> None:
     )
 
 
-def test_network_failure_returns_no_connection_error() -> None:
-    """A requests exception must come back as NoConnectionError (the
-    contract every sibling fetch obeys), and prepare_plugin must propagate
-    it instead of raising out of the fan-out or fetching a manifest for an
-    unresolved commit."""
+def test_network_failure_raises_store_fetch_error() -> None:
+    """A requests exception must come back as a StoreFetchError (the raising
+    contract every sibling fetch now obeys), and prepare_plugin must let it
+    propagate -- without fetching a manifest for an unresolved commit -- so the
+    fan-out's per-future collect drops just that entry."""
     def failing_get(url, timeout=30):
         raise requests.exceptions.ConnectionError("boom: no route to host")
 
@@ -137,10 +138,11 @@ def test_network_failure_returns_no_connection_error() -> None:
     try:
         sb = _make_backend()
 
-        result = sb.get_last_commit("https://github.com/Example/Repo", "main")
-        assert isinstance(result, NoConnectionError), (
-            f"a network failure must return NoConnectionError, got {result!r}"
-        )
+        try:
+            sb.get_last_commit("https://github.com/Example/Repo", "main")
+            raise AssertionError("a network failure must raise StoreFetchError")
+        except StoreFetchError:
+            pass
 
         def manifest_must_not_be_called(url, commit):
             raise AssertionError(
@@ -150,10 +152,11 @@ def test_network_failure_returns_no_connection_error() -> None:
 
         sb.get_manifest = manifest_must_not_be_called
         plugin = {"url": "https://github.com/Example/TestPlugin", "branch": "main"}
-        result = sb.prepare_plugin(plugin)
-        assert isinstance(result, NoConnectionError), (
-            f"prepare_plugin must propagate the NoConnectionError, got {result!r}"
-        )
+        try:
+            sb.prepare_plugin(plugin)
+            raise AssertionError("prepare_plugin must propagate the StoreFetchError")
+        except StoreFetchError:
+            pass
     finally:
         sb_module.http_client.get = real_get
 
@@ -196,7 +199,7 @@ def main() -> None:
     fixtures.start_watchdog(30, label="scenario_store_gather_offload")
     test_catalog_fanout_overlaps()
     test_lookup_respects_fetch_limiter()
-    test_network_failure_returns_no_connection_error()
+    test_network_failure_raises_store_fetch_error()
     test_download_repo_guards_unresolved_sha()
     print("scenario_store_gather_offload: PASS")
 

@@ -59,17 +59,19 @@ def make_recommendations_self():
 
 
 def check_recommendations_offline() -> None:
-    from src.backend.Store.StoreBackend import NoConnectionError
+    from src.backend.Store.store_result import Err, ErrReason, Ok
     from src.windows.Onboarding.PluginRecommendations import PluginRecommendations
 
-    # Leg 1a: sentinel return -- must show the error state, not die.
-    gl.store_backend = types.SimpleNamespace(get_all_plugins=lambda: NoConnectionError())
+    # Leg 1a: an Err from the read boundary -- must show the error state, not
+    # die. (Pre-fix get_all_plugins returned a NoConnectionError sentinel and
+    # load() iterated it -> TypeError killed the loader thread.)
+    gl.store_backend = types.SimpleNamespace(get_all_plugins=lambda: Err(ErrReason.NO_CONNECTION))
     fake, calls = make_recommendations_self()
     PluginRecommendations.load(fake)
     assert calls["error"] == 1, (
-        "a NoConnectionError sentinel from get_all_plugins must show the "
-        "error state (pre-fix: TypeError killed the loader thread and the "
-        "spinner span forever -- fresh-install mode)"
+        "an Err from get_all_plugins must show the error state (pre-fix: "
+        "iterating the sentinel killed the loader thread and the spinner span "
+        "forever -- fresh-install mode)"
     )
     assert not fake.group.rows, "no rows may be built on a failed fetch"
 
@@ -82,10 +84,10 @@ def check_recommendations_offline() -> None:
     PluginRecommendations.load(fake)
     assert calls["error"] == 1, "a raising fetch must also show the error state"
 
-    # Leg 1c: a normal (here: all-falsy, so no widgets get built) list still
-    # completes the load -- the idle-marshalled build_rows must run and stop
-    # the spinner.
-    gl.store_backend = types.SimpleNamespace(get_all_plugins=lambda: [None, None])
+    # Leg 1c: a normal Ok (here carrying an all-falsy list, so no widgets get
+    # built) still completes the load -- the idle-marshalled build_rows must
+    # run and stop the spinner.
+    gl.store_backend = types.SimpleNamespace(get_all_plugins=lambda: Ok([None, None]))
     fake, calls = make_recommendations_self()
     PluginRecommendations.load(fake)
     pump_main_context()
@@ -96,6 +98,112 @@ def check_recommendations_offline() -> None:
     assert calls["error"] == 0
 
     print("PASS: recommendations page survives an unreachable store")
+
+
+def check_get_plugin_for_id_offline_returns_none() -> None:
+    """Headless, pure backend: an unreachable store makes get_all_plugins
+    answer an Err, and get_plugin_for_id must narrow it to None -- not iterate
+    it. On the pre-fix backend get_all_plugins answered a NoConnectionError
+    sentinel and this method iterated it, raising TypeError; under the
+    @log.catch of every caller that TypeError was swallowed and the caller
+    stranded."""
+    from src.backend.Store.StoreBackend import StoreBackend
+    from src.backend.Store.store_result import Err, ErrReason
+
+    backend = StoreBackend.__new__(StoreBackend)  # skip __init__ (spawns a fetch thread)
+    backend.get_all_plugins = lambda include_images=True: Err(ErrReason.NO_CONNECTION, "offline")
+
+    assert backend.get_plugin_for_id("com_any_Plugin") is None, (
+        "an unreachable store must resolve to None, not raise TypeError out of "
+        "an iterated sentinel"
+    )
+    print("PASS: get_plugin_for_id returns None when the store is unreachable")
+
+
+class _LabelRecorder:
+    def __init__(self, text):
+        self.text = text
+
+    def set_text(self, text):
+        self.text = text
+
+
+class _SpinnerRecorder:
+    def __init__(self):
+        self.visible = True
+        self.spinning = True
+
+    def set_visible(self, visible):
+        self.visible = visible
+
+    def start(self):
+        self.spinning = True
+
+    def stop(self):
+        self.spinning = False
+
+
+def check_missing_row_spinner_recovers() -> None:
+    """The real MissingRow.install driven over a backend whose store is
+    unreachable. Install failure must reach the failed-label + error-styling
+    state instead of leaving the spinner up on the "installing" text forever.
+
+    Pre-fix: get_plugin_for_id iterated the offline sentinel and raised
+    TypeError, which install's @log.catch swallowed -- show_install_error never
+    ran, so the label stayed on installing_label and the spinner kept
+    spinning. The fix is in get_plugin_for_id (Err -> None), so this drives it
+    through the real MissingRow method to prove the stuck-spinner site is
+    healed."""
+    import types as _types
+
+    from src.backend import timer_wheel
+    from src.backend.Store.StoreBackend import StoreBackend
+    from src.backend.Store.store_result import Err, ErrReason
+    from src.windows.mainWindow.elements.Sidebar.elements.ActionMissing.MissingRow import MissingRow
+
+    backend = StoreBackend.__new__(StoreBackend)
+    backend.get_all_plugins = lambda include_images=True: Err(ErrReason.NO_CONNECTION, "offline")
+    gl.store_backend = backend
+
+    # The 3s auto-hide would leave a live timer past the test; the recovery
+    # state it hides is exactly what this asserts before it fires.
+    real_schedule = timer_wheel.schedule
+    timer_wheel.schedule = lambda *a, **k: None
+
+    css: list = []
+    label = _LabelRecorder("Installing...")
+    spinner = _SpinnerRecorder()
+    fake = _types.SimpleNamespace(
+        action_id="com_test_Missing::action0",
+        spinner=spinner,
+        label=label,
+        install_label="Install",
+        installing_label="Installing...",
+        install_failed_label="Install failed",
+        add_css_class=lambda name: css.append(name),
+        set_sensitive=lambda sensitive: None,
+        main_button=_types.SimpleNamespace(set_sensitive=lambda sensitive: None),
+    )
+    # show_install_error / hide_install_error are the real methods, bound to the
+    # duck-typed self -- the GLib marshalling they do is real and pumped below.
+    fake.show_install_error = _types.MethodType(MissingRow.show_install_error, fake)
+    fake.hide_install_error = _types.MethodType(MissingRow.hide_install_error, fake)
+
+    try:
+        MissingRow.install(fake)  # @log.catch wrapper -- must NOT swallow into a stuck spinner
+        pump_main_context()
+    finally:
+        timer_wheel.schedule = real_schedule
+
+    assert label.text == fake.install_failed_label, (
+        f"an unreachable store must move the row to the failed label, not leave "
+        f"it stuck on {fake.installing_label!r}; got {label.text!r}"
+    )
+    assert spinner.visible is False and spinner.spinning is False, (
+        "the spinner must stop on install failure, not spin forever"
+    )
+    assert "error" in css, "the error styling must be applied on install failure"
+    print("PASS: MissingRow install surfaces failure when the store is unreachable")
 
 
 def check_install_failures_toast() -> None:
@@ -158,6 +266,8 @@ def check_install_failures_toast() -> None:
 def main() -> None:
     fixtures.start_watchdog(WATCHDOG_SECONDS, label="scenario_onboarding_store_offline")
     check_recommendations_offline()
+    check_get_plugin_for_id_offline_returns_none()
+    check_missing_row_spinner_recovers()
     check_install_failures_toast()
     print("PASS: scenario_onboarding_store_offline")
 
