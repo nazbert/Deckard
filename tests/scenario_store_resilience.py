@@ -31,6 +31,7 @@ import globals as gl  # noqa: F401
 
 from src.backend.Store.StoreBackend import StoreBackend, NoConnectionError
 from src.backend.Store.StoreCache import StoreCache
+from src.backend.Store.store_result import StoreFetchError
 
 
 class Item:
@@ -89,11 +90,14 @@ def test_remote_file_falls_back_to_cache() -> None:
         f"failed refetch must serve the cached copy, got {second!r}"
     )
 
-    # With no cached copy at all, the failure still propagates.
-    third = sb.get_remote_file(repo, "Missing.json", "main", force_refetch=True)
-    assert isinstance(third, NoConnectionError), (
-        f"uncached failure must stay NoConnectionError, got {third!r}"
-    )
+    # With no cached copy at all, the failure now propagates as a raise -- the
+    # fetch layer raises, and get_remote_file re-raises only a genuine
+    # no-cache failure (the stale-cache path above still returns bytes).
+    try:
+        sb.get_remote_file(repo, "Missing.json", "main", force_refetch=True)
+        raise AssertionError("uncached failure must raise StoreFetchError")
+    except StoreFetchError:
+        pass
 
 
 def test_fallback_respects_content_age() -> None:
@@ -131,13 +135,17 @@ def test_fallback_respects_content_age() -> None:
     sb.request_from_url = fetch_fail
     assert sb.get_remote_file(repo, "AgeBound.json", "main", force_refetch=True) == "fresh-content"
 
-    # Failed refetch with content older than the bound: refused.
+    # Failed refetch with content older than the bound: refused -- and a refusal
+    # with no fresh cache is now a raise, not a returned sentinel.
     sb.store_cache.files[key]["fetched"] = time.time() - (StoreCache.DAYS_TO_KEEP * 24 * 3600 + 60)
     sb.store_cache.set_files(sb.store_cache.files)
-    stale = sb.get_remote_file(repo, "AgeBound.json", "main", force_refetch=True)
-    assert isinstance(stale, NoConnectionError), (
-        f"content older than {StoreCache.DAYS_TO_KEEP} days must not be served, got {stale!r}"
-    )
+    try:
+        sb.get_remote_file(repo, "AgeBound.json", "main", force_refetch=True)
+        raise AssertionError(
+            f"content older than {StoreCache.DAYS_TO_KEEP} days must not be served"
+        )
+    except StoreFetchError:
+        pass
 
 
 def test_prepare_plugin_survives_failed_thumbnail() -> None:

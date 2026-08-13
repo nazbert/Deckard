@@ -26,7 +26,7 @@ from loguru import logger as log
 # Import own modules
 from src.windows.Store.StorePage import StorePage
 from src.windows.Store.Preview import StorePreview
-from src.backend.Store.StoreBackend import NoConnectionError
+from src.backend.Store.store_result import Err
 
 # Typing
 from typing import TYPE_CHECKING
@@ -49,10 +49,11 @@ class PluginPage(StorePage):
     # show the error page and re-arm the tab for a retry.
     def load(self):
         self.set_loading()
-        plugins: list[PluginData] = self.store.backend.get_all_plugins()
-        if isinstance(plugins, NoConnectionError):
+        result = self.store.backend.get_all_plugins()
+        if isinstance(result, Err):
             self.show_connection_error()
             return
+        plugins: list[PluginData] = result.value
         for plugin in plugins:
             if not plugin:
                 continue

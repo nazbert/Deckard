@@ -58,6 +58,7 @@ from PIL import Image
 
 import src.backend.Store.StoreBackend as store_backend_module
 from src.backend.Store.StoreBackend import StoreBackend, NoConnectionError
+from src.backend.Store.store_result import Ok
 
 
 APP_MAJOR = int(gl.app_version.split(".")[0])
@@ -720,9 +721,11 @@ def test_store_window_still_gets_the_full_prepare() -> None:
     _install_catalogs(sb, catalogs)
 
     with _Offline(), _CountingDecodes(store):
-        plugins = sb.get_all_plugins()
+        result = sb.get_all_plugins()
 
-    assert not isinstance(plugins, NoConnectionError)
+    # get_all_* is the typed read boundary now: Ok carrying the catalog list.
+    assert isinstance(result, Ok)
+    plugins = result.value
     assert len(plugins) == len(plugins_catalog), (
         f"the store window must still list every catalog entry, got {len(plugins)}"
     )

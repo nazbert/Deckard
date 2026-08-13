@@ -56,10 +56,13 @@ from src.backend.Store.asset_types import (
     SD_PLUS_BAR,
     WALLPAPER,
 )
+from src.backend.Store.store_result import Err, ErrReason, Ok, StoreFetchError, StoreResult
 
 
 class NoConnectionError:
-    # Falsy so callers can treat any error result as a failed operation.
+    # Falsy legacy failure sentinel. The read boundary speaks StoreResult and
+    # the fetch layer raises now; this survives only on the still-untyped WRITE
+    # side and as the value some test stubs return in place of a raise.
     def __bool__(self) -> bool:
         return False
 
@@ -236,10 +239,8 @@ class StoreBackend:
     def _fetch_official_authors_background(self):
         """Fetches official authors in a background thread and updates self.official_authors."""
         try:
-            authors = self.get_official_authors()
-            if not isinstance(authors, NoConnectionError):
-                self.official_authors = authors
-                log.info(f"Official authors updated: {authors}")
+            self.official_authors = self.get_official_authors()
+            log.info(f"Official authors updated: {self.official_authors}")
         except Exception as e:
             log.warning(f"Failed to fetch official authors, using fallback: {e}")
 
@@ -310,8 +311,9 @@ class StoreBackend:
         """
         if self.official_store_branch_cache is not None:
             return self.official_store_branch_cache
-        versions_file = self.get_remote_file(self.STORE_REPO_URL, "versions.json", branch_name="versions", force_refetch=True)
-        if isinstance(versions_file, NoConnectionError) or versions_file is None:
+        try:
+            versions_file = self.get_remote_file(self.STORE_REPO_URL, "versions.json", branch_name="versions", force_refetch=True)
+        except StoreFetchError:
             log.warning(f"Could not fetch versions.json; falling back to store branch {self.STORE_BRANCH}")
             return self.STORE_BRANCH
         try:
@@ -332,12 +334,13 @@ class StoreBackend:
         self.official_store_branch_cache = v
         return v
 
-    def request_from_url(self, url: str) -> "requests.Response | NoConnectionError":
+    def request_from_url(self, url: str) -> "requests.Response":
         # Callers run on worker threads (the prepare pool, UI install
         # threads). Connection AND body read stay inside the limiter, which
         # is what keeps a catalog load from presenting as a scrape burst --
         # the shared session's 429/5xx retries happen inside the adapter, so
         # they hold the same slot and cannot widen that burst either.
+        # Returns the read Response, or raises StoreFetchError.
         try:
             with self._fetch_limiter:
                 req = http_client.get(url, stream=True, timeout=30)
@@ -357,12 +360,12 @@ class StoreBackend:
                     # GitHub's error bodies are a few bytes; a 200 body from
                     # the same host is already read unbounded above.
                     req.content
-                    return NoConnectionError()
+                    raise StoreFetchError(url, f"status code {req.status_code}")
                 finally:
                     req.close()  # content stays cached on the Response
         except requests.exceptions.RequestException as e:
             log.error(e)
-            return NoConnectionError()
+            raise StoreFetchError(url, str(e)) from e
     
     def build_url(self, repo_url: str, file_path: str, branch_name: str = "main") -> str:
         """
@@ -421,29 +424,26 @@ class StoreBackend:
 
         url = self.build_url(repo_url, file_path, branch_name)
 
-        answer = self.request_from_url(url)
-
-        if isinstance(answer, NoConnectionError):
-            # Fetch failed (offline, or raw.githubusercontent rate-limiting
-            # us with 429s): fall back to the cached copy, even when the
-            # caller forced a refetch -- a slightly stale catalog beats an
-            # empty/errored store page. Bounded by the entry's FETCHED age;
-            # its "date" field is a last-use clock that every read renews,
-            # so it cannot bound staleness (see StoreCache).
+        answer: "requests.Response | NoConnectionError | None"
+        try:
+            answer = self.request_from_url(url)
+        except StoreFetchError:
+            answer = None  # offline / 429 -- run the fallback path below
+        # isinstance too: a stub may return the sentinel rather than raise.
+        if answer is None or isinstance(answer, NoConnectionError):
+            # Fall back to the cached copy, even when the caller forced a
+            # refetch -- a slightly stale catalog beats an empty/errored store
+            # page. Bounded by the entry's FETCHED age (its "date" field is a
+            # last-use clock every read renews, so it cannot bound staleness).
             if self.store_cache.is_cached(url=repo_url, branch=branch_name, path=file_path, data_type=data_type):
                 fetched = self.store_cache.get_fetched_date(url=repo_url, branch=branch_name, path=file_path, data_type=data_type)
                 if fetched is not None and time.time() - fetched <= StoreCache.DAYS_TO_KEEP * 24 * 60 * 60:
                     log.warning(f"Serving cached copy of {file_path} from {repo_url} after failed fetch")
                     with self.store_cache.open_cache_file(url=repo_url, branch=branch_name, path=file_path, data_type=data_type, mode=f"r{byte_suffix}") as f:
                         return f.read()
-            return answer
-
-        if answer is None:
-            return
+            raise StoreFetchError(url, f"could not fetch {file_path} and no fresh cache")
 
         with self.store_cache.open_cache_file(url=repo_url, branch=branch_name, path=file_path, data_type=data_type, mode=f"w{byte_suffix}") as f:
-            if answer is None:
-                return
             if data_type == "text":
                 f.write(answer.text)
             elif data_type == "content":
@@ -458,15 +458,12 @@ class StoreBackend:
         """Resolves the tip sha of a branch via the GitHub API.
 
         Runs under the fetch semaphore like every sibling fetch --
-        prepare_plugin calls this for every branch-pinned custom plugin
-        during the catalog fan-out, and an uncapped requests.get() here
-        would evade the limiter.
+        prepare_plugin calls this for every branch-pinned custom plugin during
+        the catalog fan-out, and an uncapped requests.get() would evade it.
 
-        Returns the sha str, None when there is no sha to resolve (a url
-        that names no repository, a non-200 answer, an empty/unparseable
-        commit list), or NoConnectionError on a network failure -- the same
-        contract as request_from_url, so callers isinstance-check instead of
-        catching requests exceptions out of a gather.
+        Returns the sha str, or None when there is no sha to resolve (a url that
+        names no repository, a non-200 answer, an empty/unparseable commit
+        list). A network failure RAISES StoreFetchError, like request_from_url.
         """
         ref = parse_repo_url(repo_url)
         if ref is None:
@@ -480,7 +477,7 @@ class StoreBackend:
                 response = http_client.get(url, timeout=30)
         except requests.exceptions.RequestException as e:
             log.error(f"Failed to fetch the last commit of {repo_url}@{branch_name}: {e}")
-            return NoConnectionError()
+            raise StoreFetchError(repo_url, f"could not resolve {branch_name}: {e}") from e
 
         if response.status_code != 200:
             return None
@@ -494,21 +491,20 @@ class StoreBackend:
             return None
         return commits[0].get("sha")
     
-    def get_official_authors(self) -> "list | NoConnectionError":
+    def get_official_authors(self) -> list:
         authors_json = self.get_remote_file(self.STORE_REPO_URL, "OfficialAuthors.json", self.STORE_BRANCH, force_refetch=True)
-        if isinstance(authors_json, NoConnectionError):
-            return authors_json
-        authors_json = json.loads(authors_json)
-        return authors_json
-    
+        return json.loads(authors_json)
+
     def fetch_and_parse_store_json(self, url: str, filename: str, branch: str, n_stores_with_errors: int = 0):
         try:
             store_file_json = self.get_remote_file(url, filename, branch, force_refetch=True)
-            if isinstance(store_file_json, NoConnectionError):
-                n_stores_with_errors += 1
-                return None, n_stores_with_errors
             store_file_json = json.loads(store_file_json)
             return store_file_json, n_stores_with_errors
+        except StoreFetchError:
+            # Catalog unreachable (no fresh cache): count it where the
+            # returned-sentinel check used to. The fetch layer logged why.
+            n_stores_with_errors += 1
+            return None, n_stores_with_errors
         except (json.decoder.JSONDecodeError, TypeError) as e:
             n_stores_with_errors += 1
             log.error(e)
@@ -572,6 +568,9 @@ class StoreBackend:
                 try:
                     results.append(future.result())
                 except Exception as e:
+                    # A StoreFetchError from this entry's fetch, or any fault:
+                    # drop just this entry (as the old sentinel was dropped).
+                    # Only every store failing, below, is an error.
                     log.error(f"Store item preparation failed: {e!r}")
             results = [result for result in results if isinstance(result, data_class)]
 
@@ -582,35 +581,37 @@ class StoreBackend:
                 # never decide against a snapshot from an earlier one.
                 self._installed_index = None
 
-    def get_all_plugins(self, include_images: bool = True) -> list[PluginData]:
-        return self.process_store_data(self.PLUGIN_FILE, self.prepare_plugin, self.get_custom_plugins, PluginData, include_images, gl.PLUGIN_DIR)
+    def _as_store_result(self, data) -> StoreResult[list]:
+        # process_store_data's sentinel -> typed channel: Err only when every
+        # configured store's catalog fetch failed.
+        if isinstance(data, NoConnectionError):
+            return Err(ErrReason.NO_CONNECTION, "no store catalog could be fetched")
+        return Ok(data)
 
-    def get_all_icons(self, include_images: bool = True) -> list[IconData]:
-        return self.process_store_data(self.ICON_FILE, self.prepare_icon, None, IconData, include_images, self.icons_dir())
+    def get_all_plugins(self, include_images: bool = True) -> StoreResult[list[PluginData]]:
+        return self._as_store_result(self.process_store_data(self.PLUGIN_FILE, self.prepare_plugin, self.get_custom_plugins, PluginData, include_images, gl.PLUGIN_DIR))
 
-    def get_all_wallpapers(self, include_images: bool = True) -> list[WallpaperData]:
-        return self.process_store_data(self.WALLPAPERS_FILE, self.prepare_wallpaper, None, WallpaperData, include_images, self.wallpapers_dir())
+    def get_all_icons(self, include_images: bool = True) -> StoreResult[list[IconData]]:
+        return self._as_store_result(self.process_store_data(self.ICON_FILE, self.prepare_icon, None, IconData, include_images, self.icons_dir()))
 
-    def get_all_sd_plus_bar_wallpapers(self, include_images: bool = True) -> list[SDPlusBarWallpaperData]:
-        return self.process_store_data(self.SDPLUSWALLPAPERS_FILE, self.prepare_sd_plus_bar_wallpaper, None, SDPlusBarWallpaperData, include_images, self.sd_plus_bar_wallpapers_dir())
+    def get_all_wallpapers(self, include_images: bool = True) -> StoreResult[list[WallpaperData]]:
+        return self._as_store_result(self.process_store_data(self.WALLPAPERS_FILE, self.prepare_wallpaper, None, WallpaperData, include_images, self.wallpapers_dir()))
+
+    def get_all_sd_plus_bar_wallpapers(self, include_images: bool = True) -> StoreResult[list[SDPlusBarWallpaperData]]:
+        return self._as_store_result(self.process_store_data(self.SDPLUSWALLPAPERS_FILE, self.prepare_sd_plus_bar_wallpaper, None, SDPlusBarWallpaperData, include_images, self.sd_plus_bar_wallpapers_dir()))
     
-    def get_manifest(self, url:str, commit:str) -> "dict | NoConnectionError | None":
-        # url = self.build_url(url, "manifest.json", commit)
-        manifest = self.get_remote_file(url, "manifest.json", commit)
-        if isinstance(manifest, NoConnectionError):
-            return manifest
-        if manifest is None:
-            return None
+    def get_manifest(self, url:str, commit:str) -> "dict | None":
+        manifest = self.get_remote_file(url, "manifest.json", commit)  # raises on a failed fetch
         return json.loads(manifest)
 
     def get_attribution(self, url:str, commit:str) -> dict:
-        result = self.get_remote_file(url, "attribution.json", commit)
-        if isinstance(result, NoConnectionError):
-            return {}
-        
+        try:
+            result = self.get_remote_file(url, "attribution.json", commit)
+        except StoreFetchError:
+            return {}  # optional file; a failed fetch is an empty attribution
         try:
             return json.loads(result)
-        except (json.decoder.JSONDecodeError, TypeError) as e:
+        except (json.decoder.JSONDecodeError, TypeError):
             return {}
 
     def _resolve_asset_version(self, entry: dict, desc: AssetTypeDescriptor, url: str):
@@ -618,10 +619,9 @@ class StoreBackend:
 
         Non-plugin entries always pin a version map; a plugin entry may omit
         it (a branch-pinned custom plugin), and only a plugin entry resolves a
-        branch tip. Returns a _ResolvedVersion, or one of the two early-out
-        values its callers already understand: the NoCompatibleVersion class
-        when no version resolves at all, or a NoConnectionError when a branch
-        tip cannot be reached.
+        branch tip. Returns a _ResolvedVersion, or the NoCompatibleVersion
+        class when no version resolves at all. An unreachable branch tip raises
+        out of get_last_commit (the fan-out's per-future collect drops it).
         """
         compatible = True
         commit: str | None = None
@@ -639,19 +639,12 @@ class StoreBackend:
             branch = entry.get("branch")
             if branch is not None:
                 commit = self.get_last_commit(url, branch)
-                if isinstance(commit, NoConnectionError):
-                    # NoConnectionError is falsy: letting it fall through would
-                    # fetch the manifest at `branch` but store the error object
-                    # as the entry's commit_sha (poisoning sha comparisons).
-                    log.error(f"Could not resolve the last commit of {url}@{branch} due to NoConnectionError")
-                    return commit
 
         return _ResolvedVersion(compatible, commit, branch)
 
     def _fetch_thumbnail(self, url: str, thumbnail_path: Any, ref: Any) -> "Image.Image | None":
+        # List without an image, don't drop; a stub may return the sentinel.
         fetched = self.get_web_image(url, thumbnail_path, ref)
-        # A missing/rate-limited thumbnail must not drop the asset from the
-        # catalog -- list it without an image.
         return None if isinstance(fetched, NoConnectionError) else fetched
 
     def _translate_descriptions(self, manifest: dict) -> "tuple[Any, Any]":
@@ -708,8 +701,7 @@ class StoreBackend:
 
         resolved = self._resolve_asset_version(entry, desc, url)
         if not isinstance(resolved, _ResolvedVersion):
-            # NoCompatibleVersion (dropped by process_store_data's isinstance
-            # filter) or a NoConnectionError from an unreachable branch tip.
+            # The NoCompatibleVersion class, dropped by process_store_data.
             return resolved
         compatible, commit, branch = resolved
         # Any because a plugin entry with neither a version map nor a branch
@@ -718,9 +710,7 @@ class StoreBackend:
         # fetch layer's honest retype is a later change's job.
         ref_for_fetch: Any = commit or branch
 
-        manifest = self.get_manifest(url, ref_for_fetch)
-        if isinstance(manifest, NoConnectionError):
-            return manifest
+        manifest = self.get_manifest(url, ref_for_fetch)  # raises on a failed fetch
         if not manifest:
             log.error(f"manifest failed to load for repository {url}")
             return None
@@ -1074,8 +1064,8 @@ class StoreBackend:
                 return
             newest = self.get_newest_compatible_version(commits) or self.get_newest_version(list(commits.keys()))
             revision = commits[newest]
-        manifest = self.get_manifest(url, revision)
-        if isinstance(manifest, NoConnectionError) or not manifest:
+        manifest = self.get_manifest(url, revision)  # raises; the per-entry catch owns it
+        if not manifest:
             return
         asset_id = manifest.get("id")
         if not self.is_safe_asset_id(asset_id):
@@ -1092,7 +1082,7 @@ class StoreBackend:
         # must see the directory as stamped.
         installed[asset_id] = asset._replace(origin=ref)
 
-    def check_entry_for_update(self, entry: dict, base_dir: str) -> "UpdateCheck | NoConnectionError | None":
+    def check_entry_for_update(self, entry: dict, base_dir: str) -> "UpdateCheck | None":
         """Resolves one catalog entry against what is installed under
         base_dir, fetching nothing the update decision does not need.
 
@@ -1125,14 +1115,9 @@ class StoreBackend:
         branch = entry.get("branch")
         compatible = True
         if branch is not None:
-            commit = self.get_last_commit(url, branch)
-            if isinstance(commit, NoConnectionError):
-                # NoConnectionError is falsy: letting it fall through would
-                # store the error object as the entry's commit_sha and
-                # poison the sha comparison.
-                log.error(f"Could not resolve the last commit of {url}@{branch} due to NoConnectionError")
-                return commit
-            target = commit
+            # An unreachable tip raises out of get_last_commit (the fan-out
+            # drops the entry) rather than poisoning commit_sha with a failure.
+            target = self.get_last_commit(url, branch)
         else:
             commits = entry.get("commits")
             if not isinstance(commits, dict) or not commits:
@@ -1202,32 +1187,22 @@ class StoreBackend:
     def prepare_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper, include_image: bool = True, verified: bool = False):
         return self._prepare_asset(sd_plus_bar_wallpaper, SD_PLUS_BAR, include_image, verified)
 
-    def get_web_image(self, url: str, path: str, branch: str = "main") -> "Image.Image | NoConnectionError | None":
-        # `except Exception` so a pool worker still honours SystemExit and
-        # KeyboardInterrupt.
+    def get_web_image(self, url: str, path: str, branch: str = "main") -> "Image.Image | None":
         try:
             result = self.get_remote_file(url, path, branch, data_type="content")
+        except StoreFetchError:
+            return None  # offline / rate-limited (already logged) -- list without an image
         except Exception as e:
+            # `except Exception` so a pool worker still honours SystemExit and
+            # KeyboardInterrupt.
             log.error(f"Failed to fetch image {path} from {url}: {e}")
             return None
-        if isinstance(result, NoConnectionError):
-            return result
         try:
             return Image.open(BytesIO(result))
         except Exception as e:
             log.warning(f"Could not decode image {path} from {url}: {e}")
             return None
     
-    def get_user_name(self, repo_url:str) -> str:
-        ref = parse_repo_url(repo_url)
-        if ref is None:
-            raise ValueError(f"Not a store repository url: {repo_url!r}")
-        return ref.user
-
-    def get_repo_name(self, repo_url:str) -> str | None:
-        ref = parse_repo_url(repo_url)
-        return None if ref is None else ref.repo
-
     def repo_ref_for_entry(self, url: object) -> RepoRef | None:
         """Parses a catalog/settings entry's url, reporting the skip.
 
@@ -1403,10 +1378,15 @@ class StoreBackend:
         projectname = ref.repo.lower()
         sha = commit_sha
         if commit_sha is None and branch_name is not None:
-            # Used to write the version
-            sha = self.get_last_commit(repo_url, branch_name)
+            # Used to write the version.
+            try:
+                sha = self.get_last_commit(repo_url, branch_name)
+            except StoreFetchError:
+                # Bridge: download_repo still answers the NoConnectionError/int
+                # contract install_* narrow on, until the write side is typed.
+                return NoConnectionError()
             if isinstance(sha, NoConnectionError):
-                return sha
+                return sha  # a test stub may still return the sentinel
             if sha is None:
                 # Fail up front rather than building a ".../None.zip" URL
                 # that 404s later with a misleading log.
@@ -1825,22 +1805,35 @@ class StoreBackend:
     def uninstall_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper_data:SDPlusBarWallpaperData):
         return self._uninstall_asset(sd_plus_bar_wallpaper_data, SD_PLUS_BAR)
 
-    def get_plugin_for_id(self, plugin_id):
-        plugins = self.get_all_plugins()
-        for plugin in plugins:
+    def get_plugin_for_id(self, plugin_id) -> "PluginData | None":
+        """The catalog plugin with this id, or None (an unreachable store
+        included). get_all_plugins returns a StoreResult, so an Err is narrowed
+        here, not iterated -- iterating the old sentinel raised TypeError under
+        an @log.catch that swallowed it and stranded the caller (a stuck
+        install spinner, an onboarding page stuck loading)."""
+        result = self.get_all_plugins()
+        if isinstance(result, Err):
+            log.error(f"Cannot resolve plugin {plugin_id!r}: {result.detail or result.reason.value}")
+            return None
+        for plugin in result.value:
             if plugin.plugin_id == plugin_id:
                 return plugin
-            
+        return None
+
     ## Updates
-    def _get_assets_to_update(self, desc: AssetTypeDescriptor):
+    def _get_assets_to_update(self, desc: AssetTypeDescriptor) -> StoreResult[list]:
         """The installed assets of one class that have a newer, compatible,
         known-target version -- the shared update-check decision. The
         update-check view fetches no thumbnails and makes no request for a
         catalog entry that was never installed. Dispatches through the public
         ``get_all_*`` name so a test stub of it is honoured."""
-        assets = getattr(self, desc.get_all_attr)(include_images=False)
-        if isinstance(assets, NoConnectionError):
-            return assets
+        result = getattr(self, desc.get_all_attr)(include_images=False)
+        # A StoreResult, or a legacy stub's bare list / sentinel -- accept all.
+        if isinstance(result, Err):
+            return result
+        if isinstance(result, NoConnectionError):
+            return Err(ErrReason.NO_CONNECTION, "no store catalog could be fetched")
+        assets = result.value if isinstance(result, Ok) else result
 
         to_update: list = []
         for asset in assets:
@@ -1870,7 +1863,7 @@ class StoreBackend:
                 continue
             to_update.append(asset)
 
-        return to_update
+        return Ok(to_update)
 
     def _update_all(self, desc: AssetTypeDescriptor) -> "int | NoConnectionError":
         """Reinstall every out-of-date asset of one class; return how many
@@ -1900,29 +1893,36 @@ class StoreBackend:
 
         return n_updated
 
+    def _to_update_legacy(self, desc: AssetTypeDescriptor) -> "list | NoConnectionError":
+        # Bridge the typed read to the sentinel the write side below still speaks.
+        result = self._get_assets_to_update(desc)
+        if isinstance(result, Err):
+            return NoConnectionError()
+        return result.value
+
     def get_plugins_to_update(self):
-        return self._get_assets_to_update(PLUGIN)
+        return self._to_update_legacy(PLUGIN)
 
     def update_all_plugins(self) -> "int | NoConnectionError":
         """Returns number of SUCCESSFULLY updated plugins"""
         return self._update_all(PLUGIN)
 
     def get_icons_to_update(self):
-        return self._get_assets_to_update(ICON)
+        return self._to_update_legacy(ICON)
 
     def update_all_icons(self) -> "int | NoConnectionError":
         """Returns number of SUCCESSFULLY updated icon packs"""
         return self._update_all(ICON)
 
     def get_wallpapers_to_update(self):
-        return self._get_assets_to_update(WALLPAPER)
+        return self._to_update_legacy(WALLPAPER)
 
     def update_all_wallpapers(self) -> "int | NoConnectionError":
         """Returns number of SUCCESSFULLY updated wallpapers"""
         return self._update_all(WALLPAPER)
 
     def get_sd_plus_bar_wallpapers_to_update(self):
-        return self._get_assets_to_update(SD_PLUS_BAR)
+        return self._to_update_legacy(SD_PLUS_BAR)
 
     def update_all_sd_plus_bar_wallpapers(self) -> "int | NoConnectionError":
         """Returns number of SUCCESSFULLY updated SD+ bar wallpapers"""

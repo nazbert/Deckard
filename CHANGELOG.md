@@ -9,6 +9,11 @@ bundle as a release asset.
 
 ### Fixed
 
+- Installing a plugin from a missing-action row or from the onboarding
+  recommendations no longer hangs when the store cannot be reached. The button
+  used to spin forever on its "installing" label with no way back; now an
+  unreachable store surfaces the same install-failed state as any other
+  failure, and the row can be retried.
 - Screensaver and brightness settings now show the values the deck actually
   uses. A page's screensaver brightness slider read 75 for a screensaver that
   had never been given one, while the deck dimmed to 30; a deck's own settings
