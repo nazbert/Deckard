@@ -25,6 +25,7 @@ from gi.repository import Gtk, Adw, GLib
 import threading
 import globals as gl
 from src.backend import timer_wheel
+from src.backend.Store.store_result import Err
 from loguru import logger as log
 
 class MissingRow(Adw.PreferencesRow):
@@ -89,11 +90,11 @@ class MissingRow(Adw.PreferencesRow):
         if plugin is None:
             self.show_install_error()
             return
-        # Install plugin. Success is exactly True -- checking only for 404
-        # let NoConnectionError (and any other failure return) fall through
-        # to the "installed" UI reset.
-        success = gl.store_backend.install_plugin(plugin)
-        if success is not True:
+        # Install plugin. An Err is a failure -- anything else is the single
+        # success. Reading the result is what keeps a failed install from
+        # falling through to the "installed" UI reset.
+        result = gl.store_backend.install_plugin(plugin)
+        if isinstance(result, Err):
             self.show_install_error()
             return
         

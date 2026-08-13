@@ -89,7 +89,7 @@ def test_text_and_binary_keys_do_not_collide() -> None:
 
 def test_stale_fallback_respects_data_type() -> None:
     """The failed-fetch fallback must find the binary copy it itself wrote."""
-    from src.backend.Store.StoreBackend import NoConnectionError
+    from src.backend.Store.store_result import StoreFetchError
 
     sb = make_backend()
 
@@ -101,7 +101,7 @@ def test_stale_fallback_respects_data_type() -> None:
         return Resp()
 
     def fetch_fail(url):
-        return NoConnectionError()
+        raise StoreFetchError(url, "429 rate limit")
 
     sb.request_from_url = fetch_ok
     sb.get_remote_file(REPO, "wall.png", "main", data_type="content", force_refetch=True)

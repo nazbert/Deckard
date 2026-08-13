@@ -18,9 +18,10 @@ from src.windows.Store.StoreData import SDPlusBarWallpaperData
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk
+from gi.repository import Gtk, GLib
 
 # Import python modules
+from loguru import logger as log
 
 # Import own modules
 from src.windows.Store.StorePage import StorePage
@@ -95,9 +96,28 @@ class SDPlusBarWallpaperPreview(StorePreview):
             description = self.wallpaper_data.description
         self.set_description(description)
 
-    def install(self):
-        self.store.backend.install_sd_plus_bar_wallpaper(sd_plus_bar_wallpaper_data=self.wallpaper_data)
-        self.set_install_state(1)
+    def install(self) -> bool:
+        """Runs on the store's download worker thread; returns whether the
+        install actually succeeded. A failed install (Err) leaves the button in
+        its previous state instead of flipping it to 'installed' -- the fix for
+        a 400/404/offline download silently reading as installed."""
+        backend = self.store.backend
+        if backend is None:
+            log.error(f"Store backend unavailable; cannot install {self.wallpaper_data.id}")
+            self.notify_install_failure()
+            return False
+        result = backend.install_sd_plus_bar_wallpaper(sd_plus_bar_wallpaper_data=self.wallpaper_data)
+        if isinstance(result, Err):
+            log.error(f"Failed to install SD+ bar wallpaper {self.wallpaper_data.id}: {result!r}")
+            self.notify_install_failure()
+            return False
+        GLib.idle_add(self.set_install_state, 1)
+        return True
+
+    def notify_install_failure(self):
+        name = self.wallpaper_data.name or self.wallpaper_data.id
+        gl.notify.error(f"The SD+ bar wallpaper {name} could not be installed",
+                        title="SD+ bar wallpaper install failed")
 
     def uninstall(self):
         self.store.backend.uninstall_sd_plus_bar_wallpaper(sd_plus_bar_wallpaper_data=self.wallpaper_data)

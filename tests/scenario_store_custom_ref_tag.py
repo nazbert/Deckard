@@ -33,6 +33,7 @@ import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl
 
 from src.backend.Store.StoreBackend import StoreBackend
+from src.backend.Store.store_result import Ok, Err
 
 
 CACHE_DIR = os.path.join(gl.DATA_PATH, "cache")
@@ -111,7 +112,7 @@ def test_tag_ref_installs_tagged_tree(sb: StoreBackend) -> None:
     result = sb.download_repo(repo_url=FIXTURE_REPO, directory=dest,
                               branch_name="v1", expected_id="com_test_TagPlugin")
 
-    assert result == 200, f"install pinned to a tag must succeed, got {result!r}"
+    assert isinstance(result, Ok), f"install pinned to a tag must succeed, got {result!r}"
     assert _flag(dest) == "tagged content", (
         f"installed tree is not the tagged revision (got {_flag(dest)!r}) -- "
         f"`git switch <tag>` fails silently and leaves the default tip"
@@ -131,7 +132,7 @@ def test_branch_ref_still_installs_branch_tip(sb: StoreBackend) -> None:
     result = sb.clone_repo(repo_url=FIXTURE_REPO, local_path=dest,
                            branch_name="feature")
 
-    assert result == 200, f"install pinned to a branch must succeed, got {result!r}"
+    assert isinstance(result, Ok), f"install pinned to a branch must succeed, got {result!r}"
     assert _flag(dest) == "feature content", (
         f"installed tree is not the branch tip: {_flag(dest)!r}"
     )
@@ -149,7 +150,7 @@ def test_nonexistent_ref_fails_install(sb: StoreBackend) -> None:
     result = sb.clone_repo(repo_url=FIXTURE_REPO, local_path=dest,
                            branch_name="v1-typo")
 
-    assert result != 200, (
+    assert isinstance(result, Err), (
         "a nonexistent pinned ref must fail the install, not silently ship "
         "the default-branch tip"
     )
@@ -171,7 +172,7 @@ def test_commit_sha_installs_that_commit(sb: StoreBackend) -> None:
 
     result = sb.clone_repo(repo_url=FIXTURE_REPO, local_path=dest, commit_sha=sha)
 
-    assert result == 200, f"install pinned to a reachable sha must succeed, got {result!r}"
+    assert isinstance(result, Ok), f"install pinned to a reachable sha must succeed, got {result!r}"
     assert _flag(dest) == "tagged content", (
         f"installed tree is not the pinned commit: {_flag(dest)!r}"
     )
@@ -191,7 +192,7 @@ def test_unreachable_commit_sha_fails_install(sb: StoreBackend) -> None:
 
     result = sb.clone_repo(repo_url=FIXTURE_REPO, local_path=dest, commit_sha=gone_sha)
 
-    assert result != 200, (
+    assert isinstance(result, Err), (
         "an unreachable pinned commit sha must fail the install, not "
         "silently ship the default-branch tip"
     )

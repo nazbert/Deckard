@@ -57,8 +57,8 @@ import globals as gl
 from PIL import Image
 
 import src.backend.Store.StoreBackend as store_backend_module
-from src.backend.Store.StoreBackend import StoreBackend, NoConnectionError
-from src.backend.Store.store_result import Ok
+from src.backend.Store.StoreBackend import StoreBackend
+from src.backend.Store.store_result import Ok, Err, StoreFetchError
 
 
 APP_MAJOR = int(gl.app_version.split(".")[0])
@@ -195,7 +195,7 @@ class _FakeStore:
         self.image_decodes = 0
         self._lock = threading.Lock()
 
-    def request_from_url(self, url: str) -> "_Answer | NoConnectionError":
+    def request_from_url(self, url: str) -> "_Answer":
         with self._lock:
             self.urls.append(url)
         path = url.split("/", 5)[-1] if url.count("/") >= 5 else url
@@ -208,7 +208,7 @@ class _FakeStore:
         if path.endswith("manifest.json"):
             entry = self._entry_for(url)
             if entry is None:
-                return NoConnectionError()
+                raise StoreFetchError(url, "not found")
             if entry.bad_manifest:
                 # What a truncated write or a proxy error page serves where
                 # json is expected.
@@ -226,12 +226,12 @@ class _FakeStore:
         if path.endswith("attribution.json"):
             # Optional in the real store, so most entries 404 -- which still
             # costs the request that this scenario is here to count.
-            return NoConnectionError()
+            raise StoreFetchError(url, "not found")
         if path.endswith(".png"):
             with self._lock:
                 self.image_fetches += 1
             return _Answer(content=THUMBNAIL_BYTES)
-        return NoConnectionError()
+        raise StoreFetchError(url, "not found")
 
     def _entry_for(self, url: str) -> "_Entry | None":
         for entry in self.entries:
@@ -438,7 +438,7 @@ def test_update_everything_stays_off_the_network_for_uninstalled_entries() -> No
     # The identity regression: every outdated entry here had its sha
     # replaced in place under the same version key, which is what the real
     # store does on a bump.
-    assert n_updated == 3, (
+    assert isinstance(n_updated, Ok) and n_updated.value == 3, (
         f"the three outdated installed assets must be updated -- an install "
         f"whose sha the catalog replaced in place is still that install, "
         f"got {n_updated!r}"
@@ -495,7 +495,9 @@ def test_backup_directory_never_claims_the_entry() -> None:
     with _Offline():
         to_update = sb.update_all_plugins()
 
-    assert to_update == 1, f"exactly the real install may be updated, got {to_update!r}"
+    assert isinstance(to_update, Ok) and to_update.value == 1, (
+        f"exactly the real install may be updated, got {to_update!r}"
+    )
     assert installed == [("com_acme_Alpha", entry.new_sha)], (
         f"the copy kept aside must never be installed over, got {installed}"
     )
@@ -508,7 +510,7 @@ def test_backup_directory_never_claims_the_entry() -> None:
     installed = _recording_installs(sb)
     with _Offline():
         n = sb.update_all_plugins()
-    assert (n, installed) == (0, []), (
+    assert isinstance(n, Ok) and (n.value, installed) == (0, []), (
         f"a directory whose name is not its manifest id must not be installed "
         f"over -- that download is refused by the staged-id check, got {n}, {installed}"
     )
@@ -533,12 +535,12 @@ def test_two_entries_sharing_a_commit_resolve_to_their_own_install() -> None:
     with _Offline():
         to_update = sb.get_plugins_to_update()
 
-    assert not isinstance(to_update, NoConnectionError)
-    ids = sorted(plugin.plugin_id for plugin in to_update)
+    assert not isinstance(to_update, Err)
+    ids = sorted(plugin.plugin_id for plugin in to_update.value)
     assert ids == ["com_acme_Fork", "com_acme_Upstream"], (
         f"each entry must resolve to its own install, got {ids}"
     )
-    for plugin in to_update:
+    for plugin in to_update.value:
         assert plugin.plugin_id.split("_")[-1] in plugin.github, (
             f"{plugin.plugin_id} resolved to {plugin.github}"
         )
@@ -568,7 +570,7 @@ def test_legacy_install_is_identified_once_and_then_stamped() -> None:
         f"{len(catalogs[StoreBackend.PLUGIN_FILE])} entries with 1 unstamped install "
         f"-> {store.manifest_fetches} manifest fetches, {store.image_fetches} image fetches"
     )
-    assert (n, installed) == (1, [("com_acme_Legacy", legacy.new_sha)]), (
+    assert isinstance(n, Ok) and (n.value, installed) == (1, [("com_acme_Legacy", legacy.new_sha)]), (
         f"the legacy install must still be identified and updated, got {n}, {installed}"
     )
     assert store.image_fetches == 0, "the legacy lookup must not fetch images"
@@ -616,8 +618,8 @@ def test_symlinked_install_is_left_to_its_owner() -> None:
     with _Offline():
         to_update = sb.get_plugins_to_update()
 
-    assert not isinstance(to_update, NoConnectionError)
-    assert to_update == [], (
+    assert not isinstance(to_update, Err)
+    assert to_update.value == [], (
         f"a stamped symlinked install must not be auto-updated, got {to_update}"
     )
 
@@ -632,7 +634,9 @@ def test_symlinked_install_is_left_to_its_owner() -> None:
     with _Offline():
         to_update = sb.get_plugins_to_update()
 
-    assert to_update == [], f"an unstamped symlink must not be auto-updated, got {to_update}"
+    assert isinstance(to_update, Ok) and to_update.value == [], (
+        f"an unstamped symlink must not be auto-updated, got {to_update}"
+    )
     assert store.manifest_fetches == 0, (
         f"a symlinked install must not be looked up at all, got {store.manifest_fetches}"
     )
@@ -658,7 +662,7 @@ def test_install_with_unreadable_sha_is_repaired() -> None:
     with _Offline():
         n = sb.update_all_plugins()
 
-    assert (n, installed) == (1, [("com_acme_Broken", broken.new_sha)]), (
+    assert isinstance(n, Ok) and (n.value, installed) == (1, [("com_acme_Broken", broken.new_sha)]), (
         f"an install with no readable sha must be repaired, got {n}, {installed}"
     )
 
@@ -692,8 +696,8 @@ def test_branch_pinned_entry_resolves_its_tip_but_not_its_manifest() -> None:
     with _Offline():
         to_update = sb.get_plugins_to_update()
 
-    assert not isinstance(to_update, NoConnectionError)
-    ids = [plugin.plugin_id for plugin in to_update]
+    assert not isinstance(to_update, Err)
+    ids = [plugin.plugin_id for plugin in to_update.value]
     assert "com_acme_CustomPlugin" not in ids, (
         f"a custom plugin sitting on the branch tip needs no update, got {ids}"
     )
@@ -779,7 +783,7 @@ def test_one_bad_entry_does_not_abort_the_identification_pass() -> None:
     with _Offline():
         n = sb.update_all_plugins()
 
-    assert n == 2, f"a raising entry must not stop the pass, got {n!r}"
+    assert isinstance(n, Ok) and n.value == 2, f"a raising entry must not stop the pass, got {n!r}"
     assert sorted(installed) == sorted([
         ("com_acme_Legacy", legacy.new_sha),
         ("com_acme_Healthy", healthy.new_sha),
@@ -819,7 +823,7 @@ def test_stamp_naming_a_repository_the_catalog_dropped_is_re_resolved() -> None:
     with _Offline():
         n = sb.update_all_plugins()
 
-    assert (n, installed) == (1, [("com_acme_Widget", renamed.new_sha)]), (
+    assert isinstance(n, Ok) and (n.value, installed) == (1, [("com_acme_Widget", renamed.new_sha)]), (
         f"an install whose repository was renamed must still be updated, got {n}, {installed}"
     )
     origin = os.path.join(gl.PLUGIN_DIR, "com_acme_Widget", StoreBackend.ORIGIN_FILE)
@@ -846,7 +850,7 @@ def test_stamp_matches_the_catalog_case_insensitively() -> None:
     with _Offline():
         n = sb.update_all_plugins()
 
-    assert (n, installed) == (1, [("com_acme_Widget", entry.new_sha)]), (
+    assert isinstance(n, Ok) and (n.value, installed) == (1, [("com_acme_Widget", entry.new_sha)]), (
         f"a differently cased stamp names the same repository, got {n}, {installed}"
     )
     assert store.manifest_fetches == 0, (

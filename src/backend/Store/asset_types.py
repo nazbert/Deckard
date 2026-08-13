@@ -29,7 +29,6 @@ time; it imports only the dataclasses it names.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 
 from src.windows.Store.StoreData import (
@@ -57,14 +56,6 @@ class AssetTypeDescriptor:
     update_all_attr: str         # backend method NAME: reinstall the outdated
     install_attr: str            # backend method NAME: install one entry
     get_custom_attr: str | None  # backend method NAME for user-added entries
-    # Whether an install call reported success. Plugins answer True, the
-    # other three answer the HTTP-style 200 -- the one dialect the collapse
-    # cannot yet erase, carried here as data until the install boundary
-    # returns a single success value and this predicate is removed. Unlike the
-    # method-name fields above, this is a predicate over an already-RETURNED
-    # value, not a reference to a method the backend would dispatch through --
-    # so it carries no stub-bypass risk and is allowed to be a callable.
-    install_ok: Callable[[object], bool]
     is_plugin: bool              # gates the plugin-only install/prepare paths
 
 
@@ -81,7 +72,6 @@ PLUGIN = AssetTypeDescriptor(
     update_all_attr="update_all_plugins",
     install_attr="install_plugin",
     get_custom_attr="get_custom_plugins",
-    install_ok=lambda result: result is True,
     is_plugin=True,
 )
 
@@ -98,7 +88,6 @@ ICON = AssetTypeDescriptor(
     update_all_attr="update_all_icons",
     install_attr="install_icon",
     get_custom_attr=None,
-    install_ok=lambda result: result == 200,
     is_plugin=False,
 )
 
@@ -115,7 +104,6 @@ WALLPAPER = AssetTypeDescriptor(
     update_all_attr="update_all_wallpapers",
     install_attr="install_wallpaper",
     get_custom_attr=None,
-    install_ok=lambda result: result == 200,
     is_plugin=False,
 )
 
@@ -132,7 +120,6 @@ SD_PLUS_BAR = AssetTypeDescriptor(
     update_all_attr="update_all_sd_plus_bar_wallpapers",
     install_attr="install_sd_plus_bar_wallpaper",
     get_custom_attr=None,
-    install_ok=lambda result: result == 200,
     is_plugin=False,
 )
 

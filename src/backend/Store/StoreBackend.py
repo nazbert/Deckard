@@ -59,20 +59,12 @@ from src.backend.Store.asset_types import (
 from src.backend.Store.store_result import Err, ErrReason, Ok, StoreFetchError, StoreResult
 
 
-class NoConnectionError:
-    # Falsy legacy failure sentinel. The read boundary speaks StoreResult and
-    # the fetch layer raises now; this survives only on the still-untyped WRITE
-    # side and as the value some test stubs return in place of a raise.
-    def __bool__(self) -> bool:
-        return False
-
-
 class _ResolvedVersion(NamedTuple):
     """What version resolution decides before an entry is fetched: whether a
     compatible release exists, which commit to fetch, and (plugins only) the
     branch a custom entry pins. _prepare_asset distinguishes this from the
-    two early-out sentinels version resolution can also produce -- the
-    NoCompatibleVersion class and a NoConnectionError -- by its type."""
+    None version resolution returns when no compatible-or-newest release
+    exists at all (the entry is then dropped from the catalog) -- by its type."""
     compatible: bool
     commit: str | None
     branch: str | None
@@ -424,13 +416,12 @@ class StoreBackend:
 
         url = self.build_url(repo_url, file_path, branch_name)
 
-        answer: "requests.Response | NoConnectionError | None"
+        answer: "requests.Response | None"
         try:
             answer = self.request_from_url(url)
         except StoreFetchError:
             answer = None  # offline / 429 -- run the fallback path below
-        # isinstance too: a stub may return the sentinel rather than raise.
-        if answer is None or isinstance(answer, NoConnectionError):
+        if answer is None:
             # Fall back to the cached copy, even when the caller forced a
             # refetch -- a slightly stale catalog beats an empty/errored store
             # page. Bounded by the entry's FETCHED age (its "date" field is a
@@ -547,7 +538,11 @@ class StoreBackend:
                     data_list.extend(store_file_json)
 
             if n_stores_with_errors >= len(stores):
-                return NoConnectionError()
+                # Every configured store's catalog fetch failed. None (not an
+                # empty list) is the "no catalog at all" signal _as_store_result
+                # turns into an Err; an empty list means the stores answered but
+                # listed nothing.
+                return None
 
             custom_entries = [{"url": url, "branch": branch}
                               for url, branch in (get_custom_func() if get_custom_func is not None else [])]
@@ -582,9 +577,9 @@ class StoreBackend:
                 self._installed_index = None
 
     def _as_store_result(self, data) -> StoreResult[list]:
-        # process_store_data's sentinel -> typed channel: Err only when every
-        # configured store's catalog fetch failed.
-        if isinstance(data, NoConnectionError):
+        # process_store_data's None sentinel -> typed channel: Err only when
+        # every configured store's catalog fetch failed.
+        if data is None:
             return Err(ErrReason.NO_CONNECTION, "no store catalog could be fetched")
         return Ok(data)
 
@@ -619,9 +614,10 @@ class StoreBackend:
 
         Non-plugin entries always pin a version map; a plugin entry may omit
         it (a branch-pinned custom plugin), and only a plugin entry resolves a
-        branch tip. Returns a _ResolvedVersion, or the NoCompatibleVersion
-        class when no version resolves at all. An unreachable branch tip raises
-        out of get_last_commit (the fan-out's per-future collect drops it).
+        branch tip. Returns a _ResolvedVersion, or None when no version resolves
+        at all (the entry is then dropped from the catalog). An unreachable
+        branch tip raises out of get_last_commit (the fan-out's per-future
+        collect drops it).
         """
         compatible = True
         commit: str | None = None
@@ -631,7 +627,7 @@ class StoreBackend:
                 compatible = False
                 newest = self.get_newest_version(list(entry["commits"].keys()))
                 if newest is None:
-                    return NoCompatibleVersion
+                    return None
             commit = entry["commits"][newest]
 
         branch: str | None = None
@@ -643,9 +639,10 @@ class StoreBackend:
         return _ResolvedVersion(compatible, commit, branch)
 
     def _fetch_thumbnail(self, url: str, thumbnail_path: Any, ref: Any) -> "Image.Image | None":
-        # List without an image, don't drop; a stub may return the sentinel.
-        fetched = self.get_web_image(url, thumbnail_path, ref)
-        return None if isinstance(fetched, NoConnectionError) else fetched
+        # List without an image, don't drop: get_web_image already swallows a
+        # failed fetch to None. The single image guard, named so _prepare_asset
+        # reads one line.
+        return self.get_web_image(url, thumbnail_path, ref)
 
     def _translate_descriptions(self, manifest: dict) -> "tuple[Any, Any]":
         return (
@@ -701,7 +698,7 @@ class StoreBackend:
 
         resolved = self._resolve_asset_version(entry, desc, url)
         if not isinstance(resolved, _ResolvedVersion):
-            # The NoCompatibleVersion class, dropped by process_store_data.
+            # None: no version resolved -- dropped by process_store_data.
             return resolved
         compatible, commit, branch = resolved
         # Any because a plugin entry with neither a version map nor a branch
@@ -1244,7 +1241,7 @@ class StoreBackend:
     def subp_call(self, args):
         return subprocess.call(args)
 
-    def get_main_folder_of_zip(self, zip_path: str) -> str | int:
+    def get_main_folder_of_zip(self, zip_path: str) -> str | None:
         extracted_folder_name = None
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_contents = zip_ref.namelist()
@@ -1253,16 +1250,16 @@ class StoreBackend:
                     continue
                 if item.count("/") > 1:
                     continue
-                
+
                 if extracted_folder_name is not None:
                     log.error("Multiple folders in zip")
-                    return 400
+                    return None
                 extracted_folder_name = item.split("/")[0]
 
 
         if extracted_folder_name is None:
             log.error("Could not find extracted folder name")
-            return 400
+            return None
 
         return extracted_folder_name
 
@@ -1356,10 +1353,13 @@ class StoreBackend:
             raise
         self._remove_leftover(old_tree)
 
-    def download_repo(self, repo_url:str, directory:str, commit_sha:str = None, branch_name:str = None, expected_id:str = None):
-        """Returns 200 on success, 404 for a hard failure (e.g. git missing
-        on the devel clone path), 400 for a staged tree that fails the
-        expected_id manifest check, or NoConnectionError.
+    def download_repo(self, repo_url:str, directory:str, commit_sha:str = None, branch_name:str = None, expected_id:str = None) -> StoreResult[None]:
+        """Returns Ok(None) on success, or an Err naming the failure:
+        INSTALL_FAILED for a hard failure (e.g. git missing on the devel clone
+        path, an unresolvable branch), INVALID_ASSET for a staged tree that
+        fails the expected_id manifest check, NO_CONNECTION for a network or
+        archive fault. Internal to the backend -- only the install_* methods
+        call it, and they hand the Err straight back to the UI.
 
         The install is transactional: the new tree is downloaded, extracted,
         validated and VERSION-stamped in a staging area first, then swapped
@@ -1373,7 +1373,7 @@ class StoreBackend:
         ref = parse_repo_url(repo_url)
         if ref is None:
             log.error(f"Could not derive a repository from {repo_url!r}")
-            return 404
+            return Err(ErrReason.INSTALL_FAILED, f"could not derive a repository from {repo_url!r}")
         username = ref.user
         projectname = ref.repo.lower()
         sha = commit_sha
@@ -1382,22 +1382,18 @@ class StoreBackend:
             try:
                 sha = self.get_last_commit(repo_url, branch_name)
             except StoreFetchError:
-                # Bridge: download_repo still answers the NoConnectionError/int
-                # contract install_* narrow on, until the write side is typed.
-                return NoConnectionError()
-            if isinstance(sha, NoConnectionError):
-                return sha  # a test stub may still return the sentinel
+                return Err(ErrReason.NO_CONNECTION, f"could not resolve branch {branch_name!r} of {repo_url}")
             if sha is None:
                 # Fail up front rather than building a ".../None.zip" URL
                 # that 404s later with a misleading log.
                 log.error(f"Could not resolve branch {branch_name!r} of {repo_url}")
-                return 404
+                return Err(ErrReason.INSTALL_FAILED, f"branch {branch_name!r} of {repo_url} has no commits")
         if sha is None:
             # Neither a commit sha nor a branch was given: there is nothing to
             # download (this used to build a ".../None.zip" url and stamp
             # VERSION with None).
             log.error(f"Refusing to download {repo_url}: no commit sha and no branch")
-            return 404
+            return Err(ErrReason.INSTALL_FAILED, f"no commit sha and no branch for {repo_url}")
 
         zip_url = f"https://github.com/{username}/{projectname}/archive/{sha}.zip"
 
@@ -1410,8 +1406,8 @@ class StoreBackend:
             http_client.download_to_file(zip_url, zip_path, timeout=30)
         except Exception as e:
             log.error(e)
-            return NoConnectionError()
-        
+            return Err(ErrReason.NO_CONNECTION, f"download of {projectname} failed: {e}")
+
         ## Extract
         extracted_folder = None
         try:
@@ -1419,14 +1415,14 @@ class StoreBackend:
             # case-sensitive, so it may not match projectname) BEFORE unpacking,
             # so the finally-cleanup also covers a mid-extraction failure.
             extracted_folder_name = self.get_main_folder_of_zip(zip_path)
-            if not isinstance(extracted_folder_name, str):
-                # 400 from the helper: no single root folder in the archive.
+            if extracted_folder_name is None:
+                # The helper found no single root folder in the archive.
                 raise ValueError("could not determine the archive's root folder")
             # Defense-in-depth: refuse a traversal/absolute member before we
             # let shutil.unpack_archive write anything to disk.
             if self.zip_has_unsafe_members(zip_path):
                 log.error(f"Refusing to extract {projectname}: archive contains unsafe member paths")
-                return NoConnectionError()
+                return Err(ErrReason.NO_CONNECTION, f"{projectname} archive contains unsafe member paths")
             extracted_folder = os.path.join(gl.DATA_PATH, "cache", extracted_folder_name)
             if os.path.exists(extracted_folder):
                 shutil.rmtree(extracted_folder)
@@ -1438,7 +1434,7 @@ class StoreBackend:
             # crash after the swap but before a late VERSION write would
             # leave an install that is never retried.
             if not self._staged_tree_id_matches(extracted_folder, expected_id):
-                return 400
+                return Err(ErrReason.INVALID_ASSET, f"staged {projectname} tree does not match expected id {expected_id!r}")
             with open(os.path.join(extracted_folder, "VERSION"), "w") as f:
                 f.write(sha)
             # Stamped in the staging tree like VERSION, so the swap
@@ -1448,7 +1444,7 @@ class StoreBackend:
             self._swap_into_place(extracted_folder, directory)
         except Exception as e:
             log.error(f"Failed to extract/install {projectname}: {e}")
-            return NoConnectionError()
+            return Err(ErrReason.NO_CONNECTION, f"failed to extract/install {projectname}: {e}")
         finally:
             # Best-effort: never leave the archive or extracted temp folder behind,
             # and never let cleanup replace the try-block's outcome.
@@ -1460,9 +1456,9 @@ class StoreBackend:
             if extracted_folder is not None and os.path.isdir(extracted_folder):
                 shutil.rmtree(extracted_folder, ignore_errors=True)
 
-        return 200
-    
-    def clone_repo(self, repo_url:str, local_path:str, commit_sha:str = None, branch_name:str = None, expected_id:str = None):
+        return Ok(None)
+
+    def clone_repo(self, repo_url:str, local_path:str, commit_sha:str = None, branch_name:str = None, expected_id:str = None) -> StoreResult[None]:
         if commit_sha is not None:
             # Use the main branch for the initial clone
             branch_name = None
@@ -1475,15 +1471,15 @@ class StoreBackend:
         # the install-script runners were de-shelled.
         if commit_sha is not None and not self.is_safe_commit_sha(commit_sha):
             log.error(f"Refusing to clone {repo_url}: malformed commit sha {commit_sha!r}")
-            return 400
+            return Err(ErrReason.INVALID_ASSET, f"malformed commit sha {commit_sha!r}")
         if branch_name is not None and not self.is_safe_ref_name(branch_name):
             log.error(f"Refusing to clone {repo_url}: unsafe branch/ref name {branch_name!r}")
-            return 400
+            return Err(ErrReason.INVALID_ASSET, f"unsafe branch/ref name {branch_name!r}")
 
         # Check if git is installed on the system - should be the case for most linux systems
         if shutil.which("git") is None:
             log.error("Git is not installed on this system. Please install it.")
-            return 404
+            return Err(ErrReason.INSTALL_FAILED, "git is not installed on this system")
 
         # Same transactional contract as download_repo: clone and prepare in
         # a staging dir under cache/, then swap -- the old rmtree-first flow
@@ -1497,7 +1493,7 @@ class StoreBackend:
             rc = self.subp_call(["git", "clone", repo_url, staging])
             if rc != 0 or not os.path.isdir(staging):
                 log.error(f"git clone of {repo_url} failed with exit code {rc}")
-                return 404
+                return Err(ErrReason.INSTALL_FAILED, f"git clone of {repo_url} failed (exit {rc})")
 
             # Add repository to the safe directory list to avoid dubious ownership warnings
             # -- both the final home and the staging clone, since the
@@ -1520,18 +1516,18 @@ class StoreBackend:
             #
             # Fail hard rather than fall back to the default tip: that is
             # what every other git failure in this function does (clone rc,
-            # checkout rc, missing git -> 404), and, decisively, it is
-            # already what the NON-devel path does for this exact failure --
+            # checkout rc, missing git -> INSTALL_FAILED), and, decisively, it
+            # is already what the NON-devel path does for this exact failure --
             # download_repo builds ".../<sha>.zip", which 404s on an
-            # unreachable sha and returns NoConnectionError. A fallback here
-            # would make the devel clone path the only place in the store
-            # where an unreachable sha still installs something.
+            # unreachable sha and fails the install. A fallback here would make
+            # the devel clone path the only place in the store where an
+            # unreachable sha still installs something.
             if commit_sha is not None:
                 rc = self.subp_call(["git", "-C", staging, "reset", "--hard", commit_sha])
                 if rc != 0:
                     log.error(f"git reset --hard {commit_sha!r} failed with exit code {rc} for {repo_url} "
                               f"(commit unreachable?) -- refusing to install the default-branch tip")
-                    return 404
+                    return Err(ErrReason.INSTALL_FAILED, f"git reset --hard {commit_sha!r} failed (exit {rc})")
             elif branch_name is not None:
                 # checkout, not switch: custom plugins may pin a TAG (or any
                 # detachable ref), which `git switch` refuses without
@@ -1541,18 +1537,18 @@ class StoreBackend:
                 rc = self.subp_call(["git", "-C", staging, "checkout", branch_name])
                 if rc != 0:
                     log.error(f"git checkout {branch_name!r} failed with exit code {rc} for {repo_url}")
-                    return 404
+                    return Err(ErrReason.INSTALL_FAILED, f"git checkout {branch_name!r} failed (exit {rc})")
 
             # Same order as download_repo: validate the staged tree first,
             # then stamp VERSION, then swap.
             if not self._staged_tree_id_matches(staging, expected_id):
-                return 400
+                return Err(ErrReason.INVALID_ASSET, f"staged tree does not match expected id {expected_id!r}")
 
             ## Write version
             version_stamp = commit_sha or branch_name
             if version_stamp is None:
                 log.error(f"Refusing to stamp VERSION for {repo_url}: no commit sha and no branch")
-                return 400
+                return Err(ErrReason.INVALID_ASSET, f"no commit sha and no branch for {repo_url}")
             with open(os.path.join(staging, "VERSION"), "w") as f:
                 f.write(version_stamp)
             self.stamp_origin(staging, repo_url)
@@ -1560,13 +1556,13 @@ class StoreBackend:
             self._swap_into_place(staging, local_path)
         except Exception as e:
             log.error(f"Failed to stage devel clone of {repo_url}: {e}")
-            return NoConnectionError()
+            return Err(ErrReason.NO_CONNECTION, f"failed to stage devel clone of {repo_url}: {e}")
         finally:
             self._remove_leftover(staging)
 
-        return 200
+        return Ok(None)
 
-    def install_plugin(self, plugin_data:PluginData, auto_update: bool = False):
+    def install_plugin(self, plugin_data:PluginData, auto_update: bool = False) -> StoreResult[None]:
         url = plugin_data.github
         plugin_id = plugin_data.plugin_id
 
@@ -1574,11 +1570,11 @@ class StoreBackend:
             # The id names the install dir (which download_repo swap-replaces)
             # -- a traversal id like "../../.." must never reach that join.
             log.error(f"Refusing to install plugin with unsafe id {plugin_id!r} from {url}")
-            return 400
+            return Err(ErrReason.INVALID_ASSET, f"unsafe plugin id {plugin_id!r}")
 
         if url is None:
             log.error(f"Refusing to install plugin {plugin_id!r}: no repository url")
-            return 400
+            return Err(ErrReason.INVALID_ASSET, f"no repository url for plugin {plugin_id!r}")
 
         local_path = os.path.join(gl.PLUGIN_DIR, plugin_id)
 
@@ -1586,10 +1582,8 @@ class StoreBackend:
 
         # Bail before running install scripts or reloading plugins over a
         # missing or partial tree.
-        if isinstance(response, NoConnectionError):
+        if isinstance(response, Err):
             return response
-        if response != 200:
-            return 404
 
         # UPDATE case: the new tree is already swapped in; deregister the
         # old version now (sys.modules purge included) so load_plugins
@@ -1645,7 +1639,7 @@ class StoreBackend:
         gl.signal_manager.trigger_signal(Signals.PluginInstall, plugin_data.plugin_id)
 
         log.success(f"Plugin {plugin_id} installed successfully under: {local_path} with sha: {plugin_data.commit_sha}")
-        return True
+        return Ok(None)
 
     @staticmethod
     def notify_if_installed_disabled(plugin_id: str) -> bool:
@@ -1752,11 +1746,11 @@ class StoreBackend:
     # the plugin-manager deregister/reload wiring the packs have no equivalent
     # of.
 
-    def _install_asset(self, data, desc: AssetTypeDescriptor):
+    def _install_asset(self, data, desc: AssetTypeDescriptor) -> StoreResult[None]:
         """Download one data-only asset into its per-type directory. Returns
-        download_repo's result (200 success / 404 hard failure / 400 bad-tree /
-        NoConnectionError), or 400 for an unsafe id or a missing url -- the same
-        contract each per-type installer carried.
+        download_repo's StoreResult (Ok(None) / Err), or Err(INVALID_ASSET) for
+        an unsafe id or a missing url -- the same failure the plugin installer
+        reports for the same two conditions.
 
         No pre-delete (B-06): download_repo stages and validates the new tree
         and only swaps it over the installed one at the end, so a failed
@@ -1765,12 +1759,12 @@ class StoreBackend:
         asset_id = data.asset_id
         if not self.is_safe_asset_id(asset_id):
             log.error(f"Refusing to install {desc.display_name} with unsafe id {asset_id!r} from {data.github}")
-            return 400
+            return Err(ErrReason.INVALID_ASSET, f"unsafe {desc.display_name} id {asset_id!r}")
 
         github = data.github
         if github is None:
             log.error(f"Refusing to install {desc.display_name} {asset_id!r}: no repository url")
-            return 400
+            return Err(ErrReason.INVALID_ASSET, f"no repository url for {desc.display_name} {asset_id!r}")
 
         asset_path = os.path.join(getattr(self, desc.base_dir_attr)(), asset_id)
         return self.download_repo(repo_url=github, directory=asset_path, commit_sha=data.commit_sha, expected_id=asset_id)
@@ -1787,19 +1781,19 @@ class StoreBackend:
         if os.path.exists(asset_path):
             shutil.rmtree(asset_path)
 
-    def install_icon(self, icon_data:IconData):
+    def install_icon(self, icon_data:IconData) -> StoreResult[None]:
         return self._install_asset(icon_data, ICON)
 
     def uninstall_icon(self, icon_data:IconData):
         return self._uninstall_asset(icon_data, ICON)
 
-    def install_wallpaper(self, wallpaper_data:WallpaperData):
+    def install_wallpaper(self, wallpaper_data:WallpaperData) -> StoreResult[None]:
         return self._install_asset(wallpaper_data, WALLPAPER)
 
     def uninstall_wallpaper(self, wallpaper_data:WallpaperData):
         return self._uninstall_asset(wallpaper_data, WALLPAPER)
 
-    def install_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper_data:SDPlusBarWallpaperData):
+    def install_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper_data:SDPlusBarWallpaperData) -> StoreResult[None]:
         return self._install_asset(sd_plus_bar_wallpaper_data, SD_PLUS_BAR)
 
     def uninstall_sd_plus_bar_wallpaper(self, sd_plus_bar_wallpaper_data:SDPlusBarWallpaperData):
@@ -1828,12 +1822,9 @@ class StoreBackend:
         catalog entry that was never installed. Dispatches through the public
         ``get_all_*`` name so a test stub of it is honoured."""
         result = getattr(self, desc.get_all_attr)(include_images=False)
-        # A StoreResult, or a legacy stub's bare list / sentinel -- accept all.
         if isinstance(result, Err):
             return result
-        if isinstance(result, NoConnectionError):
-            return Err(ErrReason.NO_CONNECTION, "no store catalog could be fetched")
-        assets = result.value if isinstance(result, Ok) else result
+        assets = result.value
 
         to_update: list = []
         for asset in assets:
@@ -1865,84 +1856,70 @@ class StoreBackend:
 
         return Ok(to_update)
 
-    def _update_all(self, desc: AssetTypeDescriptor) -> "int | NoConnectionError":
-        """Reinstall every out-of-date asset of one class; return how many
-        reinstalls actually succeeded, or NoConnectionError if the catalog was
-        unreachable. Reinstalling goes entirely through the install method, so
-        this never deregisters anything itself -- for plugins the bespoke
+    def _update_all(self, desc: AssetTypeDescriptor) -> StoreResult[int]:
+        """Reinstall every out-of-date asset of one class; return Ok(n) with the
+        number of reinstalls that actually succeeded, or the catalog's Err if it
+        was unreachable. Reinstalling goes entirely through the install method,
+        so this never deregisters anything itself -- for plugins the bespoke
         installer deregisters the old version only AFTER a good download, so a
         failed update leaves the old version on disk AND registered."""
         to_update = getattr(self, desc.get_to_update_attr)()
-        if isinstance(to_update, NoConnectionError):
+        if isinstance(to_update, Err):
             return to_update
 
         n_updated = 0
         install = getattr(self, desc.install_attr)
-        for asset in to_update:
+        for asset in to_update.value:
             result = install(asset)
-            # desc.install_ok reads the install call's raw success value. A
-            # plugin install answers True; the three data-only installers
-            # answer the HTTP-style 200. That split is the one success dialect
-            # the collapse cannot yet erase -- it lives as descriptor data and
-            # is removed once the install boundary returns a single success
-            # value.
-            if desc.install_ok(result):
-                n_updated += 1
-            else:
+            # install_* answers a single StoreResult now -- a success is exactly
+            # an Ok. Narrowing, not truthiness: an Err is truthy, so counting it
+            # would be the bug the typed channel exists to make impossible.
+            if isinstance(result, Err):
                 log.error(f"Failed to update {desc.display_name} {asset.asset_id}: {result!r}")
+                continue
+            n_updated += 1
 
-        return n_updated
+        return Ok(n_updated)
 
-    def _to_update_legacy(self, desc: AssetTypeDescriptor) -> "list | NoConnectionError":
-        # Bridge the typed read to the sentinel the write side below still speaks.
-        result = self._get_assets_to_update(desc)
-        if isinstance(result, Err):
-            return NoConnectionError()
-        return result.value
+    def get_plugins_to_update(self) -> StoreResult[list]:
+        return self._get_assets_to_update(PLUGIN)
 
-    def get_plugins_to_update(self):
-        return self._to_update_legacy(PLUGIN)
-
-    def update_all_plugins(self) -> "int | NoConnectionError":
-        """Returns number of SUCCESSFULLY updated plugins"""
+    def update_all_plugins(self) -> StoreResult[int]:
+        """Returns Ok(number of SUCCESSFULLY updated plugins), or an Err."""
         return self._update_all(PLUGIN)
 
-    def get_icons_to_update(self):
-        return self._to_update_legacy(ICON)
+    def get_icons_to_update(self) -> StoreResult[list]:
+        return self._get_assets_to_update(ICON)
 
-    def update_all_icons(self) -> "int | NoConnectionError":
-        """Returns number of SUCCESSFULLY updated icon packs"""
+    def update_all_icons(self) -> StoreResult[int]:
+        """Returns Ok(number of SUCCESSFULLY updated icon packs), or an Err."""
         return self._update_all(ICON)
 
-    def get_wallpapers_to_update(self):
-        return self._to_update_legacy(WALLPAPER)
+    def get_wallpapers_to_update(self) -> StoreResult[list]:
+        return self._get_assets_to_update(WALLPAPER)
 
-    def update_all_wallpapers(self) -> "int | NoConnectionError":
-        """Returns number of SUCCESSFULLY updated wallpapers"""
+    def update_all_wallpapers(self) -> StoreResult[int]:
+        """Returns Ok(number of SUCCESSFULLY updated wallpapers), or an Err."""
         return self._update_all(WALLPAPER)
 
-    def get_sd_plus_bar_wallpapers_to_update(self):
-        return self._to_update_legacy(SD_PLUS_BAR)
+    def get_sd_plus_bar_wallpapers_to_update(self) -> StoreResult[list]:
+        return self._get_assets_to_update(SD_PLUS_BAR)
 
-    def update_all_sd_plus_bar_wallpapers(self) -> "int | NoConnectionError":
-        """Returns number of SUCCESSFULLY updated SD+ bar wallpapers"""
+    def update_all_sd_plus_bar_wallpapers(self) -> StoreResult[int]:
+        """Returns Ok(number of SUCCESSFULLY updated SD+ bar wallpapers), or an Err."""
         return self._update_all(SD_PLUS_BAR)
 
-    def update_everything(self) -> "int | NoConnectionError":
-        """
-        Returns number of SUCCESSFULLY updated assets, or NoConnectionError
-        """
+    def update_everything(self) -> StoreResult[int]:
+        """Returns Ok(number of SUCCESSFULLY updated assets), or the first Err."""
         # Run every class's update leg first -- dispatched through the public
-        # update_all_* names so a test stub of any of them is honoured -- THEN
-        # check. A NoConnectionError leaking into the sum used to raise
-        # TypeError, and one leg used to go unchecked entirely. (SD+ bar
-        # wallpaper packs used to have no update leg at all -- installed once
-        # and never auto-updated.)
+        # update_all_* names so a test stub of any of them is honoured, in
+        # ASSET_TYPES order (plugins first, the only leg that reloads the plugin
+        # manager) -- THEN aggregate. Any leg's Err surfaces as the overall Err;
+        # otherwise the successful counts sum. (SD+ bar wallpaper packs used to
+        # have no update leg at all -- installed once and never auto-updated.)
         results = [getattr(self, desc.update_all_attr)() for desc in ASSET_TYPES]
-        if any(isinstance(result, NoConnectionError) for result in results):
-            return NoConnectionError()
+        for result in results:
+            if isinstance(result, Err):
+                return result
 
-        return sum(results)
-
-class NoCompatibleVersion:
-    pass
+        return Ok(sum(result.value for result in results if isinstance(result, Ok)))

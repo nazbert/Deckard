@@ -22,7 +22,8 @@ outdated pack is offered and counted.
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl  # noqa: F401
 
-from src.backend.Store.StoreBackend import StoreBackend, NoConnectionError
+from src.backend.Store.StoreBackend import StoreBackend
+from src.backend.Store.store_result import Ok, Err
 from src.windows.Store.StoreData import IconData, SDPlusBarWallpaperData, WallpaperData
 
 
@@ -69,13 +70,13 @@ def test_get_icons_to_update_skips_incompatible() -> None:
     sb = _make_backend()
 
     def fake_get_all_icons(include_images: bool = True):
-        return _icon_catalog()
+        return Ok(_icon_catalog())
 
     sb.get_all_icons = fake_get_all_icons
 
     to_update = sb.get_icons_to_update()
-    assert not isinstance(to_update, NoConnectionError)
-    ids = [i.icon_id for i in to_update]
+    assert not isinstance(to_update, Err)
+    ids = [i.icon_id for i in to_update.value]
     assert ids == ["com_b_Outdated"], (
         f"only the compatibly-outdated icon pack may be offered for update, got {ids}"
     )
@@ -86,19 +87,21 @@ def test_update_all_icons_never_installs_incompatible() -> None:
     sb = _make_backend()
 
     def fake_get_all_icons(include_images: bool = True):
-        return _icon_catalog()
+        return Ok(_icon_catalog())
 
     installed: list[str] = []
 
     def fake_install_icon(icon_data):
         installed.append(icon_data.icon_id)
-        return 200
+        return Ok(None)
 
     sb.get_all_icons = fake_get_all_icons
     sb.install_icon = fake_install_icon
 
-    n = sb.update_all_icons()
-    assert n == 1, f"exactly the one compatible icon update may be counted, got {n!r}"
+    result = sb.update_all_icons()
+    assert isinstance(result, Ok) and result.value == 1, (
+        f"exactly the one compatible icon update may be counted, got {result!r}"
+    )
     assert installed == ["com_b_Outdated"], (
         f"the incompatible icon pack must never be installed, got installs {installed}"
     )
@@ -109,13 +112,13 @@ def test_get_wallpapers_to_update_skips_incompatible() -> None:
     sb = _make_backend()
 
     def fake_get_all_wallpapers(include_images: bool = True):
-        return _wallpaper_catalog()
+        return Ok(_wallpaper_catalog())
 
     sb.get_all_wallpapers = fake_get_all_wallpapers
 
     to_update = sb.get_wallpapers_to_update()
-    assert not isinstance(to_update, NoConnectionError)
-    ids = [w.wallpaper_id for w in to_update]
+    assert not isinstance(to_update, Err)
+    ids = [w.wallpaper_id for w in to_update.value]
     assert ids == ["com_b_Outdated"], (
         f"only the compatibly-outdated wallpaper may be offered for update, got {ids}"
     )
@@ -126,13 +129,13 @@ def test_get_sd_plus_bar_wallpapers_to_update_skips_incompatible() -> None:
     sb = _make_backend()
 
     def fake_get_all_sd_plus(include_images: bool = True):
-        return _sd_plus_catalog()
+        return Ok(_sd_plus_catalog())
 
     sb.get_all_sd_plus_bar_wallpapers = fake_get_all_sd_plus
 
     to_update = sb.get_sd_plus_bar_wallpapers_to_update()
-    assert not isinstance(to_update, NoConnectionError)
-    ids = [w.id for w in to_update]
+    assert not isinstance(to_update, Err)
+    ids = [w.id for w in to_update.value]
     assert ids == ["com_b_Outdated"], (
         f"only the compatibly-outdated SD+ bar wallpaper may be offered for update, got {ids}"
     )

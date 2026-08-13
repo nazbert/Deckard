@@ -90,7 +90,8 @@ from src.backend.PluginManager.PluginManager import PluginManager
 from src.backend.IconPackManagement.IconPackManager import IconPackManager
 from src.backend.WallpaperPackManagement.WallpaperPackManager import WallpaperPackManager
 from src.backend.SDPlusBarWallpaperPackManagement.SDPlusBarWallpaperPackManager import SDPlusBarWallpaperPackManager
-from src.backend.Store.StoreBackend import StoreBackend, NoConnectionError
+from src.backend.Store.StoreBackend import StoreBackend
+from src.backend.Store.store_result import Err
 from src.backend.notify import Notify
 from autostart import setup_autostart, ensure_app_desktop_entry
 from src.Signals.SignalManager import SignalManager
@@ -243,11 +244,12 @@ def update_assets():
 
     log.info("Updating store assets")
     start = time.time()
-    number_of_installed_updates = gl.store_backend.update_everything()
-    if isinstance(number_of_installed_updates, NoConnectionError):
+    result = gl.store_backend.update_everything()
+    if isinstance(result, Err):
         log.error("Failed to update store assets")
         gl.notify.error("Failed to update store assets")
         return
+    number_of_installed_updates = result.value
     log.info(f"Updating {number_of_installed_updates} store assets took {time.time() - start} seconds")
 
     if number_of_installed_updates <= 0:

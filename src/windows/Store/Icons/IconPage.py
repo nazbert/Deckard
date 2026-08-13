@@ -18,9 +18,10 @@ from src.windows.Store.StoreData import IconData
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk
+from gi.repository import Gtk, GLib
 
 # Import python modules
+from loguru import logger as log
 
 # Import own modules
 from src.windows.Store.StorePage import StorePage
@@ -105,9 +106,28 @@ class IconPreview(StorePreview):
             description = self.icon_data.description
         self.set_description(description)
 
-    def install(self):
-        self.store.backend.install_icon(icon_data=self.icon_data)
-        self.set_install_state(1)
+    def install(self) -> bool:
+        """Runs on the store's download worker thread; returns whether the
+        install actually succeeded. A failed install (Err) leaves the button in
+        its previous state instead of flipping it to 'installed' -- the fix for
+        a 400/404/offline download silently reading as installed."""
+        backend = self.store.backend
+        if backend is None:
+            log.error(f"Store backend unavailable; cannot install {self.icon_data.icon_id}")
+            self.notify_install_failure()
+            return False
+        result = backend.install_icon(icon_data=self.icon_data)
+        if isinstance(result, Err):
+            log.error(f"Failed to install icon pack {self.icon_data.icon_id}: {result!r}")
+            self.notify_install_failure()
+            return False
+        GLib.idle_add(self.set_install_state, 1)
+        return True
+
+    def notify_install_failure(self):
+        name = self.icon_data.icon_name or self.icon_data.icon_id
+        gl.notify.error(f"The icon pack {name} could not be installed",
+                        title="Icon pack install failed")
 
     def uninstall(self):
         self.store.backend.uninstall_icon(icon_data=self.icon_data)

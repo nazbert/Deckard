@@ -92,9 +92,9 @@ class PluginRecommendations(Gtk.Box):
         # the carousel on every first launch.
         #
         # The fetch returns an Err when every store is unreachable (offline,
-        # GitHub rate limit); iterating the old NoConnectionError sentinel
-        # raised TypeError, killing this thread with the spinner still up on a
-        # fresh install. Err and any raising fetch get the same error state.
+        # GitHub rate limit); iterating the old untyped failure sentinel raised
+        # TypeError, killing this thread with the spinner still up on a fresh
+        # install. Err and any raising fetch get the same error state.
         try:
             result = gl.store_backend.get_all_plugins()
         except Exception as e:

@@ -2,27 +2,31 @@
 Regression test -- install/update results ignored across the store
 backend, exercised WITHOUT network:
 
-- install_plugin's failure returns (404/400 ints, NoConnectionError) were
-  discarded by the UI and by update_all_plugins, which deregistered the old
-  version BEFORE the fallible download and returned len(plugins_to_update)
-  -- failures counted as successes in the "assets updated" toast, and a
-  failed update left the (still on-disk) plugin unregistered until restart.
-- update_everything checked only the plugins/icons legs for
-  NoConnectionError; a wallpapers-leg failure raised TypeError on the sum.
+- install_plugin's failure returns were discarded by the UI and by
+  update_all_plugins, which deregistered the old version BEFORE the fallible
+  download and returned len(plugins_to_update) -- failures counted as
+  successes in the "assets updated" toast, and a failed update left the
+  (still on-disk) plugin unregistered until restart.
+- update_everything checked only the plugins/icons legs for the failure
+  sentinel; a wallpapers-leg failure raised TypeError on the sum.
 
-The contract is now: install_plugin success is exactly True;
-download_repo/install_icon/install_wallpaper success is exactly 200;
-update_all_* count only real successes. Since the transactional-install
-redesign, update_all_plugins never deregisters anything itself:
-install_plugin deregisters the old version only AFTER its download
-succeeded, so a failed update leaves the old version on disk AND
-registered and no recovery reload exists.
+The contract is now uniform: install_plugin / install_icon / install_wallpaper
+/ install_sd_plus_bar_wallpaper answer a StoreResult -- Ok(None) on success, an
+Err naming the failure otherwise. update_all_* count only real successes
+(narrowing on Ok, never truthiness -- an Err is truthy) and return Ok(count) or
+propagate the Err. update_everything returns Ok(sum) or the first leg's Err --
+which is exactly the failure the app-action's toast path reads. Since the
+transactional-install redesign, update_all_plugins never deregisters anything
+itself: install_plugin deregisters the old version only AFTER its download
+succeeded, so a failed update leaves the old version on disk AND registered and
+no recovery reload exists.
 """
 
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl  # noqa: F401
 
-from src.backend.Store.StoreBackend import StoreBackend, NoConnectionError
+from src.backend.Store.StoreBackend import StoreBackend
+from src.backend.Store.store_result import Ok, Err, ErrReason
 from src.windows.Store.StoreData import PluginData, IconData, SDPlusBarWallpaperData
 
 
@@ -50,23 +54,25 @@ def test_install_plugin_failure_propagates_and_skips_reload() -> None:
 
     sb = _make_backend()
 
-    def download_nce(**kwargs):
-        return NoConnectionError()
+    def download_conn(**kwargs):
+        return Err(ErrReason.NO_CONNECTION, "offline")
 
-    def download_404(**kwargs):
-        return 404
+    def download_hard(**kwargs):
+        return Err(ErrReason.INSTALL_FAILED, "hard failure")
 
     data = PluginData(github="https://github.com/test/test", plugin_id="com_test_Plugin")
 
-    sb.download_repo = download_nce
+    sb.download_repo = download_conn
     result = sb.install_plugin(data)
-    assert isinstance(result, NoConnectionError), (
-        f"failed download must propagate, got {result!r}"
+    assert isinstance(result, Err) and result.reason is ErrReason.NO_CONNECTION, (
+        f"a failed download must propagate its Err, got {result!r}"
     )
 
-    sb.download_repo = download_404
+    sb.download_repo = download_hard
     result = sb.install_plugin(data)
-    assert result == 404, f"hard download failure must return 404, got {result!r}"
+    assert isinstance(result, Err) and result.reason is ErrReason.INSTALL_FAILED, (
+        f"a hard download failure must propagate its Err, got {result!r}"
+    )
 
     assert plugin_manager.calls == [], (
         f"a failed install must never reload/reinit plugins over a missing "
@@ -82,7 +88,7 @@ def test_update_all_plugins_counts_only_successes_and_never_predeletes() -> None
     plugin_bad = PluginData(github="https://github.com/b/b", plugin_id="com_b_Bad")
 
     def fake_get_plugins_to_update():
-        return [plugin_ok, plugin_bad]
+        return Ok([plugin_ok, plugin_bad])
 
     uninstalled = []
 
@@ -90,14 +96,16 @@ def test_update_all_plugins_counts_only_successes_and_never_predeletes() -> None
         uninstalled.append((plugin_id, remove_files))
 
     def fake_install(plugin_data, auto_update=False):
-        return True if plugin_data is plugin_ok else NoConnectionError()
+        return Ok(None) if plugin_data is plugin_ok else Err(ErrReason.NO_CONNECTION, "offline")
 
     sb.get_plugins_to_update = fake_get_plugins_to_update
     sb.uninstall_plugin = fake_uninstall
     sb.install_plugin = fake_install
 
-    n = sb.update_all_plugins()
-    assert n == 1, f"only the ONE successful update may be counted, got {n!r}"
+    result = sb.update_all_plugins()
+    assert isinstance(result, Ok) and result.value == 1, (
+        f"only the ONE successful update may be counted, got {result!r}"
+    )
     assert uninstalled == [], (
         "update_all_plugins must never deregister a plugin itself -- "
         "install_plugin deregisters only after a good download, "
@@ -112,10 +120,16 @@ def test_update_all_plugins_counts_only_successes_and_never_predeletes() -> None
 def test_update_everything_checks_all_four_legs() -> None:
     sb = _make_backend()
 
-    def plugins_ok(): return 2
-    def icons_ok(): return 1
-    def wallpapers_fail(): return NoConnectionError()
-    def sd_plus_ok(): return 4
+    # The app-action (_update_all_assets) toasts success only on an Ok and
+    # failure on anything else; mirror that discriminant here so this pins the
+    # exact result the toast path branches on.
+    def app_reads_failure(result) -> bool:
+        return not isinstance(result, Ok)
+
+    def plugins_ok(): return Ok(2)
+    def icons_ok(): return Ok(1)
+    def wallpapers_fail(): return Err(ErrReason.NO_CONNECTION, "offline")
+    def sd_plus_ok(): return Ok(4)
 
     sb.update_all_plugins = plugins_ok
     sb.update_all_icons = icons_ok
@@ -123,25 +137,31 @@ def test_update_everything_checks_all_four_legs() -> None:
     sb.update_all_sd_plus_bar_wallpapers = sd_plus_ok
 
     result = sb.update_everything()
-    assert isinstance(result, NoConnectionError), (
-        f"a wallpapers-leg failure must surface as NoConnectionError "
+    assert isinstance(result, Err), (
+        f"a wallpapers-leg failure must surface as an Err "
         f"(it used to TypeError on the sum), got {result!r}"
     )
+    assert app_reads_failure(result), (
+        "the app-action must read a one-leg failure as the failure-toast path"
+    )
 
-    def wallpapers_ok(): return 3
+    def wallpapers_ok(): return Ok(3)
     sb.update_all_wallpapers = wallpapers_ok
     result = sb.update_everything()
-    assert result == 10, (
+    assert isinstance(result, Ok) and result.value == 10, (
         f"the sum must include the SD+ bar wallpapers leg (2+1+3+4), got {result!r}"
+    )
+    assert not app_reads_failure(result), (
+        "all legs Ok must read as the success-toast path"
     )
 
     # An SD+-only failure must surface too -- the leg simply
     # did not exist, so SD+ bar packs were never auto-updated at all.
-    def sd_plus_fail(): return NoConnectionError()
+    def sd_plus_fail(): return Err(ErrReason.NO_CONNECTION, "offline")
     sb.update_all_sd_plus_bar_wallpapers = sd_plus_fail
     result = sb.update_everything()
-    assert isinstance(result, NoConnectionError), (
-        f"an SD+-leg failure must surface as NoConnectionError, got {result!r}"
+    assert isinstance(result, Err), (
+        f"an SD+-leg failure must surface as an Err, got {result!r}"
     )
 
 
@@ -158,30 +178,32 @@ def test_update_all_sd_plus_bar_wallpapers_counts_only_successes() -> None:
                                               local_sha=None, commit_sha="new")
 
     def fake_get_all(*args, **kwargs):
-        return [wp_ok, wp_bad, wp_current, wp_not_installed]
+        return Ok([wp_ok, wp_bad, wp_current, wp_not_installed])
 
     installed = []
 
     def fake_install(wallpaper_data):
         installed.append(wallpaper_data.id)
-        return 200 if wallpaper_data is wp_ok else NoConnectionError()
+        return Ok(None) if wallpaper_data is wp_ok else Err(ErrReason.NO_CONNECTION, "offline")
 
     sb.get_all_sd_plus_bar_wallpapers = fake_get_all
     sb.install_sd_plus_bar_wallpaper = fake_install
 
-    n = sb.update_all_sd_plus_bar_wallpapers()
-    assert n == 1, f"only the ONE successful SD+ update may be counted, got {n!r}"
+    result = sb.update_all_sd_plus_bar_wallpapers()
+    assert isinstance(result, Ok) and result.value == 1, (
+        f"only the ONE successful SD+ update may be counted, got {result!r}"
+    )
     assert installed == ["com_a_SDPlus", "com_b_SDPlus"], (
         f"exactly the outdated installed packs may be reinstalled, got {installed}"
     )
 
     # Catalog failure propagates.
     def fake_get_all_fail(*args, **kwargs):
-        return NoConnectionError()
+        return Err(ErrReason.NO_CONNECTION, "offline")
 
     sb.get_all_sd_plus_bar_wallpapers = fake_get_all_fail
     result = sb.update_all_sd_plus_bar_wallpapers()
-    assert isinstance(result, NoConnectionError)
+    assert isinstance(result, Err)
 
 
 def test_update_all_icons_counts_only_successes() -> None:
@@ -191,16 +213,18 @@ def test_update_all_icons_counts_only_successes() -> None:
     icon_bad = IconData(github="https://github.com/b/icons", icon_id="com_b_Icons")
 
     def fake_get_icons_to_update():
-        return [icon_ok, icon_bad]
+        return Ok([icon_ok, icon_bad])
 
     def fake_install_icon(icon_data):
-        return 200 if icon_data is icon_ok else NoConnectionError()
+        return Ok(None) if icon_data is icon_ok else Err(ErrReason.NO_CONNECTION, "offline")
 
     sb.get_icons_to_update = fake_get_icons_to_update
     sb.install_icon = fake_install_icon
 
-    n = sb.update_all_icons()
-    assert n == 1, f"only the ONE successful icon update may be counted, got {n!r}"
+    result = sb.update_all_icons()
+    assert isinstance(result, Ok) and result.value == 1, (
+        f"only the ONE successful icon update may be counted, got {result!r}"
+    )
 
 
 def test_install_icon_propagates_download_result() -> None:
@@ -208,19 +232,19 @@ def test_install_icon_propagates_download_result() -> None:
     sb = _make_backend()
 
     def download_ok(**kwargs):
-        return 200
+        return Ok(None)
 
     def download_fail(**kwargs):
-        return NoConnectionError()
+        return Err(ErrReason.NO_CONNECTION, "offline")
 
     data = IconData(github="https://github.com/a/icons", icon_id="com_a_Icons")
 
     sb.download_repo = download_ok
-    assert sb.install_icon(data) == 200
+    assert isinstance(sb.install_icon(data), Ok)
 
     sb.download_repo = download_fail
     result = sb.install_icon(data)
-    assert isinstance(result, NoConnectionError), (
+    assert isinstance(result, Err), (
         f"install_icon must propagate the failed download, got {result!r}"
     )
 
