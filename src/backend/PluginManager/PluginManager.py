@@ -6,7 +6,6 @@ import sys
 from loguru import logger as log
 import threading
 
-# Import own modules
 from src.backend.PluginManager.ActionHolder import ActionHolder
 from src.backend.PluginManager.PluginBase import PluginBase
 from streamcontroller_plugin_tools import BackendBase
@@ -16,10 +15,12 @@ from src.backend import startup_queue
 
 
 def terminate_backend_process(process, escalate: bool = True) -> None:
-    """SIGTERM a launched backend's process group (it leads its own session). If
-    escalate, wait briefly and SIGKILL if it doesn't exit, then reap it so it
-    doesn't linger as a zombie. Pass escalate=False on app-quit -- os._exit reaps
-    the whole tree, so we don't want to wait per backend."""
+    """Send SIGTERM to the process group of a launched backend.
+
+    The backend leads its own session. With escalate, this waits a moment,
+    sends SIGKILL to a process that stays, and reaps it, so no zombie stays
+    behind. Pass escalate=False at app quit, where os._exit reaps the whole
+    tree and a wait per backend costs time."""
     if process is None:
         return
     try:
@@ -51,50 +52,47 @@ def terminate_backend_process(process, escalate: bool = True) -> None:
 
 def build_backend_launch_command(backend_path: str, venv_path: str | None, port: int,
                                  open_in_terminal: bool = False) -> list[str]:
-    """Build the argv for launching a plugin/action backend.
+    """Build the argv that launches a plugin or action backend.
 
-    Shared by ActionCore.launch_backend and PluginBase.launch_backend, which
-    carried character-identical copies of this -- so the path validation
-    ActionCore gained now covers PluginBase too, and the two can no
-    longer drift.
+    ActionCore.launch_backend and PluginBase.launch_backend share this, so the
+    path validation covers both and the two cannot drift.
 
-    An argv list, never a shell string: a backend or venv path containing a
-    space (a plugin under "My Plugins/", a home dir with a space) used to be
-    split into separate words by the shell, and metacharacters in it were
-    executed rather than passed along.
+    It returns an argv list and never a shell string. The shell splits a
+    backend or venv path that holds a space, such as a plugin under
+    "My Plugins/" or a home directory with a space, into separate words, and it
+    executes the metacharacters in that path.
 
-    The interpreter is the venv's own python, or ours when the plugin has no
-    venv. It used to be whatever `python3` PATH resolved to, which on a
-    native install is the system python -- no rpyc there, so the backend
-    died at import (in flatpak `python3` and sys.executable are the same
-    interpreter, so nothing changes). Running {venv}/bin/python directly
-    rather than sourcing {venv}/bin/activate resolves imports identically
-    (plugin venvs come from venv.create() without system site packages, so
-    activation's `python3` was this same binary); what activation also did
-    and this does not is export VIRTUAL_ENV and prepend {venv}/bin to PATH,
-    which only a backend that shells out to its own venv's console scripts
-    would notice.
+    The interpreter is the venv's own python, or this app's interpreter when
+    the plugin has no venv. A python3 from PATH is the system python on a
+    native install, which carries no rpyc, so the backend dies at import. In
+    flatpak, python3 and sys.executable name the same interpreter. A run of
+    {venv}/bin/python resolves the imports as a source of {venv}/bin/activate
+    does, because venv.create() builds a plugin venv without the system site
+    packages, so the python3 of that activation is this same binary. The
+    activation also exports VIRTUAL_ENV and prepends {venv}/bin to PATH, which
+    this omits. Only a backend that runs a console script of its own venv
+    notices the difference.
 
     Raises:
-        ValueError: if venv_path is given but missing or has no usable
-            interpreter, or backend_path is None or missing.
+        ValueError: When a given venv_path is absent or has no usable
+            interpreter, or when backend_path is None or absent.
     """
     if venv_path is not None:
         if not os.path.exists(venv_path):
             raise ValueError(f"Venv path does not exist: {venv_path}")
-    # The gate used to be inverted (`if backend_path is None:` guarding
-    # the exists() check), so None reached os.path.exists -> TypeError
-    # and a real-but-missing path sailed through to Popen.
+    # One gate covers both a None path and an absent path. A gate on None
+    # alone lets os.path.exists raise TypeError, and it passes an absent path
+    # to Popen.
     if backend_path is None or not os.path.exists(backend_path):
         raise ValueError(f"Backend path does not exist: {backend_path}")
 
     if venv_path is not None:
         interpreter = os.path.join(venv_path, "bin", "python")
         # bin/python is a symlink to the interpreter the venv was built
-        # against; a python upgrade under a native install leaves it
-        # dangling (exists() follows the link, so this catches that too).
-        # Checked here so the caller gets the documented ValueError with a
-        # useful message instead of a bare FileNotFoundError out of Popen.
+        # against, and a python upgrade under a native install leaves that
+        # symlink dangling. exists() follows the link, so this catches it. The
+        # check here gives the caller the documented ValueError with a useful
+        # message, instead of a bare FileNotFoundError out of Popen.
         if not os.path.exists(interpreter):
             raise ValueError(f"Venv has no usable interpreter: {interpreter}")
     else:
@@ -103,18 +101,19 @@ def build_backend_launch_command(backend_path: str, venv_path: str | None, port:
     if not open_in_terminal:
         return [interpreter, backend_path, f"--port={port}"]
 
-    # Debug affordance: run the backend in a terminal that stays open after
-    # it exits (`exec $SHELL`) so its output survives a crash. The paths ride
-    # in as bash positional parameters, so nothing in them is interpolated.
+    # A debug affordance runs the backend in a terminal that stays open after
+    # the backend exits, through exec $SHELL, so its output survives a crash.
+    # The paths arrive as bash positional parameters, so bash interpolates
+    # nothing in them.
     #
-    # DECKARD_TERMINAL is the whole terminal command PREFIX, not just the
-    # binary: there is no portable "run this command" flag. gnome-terminal
-    # and friends take `--`, konsole/alacritty/xterm/xfce4-terminal take
-    # `-e`, kitty takes the command as a bare positional. Splitting the env
-    # var means every one of those is expressible ("konsole -e",
-    # "alacritty -e", "kitty"); hardcoding `--` after it made the knob work
-    # for exactly one family and fail silently -- terminal prints its usage,
-    # exits, backend never registers -- for the rest.
+    # DECKARD_TERMINAL holds the whole terminal command prefix and not the
+    # binary alone, because no flag for "run this command" works everywhere.
+    # gnome-terminal and its family take --, konsole, alacritty, xterm and
+    # xfce4-terminal take -e, and kitty takes the command as a bare positional.
+    # A split of the whole variable expresses each of those, such as
+    # "konsole -e", "alacritty -e" and "kitty". A hardcoded -- after the binary
+    # works for one family, and for the rest the terminal prints its usage and
+    # exits, so the backend never registers.
     terminal = shlex.split(os.environ.get("DECKARD_TERMINAL", "")) or ["gnome-terminal", "--"]
     return [*terminal, "bash", "-c", '"$1" "$2" --port="$3"; exec $SHELL',
             "deckard-backend", interpreter, backend_path, str(port)]
@@ -125,54 +124,56 @@ class PluginManager:
     def __init__(self):
         self.initialized_plugin_classes = list[PluginBase]()
         self.backends:list[BackendBase] = []
-        # subprocess.Popen handles for launched backends, terminated on teardown.
+        # The subprocess.Popen handles of the launched backends. The teardown
+        # terminates each one.
         self.backend_processes: list = []
-        # Set by the first warm_up_plugins() call (App.on_activate). Once
-        # true, load_plugins() re-runs the warm-up so hot-installed plugins
-        # (store installs call load_plugins long after activation) get their
-        # on_app_ready too; the per-plugin fired marker keeps every hook
-        # at-most-once.
+        # The first warm_up_plugins() call, from App.on_activate, sets this.
+        # After that, load_plugins() runs the warm-up again, so a plugin
+        # installed later gets its on_app_ready too. A store install calls
+        # load_plugins long after the activation. The fired marker per plugin
+        # keeps every hook to one call.
         self._app_ready: bool = False
-        # Plugins that failed to load, keyed by their folder name under
-        # PLUGIN_DIR, with a short human-readable reason (the full traceback
-        # goes to the logs). Surfaced in the UI (startup toast + the Add
-        # Action dialog's empty state) so a broken plugin never fails
-        # silently. Entries are pruned when the folder disappears or the
-        # plugin later registers successfully.
+        # The plugins that failed to load, keyed by their folder name under
+        # PLUGIN_DIR, each with a short reason for a reader. The full traceback
+        # goes to the logs. The UI shows these in the startup toast and in the
+        # empty state of the Add Action dialog, so a broken plugin never fails
+        # in silence. An entry is pruned when its folder disappears, or when
+        # the plugin registers later.
         #
-        # Cross-thread: a store install re-runs load_plugins()/init_plugins()
-        # on a background thread (StoreBackend.install_plugin), which rebuilds
-        # and writes this dict, while the GTK main thread reads it via
-        # get_load_health() (Add-Action empty state). _load_errors_lock keeps
-        # the rebuild atomic against those reads -- a plain dict is GIL-safe
-        # today but the mid-rebuild prune could otherwise expose a half-built
-        # dict on a future Python.
+        # Two threads reach this dict. A store install runs load_plugins() and
+        # init_plugins() again on a background thread, from
+        # StoreBackend.install_plugin, and that rebuilds and writes the dict.
+        # The GTK main thread reads it through get_load_health() for the
+        # Add-Action empty state. _load_errors_lock keeps the rebuild atomic
+        # against those reads. A plain dict is GIL-safe today, and the prune
+        # inside a rebuild could expose a half-built dict on a later Python.
         self.load_errors: dict[str, str] = {}
         self._load_errors_lock = threading.Lock()
 
     def terminate_all_backends(self) -> None:
-        """Terminate every launched backend child process; called on app quit."""
+        """Terminate every launched backend child process. Called at app quit."""
         for process in list(self.backend_processes):
             terminate_backend_process(process, escalate=False)
         self.backend_processes.clear()
 
     def warm_up_plugins(self) -> None:
-        """Eagerly initialize plugin backends without blocking the caller.
+        """Initialize the plugin backends early, without a block on the caller.
 
-        Invokes every registered plugin's not-yet-fired on_app_ready() hook
-        on a single background daemon thread, one plugin at a time, each
-        call exception-isolated; each plugin's hook fires at most once per
-        process (per-instance fired marker). This is the supported
-        eager-init point for backend launches: in background/autostart mode
-        (-b) no config UI is ever opened, and if no deck was enumerable at
-        startup no page load fires action on_ready either -- so a
-        lazily-launched backend would otherwise stay down until the first
-        user interaction that happens to force it, leaving the first
-        hardware presses inert. Backend launches spawn subprocesses, so
-        this must never run on (or block) the GTK main thread.
+        It calls the on_app_ready() hook of every registered plugin that has
+        not fired one yet. The calls run on one background daemon thread, one
+        plugin at a time, each isolated from the exceptions of the rest. A
+        fired marker per instance keeps each hook to one call per process.
 
-        Called from App.on_activate at startup, and again from
-        load_plugins() for plugins hot-installed after activation.
+        This is the supported point for an early backend launch. Background
+        mode with -b opens no config UI, and without an enumerable deck at
+        startup no page load fires an action on_ready. A lazily launched
+        backend would therefore stay down until some user interaction forces
+        it, and the first hardware presses would do nothing. A backend launch
+        spawns a subprocess, so this must never run on the GTK main thread or
+        block it.
+
+        App.on_activate calls this at startup, and load_plugins() calls it
+        again for a plugin installed after the activation.
         """
         self._app_ready = True
         threading.Thread(
@@ -186,8 +187,9 @@ class PluginManager:
             plugin_base = plugin.get("object")
             if plugin_base is None:
                 continue
-            # At-most-once per plugin instance: startup warm-up and the
-            # late-load warm-ups (store installs) overlap over the same dict.
+            # One call per plugin instance. The startup warm-up and the
+            # warm-ups of a later load, after a store install, share this
+            # dict.
             if getattr(plugin_base, "_on_app_ready_fired", False):
                 continue
             plugin_base._on_app_ready_fired = True
@@ -197,7 +199,6 @@ class PluginManager:
                 log.error(f"Plugin {plugin_id}: on_app_ready failed: {e}")
 
     def load_plugins(self, show_notification: bool = False):
-        # get all folders in plugins folder
         os.makedirs(gl.PLUGIN_DIR, exist_ok=True)
         try:
             folders = os.listdir(gl.PLUGIN_DIR)
@@ -207,34 +208,32 @@ class PluginManager:
             )
             folders = []
 
-        # Drop stale errors for plugins that no longer exist on disk (uninstalled).
+        # Drop the stale errors of the plugins an uninstall removed.
         with self._load_errors_lock:
             self.load_errors = {folder: error for folder, error in self.load_errors.items() if folder in folders}
 
         for folder in folders:
             if folder.startswith(".") or not os.path.isdir(os.path.join(gl.PLUGIN_DIR, folder)):
-                # Stray files and hidden directories in the plugin dir are not plugins.
+                # A stray file and a hidden directory are no plugin.
                 continue
             if "." in folder:
-                # A dot makes the import below structurally impossible:
-                # `plugins.<folder>.main` parses every dot as a package
-                # boundary, so e.g. a timestamped backup dir
-                # (com_x_Plugin.bak.20260703) produced a ModuleNotFoundError
-                # traceback and a false "failed to load" toast entry on every
-                # startup. Not a plugin failure -- warn without a
-                # traceback and keep it out of load_errors. (Deliberately
-                # only dots, not isidentifier(): dash/digit-leading names are
-                # importable through importlib and may be real plugins.)
+                # A dot makes the import below impossible. The import string
+                # plugins.<folder>.main reads every dot as a package boundary,
+                # so a timestamped backup directory raises ModuleNotFoundError
+                # and adds a false toast entry at every startup. This is no
+                # plugin failure, so it warns without a traceback and stays out
+                # of load_errors. The test covers a dot alone and not
+                # isidentifier(), because importlib imports a name that starts
+                # with a dash or a digit, and such a name can be a real
+                # plugin.
                 log.warning(
                     f"Skipping plugin directory '{folder}': dots in the name make "
                     f"it unimportable as a Python module -- rename it to load it "
                     f"as a plugin, or ignore this if it is a backup"
                 )
                 continue
-            # Import main module
             import_string = f"plugins.{folder}.main"
             if import_string not in sys.modules.keys():
-                # Import module only if it's not already imported
                 try:
                     importlib.import_module(import_string)
                 except Exception as e:
@@ -242,13 +241,13 @@ class PluginManager:
                     with self._load_errors_lock:
                         self.load_errors[folder] = f"import failed: {e}"
 
-        # Get all classes inheriting from PluginBase and generate objects for them
+        # Build an object for every class that inherits from PluginBase.
         self.init_plugins()
 
-        # Hot-installed plugins (store installs re-run load_plugins after
-        # startup) must get their on_app_ready like startup-loaded ones --
-        # the on_activate warm-up has already come and gone by then. No-op
-        # for already-warmed plugins.
+        # A plugin installed after startup must get its on_app_ready, like a
+        # plugin loaded at startup. A store install runs load_plugins again,
+        # and the warm-up of on_activate ran long before. This does nothing for
+        # a plugin that is warm already.
         if self._app_ready:
             self.warm_up_plugins()
 
@@ -271,16 +270,18 @@ class PluginManager:
             body,
             button=("Update All", "app.update-all-assets", None)
         )
-        # Called during plugin load, i.e. before the app exists on the boot
-        # path: the queue answers whether this thread delivers now or
-        # App.on_activate's drain does (src/backend/startup_queue.py).
+        # The plugin load calls this, which on the boot path runs before the
+        # app exists. The queue answers whether this thread delivers now, or
+        # the drain in App.on_activate does. See src/backend/startup_queue.py.
         if startup_queue.get().when_app_ready(call):
             call()
 
     def show_load_errors_notification(self):
-        """Surfaces plugin load failures to the user. Safe to call from any
-        thread and at any point during startup -- gl.notify handles the
-        startup deferral and the main-thread marshalling."""
+        """Show the plugin load failures to the user.
+
+        Any thread can call this at any point during startup, because gl.notify
+        defers the message during startup and marshals it to the main
+        thread."""
         with self._load_errors_lock:
             n_failed = len(self.load_errors)
         if n_failed == 0:
@@ -294,10 +295,11 @@ class PluginManager:
         gl.notify.error(body, title="Plugins")
 
     @staticmethod
-    def _get_plugin_folder_from_subclass(subclass) -> str:
-        """Maps a PluginBase subclass back to its folder name under
-        PLUGIN_DIR (plugins.<folder>.main -> <folder>) for load_errors
-        bookkeeping."""
+    def _plugin_folder_of(subclass) -> str:
+        """Map a PluginBase subclass back to its folder name under PLUGIN_DIR.
+
+        The module plugins.<folder>.main gives <folder>, which load_errors
+        keys by."""
         module = getattr(subclass, "__module__", "") or ""
         parts = module.split(".")
         if len(parts) >= 2 and parts[0] == "plugins":
@@ -314,7 +316,7 @@ class PluginManager:
             if subclass in self.initialized_plugin_classes:
                 log.info(f"Skipping {subclass} because it's already initialized")
                 continue
-            folder = self._get_plugin_folder_from_subclass(subclass)
+            folder = self._plugin_folder_of(subclass)
             try:
                 obj = subclass()
             except Exception as e:
@@ -325,13 +327,13 @@ class PluginManager:
             self.initialized_plugin_classes.append(subclass)
 
             if getattr(obj, "registered", False):
-                # A previously recorded failure for this folder is obsolete.
+                # A failure recorded earlier for this folder is stale.
                 with self._load_errors_lock:
                     self.load_errors.pop(folder, None)
             elif not self._is_plugin_disabled(obj):
-                # register() bailed out (invalid manifest, duplicate name, ...)
-                # without even disabling the plugin -- without this record the
-                # plugin would vanish without any user-visible trace.
+                # register() stopped over an invalid manifest or a duplicate
+                # name, and it disabled no plugin. Without this record the
+                # plugin vanishes with no trace for the user.
                 log.error(
                     f"Plugin {subclass} (folder: {folder}) initialized but never registered successfully "
                     f"-- its actions will not be available. See the errors above for the reason."
@@ -347,11 +349,11 @@ class PluginManager:
             self.action_index.update(plugin_base.action_holders)
 
     def get_plugins(self, include_disabled: bool = False) -> dict:
-        # Copy: updating PluginBase.plugins (a class attribute) in place would
-        # permanently merge the disabled plugins into the enabled registry --
-        # get_plugin_by_id() defaults to include_disabled=True and runs on
-        # every page-load action resolution, so the very first hit would leak
-        # every disabled plugin into the action index and the action chooser.
+        # A copy. An in-place update of PluginBase.plugins, a class attribute,
+        # merges the disabled plugins into the enabled registry for good.
+        # get_plugin_by_id() defaults to include_disabled=True and runs for
+        # every action a page load resolves, so the first call would leak every
+        # disabled plugin into the action index and the action chooser.
         plugins = dict(PluginBase.plugins)
 
         if include_disabled:
@@ -363,9 +365,7 @@ class PluginManager:
         return PluginBase.plugins[plugin_id]["object"].ACTIONS
     
     def get_action_holder_from_id(self, action_id: str) -> ActionHolder | None:
-        """
-        Example string: dev_core447_MediaPlugin::Pause
-        """
+        """Example string: dev_core447_MediaPlugin::Pause"""
         try:
             return self.action_index[action_id]
         except KeyError:
@@ -376,14 +376,13 @@ class PluginManager:
         return self.get_plugins(include_disabled).get(plugin_id, {}).get("object", None)
             
     def remove_plugin_from_list(self, plugin_base: PluginBase):
-        # A plugin can live in either registry: version-gated ones exist only
-        # in disabled_plugins, and get_plugin_by_id (include_disabled=True,
-        # the default) hands them out too. The old bare
-        # `del PluginBase.plugins[...]` raised KeyError for those, aborting
-        # uninstall_plugin mid-way (registry entry kept, sys.modules purge
-        # skipped) -- which under the post-download deregister meant an
-        # update of a disabled plugin could keep serving the old code from
-        # the module cache.
+        # A plugin can live in either registry. A version gate puts a plugin
+        # in disabled_plugins alone, and get_plugin_by_id hands it out too,
+        # because include_disabled defaults to True. A del on
+        # PluginBase.plugins raises KeyError for such a plugin and aborts
+        # uninstall_plugin in the middle, which keeps the registry entry and
+        # skips the sys.modules purge. An update of a disabled plugin then
+        # keeps serving the old code from the module cache.
         PluginBase.plugins.pop(plugin_base.plugin_id, None)
         PluginBase.disabled_plugins.pop(plugin_base.plugin_id, None)
 
@@ -394,11 +393,12 @@ class PluginManager:
         return action_id.split("::")[0]
     
     def get_load_health(self) -> tuple[int, int]:
-        """Returns (n_failed, n_disabled) -- how many plugins failed to load
-        and how many are disabled (version-gated). Used by the UI (GTK main
-        thread) to explain an empty action list instead of showing a blank
-        page; the lock snapshots load_errors against a concurrent store-install
-        reload rebuilding it on a background thread."""
+        """Return the count of failed plugins and the count of disabled ones.
+
+        A version gate disables a plugin. The UI reads this on the GTK main
+        thread and explains an empty action list with it, instead of a blank
+        page. The lock snapshots load_errors against a concurrent store-install
+        reload, which rebuilds it on a background thread."""
         with self._load_errors_lock:
             n_failed = len(self.load_errors)
         return n_failed, len(PluginBase.disabled_plugins)
@@ -406,7 +406,7 @@ class PluginManager:
     def get_is_plugin_out_of_date(self, plugin_id: str) -> bool:
         plugin = PluginBase.disabled_plugins.get(plugin_id)
         if plugin is None:
-            # Not installed
+            # The plugin is not installed.
             return False
         
         reason = PluginBase.disabled_plugins[plugin_id].get("reason")
