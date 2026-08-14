@@ -1,17 +1,7 @@
-"""
-FaultyFakeDeck: a FakeDeck subclass for the single-writer migration harness
-(docs/presenter-migration-plan.md, M0).
+"""FakeDeck subclass that journals every device write.
 
-Records every device write into an ordered journal -- [(t, seq, op, slot,
-bytes_hash, thread_name), ...] -- and can scriptably inject TransportErrors,
-per-write latency, and input events (fired the way the real reader thread
-would call into DeckController's key/dial/touchscreen callbacks).
-
-Import order matters: this module imports FakeDeck, which imports `globals`
-at module scope and reads `gl.settings_manager` during __init__. Always
-import `fixtures` first in a scenario/test script so the isolated temp data
-dir + stub/real settings manager are in place before a FaultyFakeDeck (or any
-FakeDeck) is constructed.
+Entries are (t, seq, op, slot, bytes_hash, thread_name). The deck also injects
+TransportErrors, latency and input events. Import fixtures first.
 """
 import hashlib
 import itertools
@@ -34,17 +24,15 @@ def _hash_bytes(data) -> str:
         return "none"
     if isinstance(data, (bytes, bytearray, memoryview)):
         return hashlib.sha1(bytes(data)).hexdigest()[:12]
-    # Non-bytes payloads (brightness percent, key-color tuple, ...): hash a
-    # stable repr so the journal still has a comparable fingerprint.
+    # Non-bytes payloads hash their repr, so the journal stays comparable.
     return hashlib.sha1(repr(data).encode()).hexdigest()[:12]
 
 
 class FaultyFakeDeck(FakeDeck):
-    """FakeDeck + write journal + scriptable fault injection.
+    """FakeDeck plus a write journal and scriptable fault injection.
 
-    Journal entries are 6-tuples: (t, seq, op, slot, bytes_hash, thread_name).
-    `seq` comes from a per-instance monotonic counter (one counter per deck
-    instance, so two-deck scenarios get independent sequences).
+    Journal entries are (t, seq, op, slot, bytes_hash, thread_name). Each deck
+    counts seq on its own, so two-deck scenarios keep independent sequences.
     """
 
     def __init__(self, *args, **kwargs):
@@ -54,42 +42,30 @@ class FaultyFakeDeck(FakeDeck):
         self._journal: list[tuple] = []
         self._seq_counter = itertools.count(1)
 
-        # op-name-substring -> remaining-failures-to-inject. Matched inside
-        # _maybe_fail() so `fail_next("set_key_image", 3)` fails only key
-        # writes, not touchscreen/brightness writes.
+        # Maps an op-name substring to the failures left to inject. _maybe_fail
+        # matches the substring, so a pattern fails only the ops that contain it.
         self._fail_lock = threading.Lock()
         self._fail_schedule: dict[str, int] = {}
 
         self._write_latency: float = 0.0
 
-        # ---- Lifecycle state --------------------------------------------- #
-        # The stock FakeDeck's is_open()/connected() are hard-wired True, so a
-        # post-close write silently succeeds and an unplug is inexpressible.
-        # Model it explicitly:
-        #   _open       -- False after close() (device handle released).
-        #   _connected  -- False after simulate_unplug() (USB gone). Unplug
-        #                  implies not-open too, matching a yanked cable.
-        # These are only *enforced* (writes made to raise) when strict
-        # lifecycle is on. Strict is the default so new scenarios get the real
-        # semantics; a scenario that legitimately needs the old lenient
-        # behaviour opts out with set_strict_lifecycle(False).
+        # FakeDeck hard-wires is_open() and connected() to True, which hides a
+        # post-close write and makes an unplug inexpressible. Model both here.
+        # close() clears _open; simulate_unplug() clears _connected and _open.
+        # Strict mode makes later writes raise. set_strict_lifecycle(False) opts out.
         self._lifecycle_lock = threading.Lock()
         self._open = True
         self._connected = True
         self._strict_lifecycle = True
 
-        # Registered by DeckController.__init__ via BetterDeck.set_*_callback;
-        # stored here so fire_*_event() can invoke them like the real reader
-        # thread would.
+        # DeckController.__init__ registers these via BetterDeck.set_*_callback.
+        # fire_*_event() calls them the way the reader thread does.
         self._key_callback = None
         self._dial_callback = None
         self._touchscreen_callback = None
 
-    # ---------------------------------------------------------------- #
-    # Callback registration (BetterDeck.set_key_callback wraps this with a
-    # physical->logical remapper; that's exercised for free by going through
-    # BetterDeck like a real controller does).
-    # ---------------------------------------------------------------- #
+    # BetterDeck.set_key_callback wraps this with a physical-to-logical
+    # remapper, which a real controller exercises through BetterDeck.
     def set_key_callback(self, callback):
         self._key_callback = callback
 
@@ -99,25 +75,22 @@ class FaultyFakeDeck(FakeDeck):
     def set_touchscreen_callback(self, callback):
         self._touchscreen_callback = callback
 
-    # ---------------------------------------------------------------- #
     # Fault injection
-    # ---------------------------------------------------------------- #
     def fail_next(self, op_pattern: str, count: int = 1) -> None:
-        """Schedule the next `count` writes whose op name contains
-        `op_pattern` to raise StreamDeck.Transport.Transport.TransportError
-        instead of writing/journaling."""
+        """Fail the next count writes whose op name contains op_pattern.
+
+        A failing write raises TransportError and never reaches the journal.
+        """
         with self._fail_lock:
             self._fail_schedule[op_pattern] = self._fail_schedule.get(op_pattern, 0) + count
 
     def clear_failures(self) -> None:
-        """Cancels every scheduled injected failure (fail_next is additive;
-        this is the only way to reset the schedule)."""
+        """Cancel every scheduled failure. fail_next adds to the schedule."""
         with self._fail_lock:
             self._fail_schedule.clear()
 
     def set_write_latency(self, seconds: float) -> None:
-        """Every subsequent write sleeps `seconds` before it lands (and before
-        it's journaled), simulating a slow USB transfer."""
+        """Sleep seconds before each write lands and before it is journaled."""
         self._write_latency = seconds
 
     def _maybe_fail(self, op: str) -> None:
@@ -127,31 +100,29 @@ class FaultyFakeDeck(FakeDeck):
                     self._fail_schedule[pattern] = remaining - 1
                     raise TransportError(f"FaultyFakeDeck: injected failure for {op}")
 
-    # ---------------------------------------------------------------- #
-    # Lifecycle: closed/unplugged states
-    # ---------------------------------------------------------------- #
+    # Closed and unplugged lifecycle states
     def set_strict_lifecycle(self, strict: bool) -> None:
-        """When True (the default), writes made after close()/simulate_unplug()
-        raise TransportError -- the real transport's behaviour once the handle
-        is gone. When False, the old lenient behaviour (post-close writes
-        silently journal) is restored for scenarios that legitimately drive
-        writes past a close()."""
+        """Make writes after close() or simulate_unplug() raise TransportError.
+
+        Strict is the default. Set False to let post-close writes journal.
+        """
         with self._lifecycle_lock:
             self._strict_lifecycle = strict
 
     def simulate_unplug(self) -> None:
-        """Model a yanked USB cable: connected() flips False and every
-        subsequent write fails (strict mode). Unplug implies the handle is
-        no longer usable, so is_open() reads False too."""
+        """Model a yanked USB cable, so connected() and is_open() read False.
+
+        Every later write fails in strict mode.
+        """
         with self._lifecycle_lock:
             self._connected = False
             self._open = False
 
     def _lifecycle_reject(self, op: str) -> None:
-        """Raise TransportError if a write is attempted after the device was
-        closed or unplugged (strict mode only). `close` itself is exempt so a
-        double-close / fallback-close is a safe no-op, matching the real
-        Transport.close() being idempotent."""
+        """Raise TransportError for a write after close or unplug, in strict mode.
+
+        close is exempt, so a double close stays a safe no-op.
+        """
         if op == "close":
             return
         with self._lifecycle_lock:
@@ -164,9 +135,7 @@ class FaultyFakeDeck(FakeDeck):
                 raise TransportError(
                     f"FaultyFakeDeck: {op} on a closed device")
 
-    # ---------------------------------------------------------------- #
     # Journal
-    # ---------------------------------------------------------------- #
     def _record(self, op: str, slot, data) -> None:
         entry = (
             time.time(),
@@ -180,9 +149,8 @@ class FaultyFakeDeck(FakeDeck):
             self._journal.append(entry)
 
     def _do_write(self, op: str, slot, data) -> None:
-        # Fail (or sleep) BEFORE journaling: a failed write must not appear as
-        # a landed entry. Lifecycle rejection (closed/unplugged) is checked
-        # first: it's the most fundamental "this write cannot land" reason.
+        # Fail or sleep before journaling; a failed write must not land in the
+        # journal. Lifecycle rejection comes first and outranks fault injection.
         self._lifecycle_reject(op)
         self._maybe_fail(op)
         if self._write_latency:
@@ -212,10 +180,8 @@ class FaultyFakeDeck(FakeDeck):
         with self._journal_lock:
             self._journal.clear()
 
-    # ---------------------------------------------------------------- #
-    # Overridden writes -- every one funnels through _do_write so fault
-    # injection/latency/journaling apply uniformly.
-    # ---------------------------------------------------------------- #
+    # Every overridden write funnels through _do_write, so fault injection,
+    # latency and journaling apply uniformly.
     def set_key_image(self, key, image):
         self._do_write("set_key_image", f"key:{key}", image)
 
@@ -235,16 +201,14 @@ class FaultyFakeDeck(FakeDeck):
         self._do_write("reset", "device", None)
 
     def close(self):
-        # Journal the close first (the op is lifecycle-exempt, so a double- or
-        # post-unplug close is a safe no-op that still records), THEN release
-        # the handle so any LATER write raises. Idempotent.
+        # The close op is lifecycle-exempt, so a double or post-unplug close
+        # still records. Journal it first, then release the handle, so a later
+        # write raises. close() is idempotent.
         self._do_write("close", "device", None)
         with self._lifecycle_lock:
             self._open = False
 
-    # ---------------------------------------------------------------- #
-    # Lifecycle queries -- FakeDeck hard-wired both to True; reflect state.
-    # ---------------------------------------------------------------- #
+    # Lifecycle queries. FakeDeck hard-wires both to True; report state instead.
     def is_open(self) -> bool:
         with self._lifecycle_lock:
             return self._open
@@ -254,18 +218,14 @@ class FaultyFakeDeck(FakeDeck):
             return self._connected
 
     def open(self, *args, **kwargs):
-        # Re-opening a device (replug) clears the closed state. Unplug leaves
-        # _connected False -- only a real reconnection would flip that, which
-        # a scenario models by constructing a fresh deck.
+        # A replug clears the closed state. Unplug leaves _connected False; a
+        # scenario models a real reconnection with a fresh deck.
         with self._lifecycle_lock:
             if self._connected:
                 self._open = True
 
-    # ---------------------------------------------------------------- #
-    # Input event injection -- fires callbacks the way the real reader
-    # thread would (see StreamDeck.Devices.StreamDeck._read and
-    # BetterDeck.set_key_callback's physical->logical remapping).
-    # ---------------------------------------------------------------- #
+    # Input event injection fires the callbacks the way the reader thread does
+    # (StreamDeck.Devices.StreamDeck._read, BetterDeck.set_key_callback).
     def fire_key_event(self, physical_key: int, state: bool) -> None:
         if self._key_callback is not None:
             self._key_callback(self, physical_key, state)

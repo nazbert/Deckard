@@ -1,29 +1,7 @@
-"""
-Unit scenario: the process-wide image-cache budget.
+"""Unit scenario for the process-wide image-cache budget.
 
-The per-deck native-image caches are byte-capped individually, but nothing
-capped their SUM: total image-cache RAM scaled with deck count, and a cold
-deck's full memo never yielded a byte to a hot one. `cache_budget` adds a
-process-wide ceiling enforced by cross-cache LRU on a lazily-spawned daemon,
-so no painter thread ever pays cross-cache work.
-
-Covers:
-  (a) bound proof: four caches hammered concurrently past their shared
-      ceiling stay within (ceiling + overshoot) at every sample, and settle
-      at or below the ceiling once the storm stops. Overshoot is bounded by
-      put-rate x wake-latency -- the deliberate trade for keeping the writer
-      stall-free (plan-142 §3.3).
-  (b) cross-cache LRU order: an aged cache's entries lose to a freshly-used
-      cache's, which is the whole point -- per-silo eviction could not do
-      this.
-  (c) min-age and floor: entries younger than min_age_s survive pressure,
-      a cache at its floor is never dug below it, and the degenerate
-      everything-young case warns loudly and stops instead of spinning.
-  (d) lifecycle: clear() returns bytes to the budget instantly, and a
-      dropped cache falls out of the weak registry.
-  (e) env contract: a malformed DECKARD_IMAGE_CACHE_MB degrades to the
-      default with a warning (once per distinct value -- it is re-read on
-      every pass), and 0 disables global eviction entirely.
+cache_budget caps the sum of the per-deck native-image caches and enforces it
+by cross-cache LRU on a lazily spawned daemon, so no painter thread stalls.
 """
 import fixtures  # noqa: F401  (isolated data dir + sys.path, house convention)
 
@@ -43,10 +21,11 @@ MIB = 1024 * 1024
 
 
 class _FakeClock:
-    """Stands in for the `time` module inside byte_lru_cache, so last-use
-    stamps (and therefore min-age and LRU-head comparisons) are exact
-    instead of wall-clock-racy. byte_lru_cache uses nothing else from
-    `time`; cache_budget keeps the real one for its own damping."""
+    """Stands in for the time module inside byte_lru_cache.
+
+    Last-use stamps, and so min-age and LRU-head comparisons, become exact
+    instead of wall-clock racy. cache_budget keeps the real time for damping.
+    """
 
     def __init__(self, start: float = 10_000.0):
         self.now = start
@@ -87,16 +66,12 @@ def _fill(cache: ByteLRUCache, prefix: str, count: int, size: int) -> None:
 
 
 def check_mid_pass_clear_is_noticed() -> None:
-    """(f) A pass must not keep evicting against its own running total after
-    something else freed bytes underneath it. clear() is called wholesale --
-    a background change, a rotation change, a deck teardown -- and every pick
-    made after that against the stale-high total is another deck's entry
-    re-encoded for nothing.
+    """A pass must re-read the total after something else frees bytes.
 
-    Runs FIRST, before anything in this scenario has crossed the notify
-    watermark: the daemon this check's own register() spawns then sits in its
-    60 s wait for the duration, so the only pass running is the synchronous
-    one below."""
+    clear() runs wholesale on a background change or a deck teardown, and every
+    pick against the stale-high total re-encodes another deck's entry for
+    nothing. This check runs before any put crosses the notify watermark.
+    """
     clock = _FakeClock()
     byte_lru_cache.time = clock
     _set_ceiling(0.5)  # 512 KiB -> a 486 KiB target
@@ -107,8 +82,8 @@ def check_mid_pass_clear_is_noticed() -> None:
         cache_budget.register(old, label="draining:test", floor_bytes=0)
         cache_budget.register(other, label="cleared:test", floor_bytes=0)
 
-        # Both fills stay under NOTIFY_WATERMARK_BYTES, so no put in this
-        # check ever wakes the daemon.
+        # Both fills stay under NOTIFY_WATERMARK_BYTES, so no put in this check
+        # wakes the daemon.
         _fill(old, "o", 300, entry)      # 600 KiB, the only evictable source
         clock.advance(100.0)
         _fill(other, "c", 150, entry)    # 300 KiB, inside min-age
@@ -151,9 +126,10 @@ def check_mid_pass_clear_is_noticed() -> None:
 
 
 def check_cross_cache_lru_order() -> None:
-    """(b) The manager must prefer the globally-oldest head, not each
-    cache's own -- an idle deck's warm memo has to yield to a painting
-    one."""
+    """The manager must prefer the globally oldest head, not each cache's own.
+
+    The warm memo of an idle deck has to yield to a painting deck.
+    """
     clock = _FakeClock()
     byte_lru_cache.time = clock
     _set_ceiling(1)  # 1 MiB
@@ -181,8 +157,8 @@ def check_cross_cache_lru_order() -> None:
             f"{cold.total_bytes + hot.total_bytes} > {MIB}"
         )
 
-        # Age the survivor past min_age too: now it is eligible, and a
-        # tighter ceiling takes from it rather than stalling.
+        # Age the survivor past min_age too. It is then eligible, and a tighter
+        # ceiling takes from it rather than stalling.
         clock.advance(100.0)
         _set_ceiling(0.25)
         cache_budget._drain_once()
@@ -203,21 +179,17 @@ def check_cross_cache_lru_order() -> None:
 
 
 def check_min_age_and_floor() -> None:
-    """(c) The two things that make a binding ceiling safe: a hot working
-    set is protected by age, and no cache is ever emptied out from under
-    playback.
+    """Age protects a hot working set, and no cache is emptied under playback.
 
-    Sized so the FLOOR is what ends the shed rather than the drain target:
-    the only cache old enough to shed cannot reach the target by itself, so
-    the pass runs it down to exactly its floor and stops there with the sum
-    still over the ceiling. Sized the other way -- target above floor -- the
-    drain stops on the target and the floor is never consulted at all, which
-    is a check that passes with the floor stop-condition deleted."""
+    The floor ends the shed here, not the drain target. The only cache old
+    enough to shed cannot reach the target alone, so the pass runs it down to
+    its floor and stops with the sum still over the ceiling.
+    """
     clock = _FakeClock()
     byte_lru_cache.time = clock
-    # 256 KiB ceiling -> a 249 KiB target, and floor_cap = ceiling //
-    # (2 * 2 registrants) = 64 KiB, so a 64 KiB floor survives the clamp
-    # intact and sits far ABOVE the target's reach for one cache.
+    # A 256 KiB ceiling gives a 249 KiB target, and floor_cap is ceiling //
+    # (2 * 2 registrants), so 64 KiB. A 64 KiB floor survives the clamp intact
+    # and sits far above the reach of the target for one cache.
     _set_ceiling(0.25)
     cache = ByteLRUCache(max_bytes=4 * MIB)
     other = ByteLRUCache(max_bytes=4 * MIB)
@@ -245,10 +217,9 @@ def check_min_age_and_floor() -> None:
             f"{cache_budget.evictable_bytes()} <= {cache_budget.ceiling_bytes()}"
         )
 
-        # Degenerate case: refill both caches with entries that are all
-        # YOUNGER than min_age_s. Nothing is evictable; the pass must warn
-        # loudly and stop rather than spin or evict the frames being
-        # painted this instant.
+        # Refill both caches with entries younger than min_age_s. Nothing is
+        # evictable, so the pass must warn loudly and stop rather than spin or
+        # evict the frames being painted this instant.
         cache.clear()
         other.clear()
         _fill(cache, "young", 64, 16 * 1024)
@@ -260,10 +231,9 @@ def check_min_age_and_floor() -> None:
         assert cache_budget.eviction_stats()[0] == evictions_before, (
             "nothing may be evicted when every entry is younger than min_age_s"
         )
-        # Counted, not sniffed out of the log: the degenerate warning is
-        # rate-limited to one per WAKE_INTERVAL_S and that limiter is shared
-        # with the live daemon, which is free to burn it between any two
-        # statements here.
+        # Counted, not read out of the log. The degenerate warning is rate
+        # limited to one per WAKE_INTERVAL_S, and that limiter is shared with
+        # the live daemon, which can burn it between any two statements here.
         assert cache_budget.degenerate_pass_count() > degenerate_before, (
             "the degenerate case must be counted (and, rate limiter permitting, "
             "warn loudly) rather than pass silently"
@@ -272,10 +242,9 @@ def check_min_age_and_floor() -> None:
             "a degenerate pass must leave every cache untouched"
         )
 
-        # The line itself, pinned separately from the pass. Asked for
-        # repeatedly rather than once: the limiter is shared, so the daemon
-        # can take the grant this scenario just armed -- but not twenty
-        # times running.
+        # The line itself, pinned apart from the pass. Asked for repeatedly
+        # because the shared limiter lets the daemon take the grant this
+        # scenario just armed, though not twenty times running.
         emitted: list = []
         with _WarningSink() as sink:
             for _ in range(20):
@@ -300,10 +269,11 @@ def check_min_age_and_floor() -> None:
 
 
 def check_lifecycle() -> None:
-    """(d) The budget must track reality with no bookkeeping of its own to
-    go stale: a clear() is visible immediately, and a dead cache costs
-    nothing (the registry is weak, so a torn-down deck needs no unregister
-    call on the teardown path)."""
+    """The budget must track reality with no bookkeeping of its own.
+
+    A clear() is visible at once, and a dead cache costs nothing. The registry
+    is weak, so a torn-down deck needs no unregister call.
+    """
     cache = ByteLRUCache(max_bytes=4 * MIB)
     cache_budget.register(cache, label="lifecycle:test")
     _fill(cache, "l", 16, 16 * 1024)
@@ -328,24 +298,25 @@ def check_lifecycle() -> None:
 
 
 class _BoomThreading:
-    """Stands in for the `threading` module inside cache_budget for exactly
-    one _ensure_thread() call. Only `Thread` is ever looked up there (the
-    module's lock/event objects already exist), so a two-line shim is the
-    whole surface -- and swapping the module reference keeps the failure
-    injection out of the real threading module, which every other thread in
-    this process is using at the same time."""
+    """Stands in for the threading module inside one _ensure_thread() call.
+
+    Only Thread is looked up there, so a two-line shim covers it. Swapping the
+    module reference keeps the failure injection out of the real threading
+    module, which every other thread in this process uses at the same time.
+    """
 
     @staticmethod
     def Thread(*args, **kwargs):
         raise RuntimeError("can't start new thread")
 
 
-def check_thread_latch_survives_a_failed_spawn() -> None:
-    """A failed daemon spawn must not leave the "started" latch standing.
-    _ensure_thread() is the only place the daemon is ever created and
-    register() swallows what escapes it, so a latched failure is enforcement
-    dead for the life of the process -- silently, since every later
-    register() takes the early return."""
+def check_thread_latch_survives_failed_spawn() -> None:
+    """A failed daemon spawn must not leave the started latch standing.
+
+    _ensure_thread() is the only place that creates the daemon, and register()
+    swallows what escapes it, so a latched failure kills enforcement silently
+    for the life of the process.
+    """
     saved_started = cache_budget._thread_started
     saved_threading = cache_budget.threading
     try:
@@ -362,7 +333,7 @@ def check_thread_latch_survives_a_failed_spawn() -> None:
         )
     finally:
         cache_budget.threading = saved_threading
-        # Restored rather than left False: the daemon spawned by the first
+        # Restore rather than leave False. The daemon spawned by the first
         # register() of this scenario is still running, and the storm check
         # below needs that one, not a second.
         cache_budget._thread_started = saved_started
@@ -372,9 +343,11 @@ def check_thread_latch_survives_a_failed_spawn() -> None:
 
 
 def check_env_contract() -> None:
-    """(e) Same degrade-never-raise contract as DECKARD_NATIVE_TILE_CACHE_MB:
-    this is read on the DeckController.__init__ path, where an exception is
-    swallowed as "Failed to initialize deck"."""
+    """A malformed value must degrade with a warning and never raise.
+
+    DeckController.__init__ reads this and swallows an exception as a failed
+    deck initialization.
+    """
     saved = os.environ.get(cache_budget.ENV_CEILING)
     try:
         _set_ceiling(None)
@@ -390,19 +363,18 @@ def check_env_contract() -> None:
                 "a malformed ceiling must fall back to the default, not raise"
             )
             assert sink.matching("malformed"), f"expected a warning, got {sink.messages!r}"
-            # Read on every pass: the warning must not become a 60 s log spam.
+            # Read on every pass, so the warning must not become 60 s log spam.
             cache_budget.ceiling_bytes()
             assert len(sink.matching("malformed")) == 1, (
                 "a malformed ceiling must warn once per distinct value, not per read"
             )
 
-        # The values float() ACCEPTS but int() cannot take. Each parses, and
-        # nan even survives the `mb <= 0` sign test (every nan comparison is
-        # False), so without an explicit finiteness test each one reaches
-        # int(mb * MiB) and raises -- ValueError for nan, OverflowError for
-        # inf. On the daemon that is a "pass failed" warning every 5 s
-        # forever with enforcement silently off; on the __init__ path it is a
-        # lost deck.
+        # The values float() accepts that int() cannot take. Each parses, and
+        # nan even survives the mb <= 0 sign test, because every nan comparison
+        # is False. Without an explicit finiteness test each one reaches
+        # int(mb * MiB) and raises, ValueError for nan and OverflowError for
+        # inf. On the daemon that is a warning every 5 s with enforcement
+        # silently off. On the __init__ path it is a lost deck.
         for hostile in ("nan", "inf", "-inf", "1e400"):
             cache_budget._warned_ceiling_values.discard(hostile)
             _set_ceiling(hostile)
@@ -416,8 +388,8 @@ def check_env_contract() -> None:
                     f"malformed value; got {sink.messages!r}"
                 )
 
-        # 0 disables global eviction entirely; the local caps still bound
-        # each cache, so the sum is still bounded -- by Σ(local caps).
+        # 0 disables global eviction. The local caps still bound each cache, so
+        # the sum stays bounded by the sum of the local caps.
         _set_ceiling(0)
         cache = ByteLRUCache(max_bytes=4 * MIB)
         try:
@@ -439,32 +411,19 @@ def check_env_contract() -> None:
 
 
 def check_bound_under_concurrent_load() -> None:
-    """(a) The bound proof. Four caches, four hammering threads, one 1 MiB
-    ceiling, real clock and the real daemon -- exactly the production
-    arrangement, since the only thing a painter does for the budget is an
-    Event.set() past a watermark.
+    """The bound proof over four caches, four threads and one 1 MiB ceiling.
 
-    Overshoot is bounded by put-rate x wake-latency: between the put that
-    crosses the ceiling and the daemon being scheduled, painters keep
-    putting. That is the deliberate trade for never stalling the writer
-    (plan-142 §3.3), so the in-storm assertion carries generous slack while
-    the post-quiescence assertion is strict. Without the manager, the sum
-    would settle at Σ(local caps) = 16 MiB and stay there.
-
-    The bound is a STEADY-STATE claim, so sampling starts once enforcement
-    has engaged rather than at the first put. A cold start is bounded by
-    Σ(local caps), not by the ceiling, and the daemon can enter this check
-    already inside its 5 s degenerate backoff from an earlier one -- long
-    enough to sleep through the whole storm and report a "violation" that is
-    really the documented wake damping. Engagement itself is asserted (with
-    a timeout), so a daemon that never acts still fails, loudly."""
+    Overshoot is bounded by put rate times wake latency, the trade for never
+    stalling the writer, so the in-storm assertion carries slack. Sampling
+    starts once enforcement engages, because a cold start is not yet bounded.
+    """
     _set_ceiling(1)
     ceiling = MIB
     slack = 2 * MIB
     caches = [ByteLRUCache(max_bytes=4 * MIB) for _ in range(4)]
     for i, cache in enumerate(caches):
-        # min_age 0 and a tiny floor: this scenario is about the bound, and
-        # the age/floor protections have their own check above.
+        # min_age 0 and a tiny floor. This check is about the bound, and the
+        # age and floor protections have their own check above.
         cache_budget.register(cache, label=f"hammer{i}:test", min_age_s=0.0, floor_bytes=4096)
 
     stop = threading.Event()
@@ -480,7 +439,7 @@ def check_bound_under_concurrent_load() -> None:
                 n += 1
                 cache.put((seed, n), bytes(rng.randint(1024, 8 * 1024)))
                 # Exactly what ByteLRUCache.put does in production once the
-                # watermark is wired: an Event.set(), nothing more.
+                # watermark is wired, an Event.set() and nothing more.
                 if n % 8 == 0:
                     cache_budget.notify_grew()
                 time.sleep(0.002)
@@ -532,8 +491,8 @@ def check_bound_under_concurrent_load() -> None:
             f"{peak['bytes'] // 1024} KiB) -- the bound would be vacuous"
         )
 
-        # Quiescent: one more wake, then the sum must be AT or under the
-        # ceiling -- no slack.
+        # Quiescent now. One more wake, then the sum must be at or under the
+        # ceiling, with no slack.
         cache_budget.notify_grew()
         settled = fixtures.wait_until(
             lambda: cache_budget.evictable_bytes() <= ceiling, timeout=10)
@@ -559,15 +518,14 @@ def main() -> None:
     fixtures.start_watchdog(120, label="scenario_cache_budget")
 
     # The deterministic checks run first, on a fake clock and a synchronous
-    # _drain_once(). The daemon spawned by the first register() only acts on
-    # a wake, and the one check whose assertions count individual picks runs
-    # before any fill crosses the notify watermark, so nothing has woken it
-    # yet when it matters.
+    # _drain_once(). The daemon spawned by the first register() acts only on a
+    # wake, and the one check that counts individual picks runs before any fill
+    # crosses the notify watermark, so nothing has woken it when it matters.
     check_mid_pass_clear_is_noticed()
     check_cross_cache_lru_order()
     check_min_age_and_floor()
     check_lifecycle()
-    check_thread_latch_survives_a_failed_spawn()
+    check_thread_latch_survives_failed_spawn()
     check_env_contract()
     check_bound_under_concurrent_load()
 

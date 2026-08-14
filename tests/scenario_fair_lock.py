@@ -1,39 +1,7 @@
-"""
-Unit-tier scenario for the FIFO transport lock
-(src/backend/DeckManagement/fair_lock.py).
+"""Unit-tier scenario for the FIFO transport lock in fair_lock.py.
 
-FairLock replaces the stock threading.Lock the Stream Deck transport uses as
-its per-device mutex. The stock lock is unfair: a writer that releases and
-immediately re-acquires can out-race the library's HID read poll for many
-cycles, which is what made dial input arrive coalesced under a video-write
-burst. This is the regression net for the ordering guarantee that replaces
-the write-rate cap that used to paper over it.
-
-Covers:
-  (a) service order equals acquisition order for N queued threads.
-  (b) a hot acquire/release loop cannot overtake a waiter more than the one
-      acquisition already in flight -- asserted as an overtake COUNT (a
-      logical invariant) plus a wall-clock ceiling on the queued wait. Both
-      are sampled from the instant the waiter's TICKET IS DRAWN, which is
-      when it joins the order the lock promises to keep (see
-      _TicketDrawProbe). A SECOND, looser ceiling is measured from the
-      acquire() CALL, so the end-to-end wait a caller actually experiences
-      stays covered: queue entry is not ordered by the ticket (see below),
-      and a lock that starved the HID poll before it could draw would
-      otherwise satisfy every draw-relative bound in this check.
-      NOTE: with a single waiter, (b) cannot tell FIFO from LIFO -- one
-      waiter is trivially both. Ordering across MULTIPLE waiters is (a)'s
-      job; (b) only bounds how far one hot loop can run ahead of one waiter.
-  (c) the context manager releases on the exception path.
-  (d) non-blocking acquire, timeout, and release-when-unlocked semantics
-      match what a threading.Lock stand-in has to provide, and a timed-out
-      waiter never wedges the queue behind its abandoned ticket.
-  (e) DeckController.__init__ installs the lock, and does it before open()
-      starts the library's reader thread.
-  (f) the install guard swaps a stock transport mutex, is idempotent, and
-      no-ops on every shape it cannot prove safe (no transport device at
-      all -- FakeDeck/RemoteDeck; a transport without a mutex attribute --
-      library drift; a mutex that is currently held).
+FairLock replaces the unfair per-device mutex of the transport, so a hot
+writer cannot out-race the HID read poll. Service order equals arrival order.
 """
 import threading
 import time
@@ -46,11 +14,12 @@ WATCHDOG_SECONDS = 60
 
 
 def _wait_for_queue_depth(lock: FairLock, depth: int) -> None:
-    """Blocks until `depth` tickets have been handed out. _next_ticket is
-    bumped under the lock's condition at acquire() entry, so it is the exact
-    'this thread has queued' signal -- polling a state flag in the worker
-    instead would race the ticket draw and make the order under test
-    non-deterministic."""
+    """Block until depth tickets have been handed out.
+
+    _next_ticket is bumped under the lock condition at acquire() entry, so it
+    is the exact queued signal. Polling a worker state flag would race the
+    ticket draw and make the order under test non-deterministic.
+    """
     assert fixtures.wait_until(lambda: lock._next_ticket >= depth, timeout=10.0), (
         f"only {lock._next_ticket} of {depth} tickets were drawn"
     )
@@ -71,8 +40,8 @@ def check_service_order_is_arrival_order() -> None:
         t = threading.Thread(target=_worker, name=f"fifo-{index}", daemon=True)
         t.start()
         workers.append(t)
-        # One ticket per started thread, drawn before the next thread starts:
-        # arrival order is now known, not merely likely.
+        # One ticket per started thread, drawn before the next thread starts, so
+        # arrival order is known rather than merely likely.
         _wait_for_queue_depth(lock, index + 2)
 
     lock.release()
@@ -86,26 +55,11 @@ def check_service_order_is_arrival_order() -> None:
 
 
 class _TicketDrawProbe:
-    """Stands in for a FairLock's condition variable so the scenario can see
-    the exact instant a thread's ticket is drawn.
+    """Stand in for the condition variable of a FairLock to see the ticket draw.
 
-    FairLock draws the ticket and calls `wait()` inside one `with self._cond`
-    block, so a watched thread's FIRST wait() is its "I am now queued" edge,
-    observed with no other thread able to draw or serve a ticket in between.
-    Everything is delegated -- acquire()/release() run their real code.
-
-    This exists because the obvious sampling point (read the counter just
-    before calling acquire()) measures the wrong interval. FairLock orders
-    threads by TICKET, and the ticket is drawn behind `self._cond`'s own
-    mutex, which is a stock unfair threading.Lock: a hot loop that takes and
-    drops that mutex twice per cycle can keep a would-be waiter out of the
-    queue for milliseconds before it ever draws a ticket. Acquisitions in
-    that window are not overtakes of a queued waiter -- nothing was queued
-    yet -- but a before-acquire() sample counts them, which is how a spurious
-    "overtook the waiter 11 times" was reported on a lock that had not
-    reordered anything (reproduced: 11 pre-queue acquisitions, 0 real
-    overtakes). Sampling at the draw makes the bound exact instead of a
-    fudge factor: see check_hot_loop_cannot_starve_a_waiter.
+    FairLock draws the ticket and calls wait() inside one condition block, so
+    the first wait() of a watched thread is its queued edge. Sampling before
+    acquire() counts pre-queue acquisitions and measures the wrong interval.
     """
 
     def __init__(self, cond, sample):
@@ -124,14 +78,19 @@ class _TicketDrawProbe:
         return self._cond.notify_all()
 
     def wait(self, timeout=None):
-        # Only the first wait() of the watched thread's acquire(): a re-check
-        # loop must not re-baseline the sample mid-wait.
+        # Only the first wait() of the watched acquire(). A re-check loop must
+        # not re-baseline the sample mid-wait.
         if self.snapshot is None and threading.current_thread() is self.watch:
             self.snapshot = (self._sample(), time.monotonic())
         return self._cond.wait(timeout)
 
 
-def check_hot_loop_cannot_starve_a_waiter() -> None:
+def check_hot_loop_cannot_starve_waiter() -> None:
+    """A hot acquire loop must not overtake one queued waiter more than once.
+
+    One waiter cannot tell FIFO from LIFO, because a single waiter is both.
+    check_service_order_is_arrival_order pins ordering across several waiters.
+    """
     HOLD_S = 0.0005
     RUN_S = 2.0
 
@@ -169,13 +128,13 @@ def check_hot_loop_cannot_starve_a_waiter() -> None:
             served = acquisitions
             drawn = probe.snapshot
         samples += 1
-        # End-to-end: what the caller waited, ticket or no ticket.
+        # End to end, what the caller waited, ticket or no ticket.
         worst_call_latency = max(worst_call_latency, served_at - called_at)
         if drawn is not None:
-            # Queued behind the hot loop: this sample is a real measurement
-            # of what the ordering guarantee is worth. (`drawn is None` means
-            # the lock was free at the draw and nothing had to be waited out,
-            # so there is no overtaking to measure.)
+            # Queued behind the hot loop, so this sample measures what the
+            # ordering guarantee is worth. A drawn of None means the lock was
+            # free at the draw, nothing had to be waited out, and there is no
+            # overtaking to measure.
             queued_samples += 1
             worst_overtakes = max(worst_overtakes, served - drawn[0])
             worst_latency = max(worst_latency, served_at - drawn[1])
@@ -184,8 +143,8 @@ def check_hot_loop_cannot_starve_a_waiter() -> None:
     stop.set()
     hot.join(timeout=10.0)
 
-    # Vacuity first: if the poller never queued, every bound below is
-    # trivially satisfied and the sample count is a red herring.
+    # Vacuity first. If the poller never queued, every bound below is trivially
+    # satisfied and the sample count is a red herring.
     assert queued_samples > 5, (
         f"the contention this check needs never happened: only "
         f"{queued_samples} of {samples} samples queued behind the hot loop, "
@@ -196,30 +155,25 @@ def check_hot_loop_cannot_starve_a_waiter() -> None:
         f"hot loop only managed {acquisitions} acquisitions -- FairLock "
         f"throughput collapsed"
     )
-    # Exact, not a tolerance: once the poller holds ticket T, every hot
-    # acquisition drawn afterwards holds a higher ticket and is served after
-    # it, so the only one that may still land is the one already in flight
-    # when T was drawn -- and only if it had not yet reached its `+= 1`.
-    # An unfair lock loses this by orders of magnitude (the hot loop turns
-    # over ~1000x per second here).
+    # Exact, not a tolerance. Once the poller holds ticket T, every hot
+    # acquisition drawn afterwards holds a higher ticket and is served after it,
+    # so the only one that may still land is the one already in flight when T
+    # was drawn, and only if it had not reached its increment. An unfair lock
+    # loses this by orders of magnitude.
     assert worst_overtakes <= 1, (
         f"hot loop overtook the queued waiter {worst_overtakes} times -- "
         f"ordering is not FIFO"
     )
-    # Loose ceiling: the read poll needs one slot per 50ms window. The real
-    # figure is sub-millisecond; this only has to catch starvation.
+    # A loose ceiling. The read poll needs one slot per 50 ms window. The real
+    # figure is sub-millisecond, so this only has to catch starvation.
     assert worst_latency < 0.05, (
         f"worst queued wait {worst_latency * 1000:.1f}ms exceeds one poll window"
     )
-    # And the same bound end-to-end, from the acquire() CALL. Ordering is
-    # dated from the ticket draw, but drawing a ticket means first winning
-    # the condition's own mutex -- a stock unfair threading.Lock. A lock that
-    # kept the HID poll from ever reaching its ticket would starve exactly
-    # the way this module exists to prevent while satisfying every
-    # draw-relative bound above, so the caller's whole wait is bounded too.
-    # Two poll windows rather than one: the pre-draw stretch is scheduler-
-    # governed, so it gets slack the ordered stretch does not need. Measured
-    # worst under 32-core saturation is ~2ms, i.e. ~47x of headroom.
+    # The same bound end to end, from the acquire() call. Drawing a ticket means
+    # first winning the condition's own unfair mutex, so a lock that starved the
+    # HID poll before its draw would satisfy every bound above. Two poll windows,
+    # because the pre-draw stretch is scheduler-governed. Measured worst under
+    # full-core load is about 2 ms, so the bound has large headroom.
     assert worst_call_latency < 0.10, (
         f"worst end-to-end acquire {worst_call_latency * 1000:.1f}ms exceeds "
         f"two poll windows -- a waiter is being starved before it can even "
@@ -292,13 +246,15 @@ class _StubDeck:
 
 
 def check_install_happens_before_open() -> None:
-    """Integration tier: the swap has to be wired into DeckController.__init__
-    AND land before open() starts the library's reader thread -- swapping a
-    mutex that is already in use could put two threads in hidapi at once."""
+    """The swap must be wired into DeckController.__init__.
+
+    It must land before open() starts the library reader thread. Swapping a
+    mutex already in use could put two threads in hidapi at once.
+    """
     import globals as gl
     from faulty_fake_deck import FaultyFakeDeck
 
-    # A deck with no transport at all (every FakeDeck) must still construct.
+    # A deck with no transport at all, such as every FakeDeck, must construct.
     plain = fixtures.make_headless_controller(serial="fairlock-noop")
     fixtures.teardown(plain)
 
@@ -341,13 +297,12 @@ def check_install_guards() -> None:
     installed = deck.device.mutex
     assert isinstance(installed, FairLock), f"mutex is {type(installed).__name__}"
 
-    # Idempotent: a second pass must not hand the transport a fresh lock
-    # (which would be exactly the swap-while-held hazard the guard exists
-    # to avoid, were this ever called twice).
+    # Idempotent. A second pass must not hand the transport a fresh lock, which
+    # would be the swap-while-held hazard the guard exists to avoid.
     assert _install_fair_transport_lock(deck)
     assert deck.device.mutex is installed, "install replaced an existing FairLock"
 
-    # No transport device: FakeDeck, RemoteDeck, anything non-HID.
+    # No transport device, such as FakeDeck, RemoteDeck or anything non-HID.
     assert not _install_fair_transport_lock(_StubDeck(None)), (
         "install claimed success on a deck with no transport"
     )
@@ -355,7 +310,7 @@ def check_install_guards() -> None:
         FaultyFakeDeck(serial_number="fairlock-fake", deck_type="Fake Deck")
     ), "install claimed success on a FakeDeck"
 
-    # Library drift: a transport whose mutex attribute is gone.
+    # Library drift, a transport whose mutex attribute is gone.
     assert not _install_fair_transport_lock(_StubDeck(_StubTransport())), (
         "install claimed success on a transport with no mutex"
     )
@@ -375,7 +330,7 @@ def main() -> None:
     fixtures.start_watchdog(WATCHDOG_SECONDS, label="scenario_fair_lock")
 
     check_service_order_is_arrival_order()
-    check_hot_loop_cannot_starve_a_waiter()
+    check_hot_loop_cannot_starve_waiter()
     check_exception_path_releases()
     check_lock_protocol_semantics()
     check_install_happens_before_open()

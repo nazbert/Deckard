@@ -1,41 +1,7 @@
-"""
-Integration scenario (docs/memory-footprint-impl-plan.md P5.4):
-ui_image_changes_while_hidden stores dirty MARKERS while the main window is
-hidden, not a full composited PIL image per input rewritten ~20-30x/s
-against a video background.
+"""ui_image_changes_while_hidden must store dirty markers, not composites.
 
-fixtures.make_headless_controller's integration tier attaches no UI, so
-src.backend.ui_port serves the NULL port and push_input_image returns False
--- every real DeckController built through it is permanently in
-the "nothing is showing this" state as far as
-ControllerKey.set_ui_key_image/ControllerTouchScreen.set_ui_image are
-concerned. That makes the backend half of P5.4 directly exercisable here,
-driving the REAL DeckController/ControllerKey/ControllerTouchScreen code
-(not a reimplementation of it). The inverse -- an ACCEPTING port suppressing
-these markers entirely -- is pinned by scenario_ui_port_events.py.
-
-The GTK-side replay (KeyGrid.load_from_changes / ScreenBar.load_from_changes
-actually recompositing and pushing pixels into live widgets on map) is NOT
-covered here -- it needs a real GTK widget tree the harness deliberately
-never builds (gl.app is never set). See the manual QA steps at the bottom of
-this file's module docstring in the PR description.
-
-Covers:
-  (a) while "hidden", set_ui_key_image/set_ui_image store True (a marker),
-      never a PIL Image, for both Input.Key and Input.Touchscreen
-      identifiers -- across repeated ticks (the 20-30x/s churn case), not
-      just the first write.
-  (b) ControllerKey/ControllerTouchScreen.get_current_image() -- the
-      accessor the map-time recompose is meant to use -- is a pure,
-      side-effect-free composite: calling it repeatedly with nothing
-      changed reproduces byte-identical pixels, so recompositing on map
-      shows the same frame the device already has, not something stale or
-      different.
-  (c) simulating the consume-on-map contract (pop the marker after reading
-      it, exactly as KeyGrid/ScreenBar's load_from_changes do) leaves no
-      residue in the dict -- for both Key and Touchscreen identifiers
-      (design-doc bug 48's half: a Touchscreen marker must be consumable on
-      map too, not just Key ones).
+The null UI port makes push_input_image return False, so every input is in
+the nothing-is-showing state and the marker path is directly exercisable.
 """
 
 import fixtures
@@ -58,8 +24,8 @@ def main() -> None:
 
         tasks = controller.ui_image_changes_while_hidden
 
-        # --- (a) initial page load marks every key + the touchscreen dirty,
-        # with a marker, never a PIL image. ---
+        # The initial page load marks every key and the touchscreen dirty, with
+        # a marker and never a PIL image.
         def all_inputs_marked():
             return (
                 all(tasks.get(i.identifier) is not None for i in key_inputs)
@@ -84,9 +50,9 @@ def main() -> None:
 
         print("PASS: initial hidden-window paint stores markers, not PIL images")
 
-        # --- (a, continued) repeated ticks (simulating a video background
-        # rewriting every input ~20-30x/s while hidden) must never leave a
-        # PIL image behind -- every value observed is always the marker. ---
+        # Repeated ticks, which model a video background rewriting every input
+        # 20 to 30 times a second while hidden, must never leave a PIL image
+        # behind. Every value observed is always the marker.
         sample_key = key_inputs[0]
         for _ in range(10):
             sample_key.update(force=True)
@@ -101,10 +67,10 @@ def main() -> None:
 
         print("PASS: repeated hidden-window ticks never store a PIL image")
 
-        # --- (b) get_current_image() is a pure, side-effect-free composite:
-        # calling it again with nothing changed must reproduce the exact
-        # same pixels -- the map-time recompose shows the current frame, not
-        # something stale or different. ---
+        # get_current_image() is a pure composite with no side effects, so
+        # calling it again with nothing changed must reproduce the same pixels.
+        # The map-time recompose then shows the current frame rather than
+        # something stale.
         img1 = sample_key.get_current_image()
         hash1 = hash(img1.tobytes())
         img1.close()
@@ -123,9 +89,9 @@ def main() -> None:
 
         print("PASS: get_current_image() is a deterministic, side-effect-free recompose accessor")
 
-        # --- (c) the consume-on-map contract: read + pop leaves no residue,
-        # for BOTH Key and Touchscreen identifiers (bug 48's half -- a
-        # Touchscreen marker must be just as consumable as a Key one). ---
+        # The consume-on-map contract. A read and a pop leave no residue, for
+        # both Key and Touchscreen identifiers, so a Touchscreen marker is just
+        # as consumable as a Key one.
         for i in key_inputs:
             assert i.identifier in tasks
             recomposed = i.get_current_image()
@@ -141,9 +107,9 @@ def main() -> None:
         tasks.pop(touchscreen_identifier)
         assert touchscreen_identifier not in tasks
 
-        # Popping twice (KeyGrid's fallback path racing ScreenBar's own
-        # consumption, or vice versa) must be safe -- both sites guard with
-        # try/except KeyError, never a raw dict[key] access.
+        # Popping twice, when the KeyGrid fallback path races the ScreenBar
+        # consumption, must be safe. Both sites guard with try and except
+        # KeyError, never a raw dict subscript.
         try:
             tasks.pop(touchscreen_identifier)
             raised = False

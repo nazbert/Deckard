@@ -1,28 +1,7 @@
-"""
-A refused asset import must never hand its caller something that looks like
-a media path.
+"""A refused asset import must never return something shaped like a path.
 
-`AssetManagerBackend.add_custom_media_set_by_ui` answered a url that points
-at no supported media with `-1`, while every other refusal in the same
-function answers `None`. `KeyButton.handle_file_drop` -- the drop target on
-every key in the grid -- tested the result with `is None`, so the `-1` sailed
-through and was written into the key's `media.path` and saved to the page:
-a key config referring to a media path of -1, i.e. a broken key where the
-user expected a rejection.
-
-Both ends are pinned here, because either one alone leaves the door open:
-
-  (a) source: a rejected url yields None (and still tells the user), like
-      the download-failure and corrupt-file refusals next to it;
-  (b) consumer: handle_file_drop treats ANY non-path answer as a refusal --
-      None, the historical -1, or an empty string -- and only proceeds for
-      a real path.
-
-The consumer check calls the method with a stand-in `self`: the refusal
-branch returns before touching a single widget, and the accept branch is
-identified by the AttributeError it raises the moment it reaches
-`self.key_grid` -- which is the proof that the guard let it through, with no
-GTK display anywhere in sight.
+add_custom_media_set_by_ui answers None for a url with no supported media,
+and handle_file_drop treats None, -1 and the empty string all as refusals.
 """
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
 
@@ -50,7 +29,7 @@ class StubBackend:
 
 
 class StubFile:
-    """A Gio.File-alike for a remote drop: a uri, but no local path."""
+    """A Gio.File-alike for a remote drop, with a uri but no local path."""
 
     def get_uri(self):
         return REJECTED_URL
@@ -96,7 +75,7 @@ def check_rejected_url_returns_none() -> None:
     print("ok: a rejected url refuses with None, with the alert intact")
 
 
-def check_key_drop_rejects_every_non_path() -> None:
+def check_key_drop_rejects_non_path() -> None:
     real_backend = gl.asset_manager_backend
     try:
         for answer in (None, -1, "", 0, False):
@@ -111,8 +90,8 @@ def check_key_drop_rejects_every_non_path() -> None:
                 f"media path"
             )
 
-        # The accept branch must still be reachable: with a real path the
-        # guard lets it through and it dies on the stand-in `self`.
+        # The accept branch must stay reachable. With a real path the guard
+        # lets it through, and it then dies on the stand-in self.
         gl.asset_manager_backend = StubBackend("Assets/imported.png")
         raised = None
         try:
@@ -135,7 +114,7 @@ def main() -> None:
     fixtures.start_watchdog(60, label="scenario_asset_reject_sentinel")
 
     check_rejected_url_returns_none()
-    check_key_drop_rejects_every_non_path()
+    check_key_drop_rejects_non_path()
 
     print("PASS: scenario_asset_reject_sentinel")
 

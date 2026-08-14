@@ -1,44 +1,7 @@
-"""
-Scenario (deployment-floor import safety): every module in
-src/backend/DeckManagement/deck_controller/ must survive having its module body
-executed on Python 3.13, the deployment floor.
+"""Every deck_controller module must import cleanly on Python 3.13.
 
-The gap this closes. Python 3.13 evaluates parameter, return, class-body and
-base-class annotations at definition time; 3.14 defers all of them. So a bare
-Name in one of those positions that is only imported under `if TYPE_CHECKING:`
-raises NameError at import on 3.13 and is completely invisible on 3.14. Nothing
-else in the gate sees it either: compileall only compiles (it never executes a
-module body), ruff and mypy both read TYPE_CHECKING imports as legitimate, and
-the rest of the suite runs on whatever interpreter the venv holds -- which is
-ahead of the floor. A module split that forgets to quote one annotation
-therefore passes everything and then fails on every deployment.
-
-How it checks. Each module is exec'd under /usr/bin/python3.13 with its
-non-stdlib imports auto-stubbed, so only the module body -- class bodies,
-decorators, base lists, def signatures and their annotations -- is exercised.
-Stubbing is what gives the check its sharp edge: every name the module imports
-at runtime resolves to something, so the ONLY way to raise NameError is to
-reference a name the module never binds at runtime. That is exactly the defect.
-Bodies are compiled with assertions stripped, because an import-time assert
-about real structure cannot be true of stubs.
-
-The module list comes from listing the package directory, so a module added to
-it is covered the moment it exists, plus the DeckController.py compat shim that
-fronts the package -- a shim is nothing but imports and __all__, which is
-precisely what gets executed here. Under stubbing every imported name resolves,
-so the defect a shim can actually have is __all__ promising a name the import
-block no longer brings in; a module that declares __all__ therefore has each of
-its entries checked for being bound once the body has run.
-
-EXTRA_MODULES carries the same check to modules outside that package that are
-written to be importable from the engine's closure. They are listed one by one
-rather than discovered: the point is not "every file in src/backend" (most of
-it drags GTK in and has no floor contract), it is the handful whose whole
-design claim is "any layer may import this".
-
-Developer-machine only: the harness needs a real 3.13 interpreter to be honest
-about the floor. Where /usr/bin/python3.13 is absent the scenario reports that
-and passes rather than hard-requiring a system interpreter.
+3.13 evaluates annotations at definition time, so a bare TYPE_CHECKING name in
+one raises NameError there and is invisible on 3.14. Each body runs stubbed.
 """
 import fixtures  # noqa: F401  (isolated data dir + sys.path, house convention)
 
@@ -55,54 +18,54 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACKAGE_DIR = os.path.join(_REPO_ROOT, "src", "backend", "DeckManagement", "deck_controller")
 COMPAT_SHIM = os.path.join(_REPO_ROOT, "src", "backend", "DeckManagement", "DeckController.py")
 
-# Modules outside the package that claim to be importable from anywhere,
-# engine closure included. Each one is here because something depends on that
-# claim; add a module when it makes the claim, not because it is nearby.
+# Modules outside the package that claim to be importable from anywhere, engine
+# closure included. Each one is here because something depends on that claim.
+# Add a module when it makes the claim, not because it is nearby.
 EXTRA_MODULES = (
-    # The app-ready deferral protocol: imports globals + stdlib only.
+    # The app-ready deferral protocol imports globals and stdlib only.
     os.path.join(_REPO_ROOT, "src", "backend", "startup_queue.py"),
-    # The control plane: the deck controller asks it whether a parked state
-    # request is valid, so it carries the engine closure's floor contract. It
-    # imports globals + the input identifiers + stdlib, and every application
-    # type it names is TYPE_CHECKING-only.
+    # The control plane. The deck controller asks it whether a parked state
+    # request is valid, so it carries the floor contract of the engine closure.
+    # It imports globals, the input identifiers and stdlib, and every
+    # application type it names is TYPE_CHECKING-only.
     os.path.join(_REPO_ROOT, "src", "backend", "control_plane.py"),
-    # The CLI's forwarding half: its body runs on the deployment floor at every
-    # `--change-page`/`--change-state` invocation, and main.py -- the only
-    # thing that imports it -- cannot be imported by a scenario, so nothing
-    # else executes it on 3.13. Standard library plus the app id and the
-    # startup queue; the toolkit is imported inside the bus transport.
+    # The forwarding half of the CLI. Its body runs on the deployment floor at
+    # every --change-page and --change-state invocation, and main.py, the only
+    # importer, cannot be imported by a scenario, so nothing else executes it on
+    # 3.13. Standard library plus the app id and the startup queue, with the
+    # toolkit imported inside the bus transport.
     os.path.join(_REPO_ROOT, "src", "backend", "cli_forward.py"),
-    # The typed gl accessors: imports globals + stdlib only, and every type it
-    # names is TYPE_CHECKING-only -- precisely the shape this check exists for.
+    # The typed gl accessors import globals and stdlib only, and every type they
+    # name is TYPE_CHECKING-only, which is the shape this check exists for.
     os.path.join(_REPO_ROOT, "src", "backend", "services.py"),
-    # The page flush seam: Page imports it, and Page is in the engine closure,
-    # so it carries the closure's floor contract. Its only Page annotations
+    # The page flush seam. Page imports it and Page is in the engine closure, so
+    # it carries the floor contract of the closure. Its only Page annotations
     # are TYPE_CHECKING-only.
     os.path.join(_REPO_ROOT, "src", "backend", "PageManagement", "page_flush.py"),
-    # The page document: Page holds one and reads every byte of its content
-    # through it, so it inherits the engine closure's floor contract too. It
-    # names no application type at all -- globals and stdlib only.
+    # The page document. Page holds one and reads every byte of its content
+    # through it, so it inherits the floor contract too. It names no application
+    # type at all, only globals and stdlib.
     os.path.join(_REPO_ROOT, "src", "backend", "PageManagement", "page_document.py"),
-    # The settings store: the settings manager forwards its loader to it, and
-    # the settings manager is read from the engine closure, so the store
-    # carries the closure's floor contract. Standard library plus globals, the
-    # atomic writer and the logger -- and it names no application type at all.
+    # The settings store. The settings manager forwards its loader to it, and
+    # the settings manager is read from the engine closure, so the store carries
+    # the floor contract. Standard library plus globals, the atomic writer and
+    # the logger, and it names no application type at all.
     os.path.join(_REPO_ROOT, "src", "backend", "settings_store.py"),
-    # The settings views: the store imports them at the foot of its own body
-    # (the compat re-export), so they are reached on the floor the moment the
-    # store is, and they carry the same closure contract. Standard library plus
-    # globals, the store's surfaces and the logger -- no toolkit, no
+    # The settings views. The store imports them at the foot of its own body as
+    # a compat re-export, so they are reached on the floor the moment the store
+    # is, and they carry the same closure contract. Standard library plus
+    # globals, the store surfaces and the logger, with no toolkit and no
     # application type of their own.
     os.path.join(_REPO_ROOT, "src", "backend", "settings_views.py"),
-    # The page-cache pins: the deck controller reaches them on its tick and
-    # key paths, which are the engine closure at its most load-bearing. It
-    # imports globals + stdlib only; every type it names is TYPE_CHECKING-only.
+    # The page-cache pins. The deck controller reaches them on its tick and key
+    # paths, which is the engine closure at its busiest. It imports globals and
+    # stdlib only, and every type it names is TYPE_CHECKING-only.
     os.path.join(_REPO_ROOT, "src", "backend", "PageManagement", "page_pins.py"),
 )
 
-# Runs in the floor interpreter, one module per argument. Prints one
-# "OK <stem>" / "FAIL <stem> ..." line per module, so one process covers the
-# whole package and a failure names the module that raised.
+# Runs in the floor interpreter, one module per argument. Prints one OK or FAIL
+# line per module, so one process covers the whole package and a failure names
+# the module that raised.
 _CHILD = r'''
 import ast, importlib.abc, importlib.machinery, os, sys, traceback, types
 
@@ -233,10 +196,11 @@ for p in paths:
 
 
 def discover_modules() -> list[str]:
-    """Every module of the deck_controller package, by listing the directory --
-    so a module added to it is covered without touching this scenario -- plus
-    the compat shim that re-exports the package under the old import path, plus
-    the explicitly listed EXTRA_MODULES."""
+    """Every module of the deck_controller package, by listing the directory.
+
+    A module added to the package is covered without touching this scenario.
+    The compat shim and EXTRA_MODULES are added to the list.
+    """
     assert os.path.isdir(PACKAGE_DIR), f"package dir missing: {PACKAGE_DIR}"
     names = sorted(
         n for n in os.listdir(PACKAGE_DIR)
@@ -256,10 +220,10 @@ def discover_modules() -> list[str]:
     return modules
 
 
-def check_package_bodies_execute_on_the_floor() -> None:
+def check_package_bodies_execute_on_floor() -> None:
     modules = discover_modules()
     # A silent glob miss would make every assertion below vacuous, so the count
-    # is asserted before anything is run.
+    # is asserted before anything runs.
     assert modules, f"no modules discovered in {PACKAGE_DIR}: this check would pass vacuously"
     print(f"floor check covers {len(modules)} module(s): "
           + ", ".join(os.path.basename(m) for m in modules))
@@ -305,7 +269,7 @@ def main() -> None:
               f"{FLOOR_VERSION[0]}.{FLOOR_VERSION[1]} interpreter to run it.")
         print("SKIP: scenario_floor_import")
         return
-    check_package_bodies_execute_on_the_floor()
+    check_package_bodies_execute_on_floor()
     print("ALL PASS: scenario_floor_import")
 
 

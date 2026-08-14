@@ -1,20 +1,11 @@
-"""
-D-Bus mechanics of the logind detector, driven through the `bus=`
-ctor seam with a fake connection -- no real system bus is touched.
+"""D-Bus mechanics of the logind detector, driven through the bus seam.
 
-  1. XDG_SESSION_ID set   -> session path resolved via GetSession(id), and
-     the subscription targets exactly that path on the login1 Session
-     interface with member=None (both Lock and Unlock arrive on one
-     subscription).
-  2. Lock/Unlock signals flip manager.lock(True/False); any other member on
-     the interface is ignored.
-  3. XDG_SESSION_ID unset -> resolver falls back to GetSessionByPID(getpid()).
-  4. GLib.Error during resolution -> logged, ctor does not raise, and the
-     detector stays inert (no subscription).
+A fake connection stands in, so no real system bus is touched. The session
+path resolves, Lock and Unlock flip the manager, and a GLib.Error stays inert.
 """
 import os
 
-import fixtures  # must be first: isolates DATA_PATH
+import fixtures  # must be first; isolates DATA_PATH
 
 from gi.repository import GLib
 
@@ -22,7 +13,7 @@ LOGIN1 = "org.freedesktop.login1"
 
 
 class RecordingManager:
-    """Stands in for LockScreenManager; the detector only calls .lock()."""
+    """Stands in for LockScreenManager. The detector only calls .lock()."""
 
     def __init__(self):
         self.lock_calls = []
@@ -32,8 +23,10 @@ class RecordingManager:
 
 
 class FakeBus:
-    """Duck-types the two Gio.DBusConnection methods the detector uses,
-    matching their positional signatures."""
+    """Duck-types the two Gio.DBusConnection methods the detector uses.
+
+    The signatures match positionally.
+    """
 
     def __init__(self, session_path="/org/freedesktop/login1/session/_31",
                  fail=False):
@@ -63,7 +56,7 @@ def main() -> None:
 
     from src.backend.LockScreenManager.Detectors.Logind import LogindLockScreenDetector
 
-    # --- 1: resolution via GetSession(XDG_SESSION_ID) + subscription shape.
+    # 1. Resolution through GetSession(XDG_SESSION_ID), and the subscription.
     os.environ["XDG_SESSION_ID"] = "7"
     manager = RecordingManager()
     bus = FakeBus()
@@ -84,7 +77,7 @@ def main() -> None:
     assert path == bus.session_path, path
     print("PASS: GetSession(XDG_SESSION_ID) resolves the subscription path")
 
-    # --- 2: Lock/Unlock flip manager.lock(); other members are ignored.
+    # 2. Lock and Unlock flip manager.lock(). Other members are ignored.
     callback(bus, LOGIN1, path, iface, "Lock", None)
     assert manager.lock_calls == [True], manager.lock_calls
     callback(bus, LOGIN1, path, iface, "Unlock", None)
@@ -95,7 +88,7 @@ def main() -> None:
     )
     print("PASS: Lock/Unlock flip manager.lock(); other members ignored")
 
-    # --- 3: no XDG_SESSION_ID -> GetSessionByPID(getpid()).
+    # 3. With no XDG_SESSION_ID the resolver falls back to GetSessionByPID.
     os.environ.pop("XDG_SESSION_ID", None)
     bus = FakeBus()
     LogindLockScreenDetector(RecordingManager(), bus=bus)
@@ -104,7 +97,7 @@ def main() -> None:
     assert args == (os.getpid(),), args
     print("PASS: falls back to GetSessionByPID when XDG_SESSION_ID is unset")
 
-    # --- 4: GLib.Error containment -> inert, not raised.
+    # 4. A GLib.Error is contained, so the detector stays inert.
     bus = FakeBus(fail=True)
     LogindLockScreenDetector(RecordingManager(), bus=bus)  # must not raise
     assert bus.subscriptions == [], (

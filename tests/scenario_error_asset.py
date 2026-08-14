@@ -1,10 +1,7 @@
-"""
-Unit-tier scenario for SingleKeyAsset's error/fallback image: the image
-was opened via the CWD-relative path
-"Assets/images/error.png", so get_raw_image() raised FileNotFoundError
-whenever the process was launched from anywhere but the repo root (e.g. a
-desktop launcher with a different working directory). It must resolve
-against the repo root regardless of CWD.
+"""The SingleKeyAsset fallback image must resolve against the repo root.
+
+A CWD-relative path raises FileNotFoundError whenever the process starts
+anywhere but the repo root, such as under a desktop launcher.
 """
 import os
 
@@ -21,9 +18,9 @@ class _StubControllerInput:
     deck_controller = None
 
 
-def check_error_image_resolves_off_repo_root() -> None:
-    # Make the CWD explicitly NOT the repo root (run_all.py already runs
-    # scenarios from tests/, but don't depend on the runner for redness).
+def check_error_image_resolves_repo_root() -> None:
+    # Make the CWD explicitly not the repo root. run_all.py already runs
+    # scenarios from tests/, but do not depend on the runner for redness.
     os.chdir(gl.DATA_PATH)
 
     asset = SingleKeyAsset(_StubControllerInput())
@@ -42,7 +39,7 @@ def check_error_image_resolves_off_repo_root() -> None:
 def main() -> None:
     fixtures.start_watchdog(WATCHDOG_SECONDS, label="scenario_error_asset")
 
-    check_error_image_resolves_off_repo_root()
+    check_error_image_resolves_repo_root()
 
     print("PASS: scenario_error_asset")
 

@@ -1,42 +1,7 @@
-"""
-Regression test for asset-manager recycler + chooser races.
+"""Regression test for the asset-manager recycler and chooser races.
 
-1. DynamicFlowBox.show_range set recycled children VISIBLE synchronously
-   (possibly off the main thread) while binding their new asset via one
-   GLib.idle_add per child. In that gap a click activated the PREVIOUS
-   page's asset -- or a fresh placeholder's None asset (TypeError in
-   on_child_activated) -- and a child selected on the old page kept its
-   GTK selection while already showing a different asset (phantom
-   selection across pages/filters). The whole rebind must now happen
-   inside ONE main-loop callback: unselect, bind, THEN show, so input
-   events can never interleave with a half-rebound pool.
-
-2. AssetPreview.set_asset deferred set_text/set_image through idle_add;
-   with the factory now running on the main loop those must be direct
-   calls, or a just-shown child would still display the previous asset's
-   name/thumbnail for a frame.
-
-3. CustomAssetChooser.build() flipped build_finished=True BEFORE draining
-   build_task_finished_tasks, unlocked: a show_for_path that read the
-   flag as False could append its deferred task AFTER the (only) drain
-   snapshotted the queue -- the task never ran, so the Asset Manager
-   opened without preselecting/scrolling to the requested path. Flag and
-   queue are now serialized under one lock (_finish_build).
-
-4. IconPackChooserStack carried the SAME unlocked flag-vs-queue race, in
-   its subtler two-flag form: the pack chooser and the icon chooser each
-   build on their OWN worker thread, set their own build_finished, and
-   call on_load_finished. show_for_path checks get_is_build_finished()
-   (both flags) then appends unlocked -- a caller that read a flag False
-   could append after the draining thread snapshotted the queue (task
-   stranded), and because on_load_finished ran from BOTH threads the old
-   copy()-and-remove() drain could double-run or double-remove a task
-   across a concurrent entry. Flag-check + append and snapshot + clear are
-   now serialized under one lock (_loads_lock).
-
-Headless per harness convention: no GTK widget is instantiated -- the
-methods under test are called unbound on stubs, with the modules'
-GLib.idle_add captured into a drainable queue.
+One main-loop callback must unselect, bind and then show a recycled child.
+The build-finished flag and the deferred-task queue move under one lock.
 """
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 
@@ -49,12 +14,10 @@ import src.windows.AssetManager.CustomAssets.Chooser as chooser_mod
 import src.windows.AssetManager.IconPacks.Stack as stack_mod
 
 
-# --------------------------------------------------------------------- #
 # Fakes
-# --------------------------------------------------------------------- #
 
 class FakeGLib:
-    """Captures idle_add callbacks so the test controls 'main loop' time."""
+    """Captures idle_add callbacks, so the test controls main-loop time."""
 
     def __init__(self):
         self.queue = []
@@ -134,9 +97,7 @@ class StubFlow:
         _apply_range = dfb_mod.DynamicFlowBox._apply_range
 
 
-# --------------------------------------------------------------------- #
-# 1. DynamicFlowBox: no visible-but-unbound gap, atomic page swap
-# --------------------------------------------------------------------- #
+# 1. DynamicFlowBox leaves no visible-but-unbound gap and swaps pages atomically.
 
 def test_children_not_shown_before_bound() -> None:
     fake_glib = FakeGLib()
@@ -145,8 +106,8 @@ def test_children_not_shown_before_bound() -> None:
     flow = StubFlow(items=["a1", "a2", "a3"])
     flow.show_range(0, flow.N_ITEMS_PER_PAGE)
 
-    # Before the main loop runs: the pool must be untouched. The old code
-    # already had children visible here with asset=None -- the click-gap.
+    # Before the main loop runs, the pool must be untouched. A visible child
+    # with asset None here is the click gap.
     for child in flow.children:
         assert not (child.visible and child.asset is None), (
             f"child {child._index} is clickable with no asset bound -- "
@@ -161,8 +122,8 @@ def test_children_not_shown_before_bound() -> None:
     assert [c.asset for c in flow.children] == ["a1", "a2", "a3", None]
     assert [c.visible for c in flow.children] == [True, True, True, False]
 
-    # Per child: bind must precede the visibility flip, and the flip must
-    # already see the new asset.
+    # For each child the bind must precede the visibility flip, and the flip
+    # must already see the new asset.
     for event in flow.event_log:
         if event[0] == "visible" and event[2] is True:
             _, index, _, asset_at_flip = event
@@ -174,7 +135,7 @@ def test_children_not_shown_before_bound() -> None:
     assert flow.next_button.sensitive is False
 
 
-def test_page_swap_is_atomic_and_clears_selection() -> None:
+def test_page_swap_atomic_clears_selection() -> None:
     fake_glib = FakeGLib()
     dfb_mod.GLib = fake_glib
 
@@ -184,8 +145,8 @@ def test_page_swap_is_atomic_and_clears_selection() -> None:
     flow.flow_box.selected.append(flow.children[2])  # user selects a3
     flow.event_log.clear()
 
-    # Next page: until the main loop runs, page A must remain fully intact
-    # (old content stays consistent; the swap is atomic).
+    # On the next page, until the main loop runs, page A must stay intact. The
+    # swap is atomic, so the old content stays consistent.
     flow.show_range(4, 8)
     assert [c.asset for c in flow.children] == ["a1", "a2", "a3", "a4"]
     assert all(c.visible for c in flow.children)
@@ -195,8 +156,8 @@ def test_page_swap_is_atomic_and_clears_selection() -> None:
     assert [c.asset for c in flow.children] == ["b1", "b2", "a3", "a4"]
     assert [c.visible for c in flow.children] == [True, True, False, False]
 
-    # Phantom-selection kill: the stale selection from page A was dropped
-    # BEFORE any page-B child was bound or shown.
+    # The stale selection from page A was dropped before any page-B child was
+    # bound or shown, so no phantom selection survives.
     assert flow.flow_box.selected == [], "page A's selection survived onto page B"
     first_bind = next(i for i, e in enumerate(flow.event_log) if e[0] == "bind")
     unselect = next(i for i, e in enumerate(flow.event_log) if e[0] == "unselect_all")
@@ -223,9 +184,7 @@ def test_filter_shrink_hides_leftovers_atomically() -> None:
     assert flow.children[0].asset == "a4"
 
 
-# --------------------------------------------------------------------- #
 # 2. AssetPreview.set_asset binds synchronously
-# --------------------------------------------------------------------- #
 
 def test_set_asset_binds_synchronously() -> None:
     fake_glib = FakeGLib()
@@ -254,9 +213,7 @@ def test_set_asset_binds_synchronously() -> None:
     assert stub.asset == asset and stub.flow == "flow-sentinel"
 
 
-# --------------------------------------------------------------------- #
-# 3. CustomAssetChooser: build_finished vs deferred-task race
-# --------------------------------------------------------------------- #
+# 3. CustomAssetChooser races build_finished against the deferred task.
 
 def _make_chooser_stub(ran):
     class Stub:
@@ -276,9 +233,11 @@ def _make_chooser_stub(ran):
 
 
 def test_raced_deferred_task_still_runs() -> None:
-    """Deterministically replay the loser interleaving: show_for_path reads
-    build_finished as False, is 'preempted' inside its append, and the
-    build finishes meanwhile. The deferred task must still run."""
+    """Replay the losing interleaving deterministically.
+
+    show_for_path reads build_finished as False, stops inside its append, and
+    the build finishes meanwhile. The deferred task must still run.
+    """
     ran = []
     stub = _make_chooser_stub(ran)
 
@@ -300,8 +259,8 @@ def test_raced_deferred_task_still_runs() -> None:
     t_caller.start()
     assert gate_reached.wait(timeout=5), "show_for_path never tried to defer its task"
 
-    # The build finishes NOW -- with the old unlocked code this drained (an
-    # empty) queue and the raced append landed afterwards, stranded forever.
+    # The build finishes now. Without the lock this drains an empty queue and
+    # the raced append lands afterwards, stranded forever.
     t_finish = threading.Thread(
         target=chooser_mod.CustomAssetChooser._finish_build, args=(stub,),
         name="finish_build",
@@ -335,8 +294,10 @@ def test_post_finish_calls_dispatch_directly() -> None:
 
 
 def test_enqueue_storm_loses_no_tasks() -> None:
-    """Stress the lock: N threads race show_for_path against _finish_build;
-    every path must be delivered exactly once (deferred or direct)."""
+    """Stress the lock with N threads racing show_for_path and _finish_build.
+
+    Every path must be delivered exactly once, deferred or direct.
+    """
     for _ in range(50):
         ran = []
         stub = _make_chooser_stub(ran)
@@ -367,9 +328,7 @@ def test_enqueue_storm_loses_no_tasks() -> None:
         assert stub.build_task_finished_tasks == []
 
 
-# --------------------------------------------------------------------- #
-# 4. IconPackChooserStack: two-flag build vs deferred-task race
-# --------------------------------------------------------------------- #
+# 4. IconPackChooserStack races a two-flag build against the deferred task.
 
 class _StubChooser:
     def __init__(self):
@@ -377,10 +336,11 @@ class _StubChooser:
 
 
 def _make_stack_stub(ran):
-    """Stub carrying exactly what Stack.show_for_path / on_load_finished
-    touch. The post-lock body of show_for_path records the path via a
-    patched gl.icon_pack_manager (empty pack set -> the GTK-heavy tail never
-    runs), so what the test observes is purely the dispatch/no-strand logic."""
+    """Stub carrying what Stack.show_for_path and on_load_finished touch.
+
+    A patched gl.icon_pack_manager with an empty pack set records the path, so
+    the GTK-heavy tail never runs and only the dispatch logic is observed.
+    """
     class Stub:
         pass
 
@@ -390,17 +350,17 @@ def _make_stack_stub(ran):
     stub.pack_chooser = _StubChooser()
     stub.icon_chooser = _StubChooser()
 
-    # get_is_build_finished is the real method (reads the two flags).
+    # get_is_build_finished is the real method and reads the two flags.
     stub.get_is_build_finished = lambda: stack_mod.IconPackChooserStack.get_is_build_finished(stub)
 
     class FakePackManager:
         def get_icon_packs(self):
-            # Called only once show_for_path passes the build-finished gate;
-            # record the delivery, then return nothing so the loop is a no-op.
+            # Called only once show_for_path passes the build-finished gate.
+            # Record the delivery, then return nothing, so the loop is a no-op.
             ran.append(stub._current_path)
             return {}
 
-    # show_for_path takes only (self, path); stash the path so the patched
+    # show_for_path takes only (self, path). Stash the path, so the patched
     # manager can record which delivery reached the post-lock body.
     real_show = stack_mod.IconPackChooserStack.show_for_path
 
@@ -418,11 +378,12 @@ def _restore_stack_stub(stub):
     stack_mod.gl.icon_pack_manager = stub._orig_pack_manager
 
 
-def test_iconpack_raced_deferred_task_still_runs() -> None:
-    """Replay the loser interleaving with the icon-pack's two-flag build:
-    show_for_path reads a flag as False, is 'preempted' inside its append,
-    and the build finishes (second flag flips + on_load_finished) meanwhile.
-    The deferred task must still run."""
+def test_iconpack_raced_deferred_task_runs() -> None:
+    """Replay the losing interleaving with the two-flag icon-pack build.
+
+    show_for_path reads one flag as False and stops inside its append. The
+    build then finishes. The deferred task must still run.
+    """
     ran = []
     stub = _make_stack_stub(ran)
     try:
@@ -446,9 +407,9 @@ def test_iconpack_raced_deferred_task_still_runs() -> None:
         t_caller.start()
         assert gate_reached.wait(timeout=5), "show_for_path never tried to defer its task"
 
-        # The icon build finishes NOW -- flag flips, then on_load_finished.
-        # With the old unlocked code this drained an empty queue and the
-        # raced append landed afterwards, stranded forever.
+        # The icon build finishes now. The flag flips, then on_load_finished
+        # runs. Without the lock this drains an empty queue and the raced
+        # append lands afterwards, stranded forever.
         def finish():
             stub.icon_chooser.build_finished = True
             stack_mod.IconPackChooserStack.on_load_finished(stub)
@@ -472,26 +433,24 @@ def test_iconpack_raced_deferred_task_still_runs() -> None:
         _restore_stack_stub(stub)
 
 
-def test_iconpack_concurrent_drain_runs_each_task_once() -> None:
-    """The two-thread hazard unique to this stack: BOTH build threads flip
-    their flag and call on_load_finished, and can enter the drain
-    concurrently. Deterministically force the overlap: drainer #1 blocks
-    inside its FIRST task while drainer #2 enters. With the old unlocked
-    copy()-and-remove() nothing was removed yet (removal follows task()), so
-    #2 re-ran the whole queue -> double-run. Under the lock, #1 snapshots and
-    CLEARS the queue before any task runs, so #2 finds an empty queue. Every
-    task must run exactly once."""
+def test_iconpack_drain_runs_task_once() -> None:
+    """Both build threads can enter the drain at the same time.
+
+    Drainer 1 blocks inside its first task while drainer 2 enters. The lock
+    makes drainer 1 snapshot and clear the queue before any task runs, so
+    drainer 2 finds it empty. Every task must run exactly once.
+    """
     ran = []
-    order_lock = threading.Lock()  # serialize appends to `ran`
+    order_lock = threading.Lock()  # serialize appends to the ran list
     stub = _make_stack_stub(ran)
     try:
         first_task_entered = threading.Event()
         release_first_task = threading.Event()
         paths = [f"i{i}" for i in range(6)]
 
-        # Pre-seed the queue directly with instrumented tasks (bypassing the
-        # GTK-heavy show_for_path body -- we are exercising the drain, not the
-        # dispatch tail). The first task gates; the rest record immediately.
+        # Seed the queue directly with instrumented tasks and bypass the
+        # GTK-heavy show_for_path body, because the drain is under test and not
+        # the dispatch tail. The first task gates; the rest record immediately.
         def make_task(p, is_first):
             def task():
                 if is_first:
@@ -515,16 +474,16 @@ def test_iconpack_concurrent_drain_runs_each_task_once() -> None:
         d1.start()
         assert first_task_entered.wait(timeout=5), "drainer1 never entered its first task"
 
-        # drainer2 enters WHILE drainer1 is parked in task[0].
+        # drainer2 enters while drainer1 is parked in task[0].
         d2 = threading.Thread(
             target=stack_mod.IconPackChooserStack.on_load_finished, args=(stub,),
             name="drainer2",
         )
         d2.start()
         d2.join(timeout=5)
-        # Unfixed: d2 re-snapshots the still-full queue and re-runs task[0],
-        # blocking on the same gate -> still alive here. Fixed: d1 already
-        # cleared the queue under the lock, so d2 finds nothing and returns.
+        # Without the lock, d2 re-snapshots the full queue, re-runs task[0] and
+        # blocks on the same gate, so it is still alive here. With the lock, d1
+        # already cleared the queue, so d2 finds nothing and returns.
         assert not d2.is_alive(), (
             "drainer2 did not return -- it re-entered the drain and re-ran a "
             "task (double-run) instead of seeing the queue already cleared"
@@ -558,14 +517,14 @@ def test_iconpack_post_finish_dispatches_directly() -> None:
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_assetui_recycler")
     test_children_not_shown_before_bound()
-    test_page_swap_is_atomic_and_clears_selection()
+    test_page_swap_atomic_clears_selection()
     test_filter_shrink_hides_leftovers_atomically()
     test_set_asset_binds_synchronously()
     test_raced_deferred_task_still_runs()
     test_post_finish_calls_dispatch_directly()
     test_enqueue_storm_loses_no_tasks()
-    test_iconpack_raced_deferred_task_still_runs()
-    test_iconpack_concurrent_drain_runs_each_task_once()
+    test_iconpack_raced_deferred_task_runs()
+    test_iconpack_drain_runs_task_once()
     test_iconpack_post_finish_dispatches_directly()
     print("scenario_assetui_recycler: PASS")
 

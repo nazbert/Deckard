@@ -1,17 +1,7 @@
-"""
-Integration scenario (docs/presenter-migration-plan.md §7 "Owner assertion"
-+ M1's set_brightness reroute): before M1, set_brightness() wrote directly
-to the device from whatever thread called it (GTK/Timer/switch threads --
-see the plan's inventory table, §1). After routing through
-submit_control(SetBrightnessMsg(...)), the device write must land on the
-media thread, and BetterDeck's owner-assertion tooling
-(DECKARD_ASSERT_DEVICE_OWNER) must record zero violations across
-the whole scenario (bootstrap clear, page load, and the brightness call
-itself).
+"""The set_brightness device write must land on the media thread.
 
-The env var must be set before the deck's BetterDeck wrapper is constructed
-(DeckController.__init__ reads it once at construction, via BetterDeck.py)
--- set it before importing fixtures/constructing anything.
+submit_control(SetBrightnessMsg(...)) routes it there, and the owner
+assertion of BetterDeck must record zero violations across the scenario.
 """
 import os
 import threading
@@ -29,8 +19,8 @@ def main() -> None:
     fixtures.wait_until(lambda: deck.last_op_for("key:0") is not None, timeout=3)
     deck.clear_journal()
 
-    # Call from a thread that is definitely not the media thread (mirrors a
-    # GTK slider / DeckGroup UI callback).
+    # Call from a thread that is not the media thread, which mirrors a GTK
+    # slider or a DeckGroup UI callback.
     def _set():
         controller.set_brightness(42)
 
@@ -49,9 +39,9 @@ def main() -> None:
             f"thread {media_thread_name!r}: {entry}"
         )
 
-    # BetterDeck's owner-assertion detector (log-only, never raises) must
-    # show zero violations for the whole scenario -- including the bootstrap
-    # clear and page-load writes, not just the brightness call under test.
+    # The owner-assertion detector of BetterDeck logs and never raises. It must
+    # show zero violations for the whole scenario, including the bootstrap
+    # clear and the page-load writes.
     violations = controller.deck.owner_violations
     assert violations == [], f"owner violations recorded: {violations}"
 

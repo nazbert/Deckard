@@ -1,29 +1,7 @@
-"""
-Integration scenario: the image-cache budget over REAL
-DeckControllers.
+"""Integration scenario for the image-cache budget over real DeckControllers.
 
-`scenario_cache_budget.py` pins the manager against synthetic caches; this
-one pins the wiring: that a deck's two native-image caches actually join the
-budget, that a tiny ceiling makes an IDLE deck's entries lose to a BUSY
-deck's (the cross-deck behavior per-silo caps structurally cannot provide),
-that eviction never changes what reaches the device, and that a closed deck
-stops counting.
-
-Covers:
-  (a) both per-deck caches are registered, labelled with the deck serial.
-  (b) under a ceiling small enough to bind (floors clamped per plan-142
-      §3.4, or Σ(floors) would leave nothing evictable), the idle deck sheds
-      and the busy deck's freshly-touched entries are protected by min-age;
-      once everything is past min-age the sum settles at or under the
-      ceiling.
-  (c) the busy deck's paint path is unaffected: the same content still
-      reaches the device as exactly the same bytes after its cache was
-      evicted around it.
-  (d) the native tile cache's min-age tracks the background video's loop
-      duration, and reverts when the video goes away.
-  (e) the accounting-only census registrants (video readers, GIF frame
-      lists) are visible in totals() and never counted against the ceiling.
-  (f) closing a deck zeroes its share of the budget.
+Both per-deck caches join the budget. A binding ceiling makes an idle deck
+shed to a busy one, the paint path is unaffected, and a closed deck stops.
 """
 import fixtures  # noqa: F401  (isolated data dir + sys.path, house convention)
 
@@ -40,8 +18,8 @@ from src.backend.DeckManagement.Subclasses import cache_budget
 KIB = 1024
 CEILING_BYTES = 256 * KIB
 ENTRY = 4 * KIB
-# Both caches use monotonic last-use stamps and the default 2 s min-age;
-# there is no clock seam through a real DeckController, so ageing is real.
+# Both caches use monotonic last-use stamps and the default 2 s min-age. A real
+# DeckController offers no clock seam, so the ageing here is real.
 AGE_SLEEP = 2.3
 
 
@@ -53,10 +31,11 @@ def _set_ceiling(value) -> None:
 
 
 def _fill(cache, prefix: str, total_bytes: int) -> None:
-    """Files synthetic entries through the cache's real put() -- the same
-    call the paint path makes. Each key is put twice so the encode memo's
-    doorkeeper admits it (the tile cache admits on the first put and simply
-    replaces on the second)."""
+    """File synthetic entries through the real put() of the cache.
+
+    The paint path makes the same call. Each key is put twice, so the
+    doorkeeper of the encode memo admits it.
+    """
     for i in range(total_bytes // ENTRY):
         key = (prefix, i)
         cache.put(key, bytes(ENTRY))
@@ -68,10 +47,11 @@ def _deck_bytes(controller) -> int:
 
 
 def _present(cache, prefix: str, total_bytes: int) -> int:
-    """How many of the entries `_fill` filed are still cached. Counted per
-    key rather than by byte total: a real repaint can file (or a real clear
-    can drop) an entry of its own at any moment, and the assertions here are
-    about which SYNTHETIC entries the budget chose."""
+    """Count how many entries _fill filed are still cached.
+
+    Counted per key rather than by byte total, because a real repaint can file
+    an entry at any moment and these assertions are about the synthetic ones.
+    """
     return sum(1 for i in range(total_bytes // ENTRY) if cache.get((prefix, i)) is not None)
 
 
@@ -97,7 +77,7 @@ def _make_test_mp4(path: str, n_frames: int, fps: int, size=(160, 120)) -> str:
 def check_registration_and_cross_deck_eviction(busy, idle) -> None:
     busy_deck = fixtures.raw_deck(busy)
 
-    # (a) both caches of both decks joined the budget, attributably.
+    # Both caches of both decks joined the budget, and stay attributable.
     for controller in (busy, idle):
         serial = controller.serial_number()
         assert controller.encode_memo.budget_label == f"encode_memo:{serial}", (
@@ -114,11 +94,11 @@ def check_registration_and_cross_deck_eviction(busy, idle) -> None:
     idle_memo, idle_tiles = 160 * KIB, 96 * KIB
     busy_memo, busy_tiles = 96 * KIB, 32 * KIB
 
-    # The idle deck's working set first, so it is the older one...
+    # The working set of the idle deck goes first, so it is the older one.
     _fill(idle.encode_memo, "idle-memo", idle_memo)
     _fill(idle.native_tile_cache, "idle-tiles", idle_tiles)
     time.sleep(AGE_SLEEP)
-    # ...and the busy deck's second, so its entries are inside min-age.
+    # The busy deck goes second, so its entries are inside min-age.
     _fill(busy.encode_memo, "busy-memo", busy_memo)
     _fill(busy.native_tile_cache, "busy-tiles", busy_tiles)
 
@@ -130,7 +110,7 @@ def check_registration_and_cross_deck_eviction(busy, idle) -> None:
 
     cache_budget._drain_once()
 
-    # (b) the idle deck paid; the busy deck's fresh entries did not.
+    # The idle deck paid, and the fresh entries of the busy deck did not.
     assert _present(busy.encode_memo, "busy-memo", busy_memo) == busy_memo // ENTRY, (
         "the busy deck's encode memo lost entries that were inside min_age_s while "
         "an older deck still had something to give"
@@ -146,21 +126,20 @@ def check_registration_and_cross_deck_eviction(busy, idle) -> None:
         f"the sum must land at or under the ceiling: "
         f"{cache_budget.evictable_bytes()} > {CEILING_BYTES}"
     )
-    # Σ(default floors) is 4 MiB x 4 registrants -- 64x this ceiling. Only the
-    # ceiling // (2 x registrants) clamp makes ANY of this evictable, and the
-    # clamped floor is then what the idle deck's memo comes to rest on: it is
-    # the oldest cache in the process, so the drain runs it down until the
-    # floor stops it and takes the rest from the next-oldest. Comparing
-    # against the NOMINAL 4 MiB floor instead would be vacuous -- this whole
-    # fixture is a quarter of a MiB.
+    # The sum of the default floors is 4 MiB times 4 registrants, 64 times this
+    # ceiling. Only the ceiling // (2 * registrants) clamp makes any of this
+    # evictable, and the clamped floor is where the idle memo comes to rest. It
+    # is the oldest cache in the process, so the drain runs it down to the floor
+    # and takes the rest from the next-oldest. A comparison against the nominal
+    # 4 MiB floor would be vacuous, because this fixture is a quarter of a MiB.
     floor_clamp = CEILING_BYTES // (2 * 4)   # 32 KiB, 4 evictable registrants
     assert idle.encode_memo.total_bytes >= floor_clamp, (
         f"global eviction dug the idle deck's memo below its clamped floor: "
         f"{idle.encode_memo.total_bytes} < {floor_clamp}"
     )
 
-    # (c) eviction happened around a live paint path, not through it: the
-    # same content still reaches the device as the same bytes.
+    # Eviction happened around a live paint path, not through it. The same
+    # content still reaches the device as the same bytes.
     for key in busy.inputs[Input.Key]:
         key.update(force=True)
     assert fixtures.wait_until(
@@ -169,7 +148,7 @@ def check_registration_and_cross_deck_eviction(busy, idle) -> None:
         f"{_key_signature(busy, busy_deck)} != {sig_before}"
     )
 
-    # Once the busy deck's entries are past min-age too, nothing is exempt
+    # Once the entries of the busy deck are past min-age too, nothing is exempt
     # and a tighter ceiling is enforced against both decks.
     time.sleep(AGE_SLEEP)
     tight = 64 * KIB
@@ -184,11 +163,12 @@ def check_registration_and_cross_deck_eviction(busy, idle) -> None:
           "the busy deck's device writes are unchanged")
 
 
-def check_tile_cache_min_age_tracks_the_video(controller) -> None:
-    """(d) Native tile entries are keyed per FRAME, so they are re-touched
-    once per loop of the content -- the flat 2 s default would leave a
-    playing video's frame set evictable exactly one loop before it is needed
-    again."""
+def check_tile_min_age_tracks_video(controller) -> None:
+    """Native tile entries are keyed per frame and re-touched once per loop.
+
+    The flat 2 s default would leave the frame set of a playing video evictable
+    exactly one loop before it is needed again.
+    """
     assert controller.native_tile_cache.budget_min_age_s == cache_budget.DEFAULT_MIN_AGE_S, (
         "fixture sanity: a deck with no background video starts at the default min-age"
     )
@@ -200,9 +180,9 @@ def check_tile_cache_min_age_tracks_the_video(controller) -> None:
     controller.background.set_video(video, update=False)
 
     # While the tile cache is still building, playback advances one frame per
-    # MEDIA TICK rather than at source fps, so the true loop period is longer
-    # than frames/fps -- unknowably so. The conservative clamp maximum holds
-    # the frame set until the build lands.
+    # media tick rather than at source fps, so the true loop period is longer
+    # than frames over fps, and unknowably so. The conservative clamp maximum
+    # holds the frame set until the build lands.
     assert not video.is_cache_complete(), "fixture sanity: the cache should still be building"
     assert controller.native_tile_cache.budget_min_age_s == cache_budget.MAX_MIN_AGE_S, (
         f"an unbuilt tile cache must be shielded by the clamp maximum, not by a "
@@ -210,7 +190,7 @@ def check_tile_cache_min_age_tracks_the_video(controller) -> None:
         f"{controller.native_tile_cache.budget_min_age_s}"
     )
 
-    # Play it through: the build completes, and the first tick past that
+    # Play it through. The build completes, and the first tick past that
     # installs the real loop duration.
     for _ in range(video.n_frames * 3 + 10):
         if video.is_cache_complete():
@@ -225,12 +205,12 @@ def check_tile_cache_min_age_tracks_the_video(controller) -> None:
         f"{controller.native_tile_cache.budget_min_age_s}"
     )
 
-    # The reader's census entry: accounting-only, so it is visible in
-    # totals() but must never be counted against the ceiling.
+    # The census entry of the reader is accounting-only, so it is visible in
+    # totals() and must never count against the ceiling.
     controller.background.update_tiles()
     assert not video.budget_evictable, "video readers are census-only, never evictable"
-    # Read the governed sum FIRST: the census is a superset, so this
-    # comparison can only be made safer by anything that lands in between.
+    # Read the governed sum first. The census is a superset, so anything that
+    # lands in between can only make this comparison safer.
     evictable = cache_budget.evictable_bytes()
     census = cache_budget.totals()
     assert census.get("video_readers", 0) > 0, (
@@ -252,15 +232,12 @@ def check_tile_cache_min_age_tracks_the_video(controller) -> None:
 
 
 def check_gif_frames_census(controller) -> None:
-    """A retained GIF frame list is the largest image holder in the app with
-    no byte cap at all. It is deliberately NOT evictable (the list IS the
-    asset's per-frame memo); this census column is what sizes whether an
-    aggregate cap across GIF keys is ever warranted.
+    """A retained GIF frame list is the largest uncapped image holder.
 
-    The fixture carries ALPHA on purpose: only an alpha-carrying
-    GIF keeps a frame list at all -- an opaque one plays off the shared mp4
-    tile cache and shows up under video_readers instead (that route's census
-    contract is pinned by scenario_gif_opaque_route)."""
+    The list is the per-frame memo of the asset, so it is not evictable, and
+    this census column sizes whether an aggregate cap is warranted. Only an
+    alpha-carrying GIF keeps a frame list.
+    """
     from src.backend.DeckManagement.DeckController import KeyGIF
 
     path = os.path.join(gl.DATA_PATH, "media", "budget_census.gif")
@@ -291,11 +268,12 @@ def check_gif_frames_census(controller) -> None:
     print("PASS: decoded GIF frame lists are visible in the census")
 
 
-def check_close_zeroes_the_share(controller) -> None:
-    """(e) close() step 7 clears both caches, so a torn-down deck stops
-    counting against the ceiling immediately -- the weak registry then drops
-    it whenever GC gets to it, with no unregister call on the teardown
-    path."""
+def check_close_zeroes_share(controller) -> None:
+    """close() step 7 clears both caches, so a torn-down deck stops counting.
+
+    The weak registry drops it whenever GC gets to it, with no unregister call
+    on the teardown path.
+    """
     before = cache_budget.evictable_bytes()
     share = _deck_bytes(controller)
     assert share > 0, "fixture sanity: the deck being closed should hold cached bytes"
@@ -327,14 +305,14 @@ def main() -> None:
 
     try:
         check_registration_and_cross_deck_eviction(busy, idle)
-        check_tile_cache_min_age_tracks_the_video(busy)
+        check_tile_min_age_tracks_video(busy)
         check_gif_frames_census(busy)
-        check_close_zeroes_the_share(idle)
+        check_close_zeroes_share(idle)
     finally:
         _set_ceiling(None)
-        # Both, always: a controller left alive keeps its non-daemon threads
-        # running and the interpreter would never exit on a failing assert
-        # (teardown is best-effort and safe to repeat).
+        # Tear both down, always. A controller left alive keeps its non-daemon
+        # threads running and the interpreter would never exit on a failing
+        # assert. Teardown is bounded and safe to repeat.
         fixtures.teardown(busy)
         fixtures.teardown(idle)
 

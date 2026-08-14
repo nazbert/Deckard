@@ -1,31 +1,7 @@
-"""
-Regression test for atomic JSON writes.
+"""Regression test for atomic JSON writes.
 
-Page.save() got the tmp-file + fsync + os.replace + dir-fsync treatment in
-4faa8ea3, but SettingsManager.save_settings_to_file, PluginBase.set_settings,
-PageManagerBackend.add_page and the 1.5.0-beta.5 migrator's page rewrite still
-wrote with plain open("w") + json.dump -- a crash/SIGKILL/OOM mid-write
-truncated the destination file in place and the config was gone on the next
-launch. All of them now route through
-src/backend/atomic_json.py::atomic_write_json.
-
-Two fault models are exercised:
-
-  1. Serialization fault mid-dump (an unserializable object raises TypeError
-     after json.dump already emitted a prefix): with the old code the
-     destination is already truncated at that point; with the atomic helper
-     only the temp file is affected and it's cleaned up.
-  2. Process death after the temp file is written but before os.replace
-     (fsync patched to os._exit(9) in a subprocess): the destination must
-     still contain the previous, complete JSON.
-
-Additionally: new files must honor the process umask
-(secret-bearing plugin settings must not come out world-readable under
-umask 077) while pre-existing modes are preserved; symlinked targets must
-stay symlinks (os.replace on the link path would silently detach
-stow/chezmoi-managed configs); and temp files orphaned by a hard kill must
-be reaped by later writes to the same target instead of accumulating
-forever.
+Every settings and page writer routes through atomic_write_json, so a crash
+mid-write leaves the destination complete and only a temp file behind.
 """
 import glob
 import json
@@ -39,8 +15,10 @@ import globals as gl
 
 
 class Unserializable:
-    """json.dump raises TypeError on this -- but only mid-stream, after the
-    serializable prefix of the payload was already written."""
+    """json.dump raises TypeError on this, mid-stream.
+
+    The serializable prefix of the payload is already written by then.
+    """
 
 
 def tmp_litter(dir_path: str) -> list[str]:
@@ -125,15 +103,14 @@ def check_page_save(controller) -> None:
     page = controller.active_page
     before = read_json(page.json_path)
 
-    # Top-level key: untouched by get_without_action_objects' traversal, but
-    # json.dump chokes on it mid-serialization.
+    # A top-level key that get_without_action_objects does not traverse, but
+    # json.dump chokes on mid-serialization.
     page.dict["poison"] = Unserializable()
     try:
-        # save() only marks the page now -- the serialization, and so the
-        # TypeError, belongs to the flush. Asked for explicitly here, which
-        # is what every synchronous flush site (page switch, deck close,
-        # quit, any read of the file) does; the assertion below is unchanged,
-        # because what is being pinned is the file, not the timing.
+        # save() only marks the page, so the serialization and the TypeError
+        # belong to the flush. Every synchronous flush site does this: page
+        # switch, deck close, quit, or any read of the file. The assertion
+        # pins the file, not the timing.
         page.save()
         page_flush.get().flush_path(page.json_path)
     except TypeError:
@@ -151,9 +128,11 @@ def check_page_save(controller) -> None:
 
 
 def check_font_defaults_merge() -> None:
-    """save_font_defaults must merge into the general section, not replace
-    it -- it used to wipe hold-time/rolling-labels/app-launches/... whenever
-    a font default was changed."""
+    """save_font_defaults must merge into the general section.
+
+    A replace wipes hold-time, rolling-labels and app-launches whenever a font
+    default changes.
+    """
     app_settings = gl.settings_manager.get_app_settings()
     app_settings.setdefault("general", {})
     app_settings["general"]["hold-time"] = 0.7
@@ -172,9 +151,11 @@ def check_font_defaults_merge() -> None:
 
 
 def check_umask_and_mode_preservation() -> None:
-    """New files must honor the process umask like plain open('w') did --
-    hardcoding 0644 leaked secret-bearing files (plugin settings hold API
-    tokens) under umask 077. Pre-existing modes must be preserved."""
+    """New files must honor the process umask; existing modes must survive.
+
+    Plugin settings hold API tokens, so a hardcoded 0644 leaks them under
+    umask 077.
+    """
     from src.backend.atomic_json import atomic_write_json
 
     base = os.path.join(gl.DATA_PATH, "settings", "modes")
@@ -201,9 +182,11 @@ def check_umask_and_mode_preservation() -> None:
 
 
 def check_symlinked_target() -> None:
-    """Writing through a symlinked config must update the REAL file and keep
-    the link a link -- os.replace over the link path replaces it with a
-    regular file, silently detaching stow/chezmoi-managed settings."""
+    """A write through a symlinked config must update the real file.
+
+    The link must stay a link, because os.replace over the link path leaves a
+    regular file and detaches a stow or chezmoi managed settings tree.
+    """
     from src.backend.atomic_json import atomic_write_json
 
     real_dir = os.path.join(gl.DATA_PATH, "dotfiles-store")
@@ -231,9 +214,11 @@ def check_symlinked_target() -> None:
 
 
 def check_stale_tmp_reaped() -> None:
-    """Temps orphaned by SIGKILL-between-write-and-rename must be reaped by
-    a later write to the same target (they used to accumulate forever); a
-    racing writer's FRESH temp must be left alone."""
+    """A later write to the same target must reap orphaned temp files.
+
+    A SIGKILL between write and rename leaves one. A racing writer's fresh
+    temp must stay.
+    """
     from src.backend.atomic_json import atomic_write_json
 
     d = os.path.join(gl.DATA_PATH, "settings", "reap")
@@ -267,10 +252,11 @@ def check_stale_tmp_reaped() -> None:
 
 
 def check_kill_before_replace() -> None:
-    """Simulates dying (power loss / SIGKILL) after the temp file is written
-    but before it's renamed over the destination: the destination must keep
-    the previous complete content. os._exit skips atexit, so the child's
-    temp data dir survives for the parent to inspect (cleaned up below)."""
+    """Model a power loss after the temp file is written, before the rename.
+
+    The destination must keep its previous complete content. os._exit skips
+    atexit, so the child temp data dir survives for the parent to inspect.
+    """
     child_code = (
         "import fixtures, os\n"
         "from src.backend.atomic_json import atomic_write_json\n"
@@ -300,21 +286,18 @@ def check_kill_before_replace() -> None:
         )
     finally:
         import shutil
-        # child's DATA_DIR is two levels above .../settings/kill.json
+        # The child DATA_DIR is two levels above .../settings/kill.json
         shutil.rmtree(os.path.dirname(os.path.dirname(target)), ignore_errors=True)
     print("PASS: destination survives process death between write and rename")
 
 
 def check_migrator_page_write() -> None:
-    """The 1.5.0-beta.5 migrator rewrites every page in place to nest each
-    key under states.0. That rewrite used a plain open('w') + json.dump, so a
-    death mid-dump left a truncated page the loader then had to quarantine --
-    on the very first launch after an upgrade, with only the pre-migration
-    backup zip to fall back on. It now routes through atomic_write_json.
+    """The migrator page rewrite must go through atomic_write_json.
 
-    Runs entirely in a child with its own data dir (a live controller owns the
-    pages/ of this process): the child dies at fsync, so the write never
-    commits and the ORIGINAL page must still be complete on disk."""
+    The rewrite nests each key under states.0. A death mid-dump leaves a
+    truncated page the loader must quarantine, on the first launch after an
+    upgrade. The child owns its data dir and dies at fsync, so nothing commits.
+    """
     child_code = (
         "import fixtures, os, json\n"
         "import globals as gl\n"
@@ -338,8 +321,8 @@ def check_migrator_page_write() -> None:
         text=True,
         timeout=60,
     )
-    # A bare open('w') + json.dump never fsyncs, so it would not even reach the
-    # trap: rc 0 here means the migrator stopped writing atomically.
+    # A plain open('w') and json.dump never fsyncs, so it never reaches the
+    # trap. rc 0 here means the migrator stopped writing atomically.
     assert proc.returncode == 9, (
         f"child should have died at fsync, rc={proc.returncode}: {proc.stderr}"
     )
@@ -351,8 +334,8 @@ def check_migrator_page_write() -> None:
             "page json is no longer the complete pre-migration content after a "
             "mid-rewrite process death"
         )
-        # Same residue rule as every other atomic write: the never-renamed temp
-        # under the writer's own prefix, never a partial file under the real name.
+        # Same residue rule as every other atomic write. Expect a never-renamed
+        # temp under the writer prefix, never a partial file under the real name.
         assert glob.glob(os.path.join(pages_dir, ".save-Flat.json.*.tmp")), (
             f"no .save-Flat.json.*.tmp residue in {pages_dir} -- the page "
             "rewrite did not go through the shared atomic writer"

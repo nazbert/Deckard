@@ -1,24 +1,7 @@
-"""
-Unit-tier scenario (docs/presenter-migration-plan.md §7 "Clear-vs-frames
-ordering", M1): DeckController.clear() is now a seq-stamped ClearMsg
-submitted to the media thread's control queue (plan §2.1) instead of a
-direct synchronous write. This drives that queue directly (MediaPlayerThread
-.submit_control/.drain_control_queue/.next_submit_seq -- the unit-tier seam,
-tests/fixtures.py's StubDeckController is never started as a real thread) to
-check the exact predicate:
+"""Unit-tier scenario for clear-against-frames ordering.
 
-  * a frame submitted (and drained) BEFORE a Clear was even requested may
-    land before the blank -- that's just an earlier tick, not a violation;
-  * the Clear's blank write always lands;
-  * a frame submitted AFTER the Clear (same submit_seq counter, higher
-    value) is never wiped by it, and paints after the blank;
-  * a Clear submitted BEFORE any content at all (the screensaver-entry
-    pattern -- clear-then-paint) must never leave the deck sitting on a
-    blank once the content that follows actually lands.
-
-Write latency is injected so the Clear and the surrounding submits can be
-interleaved without a real background thread; the ordering assertions are on
-the journal's seq numbers, not wall-clock timing.
+DeckController.clear() submits a seq-stamped ClearMsg to the control queue.
+A frame submitted after the Clear must paint after the blank, never be wiped.
 """
 import fixtures
 from src.backend.DeckManagement.DeckController import ClearMsg
@@ -33,7 +16,7 @@ def main() -> None:
 
     deck.set_write_latency(0.01)
 
-    # --- Part 1: content, then Clear, then more content (same gen). ---
+    # Part 1. Content, then Clear, then more content, all in one generation.
     pre_clear_img = fixtures.make_native_image(fill=1)
     media_player.add_image_task(0, pre_clear_img, page=page, config_gen=gen)
     media_player.perform_media_player_tasks()  # lands on an earlier "tick"
@@ -44,7 +27,7 @@ def main() -> None:
     )
 
     # Capture the seq the way DeckController.clear() does, then queue more
-    # content for the same page/gen before draining the Clear.
+    # content for the same page and generation before draining the Clear.
     seq = media_player.next_submit_seq()
     media_player.submit_control(ClearMsg(seq=seq))
     post_clear_img = fixtures.make_native_image(fill=2)
@@ -60,8 +43,8 @@ def main() -> None:
         "frames MAY precede the blank, never the reverse"
     )
 
-    # The post-clear frame must NOT have been wiped -- it should still be
-    # queued and paint on the next media cycle.
+    # The post-clear frame must not have been wiped. It stays queued and paints
+    # on the next media cycle.
     assert 0 in media_player.image_tasks, "post-clear frame was wiped by the Clear"
 
     media_player.perform_media_player_tasks()
@@ -74,10 +57,10 @@ def main() -> None:
         "the post-clear frame must actually repaint different content, not stay blank"
     )
 
-    # --- Part 2: Clear submitted BEFORE any content exists at all
-    # (screensaver-entry pattern: caller does clear-then-paint). Content
-    # queued after must survive and the deck's final observed state for the
-    # key must be the content, never stuck on blank. ---
+    # Part 2. A Clear submitted before any content exists, which is the
+    # screensaver-entry clear-then-paint pattern. Content queued after must
+    # survive, and the final observed state for the key must be the content,
+    # never a blank.
     deck.clear_journal()
 
     seq2 = media_player.next_submit_seq()

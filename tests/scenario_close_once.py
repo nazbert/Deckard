@@ -1,22 +1,7 @@
-"""
-Scenario: DeckController.close() must be idempotent
-under CONCURRENT callers, not just sequential ones.
+"""DeckController.close() must be idempotent under concurrent callers.
 
-The `_closing` gate was an unlocked check-then-set: two teardown callers
-racing it (USB unplug thread vs. app-quit) could both read False, both set
-True, and both run the whole teardown sweep -- duplicate plugin on_removed
-hooks, double device close. The fix makes the transition a locked
-compare-and-set under a new _close_lock (sweep itself stays unlocked, since
-it can block on plugin hooks).
-
-Made deterministic with the same hook trick as scenario_touchscreen_slot_race:
-the controller's class is swapped for a subclass whose `_closing` property
-getter -- armed for exactly one read on the first closer's thread -- lets a
-SECOND close() run in the check->set window before the first proceeds. On
-the fixed code the second closer blocks on _close_lock inside that window,
-so the sweep still runs exactly once (counted via media_player.stop, one
-call per sweep). On the pre-fix code both callers pass the gate and the
-count reaches 2.
+The _closing transition is a locked compare-and-set under _close_lock. A
+one-shot read hook lets a second closer run inside the check-and-set window.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
@@ -29,8 +14,10 @@ WATCHDOG_SECONDS = 60
 
 
 def hook_closing(controller):
-    """Swap in a subclass whose _closing is a property over
-    __dict__['_closing_flag'], with a one-shot read hook on a chosen thread."""
+    """Swap in a subclass whose _closing is a property over the instance dict.
+
+    The property carries a one-shot read hook on a chosen thread.
+    """
     base = type(controller)
 
     class Hooked(base):
@@ -75,10 +62,10 @@ def main() -> None:
         second_done.set()
 
     def on_gate_read():
-        # First closer just read _closing (False) and has not yet set it:
-        # the exact check->set window. Let a second closer run here. On the
-        # fixed code it blocks on _close_lock until the first transition
-        # completes; on the pre-fix code it runs the WHOLE sweep now.
+        # The first closer just read _closing as False and has not set it yet,
+        # which is the check-and-set window. Let a second closer run here. With
+        # the lock it blocks on _close_lock until the first transition
+        # completes. Without it, the second closer runs the whole sweep now.
         t = threading.Thread(target=second_closer, name="closer-2", daemon=True)
         t.start()
         time.sleep(0.4)

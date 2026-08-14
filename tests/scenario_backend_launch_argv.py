@@ -1,35 +1,7 @@
-"""
-Scenario: plugin/action backends must be launched with an argv
-list and a real interpreter, not with a shell string built by f-string.
+"""Plugin and action backends launch with an argv list and a real interpreter.
 
-Pre-fix, both launch_backend implementations built
-
-    f". {venv_path}/bin/activate && python3 {backend_path} --port={port}"
-
-and handed it to `Popen(..., shell=True)`. A space anywhere in either path
-(a plugin under "My Plugins/", a home dir with a space) made the shell split
-it into separate words, and shell metacharacters in it were executed rather
-than passed along. `python3` also resolved through PATH, which on a native
-install is the system python -- no rpyc there, so a venv-less backend died at
-import.
-
-Both classes now go through PluginManager.build_backend_launch_command:
-
-  (a) Argv shape. Spaces and quotes survive as single argv items; a venv
-      yields {venv}/bin/python and no venv yields sys.executable; the
-      open_in_terminal debug form passes user paths as bash positional
-      parameters (nothing interpolated) and honors $DECKARD_TERMINAL as a
-      whole command prefix (terminals disagree about `--` vs `-e`).
-  (b) The ValueError contract, now shared -- PluginBase.launch_backend
-      validates too, which it never used to -- extended to a venv whose
-      bin/python does not resolve.
-  (c) End-to-end: a real stub backend under a directory whose name contains
-      a space is launched by ActionCore.launch_backend and registers back
-      over rpyc. Pre-fix this cannot work: the shell splits the path.
-  (d) wait_for_backend waits on the Event that register_backend sets instead
-      of polling backend_connection in 0.1 s steps -- so it wakes exactly on
-      registration, while `tries` keeps its meaning as a tries * 0.1 s
-      timeout budget for the plugins that pass one.
+PluginManager.build_backend_launch_command keeps spaces and quotes inside one
+argv item, picks the venv python or sys.executable, and validates the paths.
 """
 import os
 import sys
@@ -41,11 +13,10 @@ import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
 import globals as gl
 
-# launch_backend/register_backend push into these two registries; the harness
-# never builds a real PluginManager (it would drag in the whole plugin
-# ecosystem), so stand in with exactly what those paths touch. Must precede
-# the ActionCore import for the same reason scenario_plugin_backend_teardown
-# does it.
+# launch_backend and register_backend push into these two registries. The
+# harness never builds a real PluginManager, which would drag in the whole
+# plugin ecosystem, so stand in with what those paths touch. This must precede
+# the ActionCore import.
 gl.plugin_manager = types.SimpleNamespace(backends=[], backend_processes=[])
 
 from src.backend.PluginManager.ActionCore import ActionCore  # noqa: E402
@@ -103,10 +74,11 @@ def _write_stub_backend() -> str:
 
 
 def _make_venv(name: str) -> str:
-    """A venv skeleton: the directory AND a bin/python that resolves. The
-    helper checks both -- a venv dir whose bin/python is a dangling symlink
-    (a python upgrade under a native install) must fail as a ValueError with
-    a message, not as a bare FileNotFoundError out of Popen."""
+    """Build a venv skeleton with a directory and a bin/python that resolves.
+
+    The helper checks both. A dangling bin/python must fail as a ValueError
+    with a message, not as a bare FileNotFoundError out of Popen.
+    """
     venv_path = os.path.join(gl.DATA_PATH, name)
     os.makedirs(os.path.join(venv_path, "bin"), exist_ok=True)
     interpreter = os.path.join(venv_path, "bin", "python")
@@ -118,18 +90,18 @@ def _make_venv(name: str) -> str:
 def check_argv_shape(backend_path: str) -> None:
     venv_path = _make_venv("venv with spaces")
 
-    # No venv -> our own interpreter, not whatever PATH calls python3.
+    # Without a venv the command uses this interpreter, not the python3 on PATH.
     command = build_backend_launch_command(backend_path, None, 4242)
     assert command == [sys.executable, backend_path, "--port=4242"], command
     print("PASS: venv-less launch uses sys.executable and a 3-item argv")
 
-    # A venv -> that venv's interpreter.
+    # With a venv the command uses that venv's interpreter.
     command = build_backend_launch_command(backend_path, venv_path, 4242)
     assert command == [os.path.join(venv_path, "bin", "python"), backend_path, "--port=4242"], command
     print("PASS: venv launch uses {venv}/bin/python")
 
-    # The whole point: spaces and quotes stay INSIDE one argv item. A shell
-    # string would have turned each of these into several words.
+    # Spaces and quotes stay inside one argv item. A shell string would turn
+    # each of these into several words.
     assert " " in backend_path and "'" in backend_path, "test path lost its metacharacters"
     for item in command:
         assert isinstance(item, str), f"argv items must be strings: {item!r}"
@@ -138,8 +110,8 @@ def check_argv_shape(backend_path: str) -> None:
     )
     print("PASS: spaced/quoted paths survive as single argv items")
 
-    # Terminal debug form: paths ride in as bash positional parameters, so
-    # the script text itself is constant -- nothing to interpolate into.
+    # In the terminal debug form the paths ride in as bash positional
+    # parameters, so the script text stays constant with nothing to interpolate.
     os.environ.pop("DECKARD_TERMINAL", None)
     command = build_backend_launch_command(backend_path, venv_path, 4242, open_in_terminal=True)
     assert command == [
@@ -152,11 +124,10 @@ def check_argv_shape(backend_path: str) -> None:
     )
     print("PASS: terminal form passes paths as bash positional parameters")
 
-    # ... and the emulator is configurable. DECKARD_TERMINAL is the whole
-    # command prefix, because terminals disagree about how you hand them a
-    # command: gnome-terminal wants `--`, konsole/alacritty/xterm want `-e`,
-    # kitty wants a bare positional. A hardcoded `--` after the binary would
-    # work for exactly one family and fail silently for the rest.
+    # The emulator is configurable. DECKARD_TERMINAL is the whole command
+    # prefix, because terminals disagree about how to accept a command.
+    # gnome-terminal wants --, konsole, alacritty and xterm want -e, and kitty
+    # wants a bare positional. A hardcoded separator fits one family only.
     for spec, expected_prefix in (
         ("kitty", ["kitty"]),
         ("konsole -e", ["konsole", "-e"]),
@@ -171,8 +142,8 @@ def check_argv_shape(backend_path: str) -> None:
     os.environ.pop("DECKARD_TERMINAL", None)
     print("PASS: DECKARD_TERMINAL carries the terminal's own exec flag")
 
-    # An empty/blank setting must not strip the terminal off the argv (which
-    # would run bash headless and pass the whole thing to the wrong argv[0]).
+    # A blank setting must not strip the terminal off the argv, which would run
+    # bash headless and pass the whole thing to the wrong argv[0].
     os.environ["DECKARD_TERMINAL"] = "   "
     command = build_backend_launch_command(backend_path, None, 4242, open_in_terminal=True)
     assert command[:2] == ["gnome-terminal", "--"], command
@@ -181,8 +152,10 @@ def check_argv_shape(backend_path: str) -> None:
 
 
 def check_path_validation(backend_path: str) -> None:
-    """The path-validation contract, now enforced for PluginBase as well as ActionCore
-    because both go through the shared helper."""
+    """The path-validation contract, enforced for PluginBase and ActionCore.
+
+    Both go through the shared helper.
+    """
     missing = os.path.join(gl.DATA_PATH, "definitely", "not", "here.py")
 
     for bad in (None, missing):
@@ -202,9 +175,9 @@ def check_path_validation(backend_path: str) -> None:
     else:
         raise AssertionError("a missing venv_path did not raise")
 
-    # A venv dir that exists but whose bin/python doesn't resolve -- what a
+    # A venv dir that exists whose bin/python does not resolve, which is what a
     # python upgrade leaves behind on a native install. Popen would raise
-    # FileNotFoundError from inside launch_backend; the contract says
+    # FileNotFoundError from inside launch_backend. The contract says
     # ValueError, and the message must name the interpreter.
     broken_venv = os.path.join(gl.DATA_PATH, "broken venv")
     os.makedirs(os.path.join(broken_venv, "bin"), exist_ok=True)
@@ -224,10 +197,11 @@ def check_path_validation(backend_path: str) -> None:
 
 
 def _make_action() -> ActionCore:
-    """An ActionCore with only the backend-launch state wired up. __init__ is
-    bypassed deliberately (it needs a deck controller, a page and a plugin
-    base, none of which the launch contract touches) -- same approach as
-    scenario_plugin_backend_teardown."""
+    """An ActionCore with only the backend-launch state wired up.
+
+    __init__ is bypassed because it needs a deck controller, a page and a
+    plugin base, and the launch contract touches none of them.
+    """
     action = ActionCore.__new__(ActionCore)
     action.backend_connection = None
     action.backend = None
@@ -238,9 +212,10 @@ def _make_action() -> ActionCore:
 
 
 def check_end_to_end_spaced_path(backend_path: str) -> None:
-    """The lock-in property: a backend under a directory with a space in its
-    name actually launches and registers. Pre-fix the shell split the path
-    into words and the launch could not possibly succeed."""
+    """A backend under a spaced directory name launches and registers.
+
+    A shell string splits that path into words and cannot succeed.
+    """
     action = _make_action()
     try:
         action.launch_backend(backend_path)
@@ -258,15 +233,14 @@ def check_end_to_end_spaced_path(backend_path: str) -> None:
         )
         print("PASS: a backend under a spaced/quoted path launches and registers")
     finally:
-        # Grab the handle first: _release_backend_resources nulls the
-        # attribute synchronously and does the actual SIGTERM on a daemon
-        # thread, so waiting on the attribute would let this process exit
-        # while the stub is still alive -- and the stub inherits our stdout,
-        # so run_all.py would then block on the pipe until its timeout.
+        # Grab the handle first. _release_backend_resources nulls the attribute
+        # synchronously and sends SIGTERM on a daemon thread, so a wait on the
+        # attribute lets this process exit while the stub is alive. The stub
+        # inherits this stdout, so run_all.py would block on the pipe.
         process = action.backend_process
         action.on_disconnect(None)
-        # Guarded: if launch_backend itself raised, there is no process, and
-        # an AttributeError here would replace the real failure.
+        # Guarded, because launch_backend may have raised and left no process.
+        # An AttributeError here would replace the real failure.
         if process is not None:
             assert fixtures.wait_until(lambda: process.poll() is not None, timeout=15.0), (
                 "the stub backend was never terminated"
@@ -274,13 +248,14 @@ def check_end_to_end_spaced_path(backend_path: str) -> None:
 
 
 def check_wait_for_backend_event() -> None:
-    """wait_for_backend used to poll self.backend_connection in 0.1 s steps;
-    it waits on the Event that register_backend sets, so a registration that
-    lands mid-tick wakes it immediately instead of on the next tick. `tries`
-    keeps its meaning as a timeout budget of tries * 0.1 s."""
+    """wait_for_backend waits on the Event that register_backend sets.
+
+    A registration that lands mid-tick wakes it at once. tries keeps its
+    meaning as a timeout budget of tries * 0.1 s.
+    """
     action = _make_action()
 
-    # Already registered -> returns at once, not on the next tick boundary.
+    # An already registered backend returns at once, not on a tick boundary.
     action._backend_ready.set()
     start = time.monotonic()
     action.wait_for_backend()
@@ -288,7 +263,7 @@ def check_wait_for_backend_event() -> None:
     assert elapsed < 0.05, f"wait_for_backend slept {elapsed:.3f}s despite a ready backend"
     print(f"PASS: wait_for_backend returns in {elapsed*1000:.1f}ms when the backend is ready")
 
-    # Never registers -> still bounded by tries * 0.1s.
+    # A backend that never registers stays bounded by tries * 0.1 s.
     action._backend_ready.clear()
     start = time.monotonic()
     action.wait_for_backend()
@@ -296,7 +271,7 @@ def check_wait_for_backend_event() -> None:
     assert 0.2 < elapsed < 1.5, f"default wait was {elapsed:.3f}s, expected ~0.3s"
     print(f"PASS: wait_for_backend times out after {elapsed:.2f}s (tries=3 -> 0.3s)")
 
-    # A registration arriving mid-wait wakes it early -- the point of the Event.
+    # A registration that arrives mid-wait wakes the Event early.
     action._backend_ready.clear()
     threading.Timer(0.1, action._backend_ready.set).start()
     start = time.monotonic()
@@ -307,8 +282,8 @@ def check_wait_for_backend_event() -> None:
 
 
 def main() -> None:
-    # Below run_all.py's per-scenario timeout, so a stall is reported here
-    # (with a message) rather than as an opaque runner timeout.
+    # Below the per-scenario timeout of run_all.py, so a stall is reported here
+    # with a message rather than as an opaque runner timeout.
     fixtures.start_watchdog(75, label="scenario_backend_launch_argv")
 
     backend_path = _write_stub_backend()

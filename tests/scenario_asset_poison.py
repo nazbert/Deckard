@@ -1,43 +1,7 @@
-"""
-Poison-file resilience for the asset import -> thumbnail backend.
+"""Poison-file resilience for the asset import and thumbnail backend.
 
-An unreadable or corrupt imported file used to raise out of
-MediaManager.generate_thumbnail / get_thumbnail and
-AssetManagerBackend.add / fill_missing_thumbnails, killing the import
-worker thread (and, via fill_missing_thumbnails in __init__, app startup)
-and leaving the Custom Assets page spinning forever.
-
-This scenario proves, headless (no GTK widgets are built):
-
-  1. generate_thumbnail never raises for any poison shape -- garbage .png,
-     0-byte .png, truncated-but-valid-header .png (the lazy Image.open
-     case), garbage .gif, garbage .svg, 0-byte .mp4, garbage .mp4, and a
-     chmod-000 unreadable file -- and returns the tagged fallback image.
-  2. get_thumbnail never raises AND never persists the fallback into the
-     thumbnail cache (a corrupt file must stay retryable), while a valid
-     file still gets cached.
-  3. (rev1) A poisoned CACHE entry must not wedge a VALID source file:
-     get_thumbnail drops the bad entry and regenerates from source.
-  4. AssetManagerBackend.add() survives every poison file without raising
-     and REFUSES it: undecodable/unreadable files return None
-     before anything is copied into the library, and a VALID asset added
-     AFTER the poison batch still lands -- one poison file must not block
-     the batch. (The corrupt-at-add UI contract is pinned in
-     scenario_asset_add_corrupt.)
-  5. (rev1) A failed thumbnail generation for an asset ALREADY IN THE
-     LIBRARY is RETRYABLE: once the source becomes valid, the next
-     fill_missing_data produces a real thumbnail (the old
-     fallback-to-asset-path wedged it forever). The gate is import-only:
-     library entries are never auto-deleted for failing to decode.
-  6. fill_missing_data() + remove_invalid_data() + a full backend re-init
-     over a poisoned json (null thumbnail, null internal-path -- the app
-     startup path) do not raise; the null-internal-path entry is dropped.
-  7. (rev1) copy_asset failures (read-only Assets dir) fail soft: add()
-     returns None instead of killing the import worker thread.
-
-The GTK half (Preview.set_image broken-image marker, Chooser.build()'s
-guaranteed set_loading(False)) is not scenario-testable headless -- see the
-MR's manual test steps.
+An unreadable or corrupt file must never raise out of generate_thumbnail,
+get_thumbnail, add() or fill_missing_data. No library entry is ever deleted.
 """
 import fixtures  # noqa: F401  (must be first -- see fixtures.py docstring)
 
@@ -91,9 +55,9 @@ def make_poison_files() -> dict:
         "garbage_mp4": write_bytes("garbage.mp4", b"\x00\x01\x02\x03 definitely not ffmpeg-decodable"),
     }
 
-    # Truncated png: valid magic + IHDR so Image.open() succeeds, but the
-    # pixel data is cut off -- the decode only fails at .load() time. This is
-    # exactly the lazy-decode hole generate_thumbnail's forced .load() closes.
+    # A truncated PNG has valid magic and IHDR, so Image.open() succeeds. The
+    # pixel data is cut, so the decode fails at .load() time. The forced
+    # .load() in generate_thumbnail closes that lazy-decode hole.
     valid_tmp = os.path.join(POISON_DIR, "_tmp_full.png")
     fixtures.make_test_png(valid_tmp, size=(128, 128))
     with open(valid_tmp, "rb") as f:
@@ -101,11 +65,11 @@ def make_poison_files() -> dict:
     files["truncated_png"] = write_bytes("truncated.png", full[: max(64, len(full) // 2)])
     os.remove(valid_tmp)
 
-    # Unreadable file: valid content, no read permission.
+    # An unreadable file has valid content and no read permission.
     unreadable = fixtures.make_test_png(os.path.join(POISON_DIR, "unreadable.png"), size=(32, 32))
     os.chmod(unreadable, 0o000)
     if os.access(unreadable, os.R_OK):
-        # e.g. running as root -- permissions don't bite; drop the case.
+        # Running as root, permissions do not bite, so drop the case.
         os.chmod(unreadable, 0o644)
         os.remove(unreadable)
         unreadable = None
@@ -131,7 +95,7 @@ def check_generate_thumbnail_never_raises(files: dict) -> None:
 def check_get_thumbnail_no_cache_poison(files: dict) -> None:
     cache_dir = os.path.join(gl.DATA_PATH, "cache", "thumbnails")
 
-    # Poison file: image back, nothing cached.
+    # A poison file gives an image back and caches nothing.
     path = files["garbage_png"]
     thumb = gl.media_manager.get_thumbnail(path)  # must not raise
     assert isinstance(thumb, Image.Image)
@@ -141,14 +105,14 @@ def check_get_thumbnail_no_cache_poison(files: dict) -> None:
         "thumbnail cache (the file must stay retryable)"
     )
 
-    # Unreadable file: sha256() itself raises inside get_thumbnail -- still
-    # must come back as an image.
+    # For an unreadable file sha256() itself raises inside get_thumbnail, and
+    # the call must still come back as an image.
     if files["unreadable_png"] is not None:
         thumb = gl.media_manager.get_thumbnail(files["unreadable_png"])
         assert isinstance(thumb, Image.Image)
 
-    # Valid file: still decoded AND cached (the guard must not break the
-    # happy path).
+    # A valid file is still decoded and cached. The guard must not break the
+    # working path.
     valid = fixtures.make_test_png(os.path.join(POISON_DIR, "valid_cache_probe.png"), size=(64, 64))
     thumb = gl.media_manager.get_thumbnail(valid)
     assert isinstance(thumb, Image.Image)
@@ -160,31 +124,32 @@ def check_get_thumbnail_no_cache_poison(files: dict) -> None:
 
 
 def check_cache_poison_recovery() -> None:
-    """rev1 review finding 1: a poisoned/truncated FS-cache entry (e.g. left
-    by a crash mid-write) must not permanently wedge a VALID source file to
-    the broken placeholder -- get_thumbnail must drop the bad entry and
-    regenerate from the source."""
+    """A poisoned cache entry must not wedge a valid source file.
+
+    A crash mid-write leaves an undecodable entry. get_thumbnail must drop it
+    and regenerate from the source.
+    """
     cache_dir = os.path.join(gl.DATA_PATH, "cache", "thumbnails")
 
     valid = fixtures.make_test_png(os.path.join(POISON_DIR, "cache_recovery_probe.png"), size=(96, 96))
     cache_path = os.path.join(cache_dir, f"{sha256(valid)}.png")
 
-    # Prime the cache, then poison the cached entry (undecodable garbage --
-    # what a crash/disk-full mid-save used to manufacture).
+    # Prime the cache, then poison the cached entry with undecodable garbage,
+    # which is what a crash or a full disk mid-save leaves.
     first = gl.media_manager.get_thumbnail(valid)
     assert not first.info.get("sc_broken")
     assert os.path.exists(cache_path)
     with open(cache_path, "wb") as f:
         f.write(b"poisoned cache entry")
 
-    # Next call must return the REAL thumbnail, not the placeholder...
+    # The next call must return the real thumbnail, not the placeholder.
     second = gl.media_manager.get_thumbnail(valid)
     assert isinstance(second, Image.Image)
     assert not second.info.get("sc_broken"), (
         "a poisoned cache entry must not wedge a valid source file to the "
         "broken placeholder -- it must be dropped and regenerated"
     )
-    # ...and the poison must be gone: the entry was re-written and decodes.
+    # The poison must be gone, because the entry was rewritten and decodes.
     with Image.open(cache_path) as img:
         img.load()
 
@@ -198,9 +163,9 @@ def check_backend_add_batch_continues(files: dict) -> AssetManagerBackend:
     backend = AssetManagerBackend()
     gl.asset_manager_backend = backend
 
-    # Every undecodable shape: add() must not raise, must REFUSE with None
-    # and must leave the internal Assets dir untouched (the gate
-    # runs before the copy -- no partial import).
+    # For every undecodable shape add() must not raise, must refuse with None
+    # and must leave the internal Assets dir untouched. The gate runs before the
+    # copy, so no partial import lands.
     for name in ("garbage_png", "empty_mp4", "truncated_png", "unreadable_png"):
         path = files[name]
         if path is None:
@@ -216,7 +181,7 @@ def check_backend_add_batch_continues(files: dict) -> AssetManagerBackend:
             f"{name}: refused file was still copied into the library: {copied}"
         )
 
-    # THE point: a valid asset AFTER the poison batch still lands.
+    # A valid asset after the poison batch still lands.
     valid = fixtures.make_test_png(os.path.join(POISON_DIR, "valid_after_poison.png"), size=(48, 48))
     files["valid_after_poison"] = valid
     valid_id = backend.add(valid)
@@ -234,12 +199,11 @@ def check_backend_add_batch_continues(files: dict) -> AssetManagerBackend:
 
 
 def check_basename_collision_still_copied(backend: AssetManagerBackend) -> None:
-    """rev1 review finding 3: the old `file_in_dir(basename, DATA_PATH/cache)`
-    skip could leave internal-path pointing at the user's ORIGINAL file
-    outside the app data dir -- which remove_asset_by_id() os.remove()s,
-    deleting the user's source. A file whose basename collides with a
-    top-level cache/ entry (here: the 'thumbnails' dir) must still be copied
-    into the internal Assets dir."""
+    """A basename that collides with a top-level cache entry is still copied.
+
+    A skipped copy leaves internal-path at the user's original file outside the
+    app data dir, which remove_asset_by_id() then deletes.
+    """
     outside_dir = tempfile.mkdtemp(prefix="sc_outside_")
     try:
         os.makedirs(os.path.join(gl.DATA_PATH, "cache", "thumbnails"), exist_ok=True)
@@ -260,16 +224,12 @@ def check_basename_collision_still_copied(backend: AssetManagerBackend) -> None:
 
 
 def check_broken_thumbnail_retry(backend: AssetManagerBackend) -> None:
-    """rev1 review finding 2: a thumbnail generation that fails once (e.g.
-    file still downloading, network mount hiccup) must be retried once the
-    source is valid -- the old fallback returned an existing path, which
-    fill_missing_thumbnails' exists-check then skipped at every boot.
+    """A thumbnail generation that fails once must be retried.
 
-    An undecodable file can no longer ENTER via add(), but a
-    library entry can still go bad after import (interrupted write, flaky
-    mount, entries from older versions) -- manufacture that state directly:
-    a corrupt internal file with thumbnail=None, the shape a previously
-    failed run leaves in Assets.json."""
+    A file still downloading or a flaky mount fails once. The retry must run
+    when the source turns valid, so the failed run must leave thumbnail None.
+    A corrupt library entry is never deleted.
+    """
     os.makedirs(INTERNAL_ASSETS_DIR, exist_ok=True)
     internal = os.path.join(INTERNAL_ASSETS_DIR, "transient.mp4")
     with open(internal, "wb") as f:
@@ -286,22 +246,19 @@ def check_broken_thumbnail_retry(backend: AssetManagerBackend) -> None:
     backend.append(asset)
     backend.save_json()
 
-    # Still corrupt: the boot-time pass must keep the thumbnail None
-    # (retryable), never wedge it to some existing path -- and the
-    # import gate must NOT delete the library entry.
+    # While the file stays corrupt the boot-time pass must keep the thumbnail
+    # None, so the retry stays possible, and must not delete the entry.
     backend.fill_missing_data()
     assert asset["thumbnail"] is None, "generation failure must leave thumbnail unset"
     assert backend.get_by_id(asset["id"]) is not None, (
         "an undecodable LIBRARY entry must never be dropped (transient-failure policy)"
     )
 
-    # THE data-loss pin, while the entry is still corrupt-but-present: the
-    # FULL startup chain (load_json -> fill_missing_data ->
-    # remove_invalid_data, what main.py runs) must keep both the entry and
-    # the FILE. Upstream's version of this gate os.remove()d
-    # undecodable files right here -- the exact policy violation this
-    # scenario exists to catch. (fill_missing_data alone has no removal
-    # path, so only the full chain makes this assertion meaningful.)
+    # The data-loss pin, while the entry is corrupt and present. The full
+    # startup chain that main.py runs, load_json then fill_missing_data then
+    # remove_invalid_data, must keep both the entry and the file.
+    # fill_missing_data alone has no removal path, so only the full chain makes
+    # this assertion mean anything.
     reborn = AssetManagerBackend()
     assert reborn.get_by_id(asset["id"]) is not None, (
         "startup re-init must never drop an undecodable-but-present "
@@ -313,7 +270,7 @@ def check_broken_thumbnail_retry(backend: AssetManagerBackend) -> None:
         "user their asset"
     )
 
-    # The source becomes valid (download finished / mount back).
+    # The source turns valid when the download finishes or the mount comes back.
     make_test_video(internal)
 
     backend.fill_missing_data()  # the boot-time retry
@@ -329,11 +286,9 @@ def check_broken_thumbnail_retry(backend: AssetManagerBackend) -> None:
 
 
 def check_fill_missing_and_reinit(backend: AssetManagerBackend, files: dict) -> None:
-    # Null thumbnail on a VALID image asset (poison left by a previously
-    # failed run; os.path.exists(None) used to TypeError out of __init__)
-    # must be repaired. (The still-corrupt-keeps-None half now lives in
-    # check_broken_thumbnail_retry -- corrupt files can't enter
-    # via add() anymore.)
+    # A null thumbnail on a valid image asset is poison from a failed run, and
+    # os.path.exists(None) raises TypeError out of __init__. The pass must
+    # repair it. check_broken_thumbnail_retry covers the still-corrupt half.
     valid_asset = backend.get_by_sha256(sha256(files["valid_after_poison"]))
     valid_asset["thumbnail"] = None
 
@@ -343,10 +298,10 @@ def check_fill_missing_and_reinit(backend: AssetManagerBackend, files: dict) -> 
         "fill_missing_data must repair a null thumbnail for a decodable-type asset"
     )
 
-    # Poison entry with a null internal-path: the FULL __init__ chain
-    # (load_json -> fill_missing_data -> remove_invalid_data -- the app
-    # startup path, main.py) must survive it and drop the entry.
-    # remove_invalid_data used to TypeError on os.path.exists(None).
+    # Poison entry with a null internal-path. The full __init__ chain that
+    # main.py runs, load_json then fill_missing_data then remove_invalid_data,
+    # must survive it and drop the entry. os.path.exists(None) raises
+    # TypeError inside remove_invalid_data.
     n_valid = len(backend)
     backend.append({
         "name": "null-internal-path-poison",
@@ -371,9 +326,11 @@ def check_fill_missing_and_reinit(backend: AssetManagerBackend, files: dict) -> 
 
 
 def check_copy_failure_soft(backend: AssetManagerBackend) -> None:
-    """rev1 review finding 5: copy_asset failures (dest permissions, disk
-    full, file deleted between hash and copy) must fail soft with None, not
-    raise out of the import worker thread."""
+    """A copy_asset failure must fail soft with None.
+
+    Destination permissions, a full disk or a file deleted between hash and
+    copy must not raise out of the import worker thread.
+    """
     os.makedirs(INTERNAL_ASSETS_DIR, exist_ok=True)
     probe = fixtures.make_test_png(os.path.join(POISON_DIR, "copy_failure_probe.png"), size=(24, 24))
 
@@ -402,7 +359,7 @@ def main() -> None:
     check_fill_missing_and_reinit(backend, files)
     check_copy_failure_soft(backend)
 
-    # Restore perms so fixtures' atexit rmtree can clean the temp dir.
+    # Restore the permissions, so the atexit rmtree of fixtures can clean up.
     if files["unreadable_png"] is not None:
         os.chmod(files["unreadable_png"], 0o644)
 

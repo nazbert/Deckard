@@ -1,31 +1,7 @@
-"""
-Regression test for "AssetManager window reuse leaks stale tab/drill-in and
-stale search filter on reopen".
+"""Reopening the AssetManager window must clear the previous session state.
 
-The AssetManager window is reused across opens (deliver_selection hides it,
-P4.2). Before the fix, show_for_path reset nothing: the custom-asset branch
-never switched the top tab back to "custom-assets" (only the icon branch did),
-and no search entry was ever cleared -- so reopening for a custom asset after
-drilling into a pack kept showing the old drilled grid, and a leftover filter
-could hide the very asset being pre-selected.
-
-Contract under test (src/windows/AssetManager/AssetManager.py):
-  * show_for_path() calls _reset_session_state(), which backs EVERY pack stack
-    out of its drilled-in chooser (set_visible_child_name("pack-chooser")) and
-    clears EVERY non-empty search entry;
-  * the custom-asset branch of AssetChooser.show_for_path sets the top-level
-    visible child to "custom-assets";
-  * an EMPTY search entry is left untouched (set_text fires search-changed,
-    and CustomAssetChooser's handler dereferences widgets its background
-    build() may not have attached on a truly fresh window).
-
-Drives the REAL AssetManager window (all four choosers, real Gtk.Stacks, real
-ChooserPage search entries). The pack managers / asset backend are stubbed to
-hold no data so the threaded builds iterate empty and finish quickly; we pump
-the GLib loop until every build reports finished before asserting.
-
-Needs a display (it builds real Adw/Gtk widgets); prints SKIP and exits 0 when
-GTK can't initialize, like a headless CI box.
+show_for_path() backs every pack stack out of its drilled-in chooser and
+clears every non-empty search entry. An empty entry stays untouched.
 """
 
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
@@ -33,9 +9,10 @@ import globals as gl
 
 
 def _pump(context, predicate, watchdog, budget=10.0):
-    """Iterate the GLib main loop until predicate() is true (the threaded
-    chooser builds marshal their final steps back via GLib.idle_add), or the
-    budget elapses."""
+    """Iterate the GLib main loop until predicate() is true, or the budget ends.
+
+    The threaded chooser builds marshal their final steps back by GLib.idle_add.
+    """
     import time
     deadline = time.monotonic() + budget
     while not predicate():
@@ -58,9 +35,9 @@ def main() -> None:
         return
     Adw.init()
 
-    # --- Stub the data providers: no packs, no custom assets. The window's
-    #     structure (stacks + search entries) is what the reset walks; the
-    #     content builds just need to iterate empty and finish. ---
+    # Stub the data providers with no packs and no custom assets. The reset
+    # walks the window structure, the stacks and search entries, so the content
+    # builds only need to iterate empty and finish.
     class EmptyPackManager:
         def get_icon_packs(self): return {}
         def get_wallpaper_packs(self): return {}
@@ -81,8 +58,8 @@ def main() -> None:
     gl.lm = StubLM()
     gl.app = None
 
-    # Real SettingsManager rooted at the isolated harness DATA_PATH (the
-    # custom-asset build reads settings/ui/AssetManager.json on load_defaults).
+    # Real SettingsManager rooted at the isolated harness DATA_PATH. The
+    # custom-asset build reads settings/ui/AssetManager.json on load_defaults.
     if getattr(gl, "settings_manager", None) is None:
         from src.backend.SettingsManager import SettingsManager
         gl.settings_manager = SettingsManager()
@@ -94,8 +71,8 @@ def main() -> None:
     am = AssetManager(main_window=main_window)
     chooser = am.asset_chooser
 
-    # Wait for all four threaded content builds to finish so their search
-    # entries and stacks are fully wired before we manipulate them.
+    # Wait for the four threaded content builds, so their search entries and
+    # stacks are wired before the checks manipulate them.
     def builds_done():
         return (
             getattr(chooser.custom_asset_chooser, "build_finished", False)
@@ -103,10 +80,8 @@ def main() -> None:
         )
     _pump(context, builds_done, fixtures)
 
-    # ------------------------------------------------------------------
-    # 1. Simulate a previous session that drilled into every pack stack and
-    #    left stale search filters + a non-custom top tab.
-    # ------------------------------------------------------------------
+    # 1. Model a previous session that drilled into every pack stack and left
+    #    stale search filters and a non-custom top tab.
     chooser.set_visible_child_name("icon-packs")
     chooser.icon_pack_chooser.set_visible_child_name("icon-chooser")
     chooser.wallpaper_pack_chooser.set_visible_child_name("wallpaper-chooser")
@@ -120,10 +95,8 @@ def main() -> None:
     assert chooser.get_visible_child_name() != "custom-assets"
     assert chooser.icon_pack_chooser.get_visible_child_name() == "icon-chooser"
 
-    # ------------------------------------------------------------------
-    # 2. Reopen for a custom asset. show_for_path must reset navigation +
-    #    filters and switch to the custom-assets tab.
-    # ------------------------------------------------------------------
+    # 2. Reopen for a custom asset. show_for_path must reset navigation and
+    #    filters, and switch to the custom-assets tab.
     am.show_for_path("/some/custom/asset.png")
 
     assert chooser.get_visible_child_name() == "custom-assets", (

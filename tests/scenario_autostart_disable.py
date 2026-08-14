@@ -1,28 +1,7 @@
-"""
-Regression test for "disabling autostart can asynchronously re-install a
-broken flatpak-style autostart entry".
+"""Disabling autostart must win over the racing async portal callback.
 
-The state machine under test (autostart.py):
-
-  * setup_autostart(False) removes ~/.config/autostart/Deckard.desktop
-    synchronously, but the portal request it also fires completes LATER, and
-    its failure callback used to call setup_autostart_desktop_entry() with the
-    defaults (enable=True, native=False) -- re-copying the flatpak .desktop
-    (exec'ing /app/bin/launch.sh, broken outside the sandbox) right back after
-    the removal. Disable must be authoritative over that racing async writer.
-
-  * Native installs must never go through the portal at all (the portal is
-    flatpak plumbing; on native it just fails asynchronously and triggered the
-    same broken fallback), and the entry they install must be the NATIVE
-    desktop file, not the flatpak one.
-
-  * Calls are serialized by generation: a stale request's callback (e.g. an
-    enable superseded by a disable) must not clobber the newer call's state.
-
-The portal is replaced by a fake whose finish() always fails, so the scenario
-can deliver the async failure at a chosen point -- exactly the race the issue
-describes. HOME is redirected to a temp dir so ~/.config/autostart is never
-the real one.
+A portal failure callback must not re-install the flatpak entry after a
+disable. A native install never calls the portal and installs the native entry.
 """
 import os
 import tempfile
@@ -34,9 +13,11 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
 class FakeXdp:
-    """Stands in for gi.repository.Xdp: records request_background calls and
-    lets the scenario fire their async callbacks by hand, with a finish()
-    that always fails -- the exact path that used to re-install the entry."""
+    """Stands in for gi.repository.Xdp and records request_background calls.
+
+    The scenario fires their async callbacks by hand. finish() always fails,
+    which is the path that re-installs the entry.
+    """
 
     class BackgroundFlags:
         AUTOSTART = "autostart"
@@ -71,7 +52,7 @@ def main() -> None:
     os.environ["HOME"] = home  # read at call time by setup_autostart_desktop_entry
     path = os.path.join(home, ".config", "autostart", "Deckard.desktop")
 
-    # --- 1. flatpak: disable, then the async portal failure lands -------
+    # 1. Flatpak disable, then the async portal failure lands.
     autostart.is_flatpak = lambda: True
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
@@ -91,7 +72,7 @@ def main() -> None:
     )
     print("PASS: flatpak disable survives the async portal failure")
 
-    # --- 2. flatpak: stale enable callback vs newer disable -------------
+    # 2. Flatpak stale enable callback against a newer disable.
     autostart.setup_autostart(True)
     enable_portal = FakeXdp.Portal.instances[-1]
     _, enable_callback = enable_portal.requests[-1]
@@ -104,7 +85,7 @@ def main() -> None:
     )
     print("PASS: stale enable callback superseded by newer disable")
 
-    # --- 3. native: no portal at all; correct (native) entry content ----
+    # 3. Native install uses no portal, and installs the native entry.
     autostart.is_flatpak = lambda: False
     FakeXdp.Portal.instances.clear()
 
@@ -122,7 +103,7 @@ def main() -> None:
     assert not os.path.exists(path), "native disable must remove the entry"
     print("PASS: native path never touches the portal; entry content is native")
 
-    # --- 4. legacy pre-rename autostart entries removed on every setup ---
+    # 4. legacy pre-rename autostart entries are removed on every setup.
     autostart_dir = os.path.join(home, ".config", "autostart")
     os.makedirs(autostart_dir, exist_ok=True)
     for legacy in autostart.LEGACY_AUTOSTART_NAMES:

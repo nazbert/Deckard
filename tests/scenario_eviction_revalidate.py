@@ -1,25 +1,7 @@
-"""
-Scenario: page-cache eviction must not gut a live page.
+"""Page-cache eviction must not gut a live page.
 
-clear_old_cached_pages snapshotted evictable pages under _pages_lock, then
-ran clear_action_objects() + pop OUTSIDE it, with three windows:
-
-  1. A controller's screensaver-pending page (non-active and unheld,
-     stashed for the whole screensaver duration) was invisible to the guards:
-     evicted, ScreenSaver.hide() then loaded a page whose every action was
-     dead.
-  2. Activation TOCTOU: a page activated between the snapshot and the
-     out-of-lock gutting got its actions torn down while ACTIVE (made
-     deterministic here: the first eviction's clear_action_objects hook
-     activates the second candidate).
-  3. Gut-then-pop meant a concurrent get_page() could still be handed the
-     gutted object before the pop. Post-fix the pop is INSIDE the lock and
-     BEFORE the teardown, so a get_page() during the teardown gap mints a
-     fresh Page (via the single-flight builder) instead of the corpse.
-
-Post-fix: per-item re-validation under _pages_lock (skip if replaced,
-re-marked, active anywhere, or screensaver-pending) and pop-before-teardown.
-Plus a non-vacuous check: genuinely stale pages still get evicted.
+clear_old_cached_pages re-validates each item under _pages_lock and pops
+before the teardown, so a concurrent get_page() mints a fresh Page.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
@@ -47,13 +29,13 @@ def fill_cache(controller, n: int, prefix: str):
 
 
 def actions_alive(page) -> bool:
-    # clear_action_objects() empties every state dict; our seeded pages have
-    # no actions, so use a sentinel injected into action_objects instead.
+    # clear_action_objects() empties every state dict. The seeded pages carry no
+    # actions, so use a sentinel injected into action_objects instead.
     return bool(page.action_objects.get("sentinel"))
 
 
 def arm(page):
-    # Real schema depth: type -> json_identifier -> state -> {index: action}.
+    # Real schema depth is type, json_identifier, state, then index to action.
     page.action_objects["sentinel"] = {"0x0": {0: {0: object()}}}
 
 
@@ -65,7 +47,7 @@ def main() -> int:
     gl.deck_manager.deck_controller.append(controller)
     gl.page_manager.max_pages = 3
 
-    # --- 1) screensaver-pending page survives eviction pressure ---
+    # 1. A screensaver-pending page survives eviction pressure.
     pages = fill_cache(controller, 6, "Evict")
     pending = pages[0]  # oldest -> first eviction candidate
     arm(pending)
@@ -80,15 +62,15 @@ def main() -> int:
         return 1
     print("PASS: screensaver-pending page survives eviction")
 
-    # Non-vacuous: pressure was real -- some page DID get evicted.
+    # Non-vacuous. The pressure was real, so some page did get evicted.
     cached = gl.page_manager.pages[controller]
-    if len(cached) > gl.page_manager.max_pages + 1:  # +1: pending kept
+    if len(cached) > gl.page_manager.max_pages + 1:  # plus one for the pending page
         print(f"FAIL: eviction did nothing ({len(cached)} cached, "
               f"max {gl.page_manager.max_pages}) -- guard is vacuous")
         return 1
     print("PASS: stale pages still get evicted under pressure")
 
-    # --- 2) activation between snapshot and teardown (deterministic) ---
+    # 2. Activation between the snapshot and the teardown, made deterministic.
     controller2 = StubController("evict-2")
     gl.deck_manager.deck_controller.append(controller2)
     pages2 = fill_cache(controller2, 6, "Toctou")
@@ -100,8 +82,8 @@ def main() -> int:
     real_clear = victim_a.clear_action_objects
 
     def clear_and_activate():
-        # Runs during the eviction loop, outside the lock: the page-switch
-        # that the snapshot could not see.
+        # Runs during the eviction loop, outside the lock. This is the page
+        # switch the snapshot could not see.
         controller2.active_page = victim_b
         real_clear()
 
@@ -115,14 +97,11 @@ def main() -> int:
         return 1
     print("PASS: page activated mid-eviction is skipped by re-validation")
 
-    # --- 3) pop-before-teardown: a get_page() during the teardown gap gets
-    # a FRESH Page, not the gutted corpse (window 3, deterministic) ---
-    # The pop happens INSIDE the lock BEFORE clear_action_objects(), so while
-    # the corpse is being torn down (outside the lock) the cache slot is
-    # already empty -- a concurrent get_page() must mint a new Page via the
-    # single-flight builder rather than hand back the object being gutted.
-    # Made deterministic by having the victim's teardown itself perform that
-    # get_page() and capture what it receives.
+    # 3. The pop happens inside the lock before clear_action_objects(), so while
+    # the corpse is torn down outside the lock the cache slot is already empty.
+    # A concurrent get_page() must mint a new Page through the single-flight
+    # builder rather than hand back the object being gutted. Made deterministic
+    # by having the victim teardown perform that get_page() and capture it.
     controller3 = StubController("evict-3")
     gl.deck_manager.deck_controller.append(controller3)
     pages3 = fill_cache(controller3, 6, "Refetch")
@@ -134,8 +113,8 @@ def main() -> int:
     real_clear3 = victim.clear_action_objects
 
     def clear_and_refetch():
-        # Runs during the eviction loop, outside the lock, AFTER the pop: a
-        # concurrent get_page() for the same (controller, path) lands here.
+        # Runs during the eviction loop, outside the lock and after the pop. A
+        # concurrent get_page() for the same controller and path lands here.
         captured["page"] = gl.page_manager.get_page(victim_path, controller3)
         real_clear3()
 
@@ -151,8 +130,8 @@ def main() -> int:
         print("FAIL(3): a get_page() during the teardown gap was handed the "
               "gutted corpse -- pop must precede clear_action_objects()")
         return 1
-    # And the fresh object is usable (not itself gutted): a newly minted Page
-    # has its own action_objects dict, untouched by the victim's teardown.
+    # The fresh object is usable and not itself gutted. A newly minted Page has
+    # its own action_objects dict, untouched by the victim teardown.
     arm(refetched)
     if not actions_alive(refetched):
         print("FAIL(3): the freshly minted Page is not usable")

@@ -1,17 +1,7 @@
-"""
-Integration-tier scenario (phase 2): the GIF-background RAM
-budget. A GIF whose decoded footprint (n_frames x canvas_w x canvas_h x 4)
-would exceed GIF_BG_BUDGET_MB must NOT be decoded into RAM: the provider
-raises pre-decode and the background falls back to the EXISTING cv2/mp4
-path (opaque, source-fps -- today's behavior) with exactly one logged
-warning. Never an OOM, never a crash, playback still runs.
+"""A GIF background over GIF_BG_BUDGET_MB must not decode into RAM.
 
-Also pins the keep-check interaction: re-setting the same over-budget path
-keeps the loaded cv2 fallback (no second decode attempt, no second
-warning) -- the "one warning per construction" contract.
-
-The fixture is a many-frame TINY GIF (the source size is irrelevant: the
-estimate is against the fitted canvas size), generated with PIL at runtime.
+The provider raises pre-decode and the background falls back to the cv2 mp4
+path with one logged warning. Re-setting the same path keeps that fallback.
 """
 import os
 
@@ -45,9 +35,9 @@ def main() -> None:
     try:
         from src.backend.DeckManagement.DeckController import GIF_BG_BUDGET_MB
 
-        # Frame count derived from the REAL canvas geometry (mirrors the
-        # provider's estimate) so the fixture is over budget on any deck
-        # layout the harness runs with -- no hardcoded frame count to rot.
+        # The frame count derives from the real canvas geometry, which mirrors
+        # the provider estimate, so the fixture is over budget on any deck
+        # layout the harness runs with and no hardcoded count can rot.
         key_rows, key_cols = controller.deck.key_layout()
         key_w, key_h = controller.deck.key_image_format()['size']
         spacing_x, spacing_y = controller.key_spacing
@@ -76,17 +66,17 @@ def main() -> None:
                 f"{len(over_budget_warnings)}: {over_budget_warnings}"
             )
 
-            # Playback still runs on the fallback: the media tick publishes
-            # tiles (alpha placeholders while the cv2 cache builds count --
-            # the contract is "no crash, playback machinery alive").
+            # Playback still runs on the fallback. The media tick publishes
+            # tiles, and alpha placeholders while the cv2 cache builds count,
+            # because the contract is a live playback machinery with no crash.
             assert wait_until(
                 lambda: len(controller.background.tiles) == controller.deck.key_count()
                 and all(t is not None for t in controller.background.tiles),
                 timeout=5,
             ), "the cv2 fallback never published a full tile set"
 
-            # Keep-check: the same path again KEEPS the loaded fallback --
-            # no second decode attempt, no second warning.
+            # The keep-check. The same path again keeps the loaded fallback,
+            # with no second decode attempt and no second warning.
             controller.background.set_from_path(gif_path)
             assert controller.background.video is video, (
                 "re-setting the same over-budget GIF must keep the loaded "

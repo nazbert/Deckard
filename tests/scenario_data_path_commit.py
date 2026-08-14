@@ -1,19 +1,7 @@
-"""
-Regression test for "data-path setting persisted on every keystroke".
+"""The data-path setting must persist on an explicit apply, not per keystroke.
 
-DataPathGroup used to write static settings on notify::text -- every character
-typed. An abandoned half-typed edit (or a crash mid-edit) then became the
-data path globals.py adopts on the next launch, makedirs'ing garbage and
-booting an empty profile.
-
-Contract under test (src/windows/Settings/Settings.py DataPathGroup):
-  * text changes alone must NOT persist anything;
-  * an explicit apply (Enter / the check button) persists -- after validation;
-  * an invalid path (relative, unwritable) is refused, nothing is persisted;
-  * the previous value is kept recoverable as "data-path-previous".
-
-Needs a display (it builds real Adw widgets); prints SKIP and exits 0 when
-GTK can't initialize, like a headless CI box.
+DataPathGroup validates before it persists, refuses an invalid path, and
+keeps the previous value as data-path-previous. Needs a display.
 """
 import os
 
@@ -37,8 +25,10 @@ def main() -> None:
     saves: list[dict] = []
 
     class RecordingSettingsManager:
-        """Only the two methods DataPathGroup dereferences. Returns a fresh
-        dict per read, like the real load_settings_from_file."""
+        """Only the two methods DataPathGroup dereferences.
+
+        Returns a fresh dict per read, like the real load_settings_from_file.
+        """
 
         def __init__(self):
             self._static = {"data-path": gl.DATA_PATH}
@@ -57,7 +47,7 @@ def main() -> None:
     group = DataPathGroup(settings=object())
     entry = group.data_path
 
-    # --- 1. typing must not persist ---------------------------------------
+    # 1. Typing must not persist.
     for partial in ["/", "/t", "/tm", "/tmp", "/tmp/half-typed"]:
         entry.set_text(partial)
     assert not saves, (
@@ -66,7 +56,7 @@ def main() -> None:
     )
     print("PASS: keystrokes alone persist nothing")
 
-    # --- 2. explicit apply persists (valid path), old value recoverable ---
+    # 2. An explicit apply persists a valid path and keeps the old value.
     new_dir = os.path.join(gl.DATA_PATH, "relocated-data")
     entry.set_text(new_dir)
     assert not saves, "set_text must still not persist"
@@ -79,7 +69,7 @@ def main() -> None:
     assert os.path.isdir(new_dir), "validation should have created the new dir"
     print("PASS: apply persists the validated path and keeps the old one recoverable")
 
-    # --- 3. invalid paths are refused --------------------------------------
+    # 3. Invalid paths are refused.
     saves.clear()
     for bogus in ["relative/not-absolute", "", "/proc/definitely-not-writable"]:
         entry.set_text(bogus)

@@ -1,41 +1,15 @@
-"""One contender, driven from its own process, for scenario_instance_gate.
+"""One contender process for scenario_instance_gate.
 
-NOT a scenario (no ``scenario_`` prefix, so the runner does not glob it): it is
-the other process a uniqueness test needs. Registration is one-shot per
-process and the daemon answers a second request for a name the SAME connection
-already owns with ALREADY_OWNER -- so two GApplications inside one interpreter
-cannot contend, and every leg about contention has to be several processes.
-
-Configured entirely through the environment, because the data-dir isolation
-below rewrites argv before anything can parse it. DECKARD_GATE_DATA is
-mandatory and points at a directory the parent owns: a child that fell back to
-the real data path would create and write the user's own Deckard directory.
-
-Modes:
-  establish       -- run the gate and report the verdict (and the NON_UNIQUE
-                     flag); a primary holds the name for DECKARD_GATE_HOLD
-                     seconds so contenders decide while it still owns it.
-  activate        -- run the gate, then hand off the way a second launch does.
-  primary-quit    -- become the primary and answer the "quit" action the way
-                     the app does: end the process inside the handler, so the
-                     reply never arrives and the name drops with the process.
-  primary-deaf    -- become the primary and register no quit action at all:
-                     the launch that asked it to close waits out its grace.
-  old-name        -- own the PRE-RENAME application name, with a quit action,
-                     for the transition guard.
-
-Every mode prints single-line records on stdout, flushed, so the parent can
-read them with a blocking readline and never wonder whether output is stuck in
-a buffer. The name-owning modes additionally report what arrives at the WIRE
-(see watch_the_wire), which is the only way a mode that never dispatches can
-say what it was sent.
+Name registration is one-shot per process, so a contention leg needs several
+processes. The environment picks the mode. Every mode prints to stdout.
 """
 import os
 import sys
 
-# Before `import globals`, which resolves (and creates) the data directory
-# from argv at import time. The parent's directory, not one of this child's
-# own: a mode that ends in os._exit skips every cleanup hook it could register.
+# Point at the parent's data directory before import globals, which resolves
+# and creates the directory from argv at import time. A fallback here writes
+# the user's own Deckard data, and a mode that ends in os._exit runs no
+# cleanup hook.
 _DATA_PATH = os.environ.get("DECKARD_GATE_DATA")
 if not _DATA_PATH:
     raise SystemExit(
@@ -75,9 +49,8 @@ def say(line: str) -> None:
 def wait_for_barrier() -> None:
     """Hold until the shared wall-clock start, if the parent set one.
 
-    Wall clock rather than monotonic on purpose: monotonic clocks are not
-    comparable across processes, and the point of the barrier is that several
-    children reach `register()` in the same millisecond.
+    The barrier reads the wall clock because monotonic clocks do not compare
+    across processes. Several children must reach register() in one millisecond.
     """
     start_at = os.environ.get("DECKARD_GATE_START_AT")
     if not start_at:
@@ -108,15 +81,10 @@ def mode_establish() -> None:
     wait_for_barrier()
     decision = run_gate(app)
     if decision is instance_gate.Decision.PRIMARY:
-        # Hold the name while the other contenders make their decision -- a
-        # primary that exited immediately would let the next one win too, and
-        # the leg would pass while proving nothing.
-        #
-        # DISPATCHING, not sleeping: joining an application as its remote takes
-        # an answer from the owner, so a primary that holds the name without
-        # iterating its main context blocks every contender for the full bus
-        # timeout instead of losing to it cleanly. The app has the same
-        # property between registering and reaching run().
+        # Hold the name while the other contenders decide. A primary that exits
+        # at once lets the next one win, and the leg passes while it proves
+        # nothing. Dispatch instead of sleep, because joining an application as
+        # its remote needs an answer from the owner.
         hold = float(os.environ.get("DECKARD_GATE_HOLD", "0"))
         if hold > 0:
             loop = GLib.MainLoop()
@@ -132,25 +100,18 @@ def mode_activate() -> None:
         say("ACTIVATED")
 
 
-# The watched connection and its callback, for the process lifetime. Both are
-# load-bearing: a filter is dropped when the Python wrapper it was added
-# through is collected, and the connection underneath is a singleton that stays
-# alive regardless -- so letting the wrapper go leaves a process that is still
-# on the bus and no longer reports anything. Measured, and silent: the filter
-# simply stops being called, which reads as "nothing ever arrived".
+# Hold the connection and its callback for the process lifetime. GDBus drops a
+# filter when the Python wrapper it was added through is collected, and the
+# connection under it is a singleton that stays alive. A dropped wrapper leaves
+# a process on the bus that reports nothing, and reports it silently.
 _WIRE_WATCH: list = []
 
 
-def watch_the_wire() -> None:
-    """Report every action Activate that ARRIVES, from GDBus's worker thread.
+def watch_wire() -> None:
+    """Report every action Activate that arrives, from GDBus's worker thread.
 
-    A leg asserting that an instance was never asked to quit cannot see that
-    through the action handler: the handler runs on the main context, so a
-    child that never reaches its loop says nothing whether the message came or
-    not, and the assertion holds by construction rather than by evidence. A
-    connection filter runs on the worker thread that reads the socket, so it
-    reports the arrival of a message nothing is ever going to act on -- which
-    is the whole of what those legs are about.
+    The action handler runs on the main context, so a child that never reaches
+    its loop cannot say what arrived. A connection filter runs on the reader.
     """
     connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
 
@@ -167,7 +128,7 @@ def watch_the_wire() -> None:
 
 def _become_primary_loop(app_id: str, answer_quit: bool,
                          use_gate: bool = True) -> None:
-    watch_the_wire()
+    watch_wire()
     app = Gio.Application(application_id=app_id)
     if use_gate:
         decision = instance_gate.establish(app, publish=lambda: None,
@@ -176,9 +137,9 @@ def _become_primary_loop(app_id: str, answer_quit: bool,
             say(f"VERDICT {decision.value}")
             raise SystemExit(f"expected to be the primary, got {decision.value}")
     else:
-        # Registration only, deliberately not through the gate: this stands in
-        # for a build that predates it, and running the gate under the
-        # pre-rename name would have it probe the very name it is claiming.
+        # Register without the gate, which stands in for a build that predates
+        # the gate. The gate under the pre-rename name would probe the very
+        # name it is claiming.
         app.register(None)
         if app.get_is_remote():
             raise SystemExit(f"{app_id} was already owned")
@@ -189,15 +150,14 @@ def _become_primary_loop(app_id: str, answer_quit: bool,
         def on_quit(*_args):
             say("QUIT-RECEIVED")
             if delay > 0:
-                # Answers the call, then takes a moment to go -- an instance
-                # with a teardown to run. The waiting launch has to poll for
-                # the release rather than take the reply as one.
+                # Answer the call, then take a moment to go, like an instance
+                # with a teardown. The waiting launch polls for the release
+                # instead of taking the reply as one.
                 GLib.timeout_add(int(delay * 1000), lambda: os._exit(0))
                 return
-            # The app's own shape: the process ends inside the handler, so the
-            # caller never gets a reply and the name goes away with the
-            # connection. What the waiting launch sees is the release, not an
-            # answer.
+            # The app has the same shape. The process ends inside the handler,
+            # so the caller gets no reply and the name goes with the connection.
+            # The waiting launch sees the release, not an answer.
             os._exit(0)
 
         action = Gio.SimpleAction.new("quit", None)
@@ -205,9 +165,9 @@ def _become_primary_loop(app_id: str, answer_quit: bool,
         app.add_action(action)
 
     say("READY")
-    # Owning the name without dispatching is what a real instance does for the
-    # whole of its boot: it has registered, so it answers nothing that runs on
-    # the main context -- including the quit action above.
+    # A real instance owns the name without dispatching for the whole of its
+    # boot. It registered, so it answers nothing on the main context, including
+    # the quit action above.
     time.sleep(float(os.environ.get("DECKARD_GATE_DISPATCH_DELAY", "0")))
     GLib.MainLoop().run()
 

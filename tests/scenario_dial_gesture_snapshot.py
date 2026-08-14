@@ -1,31 +1,7 @@
-"""
-Regression test: dial/touchscreen gestures still live-resolved
-their target actions across page changes -- the dial/touchscreen variant of
-the key bug (fixed for keys by the DOWN-time snapshot this scenario's
-mechanism mirrors).
+"""Dial and touchscreen gestures must resolve their actions at read time.
 
-Mechanisms exercised (all against the real code paths):
-
-  * ControllerDial's PUSH branch used to resolve get_active_state() /
-    get_own_actions() at dispatch time, so a ChangePage on the dial's DOWN
-    swapped active_page mid-gesture and the tail (HOLD_STOP/SHORT_UP, UP)
-    landed on the NEW page's dial actions. The old page's actions never saw
-    their release -- EasyCommand (com_core447_OSPlugin) carries the same
-    registered_down latch as RunCommand, so a ChangePage+EasyCommand combo on
-    a dial jammed exactly like the upstream bug.
-  * ControllerDial.on_hold_timer_end live-resolved too: a hold crossing a
-    page swap fired HOLD_START into the new page's actions.
-  * TURN_CW/CCW and every touchscreen event (DRAG_*, and the SHORT/LONG
-    touches routed to a dial's state) are single events, but they resolved
-    when the pool worker ran -- a swap in the event->worker window redirected
-    them to the new page. The fix resolves them at read time, in
-    event_callback on the deck's input thread. The DeferredExecutor below
-    makes that window deterministic: queue the dispatch, swap the page, then
-    drain.
-  * ScreenSaver.show()'s stash sweep used to cancel only KEY gestures: a
-    stashed dial's hold timer stayed armed across the input swap and fired
-    HOLD_START after the physical release (which lands on the replacement
-    dial and is swallowed).
+A page change mid-gesture must not redirect the tail of that gesture. A
+screensaver that engages mid-hold cancels the dial gesture with the stash.
 """
 import os
 from concurrent.futures import Future
@@ -65,8 +41,10 @@ class RecordingAction(ActionCore):
 
 
 class ChangePageDialAction(RecordingAction):
-    """Mirrors com_core447_DeckPlugin's ChangePage on a dial: the DOWN event
-    loads the target page synchronously on the action pool."""
+    """Mirrors the ChangePage action of the deck plugin on a dial.
+
+    The DOWN event loads the target page synchronously on the action pool.
+    """
 
     def __init__(self, target_page, **kwargs):
         super().__init__(**kwargs)
@@ -79,9 +57,10 @@ class ChangePageDialAction(RecordingAction):
 
 
 class EasyCommandLikeAction(RecordingAction):
-    """Mirrors com_core447_OSPlugin's EasyCommand latch verbatim
-    (EasyCommand.py:24, the twin of RunCommand's): DOWN is swallowed while
-    registered_down is set; only UP clears it."""
+    """Mirrors the EasyCommand latch of the OS plugin.
+
+    DOWN is swallowed while registered_down is set, and only UP clears it.
+    """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -100,10 +79,11 @@ class EasyCommandLikeAction(RecordingAction):
 
 
 class DeferredExecutor:
-    """Stands in for the deck's action pool to make the event->pool-worker
-    window deterministic: submit() queues the dispatch instead of running it,
-    drain() runs everything queued (in order, on the caller's thread). Used
-    to slide a page swap between an event's read and its dispatch."""
+    """Stands in for the deck action pool to make the dispatch window exact.
+
+    submit() queues the dispatch instead of running it, and drain() runs
+    everything queued in order on the caller's thread.
+    """
 
     def __init__(self):
         self.queue = []
@@ -123,8 +103,10 @@ class DeferredExecutor:
 
 
 def inject(page, ident, actions: list) -> None:
-    """Places stub action objects where get_all_actions_for_input reads:
-    action_objects[input_type][json_identifier][state][index]."""
+    """Place stub action objects where get_all_actions_for_input reads them.
+
+    The path is action_objects[input_type][json_identifier][state][index].
+    """
     per_state = page.action_objects.setdefault(ident.input_type, {}).setdefault(ident.json_identifier, {})
     per_state[0] = {i: a for i, a in enumerate(actions)}
 
@@ -133,7 +115,7 @@ def main() -> None:
     fixtures.start_watchdog(60, label="scenario_dial_gesture_snapshot")
     controller = fixtures.make_headless_controller(serial="dial-snap-1")
     try:
-        # Generous hold threshold so pool latency can never reclassify the
+        # A generous hold threshold, so pool latency can never reclassify the
         # taps below as holds.
         controller.hold_time = 10.0
 
@@ -162,7 +144,7 @@ def main() -> None:
         inject(page_a, ident, [change_action, easy_action, snapshot_recorder])
         inject(page_b, ident, [bleed_recorder])
 
-        # ---- Press 1: dial DOWN flips the page mid-gesture ---- #
+        # Press 1. A dial DOWN flips the page mid-gesture.
         deck.fire_dial_event(0, DialEventType.PUSH, True)
         assert fixtures.wait_until(lambda: DOWN in easy_action.received), \
             "DOWN never reached the old page's EasyCommand-alike"
@@ -185,7 +167,7 @@ def main() -> None:
             f"started on the old page: {bleed_recorder.received}"
         )
 
-        # ---- Back to page A, press 2: the command must run again ---- #
+        # Back to page A. On press 2 the command must run again.
         controller.load_page(page_a)
         assert fixtures.wait_until(lambda: controller.active_page is page_a)
 
@@ -204,8 +186,8 @@ def main() -> None:
         assert bleed_recorder.received == [], \
             f"gesture bleed onto page B on press 2: {bleed_recorder.received}"
 
-        # ---- Press 3: hold across the flip -- the timer's HOLD_START must
-        # land on the snapshot, not live-resolve onto the new page ---- #
+        # Press 3 holds across the flip. The HOLD_START of the timer must land
+        # on the snapshot, not resolve live onto the new page.
         controller.load_page(page_a)
         assert fixtures.wait_until(lambda: controller.active_page is page_a)
         controller.hold_time = 0.4
@@ -230,11 +212,10 @@ def main() -> None:
             f"hold gesture bled onto page B: {bleed_recorder.received}"
         controller.hold_time = 10.0
 
-        # ---- TURN: single event, resolved at READ time ---- #
-        # A turn read on page A whose pool dispatch runs after a swap must
-        # still land on page A's actions. DeferredExecutor holds the dispatch
-        # while the test swaps the page -- the deterministic version of the
-        # event->worker window.
+        # A turn is a single event, resolved at read time. A turn read on page A
+        # whose pool dispatch runs after a swap must still land on page A
+        # actions. DeferredExecutor holds the dispatch while the test swaps the
+        # page, which makes the event-to-worker window deterministic.
         controller.load_page(page_a)
         assert fixtures.wait_until(lambda: controller.active_page is page_a)
 
@@ -257,7 +238,7 @@ def main() -> None:
         assert TURN_CW not in bleed_recorder.received, \
             f"turn bled onto the new page: {bleed_recorder.received}"
 
-        # ---- Touchscreen: DRAG + dial-routed SHORT, resolved at READ time ---- #
+        # Touchscreen drag and dial-routed short touch, resolved at read time.
         ts_recorder = RecordingAction(
             tag="ts_page_a_recorder",
             deck_controller=controller, page=page_a, input_ident=ts_ident)
@@ -273,8 +254,8 @@ def main() -> None:
         deferred = DeferredExecutor()
         controller.action_executor = deferred
         try:
-            # x < x_out -> DRAG_RIGHT (own actions); SHORT at x=10 routes to
-            # dial 0's state (SHORT_TOUCH_PRESS).
+            # An x below x_out is a DRAG_RIGHT on the own actions. A short touch
+            # at x=10 routes to the state of dial 0 as SHORT_TOUCH_PRESS.
             deck.fire_touchscreen_event(
                 TouchscreenEventType.DRAG,
                 {"x": 10, "y": 50, "x_out": 700, "y_out": 50})
@@ -300,8 +281,8 @@ def main() -> None:
         assert SHORT_TOUCH not in bleed_recorder.received, \
             f"dial-routed touch bled onto the new page: {bleed_recorder.received}"
 
-        # ---- Screensaver engages MID-HOLD: the dial gesture dies with the
-        # stash, exactly like the key case ---- #
+        # The screensaver engages mid-hold, so the dial gesture dies with the
+        # stash, exactly like the key case.
         controller.hold_time = 0.5
         ident_ss = Input.Dial("1")
         ss_recorder = RecordingAction(

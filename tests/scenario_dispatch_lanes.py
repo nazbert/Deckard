@@ -1,41 +1,7 @@
-"""
-Scenario: a wedged observer starves only its own holder's lane.
+"""A wedged observer starves only its own holder's lane.
 
-scenario_dispatch_watchdog.py covers the diagnostics half of the same defect
-(B-05): a blocking observer used to stall plugin events APP-WIDE, and the
-watchdog made that loud. This file covers the containment half, which is what
-per-holder lanes buy: an observer that never returns parks exactly one daemon
-thread -- its own holder's -- while every other holder keeps delivering.
-
-Checks (real dispatcher, real EventHolders, watchdog thresholds patched
-down):
-  1. A wedged observer on holder A does not delay holder B: five B events
-     land inside a deadline far shorter than A's wedge, and A's observer is
-     provably still parked.
-  2. The watchdog still fires and still names the culprit -- now also naming
-     the lane, and no longer claiming an app-wide stall.
-  3. Per-lane FIFO survives the incident: events queued behind the wedge run
-     in trigger order once it releases, and the lane keeps working.
-  4. Two simultaneous wedges do not couple. This is the property a shared
-     thread pool cannot offer: with max_workers=N the N-th wedge silently
-     restores the app-wide stall, whereas an independent thread per lane has
-     no exhaustion cliff.
-  5. The runner-exit invariant: a lane whose idle runner was reaped must
-     spawn a fresh one on the next event, not go quietly dead.
-  6. The watchdog survives a failing monitor tick. Its thread is spawned once
-     and never respawned, so an escaping exception would end wedge reporting
-     for the rest of the process's life -- and with wedges now contained,
-     reporting is the only thing that makes one actionable.
-  7. shutdown() retires every lane runner AND abandons what is still queued
-     (the on_quit contract): quit runs on to os._exit while these threads
-     do, so a batch taken after shutdown() dispatches plugin observers into
-     an already torn-down app.
-  8. After shutdown the fire-and-forget entry points drop quietly instead of
-     raising into the plugin threads that keep firing until os._exit, while
-     the module-level dispatch() still reports the drop to direct callers.
-
-Deck-independent -- exercises event_dispatch + real EventHolders directly, no
-FakeDeck, no controller.
+Per-holder lanes park one daemon thread while every other holder keeps
+delivering. The watchdog still names the culprit and now also names the lane.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
@@ -51,18 +17,16 @@ from src.backend.PluginManager.PluginSettings.Observer import Observer
 
 
 # How long an un-wedged lane gets to deliver. Real delivery latency here is
-# sub-millisecond (a condition notify, or one thread spawn on a cold lane),
-# so this is ~3 orders of magnitude of headroom for a loaded machine -- while
-# still being 15x shorter than the wedge a single-lane implementation would
-# make the other holder wait behind. There is no plausible middle ground for
-# this assertion to flake in.
+# sub-millisecond, one condition notify or one thread spawn on a cold lane, so
+# this leaves three orders of magnitude of headroom on a loaded machine while
+# staying 15 times shorter than the wedge a single lane would impose.
 DELIVER_S = 2.0
-# How long a wedged observer holds its lane. Bounded (not forever) so a
-# regression cannot leave the scenario's daemon threads parked past the run.
+# How long a wedged observer holds its lane. Bounded, so a regression cannot
+# leave the daemon threads of this scenario parked past the run.
 WEDGE_HOLD_S = 30.0
 
-# Every gate handed to a wedging observer, so a failing check can release
-# them all on the way out instead of leaving threads parked.
+# Every gate handed to a wedging observer, so a failing check can release them
+# all on the way out instead of leaving threads parked.
 _GATES: list[threading.Event] = []
 
 
@@ -80,8 +44,8 @@ def release_all() -> None:
 def main() -> int:
     start_watchdog(40, "dispatch_lanes")
 
-    # Tighten the watchdog so check 2 runs in fractions of a second. The idle
-    # reap is left alone until check 5 -- lanes must stay hot for 1-4.
+    # Tighten the watchdog, so check 2 runs in fractions of a second. The idle
+    # reap stays alone until check 5, because lanes must stay hot for 1 to 4.
     ed._WEDGE_WARN_S = 0.3
     ed._WEDGE_REWARN_S = 0.5
     ed._MONITOR_INTERVAL_S = 0.1
@@ -89,9 +53,7 @@ def main() -> int:
     records: list[str] = []
     log.add(lambda msg: records.append(str(msg)), level="ERROR")
 
-    # ---------------------------------------------------------------- #
-    # 1) a wedged holder must not delay another holder
-    # ---------------------------------------------------------------- #
+    # 1. A wedged holder must not delay another holder.
     holder_a = EventHolder(plugin_base=None, event_id="test::lane-a")
     holder_b = EventHolder(plugin_base=None, event_id="test::lane-b")
 
@@ -104,7 +66,7 @@ def main() -> int:
     def a_observer(event_id, payload):
         a_payloads.append(payload)
         if payload == 1:
-            # The pulsectl precedent: a callback that simply never returns.
+            # The pulsectl precedent, a callback that never returns.
             a_started.set()
             gate_a.wait(timeout=WEDGE_HOLD_S)
         a_finished.append(payload)
@@ -137,9 +99,7 @@ def main() -> int:
         return 1
     print("PASS: a wedged holder does not delay another holder's events")
 
-    # ---------------------------------------------------------------- #
-    # 2) the watchdog still fires, names the culprit AND the lane
-    # ---------------------------------------------------------------- #
+    # 2. The watchdog still fires and names the culprit and the lane.
     if not wait_until(lambda: any("wedged" in r and "a_observer" in r
                                   for r in records), timeout=5):
         print("FAIL(2): no watchdog error naming the wedged observer -- a "
@@ -161,9 +121,7 @@ def main() -> int:
         return 1
     print("PASS: the watchdog names the wedged observer and its lane")
 
-    # ---------------------------------------------------------------- #
-    # 3) per-lane FIFO survives the wedge, and the lane keeps working
-    # ---------------------------------------------------------------- #
+    # 3. Per-lane FIFO survives the wedge, and the lane keeps working.
     holder_a.trigger_event(2)
     holder_a.trigger_event(3)
     gate_a.set()
@@ -185,9 +143,7 @@ def main() -> int:
         return 1
     print("PASS: a lane drains in FIFO order after its wedge releases")
 
-    # ---------------------------------------------------------------- #
-    # 4) two simultaneous wedges do not couple (no pool-exhaustion cliff)
-    # ---------------------------------------------------------------- #
+    # 4. Two simultaneous wedges do not couple, so there is no exhaustion cliff.
     holder_c = EventHolder(plugin_base=None, event_id="test::lane-c")
     holder_d = EventHolder(plugin_base=None, event_id="test::lane-d")
 
@@ -241,14 +197,10 @@ def main() -> int:
         return 1
     print("PASS: two simultaneous wedges stay independent and both recover")
 
-    # ---------------------------------------------------------------- #
-    # 5) a reaped runner must be replaced, not missed
-    # ---------------------------------------------------------------- #
-    # An idle lane gives its thread (and its asyncio loop's fd) back after
-    # _IDLE_REAP_S. If the runner-exit bookkeeping were wrong -- the lane
-    # still holding a reference to a thread that has exited -- the lane would
-    # be dead forever, and the failure would only show up long after the fact
-    # in production. Patched down from 60s so the reap actually happens here.
+    # 5. A reaped runner must be replaced, not missed. An idle lane gives its
+    # thread, and its asyncio loop fd, back after _IDLE_REAP_S. Wrong
+    # runner-exit bookkeeping leaves the lane holding an exited thread and dead
+    # forever, which shows up long after the fact. Patched down from 60 s here.
     ed._IDLE_REAP_S = 0.2
     try:
         holder_e = EventHolder(plugin_base=None, event_id="test::lane-reap")
@@ -279,14 +231,10 @@ def main() -> int:
         ed._IDLE_REAP_S = 60.0
     print("PASS: a reaped lane spawns a fresh runner for the next event")
 
-    # ---------------------------------------------------------------- #
-    # 6) the watchdog survives a failing monitor tick
-    # ---------------------------------------------------------------- #
-    # _ensure_monitor() spawns the monitor exactly once and leaves
-    # _monitor_started True forever, so nothing ever respawns it: an
-    # exception escaping its loop silently ends wedge reporting for every
-    # lane, permanently. Red-checked: with the tick unguarded, the wedge in
-    # the second half of this check is never reported.
+    # 6. The watchdog survives a failing monitor tick. _ensure_monitor() spawns
+    # the monitor once and leaves _monitor_started True forever, so nothing
+    # respawns it. An exception escaping its loop ends wedge reporting for every
+    # lane, permanently.
     orig_check_wedge = ed.Lane._check_wedge
     boom_ticks: list[int] = []
 
@@ -331,16 +279,11 @@ def main() -> int:
 
     release_all()
 
-    # ---------------------------------------------------------------- #
-    # 7) shutdown() retires the runners and abandons the queue
-    # ---------------------------------------------------------------- #
-    # What on_quit relies on: no lane thread outlives the dispatcher, and
-    # nothing still queued runs afterwards. on_quit carries on to os._exit
-    # while these threads do, so a batch taken after shutdown() dispatches
-    # plugin observers against decks close_all() has already closed and log
-    # sinks on_quit has already detached. Retiring also keeps this scenario
-    # from exiting with daemon runners parked on an asyncio loop, which the
-    # interpreter's teardown complains about.
+    # 7. shutdown() retires the runners and abandons the queue. No lane thread
+    # may outlive the dispatcher, and nothing still queued may run afterwards.
+    # on_quit carries on to os._exit while these threads do, so a batch taken
+    # after shutdown() would dispatch observers against closed decks and
+    # detached log sinks.
     def lane_threads() -> list[threading.Thread]:
         return [t for t in threading.enumerate()
                 if t.name.startswith("event_dispatch:")]
@@ -379,15 +322,11 @@ def main() -> int:
         return 1
     print("PASS: shutdown() retires every runner and abandons the queue")
 
-    # ---------------------------------------------------------------- #
-    # 8) post-shutdown, the fire-and-forget entry points drop quietly
-    # ---------------------------------------------------------------- #
-    # trigger_event()/notify() are fire-and-forget by contract, and plugin
-    # event sources keep firing until os._exit: AudioControl's pulse listener
-    # is a `while True: pulse.event_listen()` daemon thread whose callback
-    # calls trigger_event(). Raising out of it there kills that thread with
-    # an uncaught RuntimeError -- a CRITICAL traceback in logs.log on every
-    # quit that races an event, for something no caller can act on.
+    # 8. After shutdown trigger_event() and notify() drop quietly.
+    # Both promise not to raise, and plugin event
+    # sources keep firing until os._exit. The pulse listener of AudioControl is
+    # a daemon loop whose callback calls trigger_event(), and a raise there
+    # kills that thread with a CRITICAL traceback no caller can act on.
     try:
         holder_b.trigger_event(1234)
     except BaseException as exc:
@@ -409,7 +348,7 @@ def main() -> int:
               "an asset mutation racing teardown must not propagate")
         return 1
 
-    # ...while direct callers keep the signal that their batch was dropped.
+    # Direct callers keep the signal that their batch was dropped.
     raised = False
     try:
         ed.dispatch([lambda: None], (), {}, label="post-shutdown-probe")

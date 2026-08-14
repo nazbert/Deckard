@@ -1,39 +1,7 @@
-"""Pins the deck-settings DEFAULTS table, and what the deck does with it.
+"""Pins the deck-settings defaults table, and what the deck does with it.
 
-Every deck-settings default used to be an inline literal at each of the four
-or five places that read the key, and they had drifted apart. The same
-screensaver config made the device dim to 30 while the page editor's slider
-showed 75. The same deck background looped or did not depending on whether
-anyone had ever opened the deck's settings page -- because that page filled
-the missing keys in and SAVED them. A deck whose brightness nobody had chosen
-ran at 75 until its settings page was opened, at which point it dropped to 50
-and stayed there.
-
-DECK_DEFAULTS is now the one table, and this scenario locks it the way
-scenario_settings_defaults locks the app-settings one: a literal second copy
-of every value, so a transcription slip has to disagree with something.
-
-Beyond the table, the legs here follow each default all the way to the
-device -- the only place a "default" is ever really observed:
-
-  * a fresh deck runs at the brightness the table names, written on the media
-    thread like every other device write;
-  * a deck-level screensaver config missing `loop` and `brightness` loops, and
-    dims to the number the table names, with that number reaching the device;
-  * a deck-level background missing `loop` loops, while a PAGE-level one still
-    does not -- the page's one-shot flourish is a deliberate different
-    default, not an oversight, and must survive this table;
-  * a deck connected while the session is locked shows its CONFIGURED
-    screensaver, not the ScreenSaver class's bare state;
-  * opening the deck settings page writes nothing and moves nothing, while
-    actually using a control still saves -- sparsely, so every key still
-    absent keeps following the table.
-
-The settings-page rows are driven as the REAL unbound methods over stubs that
-expose exactly what each one touches: constructing the widgets would need a
-display, and the persisting handlers hang off `GLib.idle_add`, which never
-runs without a main loop -- a widget-level test of "the load path does not
-save" would pass vacuously.
+DECK_DEFAULTS is the one table. A literal second copy of every value catches a
+transcription slip, and the legs follow each default down to the device.
 """
 import fixtures  # noqa: F401  (must be first -- see fixtures.py docstring)
 
@@ -48,49 +16,33 @@ from PIL import Image, ImageDraw  # noqa: E402
 
 from src.backend.settings_store import DECK_DEFAULTS, DeckSettings, SchemaView  # noqa: E402
 
-# The value each inline call site used before the table existed, by (section,
-# key) -- or by name alone for the settings stored as a bare value. A literal
-# second copy on purpose: a typo in DECK_DEFAULTS has to disagree with
-# something.
-#
-# Four of these are NOT a straight transcription; they are the disagreements
-# the table resolved, and each is the number the DEVICE was already using or
-# the number the device layer already applied:
-#
-#   * brightness.value 75 -- the device layer and the page-level brightness UI
-#     both said 75; only the deck settings page said 50, and it applied it.
-#   * screensaver.brightness 30 -- what the device dims to for any config
-#     without the key. The page editor displayed 75 (the RUNNING brightness)
-#     and the page-level writer wrote 75, neither of which any screensaver had
-#     ever applied.
-#   * background.loop True -- the deck settings page's value, and the same
-#     rationale the screensaver's loop default already carries.
-#   * background.media-path None, not "" -- what the device layer reads.
+# The value each inline call site used before the table existed, keyed by
+# (section, key), or by name for a setting stored as a bare value. A literal
+# second copy, so a typo in DECK_DEFAULTS has to disagree with something. Four
+# entries below resolve an old disagreement and hold the device-layer number.
 EXPECTED_DEFAULTS = {
-    ("brightness", "value"): 75,
+    ("brightness", "value"): 75,        # the device layer and the page UI
     ("screensaver", "enable"): False,
     ("screensaver", "media-path"): None,
     ("screensaver", "loop"): True,
     ("screensaver", "fps"): 30,
     ("screensaver", "time-delay"): 5,
-    ("screensaver", "brightness"): 30,
+    ("screensaver", "brightness"): 30,  # what the device dims to without a key
     ("background", "enable"): False,
-    ("background", "media-path"): None,
-    ("background", "loop"): True,
+    ("background", "media-path"): None,  # None, not "", is what the device reads
+    ("background", "loop"): True,        # same rationale as the screensaver loop
     ("background", "fps"): 30,
     ("background", "extend-to-touchscreen"): False,
     ("display", "saturation"): 1.0,
     ("rotation", None): 0,
 }
 
-# Deliberately NOT in the table: a fake deck's key layout is decided by
-# whoever constructs the deck and passed in as that caller's own fallback.
+# Not in the table. Whoever constructs a fake deck decides its key layout and
+# passes it in as that caller's own fallback.
 UNDESCRIBED_KEYS = ("key-layout",)
 
 
-# ===================================================================== #
 # The table
-# ===================================================================== #
 
 def check_table_matches_expectations() -> None:
     table = {}
@@ -120,13 +72,12 @@ def check_table_matches_expectations() -> None:
     print("PASS: DECK_DEFAULTS matches the pinned table")
 
 
-def check_the_clamp_site_agrees() -> None:
+def check_clamp_site_agrees() -> None:
     """The one deck default a reader still names for itself.
 
     The saturation factor feeds an ImageEnhance factor and a cache key, so the
-    reader clamps it and rejects non-finite values -- validation the table
-    deliberately does not do. Its no-op constant must still be the table's
-    number, or there are two saturation defaults again.
+    reader clamps it and rejects non-finite values. Its no-op constant must
+    still be the table number, or there are two saturation defaults again.
     """
     from src.backend.DeckManagement.DeckController import DeckController
 
@@ -138,11 +89,9 @@ def check_the_clamp_site_agrees() -> None:
     print("PASS: the saturation clamp's constant is the table's value")
 
 
-# ===================================================================== #
-# The view: defaults at read, sparse storage, unknown keys refused
-# ===================================================================== #
+# The view. Defaults at read, sparse storage, unknown keys refused
 
-def check_absent_keys_read_as_the_table() -> None:
+def check_absent_keys_read_table() -> None:
     data: dict = {}
     view = DeckSettings(data)
 
@@ -158,8 +107,10 @@ def check_absent_keys_read_as_the_table() -> None:
 
 
 def check_stored_values_win_and_survive() -> None:
-    """The persisted population keeps its meaning: a stored value is returned
-    unchanged, and a key stored but not described is not pruned."""
+    """A stored value is returned unchanged, and an undescribed key is kept.
+
+    The persisted population keeps its meaning.
+    """
     data = {
         "brightness": {"value": 50},
         "screensaver": {"loop": False, "brightness": 12},
@@ -173,7 +124,7 @@ def check_stored_values_win_and_survive() -> None:
     assert view.get("screensaver", "loop") is False, "an explicit loop=false was overridden"
     assert view.get("screensaver", "brightness") == 12
     assert view.get("rotation") == 180
-    # ...and the keys that section never stored still follow the table.
+    # The keys that section never stored still follow the table.
     assert view.get("screensaver", "fps") == 30
     assert view.get("background", "loop") is True
 
@@ -192,13 +143,12 @@ def check_stored_values_win_and_survive() -> None:
     print("PASS: stored values win, undescribed keys survive, section() is a copy")
 
 
-def check_container_defaults_are_copied_per_read() -> None:
+def check_container_defaults_copied_per_read() -> None:
     """No reader may ever receive the schema's own container.
 
-    DECK_DEFAULTS happens to hold only scalars today, so nothing here would
-    notice a shallow hand-out -- but the app-settings table's default-font is
-    a dict its holder mutates in place, and one shared container there poisons
-    every later read.
+    DECK_DEFAULTS holds only scalars today, so nothing here notices a shallow
+    hand-out. The app-settings default-font is a dict its holder mutates in
+    place, and one shared container there poisons every later read.
     """
     schema = {"fonts": {"default-font": {}, "families": []}}
     a, b = SchemaView({}, schema), SchemaView({}, schema)
@@ -243,7 +193,7 @@ def check_writes_are_sparse_and_tripwired() -> None:
         f"a rejected write still mutated the settings: {data}"
     )
 
-    # A section is a section and a bare value is a bare value; confusing them
+    # A section is a section and a bare value is a bare value. Confusing them
     # would write a shape no reader expects.
     for call in (lambda: view.get("screensaver"), lambda: view.set_value("screensaver", 1),
                  lambda: view.get("rotation", "value"), lambda: view.set("rotation", "value", 1)):
@@ -256,10 +206,12 @@ def check_writes_are_sparse_and_tripwired() -> None:
     print("PASS: writes are sparse, unknown keys and wrong shapes raise")
 
 
-def check_a_scalar_where_a_section_belongs() -> None:
-    """A hand-edited file can leave a bare value where a section belongs. The
-    table answers then, and a write replaces the wreckage rather than raising
-    out of a settings page."""
+def check_scalar_in_section_slot() -> None:
+    """A hand-edited file can leave a bare value where a section belongs.
+
+    The table answers then, and a write replaces the wreckage rather than
+    raising out of a settings page.
+    """
     data = {"screensaver": "on"}
     view = DeckSettings(data)
     assert view.get("screensaver", "brightness") == 30
@@ -269,7 +221,7 @@ def check_a_scalar_where_a_section_belongs() -> None:
     print("PASS: a scalar where a section belongs reads as the table")
 
 
-def check_a_view_over_a_dict_has_nothing_to_save_to() -> None:
+def check_view_over_dict_cannot_save() -> None:
     try:
         DeckSettings({}).save()
     except ValueError:
@@ -279,9 +231,7 @@ def check_a_view_over_a_dict_has_nothing_to_save_to() -> None:
     print("PASS: a view over a dict refuses to save")
 
 
-# ===================================================================== #
 # Fixtures for the device legs
-# ===================================================================== #
 
 def make_gif(name: str, n_frames: int = 4) -> str:
     path = os.path.join(gl.DATA_PATH, "media", name)
@@ -310,8 +260,10 @@ def deck_settings_file(serial: str) -> str:
 
 
 def file_fingerprint(path: str):
-    """The file's content, or None while it does not exist -- both are states
-    the first-open legs must be able to tell apart."""
+    """The file content, or None while the file does not exist.
+
+    The first-open legs must tell those two states apart.
+    """
     if not os.path.exists(path):
         return None
     return hashlib.sha1(open(path, "rb").read()).hexdigest()
@@ -326,7 +278,7 @@ def brightness_writes(deck) -> list:
     return [(e[4], e[5]) for e in deck.ops_by_name("set_brightness")]
 
 
-def assert_landed_on_the_media_thread(controller, deck, value, what: str) -> None:
+def assert_landed_on_media_thread(controller, deck, value, what: str) -> None:
     landed = fixtures.wait_until(
         lambda: any(e[0] == _hash_bytes(value) for e in brightness_writes(deck)), timeout=5)
     assert landed, (
@@ -343,18 +295,16 @@ def assert_landed_on_the_media_thread(controller, deck, value, what: str) -> Non
     )
 
 
-# ===================================================================== #
 # The defaults, followed to the device
-# ===================================================================== #
 
-def check_fresh_deck_runs_at_the_table_brightness() -> None:
+def check_fresh_deck_table_brightness() -> None:
     controller = fixtures.make_headless_controller(serial="deck-defaults-brightness")
     deck = fixtures.raw_deck(controller)
     try:
         assert controller.brightness == EXPECTED_DEFAULTS[("brightness", "value")], (
             f"a deck whose brightness nobody chose came up at {controller.brightness}"
         )
-        assert_landed_on_the_media_thread(
+        assert_landed_on_media_thread(
             controller, deck, EXPECTED_DEFAULTS[("brightness", "value")], "fresh deck")
         assert file_fingerprint(deck_settings_file("deck-defaults-brightness")) is None, (
             "bringing a deck up wrote a settings file for it"
@@ -364,11 +314,11 @@ def check_fresh_deck_runs_at_the_table_brightness() -> None:
         fixtures.teardown(controller)
 
 
-def check_keyless_deck_screensaver_loops_and_dims() -> None:
+def check_keyless_screensaver_loops_dims() -> None:
     gif = make_gif("saver.gif")
     serial = "deck-defaults-saver"
-    # No `loop` and no `brightness`: the shape every config written before
-    # those toggles existed has.
+    # No loop and no brightness, the shape every config written before those
+    # toggles existed has.
     seed_deck_settings(serial, {"screensaver": {
         "enable": True, "media-path": gif, "time-delay": 60, "fps": 30,
     }})
@@ -395,7 +345,7 @@ def check_keyless_deck_screensaver_loops_and_dims() -> None:
         assert controller.background.video.loop is True, (
             "the defaulted loop must reach the live provider, not just the ScreenSaver"
         )
-        assert_landed_on_the_media_thread(controller, deck, 30, "keyless deck screensaver")
+        assert_landed_on_media_thread(controller, deck, 30, "keyless deck screensaver")
         controller.screen_saver.hide()
         assert fixtures.wait_until(lambda: not controller.screen_saver.showing, timeout=5)
         print("PASS: a keyless deck screensaver loops and dims to the table's brightness")
@@ -403,10 +353,12 @@ def check_keyless_deck_screensaver_loops_and_dims() -> None:
         fixtures.teardown(controller)
 
 
-def check_deck_background_loops_and_the_page_one_does_not() -> None:
-    """The two loop defaults disagree ON PURPOSE, and this is the leg that
-    keeps them that way: a deck background is the "leave it running" case, a
-    page background is a flourish on page entry."""
+def check_deck_loops_page_does_not() -> None:
+    """The two loop defaults disagree, and this leg keeps them that way.
+
+    A deck background is the leave-it-running case. A page background is a
+    flourish on page entry.
+    """
     gif = make_gif("bg.gif")
     serial = "deck-defaults-bg"
     seed_deck_settings(serial, {"background": {"enable": True, "media-path": gif, "fps": 30}})
@@ -438,11 +390,12 @@ def check_deck_background_loops_and_the_page_one_does_not() -> None:
         fixtures.teardown(controller)
 
 
-def check_deck_connected_while_locked_shows_its_config() -> None:
-    """A deck (re)connected while the session is locked never runs a page
-    load, so nothing used to apply its screensaver config: it showed the
-    ScreenSaver class's own bare state -- no media, and a brightness no user
-    ever chose."""
+def check_locked_deck_shows_config() -> None:
+    """A deck reconnected while the session is locked shows its configured saver.
+
+    No page load runs then, so nothing applies the config and the deck shows
+    the bare state of the ScreenSaver class instead.
+    """
     gif = make_gif("locked.gif")
     serial = "deck-defaults-locked"
     seed_deck_settings(serial, {"screensaver": {
@@ -461,17 +414,18 @@ def check_deck_connected_while_locked_shows_its_config() -> None:
             f"configured 17"
         )
         assert controller.screen_saver.showing, "the locked deck did not show its screensaver"
-        assert_landed_on_the_media_thread(controller, deck, 17, "deck connected while locked")
+        assert_landed_on_media_thread(controller, deck, 17, "deck connected while locked")
         print("PASS: a deck connected while locked shows its configured screensaver")
     finally:
         gl.screen_locked = False
         fixtures.teardown(controller)
 
 
-def check_locked_deck_without_a_screensaver_still_blanks() -> None:
-    """Locking the deck with the session is its own feature: a deck with no
-    screensaver configured still blanks, it just no longer does so at a
-    brightness out of nowhere."""
+def check_locked_deck_blanks_without_screensaver() -> None:
+    """A deck with no screensaver configured still blanks when the session locks.
+
+    It does so at the table brightness, not at one from nowhere.
+    """
     serial = "deck-defaults-locked-bare"
     gl.screen_locked = True
     controller = fixtures.make_headless_controller(serial=serial)
@@ -488,22 +442,14 @@ def check_locked_deck_without_a_screensaver_still_blanks() -> None:
         fixtures.teardown(controller)
 
 
-# ===================================================================== #
-# The settings page: opening it changes nothing
-# ===================================================================== #
+# The settings page. Opening it changes nothing
 
 class _Widget:
-    """A Gtk.Scale/Switch/SpinButton/ToggleGroup/expander stand-in: holds a
-    value, emits to whatever is connected when it is set, and refuses to
-    disconnect a handler that is not connected -- which is what makes
-    `better_disconnect` swallowing a wrong argument observable here.
+    """Stand-in for a Gtk scale, switch, spin button, toggle group or expander.
 
-    Stricter than the real widgets in one direction, deliberately: GTK
-    notifies only when the value actually CHANGES, while this emits on every
-    set. Removal matches GTK -- PyGObject's disconnect_by_func removes exactly
-    one matching handler per call, as remove() does here. A load path that
-    survives this survives the real rows; a leak this catches is real, it
-    just needs a changed value to show itself in the field.
+    It holds a value, emits on every set, and refuses to disconnect a handler
+    that is not connected, which makes a swallowed better_disconnect argument
+    observable. Removal matches GTK and drops one matching handler per call.
     """
 
     def __init__(self, value=None):
@@ -600,7 +546,7 @@ class _StubScreenSaver:
 
 
 class _Row:
-    """Base for the row stubs: binds the REAL unbound method under test."""
+    """Base for the row stubs. Binds the real unbound method under test."""
 
     def __init__(self, serial, controller):
         self.deck_serial_number = serial
@@ -627,13 +573,13 @@ class BrightnessRow(_Row):
         from src.windows.mainWindow.elements.DeckSettings.DeckGroup import Brightness
         self._real = Brightness
         self.scale = _Widget(0)
-        # As the real row is by the time load_default runs: it defers itself to
-        # "map", which is after __init__ connected the handler.
+        # The real row is in this state by the time load_default runs. It defers
+        # itself to map, which is after __init__ connected the handler.
         self.scale.connect("value-changed", self.on_value_changed)
 
     def on_value_changed(self, scale):
-        # GLib.idle_add's callback, run inline: the harness has no main loop,
-        # and the question is whether the LOAD path reaches this at all.
+        # The GLib.idle_add callback, run inline. The harness has no main loop,
+        # and the question is whether the load path reaches this at all.
         self.handler_calls.append(scale.get_value())
         self._real.on_value_changed_idle(self, scale)
 
@@ -650,7 +596,7 @@ class SaturationRow(_Row):
         self.scale.connect("value-changed", self.on_value_changed)
 
     def on_value_changed(self, scale):
-        # Recorded, not forwarded: the real handler is a 300ms GLib debounce.
+        # Recorded, not forwarded. The real handler is a 300 ms GLib debounce.
         self.handler_calls.append(scale.get_value())
 
     def load_default(self):
@@ -736,7 +682,7 @@ def open_every_row(serial, controller):
     return rows
 
 
-def check_first_open_writes_nothing_and_moves_nothing() -> None:
+def check_first_open_writes_moves_nothing() -> None:
     serial = "deck-defaults-first-open"
     fixtures._install_integration_globals()
     path = deck_settings_file(serial)
@@ -766,7 +712,7 @@ def check_first_open_writes_nothing_and_moves_nothing() -> None:
     print("PASS: opening the deck settings page writes nothing and moves nothing")
 
 
-def check_a_fresh_page_shows_the_table() -> None:
+def check_fresh_page_shows_table() -> None:
     serial = "deck-defaults-fresh-ui"
     fixtures._install_integration_globals()
     rows = open_every_row(serial, _StubController())
@@ -794,9 +740,11 @@ def check_a_fresh_page_shows_the_table() -> None:
     print("PASS: a fresh deck's settings page shows the values the deck actually uses")
 
 
-def check_a_persisted_value_is_shown_and_left_alone() -> None:
-    """The population already holding a value keeps it, and keeps it
-    untouched: none of the resolutions above changes a byte on disk."""
+def check_persisted_value_shown_untouched() -> None:
+    """A population that already holds a value keeps it, untouched.
+
+    None of the resolutions above changes a byte on disk.
+    """
     serial = "deck-defaults-persisted"
     stored = {
         "brightness": {"value": 50},
@@ -822,8 +770,8 @@ def check_a_persisted_value_is_shown_and_left_alone() -> None:
     print("PASS: a configured deck keeps its values, byte for byte")
 
 
-def check_using_a_control_still_saves_sparsely() -> None:
-    """The load paths stopped writing; the CONTROLS must not have."""
+def check_control_use_saves_sparsely() -> None:
+    """The load paths stopped writing. The controls must not have."""
     serial = "deck-defaults-user-action"
     fixtures._install_integration_globals()
     controller = _StubController()
@@ -855,13 +803,12 @@ def check_using_a_control_still_saves_sparsely() -> None:
     print("PASS: using a control still saves, and saves only what was chosen")
 
 
-def check_a_reopened_row_keeps_exactly_one_handler() -> None:
+def check_reopened_row_one_handler() -> None:
     """A row that reloads must end with the handler count it started with.
 
-    `better_disconnect` swallows what it cannot disconnect, so a wrong
-    argument to it is silent -- and every reload then adds another handler to
-    the pile, until one load fires the saving handler as many times as the row
-    has ever been loaded.
+    better_disconnect swallows what it cannot disconnect, so a wrong argument
+    is silent. Every reload then adds another handler, until one load fires
+    the saving handler as many times as the row has ever been loaded.
     """
     serial = "deck-defaults-reopen"
     seed_deck_settings(serial, {"rotation": 90})
@@ -883,8 +830,10 @@ def check_a_reopened_row_keeps_exactly_one_handler() -> None:
 
 
 class _ScaleRow:
-    """GtkHelper's ScaleRow: a row wrapping the scale that carries the
-    handler. Telling the two apart is the whole point of this stub."""
+    """The ScaleRow of GtkHelper, wrapping the scale that carries the handler.
+
+    Telling the row and the scale apart is what this stub exists for.
+    """
 
     def __init__(self, value=0):
         self.scale = _Widget(value)
@@ -896,8 +845,8 @@ class _ScaleRow:
         self.scale.set_value(value)
 
 
-#: The row's own signal handlers, bound onto the stub so a fired one reaches
-#: the REAL writer -- which is what makes an accidental write observable.
+# The row's own signal handlers, bound onto the stub, so a fired one reaches the
+# real writer. That is what makes an accidental write observable.
 _PAGE_SCREENSAVER_HANDLERS = (
     "on_overwrite_changed", "on_enable_changed", "on_delay_changed", "on_loop_changed",
     "on_fps_changed", "on_brightness_changed", "on_media_selector_click",
@@ -905,8 +854,10 @@ _PAGE_SCREENSAVER_HANDLERS = (
 
 
 class PageScreensaverGroup:
-    """Drives the REAL page-editor screensaver row through the
-    disconnect/load/connect cycle one page selection runs."""
+    """Drive the real page-editor screensaver row through one selection cycle.
+
+    The cycle is disconnect, load, connect.
+    """
 
     def __init__(self, page_path):
         from src.windows.PageManager.elements.PageEditor import ScreensaverGroup
@@ -940,10 +891,12 @@ class _StubPageEditor:
         self.active_page_path = page_path
 
 
-def check_page_editor_row_does_not_accumulate_handlers() -> None:
-    """Selecting page after page in the page manager must not turn the page
-    editor into a writer: the row reloads per selection, and a handler left
-    connected across that reload saves the value it was just shown."""
+def check_page_editor_adds_no_handlers() -> None:
+    """Selecting page after page must not turn the page editor into a writer.
+
+    The row reloads per selection, and a handler left connected across that
+    reload saves the value it was just shown.
+    """
     fixtures._install_integration_globals()
     page_path = seed_page_settings("PageEditorReopen", {"screensaver": {
         "overwrite": True, "enable": True, "time-delay": 60, "fps": 30,
@@ -980,25 +933,25 @@ if __name__ == "__main__":
     fixtures.start_watchdog(180, label="scenario_deck_settings_defaults")
 
     check_table_matches_expectations()
-    check_the_clamp_site_agrees()
-    check_absent_keys_read_as_the_table()
+    check_clamp_site_agrees()
+    check_absent_keys_read_table()
     check_stored_values_win_and_survive()
-    check_container_defaults_are_copied_per_read()
+    check_container_defaults_copied_per_read()
     check_writes_are_sparse_and_tripwired()
-    check_a_scalar_where_a_section_belongs()
-    check_a_view_over_a_dict_has_nothing_to_save_to()
+    check_scalar_in_section_slot()
+    check_view_over_dict_cannot_save()
 
-    check_fresh_deck_runs_at_the_table_brightness()
-    check_keyless_deck_screensaver_loops_and_dims()
-    check_deck_background_loops_and_the_page_one_does_not()
-    check_deck_connected_while_locked_shows_its_config()
-    check_locked_deck_without_a_screensaver_still_blanks()
+    check_fresh_deck_table_brightness()
+    check_keyless_screensaver_loops_dims()
+    check_deck_loops_page_does_not()
+    check_locked_deck_shows_config()
+    check_locked_deck_blanks_without_screensaver()
 
-    check_first_open_writes_nothing_and_moves_nothing()
-    check_a_fresh_page_shows_the_table()
-    check_a_persisted_value_is_shown_and_left_alone()
-    check_using_a_control_still_saves_sparsely()
-    check_a_reopened_row_keeps_exactly_one_handler()
-    check_page_editor_row_does_not_accumulate_handlers()
+    check_first_open_writes_moves_nothing()
+    check_fresh_page_shows_table()
+    check_persisted_value_shown_untouched()
+    check_control_use_saves_sparsely()
+    check_reopened_row_one_handler()
+    check_page_editor_adds_no_handlers()
 
     print("\nALL PASS: scenario_deck_settings_defaults")

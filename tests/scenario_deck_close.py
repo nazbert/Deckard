@@ -1,28 +1,7 @@
-"""
-Integration scenario (docs/memory-footprint-impl-plan.md P1.3):
-DeckController.close()/DeckManager.remove_controller's teardown sweep.
+"""Integration scenario for the teardown sweep of DeckController.close().
 
-Three checks, each a small self-contained sub-test:
-
-  (a) close() called twice is safe (idempotent, second call is an
-      immediate no-op -- the `_closing` guard).
-  (b) After a remove_controller-style teardown: the controller has no
-      entry left in gl.page_manager.pages, its tick + media threads have
-      actually exited, both per-deck thread pools are shut down, and the
-      whole controller becomes collectible (a weakref to it dies once every
-      other strong reference is dropped and gc.collect() runs) -- proving
-      close() actually breaks the controller's reference cycles instead of
-      just flipping flags.
-  (c) close() while the screensaver is showing sweeps the stash: a
-      ControllerKeyState's media stashed in screen_saver.original_inputs
-      (the real page's inputs, swapped out by show()) gets close_resources()
-      called on it -- not just discarded -- and the stash containers end up
-      empty/cleared.
-
-(A fourth check -- submit_control() rejecting messages after the terminal
-ClearAndCloseMsg, bug 12 -- lived here but was unit-tier; it moved to
-scenario_submit_control_reject.py so this integration-tier scenario doesn't
-mix tiers, which the tier-mixing guard now refuses.)
+close() is idempotent, the controller becomes collectible after removal, and
+a close during a screensaver sweeps and clears the stashed inputs.
 """
 import gc
 import threading
@@ -41,17 +20,15 @@ def test_double_close_is_safe() -> None:
     controller.close(remove_media=True)
     assert controller._closing is True, "close() must set _closing"
 
-    # Second call must be an immediate no-op, not raise and not redo any of
-    # the (now-invalid, e.g. already-None executors) teardown work.
+    # The second call must be an immediate no-op. It must not raise and must
+    # not redo teardown work over already-None executors.
     t0 = time.monotonic()
     controller.close(remove_media=True)
     elapsed = time.monotonic() - t0
-    # Liveness ceiling: the second close() must not redo teardown work (which
-    # would incur a real join / 2s stop wait) -- it returns via the _closing
-    # guard almost instantly (~ms). 1.5s stays cleanly below the 2s stop
-    # timeout (so it still catches "the guard didn't fire and it re-ran a
-    # bounded join") while giving a loaded CI runner 3x the original 0.5s
-    # headroom (flake hardening).
+    # Liveness ceiling. The second close() must not redo teardown work, which
+    # would incur a real join and a 2 s stop wait. It returns through the
+    # _closing guard in milliseconds. 1.5 s stays under the 2 s stop timeout and
+    # still gives a loaded CI runner headroom.
     assert elapsed < 1.5, f"second close() call should be an immediate no-op, took {elapsed:.2f}s"
 
     if controller in gl.deck_manager.deck_controller:
@@ -66,8 +43,8 @@ def test_remove_controller_frees_everything() -> None:
 
     assert controller in gl.page_manager.pages, "fixture sanity: controller should have a cached page before teardown"
 
-    # Mirrors DeckManager.remove_controller (minus the UI-stack removal,
-    # which the null UIPort no-ops away here -- see fixtures.py).
+    # Mirrors DeckManager.remove_controller, without the UI-stack removal, which
+    # the null UIPort no-ops away here.
     fixtures.teardown(controller)
 
     assert controller not in gl.page_manager.pages, "close() must discard the controller's cached pages (step 8)"
@@ -81,21 +58,16 @@ def test_remove_controller_frees_everything() -> None:
     assert controller.action_executor is None, "action_executor should be shut down and cleared (step 9)"
     assert controller.load_executor is None, "load_executor should be shut down and cleared (step 9)"
 
-    # The real test: the controller's reference graph must actually be
-    # collectible, not just superficially "closed". Drop every strong
-    # reference this scenario itself holds, then require a plain
-    # gc.collect() (matching close() step 9's own final call) to reclaim it.
+    # The reference graph of the controller must be collectible, not merely
+    # closed. Drop every strong reference this scenario holds, then require a
+    # plain gc.collect(), which matches the final call of close() step 9.
     ref = weakref.ref(controller)
     del controller
     del deck
-    # load_page() unconditionally does GLib.idle_add(self.update_ui_on_page_
-    # change) -- in the real app the GTK main loop drains that within a
-    # frame; this headless harness never runs one, so the idle source (a
-    # non-Python, opaque GLib registration PyGObject boxes as a strong ref to
-    # the bound method) would otherwise pin the controller forever. Draining
-    # the default context once is the harness-side equivalent of "let the
-    # main loop tick", not a workaround for anything close() itself does
-    # wrong -- production's ever-running main loop makes this a non-issue.
+    # load_page() always calls GLib.idle_add(self.update_ui_on_page_change). This
+    # harness runs no main loop, so the idle source, which PyGObject boxes as a
+    # strong ref to the bound method, would pin the controller forever. Drain the
+    # default context once, the harness equivalent of one main-loop tick.
     ctx = GLib.MainContext.default()
     while ctx.iteration(False):
         pass
@@ -106,10 +78,11 @@ def test_remove_controller_frees_everything() -> None:
 
 
 class _SpyCloseable:
-    """Minimal close()-able stand-in for InputImage/InputVideo: records
-    whether it was actually close()d, so the stash sweep test can tell
-    "close_resources() was called on the stashed input" apart from "the
-    stash container was merely dropped/cleared"."""
+    """Minimal close()-able stand-in for InputImage and InputVideo.
+
+    It records whether close() ran, so the stash sweep test can tell a real
+    close_resources() apart from a dropped stash container.
+    """
 
     def __init__(self):
         self.closed = False
@@ -125,9 +98,9 @@ def test_close_sweeps_screensaver_stash() -> None:
     deck = fixtures.raw_deck(controller)
     fixtures.wait_until(lambda: deck.last_op_for("key:0") is not None, timeout=3)
 
-    # Plant a spy on a real (pre-screensaver) key's active state, mimicking a
-    # loaded key_image/key_video -- ControllerKeyState.close_resources() just
-    # needs something with a close() method to call.
+    # Plant a spy on the active state of a real pre-screensaver key, which mimics
+    # a loaded key_image. ControllerKeyState.close_resources() needs only
+    # something with a close() method.
     real_key = controller.inputs[Input.Key][0]
     spy = _SpyCloseable()
     real_key.get_active_state().key_image = spy
@@ -136,32 +109,18 @@ def test_close_sweeps_screensaver_stash() -> None:
     assert controller.screen_saver.showing is True, "fixture sanity: show() should flip showing"
     assert controller.inputs[Input.Key][0] is not real_key, "fixture sanity: show() should install fresh transient inputs"
 
-    # show() swaps deck_controller.inputs for a fresh transient set and
-    # stashes the real one -- confirm our spy-bearing key ended up in the
-    # stash (identity, not just an equal-looking copy), IF it's still
-    # observable: mem-plan P2.6 has show() enqueue a media-player task that
-    # releases + clears this same stash shortly after show() returns, so by
-    # the time this line runs the dict may already be empty again. Racing
-    # the exact interleaving here would make this fixture-sanity check
-    # itself flaky (see scenario_screensaver_entry.py's docstring for the
-    # same reasoning) -- check it only when still populated; the real
-    # assertions below hold regardless of which path did the releasing.
+    # show() swaps deck_controller.inputs for a fresh transient set and stashes
+    # the real one. Confirm by identity that the spy-bearing key reached the
+    # stash, but only while the stash is still populated. show() enqueues a
+    # media-player task that releases and clears it soon after show() returns.
     stashed_keys = controller.screen_saver.original_inputs.get(Input.Key, [])
     if stashed_keys:
         assert stashed_keys[0] is real_key, "fixture sanity: original_inputs should hold the real (pre-show) key objects"
 
-    # Let P2.6's own release (a media-player task queued by show()) actually
-    # run to completion before driving close() -- this is what exercises
-    # show()'s release rather than racing it; close()'s own stash sweep
-    # (P1.3) must then be a safe, idempotent no-op over the same objects.
-    #
-    # Wait on the CONJUNCTION, not just spy.closed: the release loop closes
-    # every stashed input (possibly several keys/dials/the touchscreen)
-    # before its own final `stashed_inputs.clear()` -- polling spy.closed
-    # alone can observe the moment right after OUR spy'd key was closed but
-    # before the release has finished closing the rest and clearing the
-    # dict, which would make this assertion flaky under load rather than
-    # testing anything real.
+    # Let the release queued by show() finish before close(), which exercises
+    # that release instead of racing it. Wait on the conjunction rather than on
+    # spy.closed alone, because the release loop closes every stashed input
+    # before its own final clear(), and polling one spy would be flaky.
     released = fixtures.wait_until(
         lambda: spy.closed and controller.screen_saver.original_inputs == {},
         timeout=5,
@@ -182,26 +141,12 @@ def test_close_sweeps_screensaver_stash() -> None:
     print("PASS: close() sweeps the screensaver stash while showing")
 
 
-def test_close_sweeps_populated_stash_unplug_race() -> None:
-    """The unplug-races-screensaver case the scenario name implies.
+def test_close_sweeps_stash_unplug_race() -> None:
+    """An unplug that races the screensaver leaves the stash populated.
 
-    test_close_sweeps_screensaver_stash above deliberately WAITS for show()'s
-    P2.6 release (a ReleaseStashedInputsMsg on the media-player control queue)
-    to empty the stash BEFORE calling close() -- so close()'s own stash sweep
-    only ever runs over an already-empty dict there, and could regress to a
-    no-op without that test noticing.
-
-    Here we deterministically hold the P2.6 release so the stash is STILL
-    populated when close() runs -- exactly what happens if the deck is
-    unplugged (remove_controller -> close()) in the window after show()
-    stashed the real inputs but before the media thread drained the release.
-    close()'s sweep (DeckController.close step 7) must then be the thing that
-    closes the stashed inputs and clears the containers.
-
-    The hold is a test seam, not a sleep: we monkeypatch the media player's
-    _exec_release_stashed_inputs to a record-only no-op, so the control
-    message drains (queue stays bounded) but never touches the stash. That
-    leaves close() as the sole releaser, which is the property under test.
+    A record-only _exec_release_stashed_inputs holds the release, so the control
+    message drains and the stash stays full. close() step 7 must then be the
+    thing that closes the stashed inputs and clears the containers.
     """
     from src.backend.DeckManagement.InputIdentifier import Input
 
@@ -212,15 +157,14 @@ def test_close_sweeps_populated_stash_unplug_race() -> None:
 
         real_key = controller.inputs[Input.Key][0]
 
-        # Neuter P2.6's release BEFORE show() enqueues it: the message still
-        # drains off the control queue (so nothing piles up), but the stash is
-        # left fully populated for close() to sweep. Bound method rebind on the
-        # instance only -- no other controller/media player is affected.
+        # Neuter the release before show() enqueues it. The message still drains
+        # off the control queue, so nothing piles up, and the stash stays
+        # populated for close() to sweep. The rebind is on this instance only.
         release_seen = threading.Event()
 
         def _record_only_release(msg):
-            # Deliberately does NOT close_resources() or clear the stash: that
-            # is exactly close()'s job in this race, and what we assert below.
+            # This does not close_resources() and does not clear the stash.
+            # That is the job of close() in this race, asserted below.
             release_seen.set()
 
         controller.media_player._exec_release_stashed_inputs = _record_only_release
@@ -228,15 +172,15 @@ def test_close_sweeps_populated_stash_unplug_race() -> None:
         controller.screen_saver.show()
         assert controller.screen_saver.showing is True, "fixture sanity: show() should flip showing"
 
-        # The neutered release must have actually run (proving show() did route
-        # the P2.6 message and the media thread drained it) -- otherwise a
-        # future refactor that stops enqueuing it would make this test pass
-        # vacuously for the wrong reason.
+        # The neutered release must have run, which proves show() routed the
+        # message and the media thread drained it. Without that check, a
+        # refactor that stops enqueuing it would make this test pass for the
+        # wrong reason.
         assert release_seen.wait(timeout=5), "show() must enqueue the P2.6 release control message"
 
-        # Precondition for the whole point of this leg: the stash is STILL
-        # populated (our record-only release left it untouched). If this ever
-        # came up empty the leg would be vacuous.
+        # Precondition for the leg. The stash is still populated, because the
+        # record-only release left it untouched. An empty stash makes the leg
+        # vacuous.
         stashed = controller.screen_saver.original_inputs
         assert stashed.get(Input.Key), (
             "the stash must still be populated at close() time -- the whole "
@@ -244,11 +188,10 @@ def test_close_sweeps_populated_stash_unplug_race() -> None:
         )
         assert stashed[Input.Key][0] is real_key, "the stash must hold the real pre-show key object"
 
-        # Plant the spy on the stashed key's active state NOW, immediately
-        # before close(), so its closed-state is controlled by us and can't be
-        # flipped by an earlier media-thread paint of the transient screensaver
-        # inputs (which races show()'s input swap under load). This is the
-        # object close()'s stash sweep must call close_resources() on.
+        # Plant the spy on the active state of the stashed key now, immediately
+        # before close(), so an earlier media-thread paint of the transient
+        # screensaver inputs cannot flip its closed state. This is the object
+        # the close() stash sweep must call close_resources() on.
         spy = _SpyCloseable()
         real_key.get_active_state().key_image = spy
         assert spy.closed is False, "fixture sanity: the freshly-planted spy starts unclosed"
@@ -262,9 +205,9 @@ def test_close_sweeps_populated_stash_unplug_race() -> None:
         assert real_key.get_active_state().key_image is None, "close()'s sweep must clear the closed reference"
         assert controller.screen_saver.original_inputs == {}, "close() must clear the populated stash"
     finally:
-        # Robust teardown: close() may already have run, but on any early
-        # assertion failure the controller (with a live media thread) must
-        # still be torn down or the process would hang to the run_all timeout.
+        # Robust teardown. close() may already have run, but on an early
+        # assertion failure the controller, with a live media thread, must still
+        # be torn down or the process hangs until the run_all timeout.
         fixtures.teardown(controller)
         if controller in gl.deck_manager.deck_controller:
             gl.deck_manager.deck_controller.remove(controller)
@@ -272,19 +215,17 @@ def test_close_sweeps_populated_stash_unplug_race() -> None:
 
 
 def main() -> None:
-    # A deadlock/hang in any close-path leg must fail loud and fast rather
-    # than parking until run_all.py's per-scenario subprocess timeout (a live
-    # media thread left un-torn-down by a mid-leg failure would otherwise
-    # keep the process alive).
+    # A hang in any close-path leg must fail loud and fast rather than parking
+    # until the per-scenario subprocess timeout of run_all.py. A live media
+    # thread left un-torn-down by a mid-leg failure keeps the process alive.
     fixtures.start_watchdog(60, label="scenario_deck_close")
     test_double_close_is_safe()
     test_remove_controller_frees_everything()
     test_close_sweeps_screensaver_stash()
-    test_close_sweeps_populated_stash_unplug_race()
-    # test_submit_control_rejected_after_stop moved to
-    # scenario_submit_control_reject.py: it is unit-tier and this scenario is
-    # integration-tier -- mixing the two in one process is now refused by the
-    # tier-mixing guard.
+    test_close_sweeps_stash_unplug_race()
+    # test_submit_control_rejected_after_stop lives in
+    # scenario_submit_control_reject.py. It is unit-tier and this scenario is
+    # integration-tier, and the tier-mixing guard refuses both in one process.
     print("PASS: scenario_deck_close")
 
 

@@ -1,71 +1,7 @@
-"""
-Unit-tier scenario: KeyGIF must hold an OPAQUE GIF off the
-shared mp4 tile cache instead of in a retained RGBA frame list -- without
-ever letting a second compositor near the pixels.
+"""An opaque GIF must play off the shared mp4 tile cache, not a frame list.
 
-The frame list is the largest uncapped image holder in the app -- ~147 KB
-per frame at 2x an XL tile, so a 200-frame GIF is ~29 MB and a 32-key page
-of them ~0.9 GiB, roughly 10x the whole evictable image-cache budget. Opaque GIFs
-(the common case) do not need it: an mp4 only lacks the ALPHA channel, so
-the existing refcounted key-video registry can serve their pixels at O(1)
-RAM while PIL's per-frame delay timeline keeps driving playback.
-
-Two rules from the design's v2 are what make that safe, and most of the
-legs below exist to pin them:
-
-  * PIL IS THE ONLY COMPOSITOR. The tile mp4 is written FROM PIL-composited
-    frames; FFmpeg never demuxes a GIF. FFmpeg's own GIF compositing
-    disagrees with PIL on disposal and partial-extent frames, so a route
-    that let it build the cache silently changed what keys looked like.
-  * THE ROUTE FOLLOWS RENDERED ALPHA, not the header's declaration: 75% of
-    real GIFs declare a transparent index and only 11% ever render one.
-
-Covers:
-  (a) an opaque GIF attaches to the mp4 tile registry, retains no frames,
-      is not a member of the census registry at all (its reader is already
-      counted under video_readers), and still serves real images;
-  (b) an alpha-carrying GIF stays on the retained frame list -- transparency
-      survives, and the gif_frames census still sees it;
-  (c) both routes pick the SAME frame index for the same wall clock over an
-      irregular delay timeline -- the routing decision must be invisible to
-      playback (the frame-index parity guard scales indices if a container
-      ever reports a different frame count than PIL);
-  (d) close() releases the reader back to the registry (refcount to zero,
-      captures closed) and leaves late media ticks harmless;
-  (e) a non-square opaque GIF is built at an aspect-preserving, shrink-only
-      tile size -- the same geometry decode_gif_frames' ImageOps.contain
-      would have produced, so the route cannot change what a key looks like;
-  (f) DECKARD_GIF_KEY_BUDGET_MB follows the house env contract (malformed
-      degrades to the default with ONE warning per distinct value rather
-      than raising out of a page load; 0 disables the retained list; a
-      sub-1-MiB budget is announced rather than silently dropping alpha
-      app-wide);
-  (g) an alpha GIF over that budget degrades to the bounded route -- alpha
-      dropped, key still playing, footprint bounded -- the census follows
-      the outcome rather than the intent, and the degraded artifact is a
-      SEPARATE cache variant so raising the budget gives the GIF its
-      transparency back;
-  (h) a GIF that DECLARES transparency but renders none takes the video
-      route -- the dominant real-world population, and the whole point of
-      classifying on pixels;
-  (i) per-frame CONTENT parity through the promoted mp4, on two compositing
-      shapes: a mixed disposal-2 / sub-canvas-extent GIF (each frame index
-      must show the disc where the SOURCE drew it -- compositing parity AND
-      frame-index mapping, where an off-by-one is a whole disc-step away),
-      and a partial-extent GIF whose untouched canvas is where PIL and
-      FFmpeg visibly disagree;
-  (j) odd and tiny geometries land on the even-dimension clamp mp4v needs;
-  (k) a warm construction (the artifact already on disk) attaches to the
-      PROMOTED file and composites not one frame;
-  (l) close() waits for an in-flight frame fetch instead of releasing the
-      reader underneath it;
-  (m) with performance.cache-videos off every GIF stays in RAM and the
-      registry is never touched -- a reader with no artifact would fall
-      back to the SOURCE, whose end-of-source path releases the capture and
-      then repeats one frame forever.
-
-GIF fixtures are generated with PIL at runtime (no binary fixtures in-repo,
-house convention); frames are visually distinct so PIL never merges them.
+PIL stays the only compositor, and the route follows rendered alpha rather
+than the header declaration. Both routes must pick the same frame indices.
 """
 import io
 import os
@@ -88,11 +24,11 @@ from src.backend.DeckManagement.Subclasses import mp4_tile_cache
 
 WATCHDOG_SECONDS = 60
 TILE = (72, 72)
-BUDGET = (TILE[0] * 2, TILE[1] * 2)  # KeyGIF's 2x-tile policy (mem-plan P2.3)
+BUDGET = (TILE[0] * 2, TILE[1] * 2)  # the 2x-tile policy of KeyGIF
 
 
 class _StubDeckController:
-    """Exactly what KeyGIF.__init__ reads (same stub as scenario_gif_fit)."""
+    """Exactly what KeyGIF.__init__ reads, as in scenario_gif_fit."""
 
     def __init__(self, key_size: tuple[int, int] = TILE):
         self._key_size = key_size
@@ -115,14 +51,12 @@ DISC_SIZE = 40
 
 def _make_gif(name: str, *, opaque: bool, durations_ms: list[int],
               size=(200, 200), disposal=2) -> str:
-    """An animated GIF with explicit per-frame durations and a disc that
-    shifts DISC_STEP px each frame. `opaque` decides the route under test: a
-    fully opaque canvas renders no alpha, a transparent one does.
+    """An animated GIF with explicit per-frame durations and a shifting disc.
 
-    `disposal` may be a per-frame list: mixing 2 (restore to background)
-    with 1 (leave in place) is what makes PIL write sub-canvas frame extents
-    for some frames and full-canvas ones for others -- the compositing shape
-    that a second compositor gets wrong."""
+    opaque decides the route under test. disposal may be a per-frame list, and
+    mixing 2 with 1 makes PIL write sub-canvas extents for some frames and
+    full-canvas ones for others, which is where a second compositor goes wrong.
+    """
     frames = []
     for i in range(len(durations_ms)):
         base = (20, 40, 90, 255) if opaque else (0, 0, 0, 0)
@@ -150,16 +84,20 @@ def _gif_frames_census() -> int:
 
 
 def _in_census_registry(obj) -> bool:
-    """Membership, not bytes: a registrant reporting 0 bytes is still IN the
-    budget's registry (and its label still lands in the telemetry CSV). The
-    video route must not be there at all."""
+    """Membership, not bytes.
+
+    A registrant reporting zero bytes is still in the budget registry, and its
+    label still lands in the telemetry CSV. The video route must not be there.
+    """
     return any(cache is obj for cache in cache_budget._snapshot())
 
 
 def _disc_centroid_x(frame: Image.Image) -> float:
-    """Mean x of the red disc's pixels. Thresholded generously: mp4v is
-    lossy and the frames have been resampled, so the disc's EDGE moves by a
-    pixel -- its centre does not."""
+    """Mean x of the red disc pixels.
+
+    Thresholded generously, because mp4v is lossy and the frames are resampled,
+    so the disc edge moves by a pixel while its centre does not.
+    """
     array = np.asarray(frame.convert("RGB"), dtype=int)
     mask = (array[:, :, 0] > 150) & (array[:, :, 1] < 120) & (array[:, :, 2] < 120)
     xs = np.nonzero(mask)[1]
@@ -167,8 +105,8 @@ def _disc_centroid_x(frame: Image.Image) -> float:
     return float(xs.mean())
 
 
-def check_opaque_gif_routes_to_the_tile_cache() -> None:
-    """(a) The whole point: an opaque GIF holds no frames."""
+def check_opaque_gif_routes_tile_cache() -> None:
+    """An opaque GIF holds no frames and plays off the tile registry."""
     path = _make_gif("opaque_route.gif", opaque=True,
                      durations_ms=[100, 100, 100, 100, 100, 100])
     census_before = _gif_frames_census()
@@ -198,7 +136,7 @@ def check_opaque_gif_routes_to_the_tile_cache() -> None:
             f"the reader must hold one registry reference, got {entry!r}"
         )
 
-        # ... and it still serves real frames off the timeline.
+        # It still serves real frames off the timeline.
         assert gif._frame_count() == 6, (
             f"the timeline must still carry every GIF frame, got {gif._frame_count()}"
         )
@@ -214,8 +152,8 @@ def check_opaque_gif_routes_to_the_tile_cache() -> None:
         gif.close()
 
 
-def check_alpha_gif_stays_on_the_frame_list() -> None:
-    """(b) Alpha still needs PIL: an mp4 has no alpha channel."""
+def check_alpha_gif_stays_frame_list() -> None:
+    """Alpha still needs PIL, because an mp4 has no alpha channel."""
     path = _make_gif("alpha_route.gif", opaque=False, durations_ms=[100, 100, 100, 100])
     census_before = _gif_frames_census()
     gif = _decode(path)
@@ -244,18 +182,12 @@ def check_alpha_gif_stays_on_the_frame_list() -> None:
 
 
 def _declare_unused_transparency(path: str) -> None:
-    """Turn on the transparent-colour flag in the first frame's graphic
-    control extension, pointing at a palette index no pixel uses.
+    """Turn on the transparent-colour flag in the first graphic control block.
 
-    Done by patching the two bytes rather than writing the GIF with PIL,
-    because PIL cannot produce this file: its writer drops a transparency
-    index that the pixel data never references. The file is still perfectly
-    ordinary -- three quarters of real animated GIFs declare an index like
-    this, most of them never rendering a transparent pixel with it.
-
-    GCE layout (GIF89a): 21 F9 04 <packed> <delay lo> <delay hi>
-    <transparent index> 00. Bit 0 of <packed> is the transparent-colour
-    flag."""
+    It points at a palette index no pixel uses. Done by patching two bytes,
+    because the PIL writer drops a transparency index the pixel data never
+    references. Three quarters of real animated GIFs declare such an index.
+    """
     raw = bytearray(open(path, "rb").read())
     assert raw[10] & 0x80, "fixture sanity: expected a global colour table"
     gct_entries = 2 ** ((raw[10] & 0x07) + 1)
@@ -267,12 +199,13 @@ def _declare_unused_transparency(path: str) -> None:
         file.write(raw)
 
 
-def check_declared_but_opaque_gif_takes_the_video_route() -> None:
-    """(h) The population the declaration test got wrong. This GIF DECLARES
-    a transparent index on frame 0 and never renders one -- 64% of real
-    GIFs behave this way (75% declare, 11% render), so routing on the
-    declaration left the dominant population paying for a frame list it did
-    not need, which is the opposite of what this issue is for."""
+def check_opaque_gif_takes_video_route() -> None:
+    """A GIF that declares transparency and renders none takes the video route.
+
+    75 percent of real GIFs declare an index and 11 percent render one, so
+    routing on the declaration makes the dominant population pay for a frame
+    list it does not need.
+    """
     path = _make_gif("declared_opaque.gif", opaque=True,
                      durations_ms=[100, 100, 100, 100])
     _declare_unused_transparency(path)
@@ -296,11 +229,13 @@ def check_declared_but_opaque_gif_takes_the_video_route() -> None:
         gif.close()
 
 
-def check_both_routes_pick_the_same_frames() -> None:
-    """(c) The routing decision must be invisible to playback. Same
-    irregular timeline, same wall clock, same frame indices -- the video
-    route's bisect result is an index into the reader instead of a list
-    subscript, nothing else changes."""
+def check_both_routes_pick_same_frames() -> None:
+    """The routing decision must be invisible to playback.
+
+    The same irregular timeline and the same wall clock must give the same
+    frame indices. The bisect result becomes a reader index instead of a list
+    subscript, and nothing else changes.
+    """
     durations = [200, 40, 40, 300, 100, 40, 500]
     opaque = _decode(_make_gif("parity_opaque.gif", opaque=True, durations_ms=durations))
     alpha = _decode(_make_gif("parity_alpha.gif", opaque=False, durations_ms=durations))
@@ -317,8 +252,8 @@ def check_both_routes_pick_the_same_frames() -> None:
         )
 
         T0 = 1_000_000.0
-        # Walk the whole loop plus a wrap, in steps that never exceed the 1s
-        # away-gap threshold (that clamp has its own scenario).
+        # Walk the whole loop plus a wrap, in steps that never exceed the 1 s
+        # away-gap threshold, which has its own scenario.
         for step in range(60):
             now = T0 + step * 0.04
             opaque.get_next_frame(now=now)
@@ -331,9 +266,9 @@ def check_both_routes_pick_the_same_frames() -> None:
                 f"frame delay divergence at t+{step * 0.04:.2f}s"
             )
 
-        # The parity guard: a reader whose count disagrees with PIL's must
-        # scale rather than index past the end (the cache is written frame-
-        # for-frame today, so drive the guard directly).
+        # The parity guard. A reader whose frame count disagrees with PIL must
+        # scale rather than index past the end. The cache is written frame for
+        # frame today, so drive the guard directly.
         cache = opaque.video_cache
         real_n = cache.n_frames
         try:
@@ -368,20 +303,12 @@ SPLICE_ORIGIN = (50, 50)
 
 
 def _make_partial_extent_gif(name: str, n_frames: int, disposals: list[int]) -> str:
-    """A GIF whose frames -- INCLUDING FRAME 0 -- cover only part of the
-    logical screen, assembled block by block.
+    """A GIF whose frames, frame 0 included, cover part of the logical screen.
 
-    PIL's writer cannot produce this: it always writes frame 0 at full
-    extent. It is nonetheless ordinary GIF89a, and it is the shape where
-    compositors visibly disagree -- the area no frame ever paints is
-    palette index 0 to PIL and the logical screen's background colour to
-    FFmpeg (measured: 75% of pixels differ). Only the LZW-coded pixel data
-    is borrowed from PIL, by saving each patch as its own GIF and splicing
-    its image block in at a chosen position.
-
-    Structure: GIF89a header, logical screen descriptor + global colour
-    table, then per frame a graphic control extension (delay + disposal)
-    and an image block, terminated by 0x3B."""
+    The PIL writer cannot produce this, because it always writes frame 0 at
+    full extent. Only the LZW-coded pixel data is borrowed from PIL, by saving
+    each patch as its own GIF and splicing its image block in at a position.
+    """
     def image_block(patch: Image.Image, left: int, top: int) -> bytes:
         buffer = io.BytesIO()
         patch.save(buffer, format="GIF")
@@ -415,10 +342,10 @@ def _make_partial_extent_gif(name: str, n_frames: int, disposals: list[int]) -> 
         + b"\x21\xff\x0bNETSCAPE2.0\x03\x01\x00\x00\x00"  # loop forever
     ]
     for index in range(n_frames):
-        # Indices 0 and 1 ONLY, in that order: PIL renumbers a saved patch's
-        # palette to its used entries in ascending order, so using the first
-        # two makes that renumbering the identity and the spliced indices
-        # keep meaning what they mean in the table above.
+        # Indices 0 and 1 only, in that order. PIL renumbers the palette of a
+        # saved patch to its used entries in ascending order, so using the first
+        # two makes that renumbering the identity, and the spliced indices keep
+        # meaning what they mean in the table above.
         patch = Image.new("P", SPLICE_PATCH, 0)
         patch.putpalette(SPLICE_PALETTE)
         x0 = 5 + index * 10
@@ -435,17 +362,13 @@ def _make_partial_extent_gif(name: str, n_frames: int, disposals: list[int]) -> 
     return path
 
 
-def check_partial_extent_canvas_survives_the_route() -> None:
-    """(i, second half -- the compositor-identity pin) The frames served
-    through the promoted mp4 must be PIL's compositing, not some other
-    library's.
+def check_partial_canvas_survives_route() -> None:
+    """The frames served through the promoted mp4 must be PIL compositing.
 
-    A GIF whose frames never cover the whole logical screen makes the two
-    disagree loudly: PIL fills the untouched canvas with palette index 0,
-    FFmpeg with the screen's declared background colour. Both are defensible
-    readings of the spec; only one of them is what this app has always
-    drawn, and a route that quietly swapped compositors changed 75% of the
-    pixels on files like this one."""
+    A GIF whose frames never cover the whole logical screen makes two
+    compositors disagree loudly. PIL fills the untouched canvas with palette
+    index 0 and FFmpeg with the declared background, 75 percent of the pixels.
+    """
     n = 6
     path = _make_partial_extent_gif("partial_extent.gif", n, [2, 1, 1, 2, 1, 1])
     source = Image.open(path)
@@ -465,8 +388,8 @@ def check_partial_extent_canvas_survives_the_route() -> None:
         scale = cache.out_size[0] / SPLICE_CANVAS[0]
         for index in range(n):
             frame = gif._frame_at(index).convert("RGB")
-            # The untouched canvas, sampled well away from any edge so mp4v's
-            # chroma ringing at the magenta/red boundary cannot reach it.
+            # The untouched canvas, sampled well away from any edge, so the
+            # chroma ringing of mp4v at the boundary cannot reach it.
             for corner in ((3, 3), (frame.width - 4, 3), (3, frame.height - 4)):
                 pixel = frame.getpixel(corner)
                 assert all(abs(a - b) < 24 for a, b in zip(pixel, (255, 0, 255))), (
@@ -484,25 +407,17 @@ def check_partial_extent_canvas_survives_the_route() -> None:
         gif.close()
 
 
-def check_frame_content_survives_the_route() -> None:
-    """(i) The H1 pin, and the one leg that would have caught the shipped
-    defect: per-INDEX content parity through the promoted mp4, on a GIF
-    whose frames mix disposal 2 (restore to background, full extent) with
-    disposal 1 (leave in place, sub-canvas extent).
+def check_frame_content_survives_route() -> None:
+    """Per-index content parity through the promoted mp4.
 
-    Every frame's disc must appear where the SOURCE drew it -- an
-    independently computed position, not a second decode of the same file,
-    so this cannot pass by comparing a compositor to itself. It fails on
-    two distinct regressions:
-      * a different compositor (FFmpeg's disposal handling smears or blanks
-        the disposed region -- the disc lands somewhere else or dissolves);
-      * an off-by-one in the timeline-index -> reader-index mapping, which
-        moves the disc a whole DISC_STEP (14 px on screen, ~5x tolerance).
+    The fixture mixes disposal 2 with disposal 1, so every frame disc must
+    appear where the source drew it, at an independently computed position. A
+    different compositor moves it, and an off-by-one moves it a whole DISC_STEP.
     """
     n = 6
     path = _make_gif("disposal_extents.gif", opaque=True, durations_ms=[100] * n,
                      size=(200, 200), disposal=[2, 1, 1, 2, 1, 1])
-    # Fixture sanity: the file really does carry sub-canvas frame extents.
+    # Fixture sanity. The file really does carry sub-canvas frame extents.
     source = Image.open(path)
     extents = []
     for index in range(n):
@@ -536,9 +451,11 @@ def check_frame_content_survives_the_route() -> None:
         gif.close()
 
 
-def check_close_releases_the_reader() -> None:
-    """(d) close() detaches from the registry (refcount to zero, captures
-    closed) and leaves a late media tick harmless."""
+def check_close_releases_reader() -> None:
+    """close() detaches from the registry and leaves a late tick harmless.
+
+    The refcount goes to zero and the captures are closed.
+    """
     path = _make_gif("release_route.gif", opaque=True, durations_ms=[100, 100, 100])
     gif = _decode(path)
     gif.get_next_frame(now=1_000_000.0)
@@ -562,14 +479,13 @@ def check_close_releases_the_reader() -> None:
     print("PASS: close() releases the shared reader; late ticks stay no-ops")
 
 
-def check_close_waits_for_an_inflight_fetch() -> None:
-    """(l) The _close_lock's whole job, on a real thread. A media tick and a
-    page teardown genuinely race, and releasing the reader while a decode is
-    in flight is how InputVideo's leak happened: the fetch resurrects a
-    capture on an object nobody will ever close again.
+def check_close_waits_inflight_fetch() -> None:
+    """close() must wait for an in-flight frame fetch.
 
-    Drops the lock and this leg fails twice over -- the reader is observed
-    closed underneath the in-flight fetch, and close() no longer waits."""
+    A media tick and a page teardown genuinely race, and releasing the reader
+    mid-decode lets the fetch resurrect a capture on an object nobody will
+    close again. Without _close_lock the reader closes underneath the fetch.
+    """
     path = _make_gif("close_race.gif", opaque=True, durations_ms=[100] * 4)
     gif = _decode(path)
     cache = gif.video_cache
@@ -582,7 +498,7 @@ def check_close_waits_for_an_inflight_fetch() -> None:
     def slow_get_frame(index):
         entered.set()
         time.sleep(0.3)
-        # Read straight off the reader: release() -> close() nulls this.
+        # Read straight off the reader, because release() then close() nulls it.
         observed["released_underneath"] = cache._cache_cap is None
         return real_get_frame(index)
 
@@ -614,17 +530,19 @@ def check_close_waits_for_an_inflight_fetch() -> None:
     print("PASS: close() waits for an in-flight frame fetch instead of racing it")
 
 
-def check_video_route_geometry_matches_the_frame_list() -> None:
-    """(e) A non-square GIF must not be cropped or squished by taking the
-    video route: the registry is asked for exactly the size ImageOps.contain
-    would have produced, and shrink-only still holds for a small source."""
+def check_video_geometry_matches_frames() -> None:
+    """A non-square GIF must not be cropped or squished by the video route.
+
+    The registry is asked for exactly the size ImageOps.contain would produce,
+    and shrink-only still holds for a small source.
+    """
     wide = _decode(_make_gif("wide_opaque.gif", opaque=True,
                              durations_ms=[100, 100, 100], size=(320, 160)))
     small = _decode(_make_gif("small_opaque.gif", opaque=True,
                               durations_ms=[100, 100], size=(40, 40)))
     try:
-        # 320x160 into a 144x144 budget -> 144x72 (the binding dimension is
-        # width), which is what scenario_gif_fit pins for the frame list.
+        # 320x160 into a 144x144 budget gives 144x72, with width as the binding
+        # dimension, which is what scenario_gif_fit pins for the frame list.
         assert contained_size((320, 160), BUDGET) == (144, 72), "helper sanity"
         assert wide.video_cache.out_size == (144, 72), (
             f"a 2:1 source must be built at the aspect-preserving 144x72, got "
@@ -634,7 +552,7 @@ def check_video_route_geometry_matches_the_frame_list() -> None:
         assert frame.size == (144, 72), (
             f"the served frame must carry that geometry, got {frame.size}"
         )
-        # Shrink-only: a 40x40 source is already inside the budget.
+        # Shrink-only. A 40x40 source is already inside the budget.
         assert small.video_cache.out_size == (40, 40), (
             f"a smaller-than-budget source must keep its own size, got "
             f"{small.video_cache.out_size}"
@@ -646,11 +564,11 @@ def check_video_route_geometry_matches_the_frame_list() -> None:
 
 
 def check_odd_geometry_is_clamped_even() -> None:
-    """(j) mp4v silently rounds odd dimensions DOWN (a 133x144 writer
-    produces 132x144 frames), which would leave every payload a pixel off
-    the geometry that was asked for -- so the tile size is the contained
-    size rounded to even, floored at 2. Untested, this clamp can be deleted
-    or inverted with the whole suite still green."""
+    """An odd tile size must be clamped to an even one, floored at 2.
+
+    mp4v rounds odd dimensions down, so a 133x144 writer produces 132x144
+    frames and leaves every payload a pixel off the geometry asked for.
+    """
     assert tile_video_size((133, 144), BUDGET) == (132, 144), "odd width must round down"
     assert tile_video_size((21, 21), BUDGET) == (20, 20), "both axes round down"
     assert tile_video_size((3, 5), BUDGET) == (2, 4), "a tiny source still rounds down"
@@ -683,19 +601,18 @@ def check_odd_geometry_is_clamped_even() -> None:
         tiny.close()
 
 
-def check_warm_construction_serves_the_promoted_file() -> None:
-    """(k) The steady state, and the page-load win: once the artifact
-    exists, a KeyGIF for the same (source, size, saturation) must attach to
-    the PROMOTED file and composite not a single frame.
+def check_warm_build_serves_promoted_file() -> None:
+    """A warm construction must attach to the promoted file and composite none.
 
-    Enforced with a tripwire rather than a stopwatch -- gif_frame_walk is
-    the only compositor in the app, so replacing it with a raise proves the
-    warm path never decodes a pixel."""
+    Once the artifact exists, a KeyGIF for the same source, size and saturation
+    decodes no pixel. Enforced with a tripwire on gif_frame_walk, the only
+    compositor in the app, rather than with a stopwatch.
+    """
     path = _make_gif("warm_route.gif", opaque=True, durations_ms=[100, 120, 140, 160])
     cold = _decode(path)
     out_size = cold.video_cache.out_size
     delays = list(cold.frame_delays)
-    cold.close()  # refcount 0: the entry is dropped, the FILE stays
+    cold.close()  # refcount 0, so the entry is dropped and the file stays
 
     key = mp4_tile_cache._registry_key(path, out_size, 1.0)
     assert mp4_tile_cache._registry.get(key) is None, (
@@ -703,7 +620,7 @@ def check_warm_construction_serves_the_promoted_file() -> None:
     )
 
     # Patched on gif_pipeline, the module KeyGIF._composited_walk resolves the
-    # name from: a stand-in installed anywhere else would leave the real
+    # name from. A stand-in installed anywhere else would leave the real
     # compositor reachable and the tripwire would never fire.
     original_walk = gif_pipeline.gif_frame_walk
 
@@ -761,17 +678,12 @@ def check_warm_construction_serves_the_promoted_file() -> None:
 
 
 def check_budget_env_contract() -> None:
-    """(f) DECKARD_GIF_KEY_BUDGET_MB follows the house env contract
-    (native_tile_cache.native_tile_cache_max_bytes): a malformed value
-    degrades to the default with a warning instead of raising out of a page
-    load, including the values float() accepts but int() cannot take. 0 and
-    negatives disable the RAM route entirely.
+    """DECKARD_GIF_KEY_BUDGET_MB follows the house env contract.
 
-    The warnings are asserted, not assumed: the malformed one fires ONCE per
-    distinct value (it is read per GIF key per page load, so a per-read
-    warning floods the log), and a sub-1-MiB budget -- under a single fitted
-    frame, so every alpha GIF in the app silently loses its transparency --
-    must announce itself rather than degrade in silence."""
+    A malformed value degrades to the default with one warning per distinct
+    value, because it is read per GIF key per page load. Zero and negatives
+    disable the RAM route, and a sub-1-MiB budget must announce itself.
+    """
     from src.backend.DeckManagement.DeckController import (
         GIF_KEY_BUDGET_MB, gif_key_budget_bytes,
     )
@@ -801,8 +713,8 @@ def check_budget_env_contract() -> None:
                 f"{off!r} must disable the retained frame list entirely"
             )
 
-        # The malformed value the app has never seen warns exactly once, no
-        # matter how many keys read it.
+        # A malformed value the app has never seen warns exactly once, however
+        # many keys read it.
         warnings.clear()
         os.environ["DECKARD_GIF_KEY_BUDGET_MB"] = "thirty-two"
         for _ in range(5):
@@ -816,7 +728,7 @@ def check_budget_env_contract() -> None:
             f"the warning must name the knob: {malformed_warnings[0]}"
         )
 
-        # A sub-1-MiB budget is legal but app-wide alpha loss: say so.
+        # A sub-1-MiB budget is legal and costs app-wide alpha, so say so.
         warnings.clear()
         os.environ["DECKARD_GIF_KEY_BUDGET_MB"] = "0.25"
         for _ in range(3):
@@ -838,21 +750,17 @@ def check_budget_env_contract() -> None:
     print("PASS: the GIF key budget env var degrades, and says so exactly once")
 
 
-def check_over_budget_alpha_degrades_to_the_video_route() -> None:
-    """(g) An alpha GIF over the per-GIF budget degrades to the bounded
-    route -- alpha is dropped, the key keeps playing, and the footprint
-    stays bounded (the same ladder GifBackground walks down to cv2). The
-    census must follow the outcome: no gif_frames registration for a GIF
-    that never built a frame list.
+def check_over_budget_alpha_degrades() -> None:
+    """An alpha GIF over the per-GIF budget degrades to the bounded route.
 
-    That artifact is written under its own cache VARIANT, so it can never be
-    mistaken later for proof that the GIF was opaque: the same file at the
-    default budget must get its transparency back, which is what the second
-    half of this leg pins."""
+    Alpha is dropped, the key keeps playing and the footprint stays bounded.
+    A GIF that built no frame list gets no gif_frames registration. The
+    artifact is a separate cache variant, so the default budget restores alpha.
+    """
     path = _make_gif("over_budget_alpha.gif", opaque=False,
                      durations_ms=[100, 100, 100, 100, 100])
     previous = os.environ.get("DECKARD_GIF_KEY_BUDGET_MB")
-    os.environ["DECKARD_GIF_KEY_BUDGET_MB"] = "0.01"  # 10 KB: one frame is ~83 KB
+    os.environ["DECKARD_GIF_KEY_BUDGET_MB"] = "0.01"  # 10 KB, one frame is 83 KB
     census_before = _gif_frames_census()
     try:
         gif = _decode(path)
@@ -873,7 +781,7 @@ def check_over_budget_alpha_degrades_to_the_video_route() -> None:
         )
         frame = gif.get_next_frame(now=1_000_000.0)
         assert frame is not None, "the degraded key must still play"
-        # The documented cost of the degrade: an mp4 has no alpha channel.
+        # The known cost of the degrade. An mp4 has no alpha channel.
         assert frame.mode == "RGB", (
             f"the video route serves opaque frames, got mode {frame.mode}"
         )
@@ -885,8 +793,8 @@ def check_over_budget_alpha_degrades_to_the_video_route() -> None:
             "the bounded artifact must actually be on disk"
         )
 
-        # Under the default budget the very same GIF keeps its frame list --
-        # the bounded artifact must not shadow the lossless decision.
+        # Under the default budget the same GIF keeps its frame list, so the
+        # bounded artifact must not shadow the lossless decision.
         unbudgeted = _decode(path)
         try:
             assert unbudgeted.video_cache is None and len(unbudgeted.frames) == 5, (
@@ -901,16 +809,13 @@ def check_over_budget_alpha_degrades_to_the_video_route() -> None:
         gif.close()
 
 
-def check_cache_videos_off_keeps_every_gif_in_ram() -> None:
-    """(m) With performance.cache-videos off there is no artifact to route
-    to, so every GIF -- opaque included -- keeps its frame list, exactly as
-    it did before this issue, and no GIF touches the registry.
+def check_cache_videos_off_keeps_gifs() -> None:
+    """With performance.cache-videos off every GIF keeps its frame list.
 
-    Reproduced before the fix: an opaque GIF acquired a reader, no builder
-    was started, and the reader's own end-of-source path released the source
-    capture -- after one pass every later frame request returned the same
-    payload forever. This walks three full loops and demands distinct
-    pixels."""
+    There is no artifact to route to, so no GIF touches the registry. A reader
+    with no artifact falls back to the source, whose end-of-source path
+    releases the capture and repeats one frame. This walks three full loops.
+    """
     app_settings = gl.settings_manager.get_app_settings()
     app_settings.setdefault("performance", {})["cache-videos"] = False
     try:
@@ -933,7 +838,7 @@ def check_cache_videos_off_keeps_every_gif_in_ram() -> None:
         T0 = 1_000_000.0
         payloads = []
         indices = []
-        # 8 frames x 100ms = 0.8s per loop; three loops at 50ms steps.
+        # 8 frames at 100 ms is 0.8 s per loop, so three loops at 50 ms steps.
         for step in range(48):
             frame = gif.get_next_frame(now=T0 + step * 0.05)
             assert frame is not None, f"playback stopped at step {step}"
@@ -956,20 +861,20 @@ def check_cache_videos_off_keeps_every_gif_in_ram() -> None:
 def main() -> None:
     fixtures.install_stub_globals({"performance": {"cache-videos": True}})
     fixtures.start_watchdog(WATCHDOG_SECONDS, label="scenario_gif_opaque_route")
-    check_opaque_gif_routes_to_the_tile_cache()
-    check_alpha_gif_stays_on_the_frame_list()
-    check_declared_but_opaque_gif_takes_the_video_route()
-    check_both_routes_pick_the_same_frames()
-    check_frame_content_survives_the_route()
-    check_partial_extent_canvas_survives_the_route()
-    check_close_releases_the_reader()
-    check_close_waits_for_an_inflight_fetch()
-    check_video_route_geometry_matches_the_frame_list()
+    check_opaque_gif_routes_tile_cache()
+    check_alpha_gif_stays_frame_list()
+    check_opaque_gif_takes_video_route()
+    check_both_routes_pick_same_frames()
+    check_frame_content_survives_route()
+    check_partial_canvas_survives_route()
+    check_close_releases_reader()
+    check_close_waits_inflight_fetch()
+    check_video_geometry_matches_frames()
     check_odd_geometry_is_clamped_even()
-    check_warm_construction_serves_the_promoted_file()
+    check_warm_build_serves_promoted_file()
     check_budget_env_contract()
-    check_over_budget_alpha_degrades_to_the_video_route()
-    check_cache_videos_off_keeps_every_gif_in_ram()
+    check_over_budget_alpha_degrades()
+    check_cache_videos_off_keeps_gifs()
     print("PASS: scenario_gif_opaque_route")
 
 

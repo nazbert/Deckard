@@ -1,25 +1,7 @@
-"""
-Regression tests for unguarded active_page derefs and
-_screensaver_pending_page retention.
+"""Regression tests for unguarded active_page derefs and pending-page retention.
 
-active_page can go None (close() step 8, load_page(None)) or be swapped
-(a racing switch) at any moment on threads other than the one reading
-it. Three read sites deref it without a local snapshot + None-guard;
-each part below builds a deterministic seam for the race that is
-otherwise a rare-timing crash:
-
-  A. ControllerInputState.get_own_actions re-reads the live attribute
-     AFTER its None check -- a flip between check and use raised
-     AttributeError out of every own_actions_* caller.
-  B. load_page's tail passes self.active_page.json_path to the
-     ChangePage signal -- a racing null between the lock release and the
-     signal silently killed the signal + DBus notify for this switch.
-  C. load_default_page's state-request branch compares against
-     self.active_page.json_path unguarded (and outside its coord
-     try/except).
-  D. close() never cleared _screensaver_pending_page -- a pure page-object
-     retention on a dead controller (teardown-only fix; the pending
-     mechanism itself must never touch active_page mid-screensaver).
+active_page goes None on close() or load_page(None), and a racing switch swaps
+it. Each part builds a deterministic seam for a race that is otherwise rare.
 """
 from types import SimpleNamespace
 
@@ -28,9 +10,10 @@ import globals as gl
 
 
 class FlippingController:
-    """Stands in for a DeckController whose active_page is nulled by a racing
-    thread: the property serves a real page for the first `live_reads`
-    reads (the None-check window), then None (the post-check flip)."""
+    """Stands in for a DeckController whose active_page a racing thread nulls.
+
+    The property serves a real page for the first live_reads reads, then None.
+    """
 
     def __init__(self, page, live_reads: int):
         self._page = page
@@ -54,7 +37,7 @@ def part_a_get_own_actions() -> None:
         action_objects={},
         get_all_actions_for_input=lambda identifier, state: list(sentinel),
     )
-    # Two live reads: enough for the None check(s) to pass, so the final
+    # Two live reads let the None checks pass, so the final
     # get_all_actions_for_input call is what sees the flip to None.
     ctrl = FlippingController(page, live_reads=2)
 
@@ -63,7 +46,7 @@ def part_a_get_own_actions() -> None:
     state.controller_input = SimpleNamespace(deck_controller=ctrl, identifier="key-0x0")
     state.state = 0
 
-    # Pre-fix: AttributeError ('NoneType' has no 'get_all_actions_for_input').
+    # Without the snapshot, this raises AttributeError on NoneType.
     actions = state.get_own_actions()
     assert actions == sentinel, (
         f"expected the snapshot page's actions, got {actions!r} -- the live "
@@ -78,16 +61,15 @@ def part_b_load_page_tail(controller) -> None:
     seed_path = fixtures.seed_page("GuardTailPage")
     page = gl.page_manager.get_page(seed_path, controller)
 
-    # Deterministic seam: initialize_actions runs in the tail right before
-    # the ChangePage signal -- have it stand in for the racing close()/
-    # load_page(None) that nulls active_page.
+    # initialize_actions runs in the tail right before the ChangePage signal.
+    # Have it stand in for the racing close() or load_page(None) that nulls
+    # active_page, which makes the seam deterministic.
     page.initialize_actions = lambda *a, **k: setattr(controller, "active_page", None)
 
-    # Observe at the trigger CALL SITE (a connected callback would only run
-    # on a GLib main loop iteration, and this harness runs none): the deref
-    # under test happens at argument evaluation, before trigger_signal is
-    # entered, so pre-fix the AttributeError lands in load_page's @log.catch
-    # and no ChangePage trigger is ever recorded.
+    # Observe at the trigger call site, because a connected callback needs a
+    # GLib main loop iteration and this harness runs none. The deref under test
+    # happens at argument evaluation, so an AttributeError lands in the
+    # @log.catch of load_page and records no ChangePage trigger.
     received = []
     original_trigger = gl.signal_manager.trigger_signal
 
@@ -114,8 +96,8 @@ def part_c_load_default_page(controller) -> None:
     fixtures.seed_page("StateReqPage")
 
     loaded = []
-    # Keep load_page inert so active_page stays exactly what the scenario
-    # sets -- the seam for "close()/clear raced the state-request branch".
+    # Keep load_page inert, so active_page stays what the scenario sets. This is
+    # the seam for a close() or clear that races the state-request branch.
     controller.load_page = lambda page, *a, **k: loaded.append(page)
     controller.active_page = None
     gl.api_state_requests[controller.serial_number()] = {
@@ -124,8 +106,8 @@ def part_c_load_default_page(controller) -> None:
         "state": 0,
     }
 
-    # Pre-fix: AttributeError (the deref sits before the branch's own
-    # try/except and the method has no other guard).
+    # Without the guard this raises AttributeError. The deref sits before the
+    # branch's own try/except and the method has no other guard.
     controller.load_default_page()
 
     assert len(loaded) >= 2, (

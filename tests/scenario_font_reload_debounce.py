@@ -1,38 +1,13 @@
-"""
-Unit-tier scenario for the shared font-row reload debounce.
+"""Unit-tier scenario for the shared font-row reload debounce.
 
-`GtkHelper/debounce.py`'s `TrailingDebouncer` is what the four Settings font
-rows (family/size, colour, outline width, outline colour) now share instead
-of each spawning its own `reload-all-pages` thread out of `on_set`.
-
-Covers:
-  (a) a burst of triggers coalesces to exactly one callback, and that
-      callback happens only after the window -- never inline.
-  (b) a trigger raised while a fire is pending re-arms the timer (trailing,
-      not leading): the pending handle is cancelled and a fresh full-length
-      one takes its place.
-  (c) THE NEVER-ELIDE CONSTRAINT: any trigger is eventually followed by a fire.
-      The font-defaults -> reload_all_pages -> create_n_states path is what
-      rebuilds every LabelManager, and the label memos treat that
-      rebuild as their pixel-correctness guarantee, so the debounce may
-      DELAY the reload but must never ELIDE it. Checked across the shapes a
-      dedupe/early-return regression would break: repeated identical
-      triggers, a trigger from inside the callback, a trigger after a
-      completed cycle.
-  (d) the production GLibScheduler path really coalesces and really is
-      one-shot, driven headless through the default GLib main context (this
-      is where a wrong SOURCE_REMOVE return or a stale source_remove id
-      would show up, not in the fake-scheduler checks).
-  (e) an AST tripwire on src/windows/Settings/Settings.py: no font row may
-      spawn its own reload thread again, every one of them routes through
-      FontPageGroup.request_page_reload, and each still saves the font
-      defaults immediately (only the reload is deferred, never the write).
+The four Settings font rows share one TrailingDebouncer. A burst coalesces to
+one trailing fire, and every trigger is eventually followed by a fire.
 """
 import ast
 import os
 import time
 
-import fixtures  # must be first: isolates DATA_PATH
+import fixtures  # must be first; isolates DATA_PATH
 
 from GtkHelper.debounce import GLibScheduler, TrailingDebouncer
 
@@ -45,7 +20,7 @@ FONT_ROW_CLASSES = ("FontRow", "FontColorRow", "FontOutlineColorRow", "FontOutli
 
 
 class FakeScheduler:
-    """Virtual-time timer source: nothing runs until the test says so."""
+    """Virtual-time timer source. Nothing runs until the test says so."""
 
     def __init__(self):
         self.armed = {}          # handle -> (delay_ms, callback)
@@ -64,7 +39,7 @@ class FakeScheduler:
         del self.armed[handle]
 
     def advance(self):
-        """Fire every currently-armed timer once (callbacks may re-arm)."""
+        """Fire every armed timer once. A callback may re-arm."""
         due = list(self.armed.items())
         self.armed.clear()
         for _handle, (_delay, callback) in due:
@@ -113,11 +88,10 @@ def check_trigger_during_window_rearms() -> None:
     print("PASS: a trigger inside the pending window re-arms the full window (trailing, not leading)")
 
 
-def check_callback_always_fires_after_any_trigger() -> None:
-    """The never-elide constraint: DELAY the reload, never ELIDE it."""
-    # 1. Repeated *identical* triggers still fire. The debouncer carries no
-    #    value at all, so there is nothing an equality check could dedupe
-    #    against -- this pins that property.
+def check_callback_fires_after_trigger() -> None:
+    """The debounce may delay the reload and must never drop it."""
+    # 1. Repeated identical triggers still fire. The debouncer carries no value
+    #    at all, so there is nothing an equality check could dedupe against.
     scheduler = FakeScheduler()
     fires = []
     debouncer = TrailingDebouncer(300, lambda: fires.append(1), scheduler=scheduler)
@@ -126,16 +100,16 @@ def check_callback_always_fires_after_any_trigger() -> None:
     scheduler.advance()
     assert len(fires) == 1, "identical repeated triggers must still produce a fire (never elide)"
 
-    # 2. A second, independent cycle after one completed still fires -- the
-    #    pending handle is cleared on fire, so the debouncer is re-usable.
+    # 2. A second, independent cycle after one completed still fires. The
+    #    pending handle is cleared on fire, so the debouncer is reusable.
     debouncer.trigger()
     scheduler.advance()
     assert len(fires) == 2, "a trigger after a completed cycle was swallowed (never elide)"
 
-    # 3. A trigger raised from *inside* the callback (the reentrant shape:
-    #    the user changes another font row while the reload is being
-    #    spawned) arms a fresh timer instead of cancelling a dead source,
-    #    and that timer fires too.
+    # 3. A trigger raised from inside the callback is the reentrant shape, where
+    #    the user changes another font row while the reload is being spawned. It
+    #    arms a fresh timer instead of cancelling a dead source, and that timer
+    #    fires too.
     scheduler = FakeScheduler()
     reentrant = []
 
@@ -152,7 +126,7 @@ def check_callback_always_fires_after_any_trigger() -> None:
     scheduler.advance()
     assert len(reentrant) == 2, "the trigger raised from inside the callback never fired (never elide)"
 
-    # 4. Sweep: for any burst length, draining always yields a fire.
+    # 4. Sweep. For any burst length, draining always yields a fire.
     for burst in range(1, 8):
         scheduler = FakeScheduler()
         fires = []
@@ -165,7 +139,7 @@ def check_callback_always_fires_after_any_trigger() -> None:
     print("PASS: debounce constraint -- every trigger is eventually followed by exactly one fire, never zero")
 
 
-def check_glib_scheduler_coalesces_and_is_one_shot() -> None:
+def check_glib_scheduler_coalesces_one_shot() -> None:
     from gi.repository import GLib
 
     fires = []
@@ -183,7 +157,7 @@ def check_glib_scheduler_coalesces_and_is_one_shot() -> None:
 
     assert len(fires) == 1, f"the GLib-scheduled debounce fired {len(fires)} times, expected 1"
 
-    # One-shot: keep pumping well past the window, it must not repeat.
+    # One-shot. Keep pumping well past the window; it must not repeat.
     end = time.monotonic() + 0.3
     while time.monotonic() < end:
         context.iteration(False)
@@ -222,10 +196,11 @@ def _func_def(class_node: ast.ClassDef, name: str) -> ast.FunctionDef:
 
 
 def _derive_font_row_classes(tree) -> tuple:
-    """Every class whose on_set touches font_page_group IS a font row --
-    derived from the AST so a fifth row added later is covered without
-    anyone remembering to extend a hardcoded list (review L-4). The
-    literal FONT_ROW_CLASSES stays as the minimum expected set."""
+    """Every class whose on_set touches font_page_group is a font row.
+
+    Derived from the AST, so a fifth row added later is covered without anyone
+    extending a list. FONT_ROW_CLASSES stays as the minimum expected set.
+    """
     found = []
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef):
@@ -238,7 +213,7 @@ def _derive_font_row_classes(tree) -> tuple:
     return tuple(found)
 
 
-def check_font_rows_route_through_the_group() -> None:
+def check_font_rows_route_through_group() -> None:
     tree = ast.parse(open(SETTINGS_PY, encoding="utf-8").read(), filename=SETTINGS_PY)
 
     derived = _derive_font_row_classes(tree)
@@ -270,11 +245,10 @@ def check_font_rows_route_through_the_group() -> None:
     assert "self.reload_debouncer.trigger" in _called_names(request), (
         "FontPageGroup.request_page_reload bypasses the debouncer"
     )
-    # The never-elide invariant, enforced structurally: the
-    # trigger must be UNCONDITIONAL. Any If/Return in the body is the
-    # "skip the reload when nothing changed" optimization that silently
-    # breaks the label memos' correctness contract -- the reload may be
-    # delayed, never elided.
+    # The never-drop invariant, enforced structurally. The trigger must be
+    # unconditional. Any If or Return in the body is the skip-when-unchanged
+    # optimization, which silently breaks the correctness contract of the label
+    # memos. The reload may be delayed and never dropped.
     conditional = [n for n in ast.walk(request)
                    if isinstance(n, (ast.If, ast.Return, ast.IfExp))]
     assert not conditional, (
@@ -294,8 +268,10 @@ def check_font_rows_route_through_the_group() -> None:
 
 
 def check_trigger_is_single_thread() -> None:
-    """The debouncer's _pending has no lock; a second triggering thread must
-    fail loudly instead of racing it (review L-1)."""
+    """The _pending field of the debouncer has no lock.
+
+    A second triggering thread must fail loudly instead of racing it.
+    """
     import threading
 
     from GtkHelper.debounce import TrailingDebouncer
@@ -326,10 +302,10 @@ def main() -> None:
 
     check_burst_coalesces_to_one_fire()
     check_trigger_during_window_rearms()
-    check_callback_always_fires_after_any_trigger()
-    check_glib_scheduler_coalesces_and_is_one_shot()
+    check_callback_fires_after_trigger()
+    check_glib_scheduler_coalesces_one_shot()
     check_trigger_is_single_thread()
-    check_font_rows_route_through_the_group()
+    check_font_rows_route_through_group()
 
     print("PASS: scenario_font_reload_debounce")
 
