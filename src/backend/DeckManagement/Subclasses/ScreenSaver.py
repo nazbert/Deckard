@@ -179,9 +179,8 @@ class ScreenSaver:
             # pinned down-time action snapshot mid-screensaver. Cancel the
             # gestures here, while a racing input event still reaches the
             # stashed inputs. This does bookkeeping only, with attribute
-            # stores and timer cancels. The touchscreen keeps no gesture state,
-            # because
-            # its events arrive pre-classified and single-shot.
+            # stores and timer cancels. The touchscreen keeps no gesture
+            # state, because its events arrive pre-classified and single-shot.
             for key in self.original_inputs.get(Input.Key, []):
                 key.cancel_gesture()
             for dial in self.original_inputs.get(Input.Dial, []):
@@ -274,8 +273,8 @@ class ScreenSaver:
         """Serialized hide transition (docs/presenter-migration-plan.md).
 
         Phase 2 runs under _load_page_lock and does the coalesce, the flip and
-        the restore. Phase 3 runs load_page and set_time after the release, as
-        a closure this method returns.
+        the restore. Phase 3 runs load_page and set_time after the release,
+        through a closure invoked below the with block.
         """
         if getattr(self.deck_controller, "_closing", False):
             # The deck is tearing down. hide()'s phase 3 calls load_page(),

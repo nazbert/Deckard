@@ -113,9 +113,8 @@ class InputVideo(SingleKeyAsset):
                     # animated content, such as a deck background video or a
                     # dial, can re-trigger composites at any rate, and
                     # per-owner tick gates never see that. Inside one cap
-                    # window the pick is
-                    # identical, so the owner's hash dedup drops the redundant
-                    # device write.
+                    # window the pick is identical, so the owner's hash dedup
+                    # drops the redundant device write.
                     cap = max(1.0, float(self.fps or 30))
                     elapsed = int(elapsed * cap) / cap
                 frame = int(elapsed * playback_fps)

@@ -99,9 +99,8 @@ class FairLock:
             self._serving += 1
         # Use notify_all and not notify. The waiters are the transport reader
         # and the writing thread, two or three at a time. The wasted wakeups
-        # cost less
-        # than a USB chunk, and each waiter re-checks its own ticket, so no
-        # wakeup is lost.
+        # cost less than a USB chunk, and each waiter re-checks its own
+        # ticket, so no wakeup is lost.
         self._cond.notify_all()
 
     def __enter__(self) -> bool:

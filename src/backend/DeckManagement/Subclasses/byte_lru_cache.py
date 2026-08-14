@@ -30,11 +30,8 @@ class has this shape. Its cost there:
                 wake damping). Nothing outside this instance's lock.
     eviction    popitem scale, one lock, never nested with another.
 
-Instances also implement cache_budget.BudgetParticipant. A process-wide
-manager uses it to compare LRU heads across caches and to shed from the
-globally-oldest one without holding two cache locks at once. See
-cache_budget's module docstring for the ceiling, the overshoot bound, and the
-disabled and degenerate behaviors.
+Instances also implement cache_budget.BudgetParticipant, through the budget_
+methods at the foot of the class.
 """
 import threading
 import time

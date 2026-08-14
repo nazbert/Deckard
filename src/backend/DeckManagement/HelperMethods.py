@@ -306,10 +306,10 @@ def _load_pango():
 
 def color_values_to_gdk(color_values: Sequence[int]) -> "Gdk.RGBA":
     # The annotation is Sequence and not a tuple union. The persisted label
-    # and font colors are JSON lists, and that is what most callers hand
-    # over. The body copies
-    # into a list and works off the length, so it accepts any 3- or 4-element
-    # sequence of channel values (scenario_helper_methods pins that contract).
+    # and font colors are JSON lists, and that is what most callers hand over.
+    # The body copies into a list and works off the length, so it accepts any
+    # 3- or 4-element sequence of channel values (scenario_helper_methods pins
+    # that contract).
     Gdk = _load_gdk()
     # Copy before normalizing. Callers pass tuples, which .append rejects,
     # and they reuse the sequence they passed in.

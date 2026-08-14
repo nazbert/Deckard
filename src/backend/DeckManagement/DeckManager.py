@@ -96,9 +96,9 @@ class DeckManager:
         self._controllers_lock = threading.Lock()
         # Serializes the two connect_new_decks() callers, the USB hotplug
         # monitor and the boot rescan below. The already-loaded check and the
-        # controller registration
-        # must be atomic, or two concurrent enumerations of one fresh deck
-        # both pass the check and register it twice.
+        # controller registration must be atomic, or two concurrent
+        # enumerations of one fresh deck both pass the check and register it
+        # twice.
         self._connect_decks_lock = threading.Lock()
         # Startup re-enumeration. load_hardware_decks() arms it when the boot
         # enumeration comes back empty, because autostart races USB device
@@ -330,10 +330,10 @@ class DeckManager:
         initialize does not count, so the rescan keeps retrying it.
         """
         # The serialization is global and not per-deck, so a slow open or
-        # retry of deck A delays deck B's pickup. The usbmonitor is a poll-diff
-        # loop
-        # that merges device changes and drops no event while this lock is
-        # held. The deferred deck arrives when its caller gets the lock.
+        # retry of deck A delays deck B's pickup. The usbmonitor is a
+        # poll-diff loop that merges device changes and drops no event while
+        # this lock is held. The deferred deck arrives when its caller gets
+        # the lock.
         with self._connect_decks_lock:
             decks = DeviceManager().enumerate()
 
