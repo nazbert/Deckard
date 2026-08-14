@@ -132,7 +132,7 @@ class LabelManager:
         # value carries no identity of its own. The media thread fills them on
         # the render path and the UI or plugin threads drop them on the edit
         # path, with no lock. A plain None latch loses that race and pins the
-        # pre-edit value forever: the reader sees None, composes, the editor
+        # pre-edit value forever. The reader sees None, composes, the editor
         # invalidates, then the reader stores. So a builder reads the epoch
         # before it composes and publishes (epoch, value), and a reader accepts
         # the memo only while the stamp equals the current epoch. The counter
@@ -141,8 +141,9 @@ class LabelManager:
         # _bbox_cache, _scroll_strips and _static_ops need no epoch. See
         # _bump_label_epoch().
         self._label_epoch: int = 0
-        # (epoch, {position: text width}) for the labels that scroll: wider
-        # than the key, with rolling labels enabled. None means recompute.
+        # (epoch, {position: text width}) for the labels that scroll, which
+        # means wider than the key with rolling labels enabled. None means
+        # recompute.
         # get_has_scroll_labels() derives from this.
         self._scroll_widths_cache: tuple[int, dict[str, int]] | None = None
         # (epoch, bool): whether any composed label has non-empty text.

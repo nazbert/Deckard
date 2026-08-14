@@ -1487,12 +1487,12 @@ class DeckController:
         # GC, proceed. The surface is narrow. The wedge is a plugin hook, and
         # plugin hooks run in the first step of _teardown_actions,
         # clear_action_objects, before its screensaver-input and background
-        # cleanup. So an abandoned thread parks in clear_action_objects and
-        # never reaches the close_resources() and original_inputs.clear() that
-        # step 7 also touches. The only state it can still mutate is the
-        # action_objects that step 8's discard_controller drops. A change that
-        # moves resource cleanup ahead of the hooks in _teardown_actions
-        # widens this.
+        # cleanup. So an abandoned thread parks in clear_action_objects and,
+        # while it stays wedged, does not reach the close_resources() and
+        # original_inputs.clear() that step 7 also touches. The only state it
+        # can still mutate is the action_objects that step 8's
+        # discard_controller drops. A change that moves resource cleanup ahead
+        # of the hooks in _teardown_actions widens this.
         if not app_quit:
             teardown_thread = threading.Thread(
                 target=self._teardown_actions,

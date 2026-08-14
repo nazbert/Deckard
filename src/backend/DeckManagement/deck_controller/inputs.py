@@ -591,8 +591,9 @@ class ControllerKey(ControllerInput["ControllerKeyState"]):
 
         # DOWN-time gesture snapshot, a (state, actions) pair captured when
         # the key went down, or None outside a gesture. The rest of the
-        # gesture dispatches to this snapshot, and not to whatever the key
-        # resolves to at release time. A ChangePage action on this key swaps
+        # gesture, HOLD_START, HOLD_STOP or SHORT_UP, and UP, dispatches to
+        # this snapshot, and not to whatever the key resolves to at release
+        # time. A ChangePage action on this key swaps
         # active_page, and rebuilds this key's states, synchronously during
         # the DOWN dispatch. Live resolution would then send the UP to the new
         # page's actions, so the old page's actions never see their release

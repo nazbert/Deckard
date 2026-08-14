@@ -366,8 +366,11 @@ class MediaPlayerThread(threading.Thread):
         # alignment. The same gate drives the repaint decision at
         # now - _last_video_write < min_gap below, so it governs render cost
         # as well as write cost, and a render above the loop rate buys
-        # nothing. Hence 30, not unlimited. A value of 0 disables the cap, and
-        # the env var is a field bisection tool; 20 restores the older pacing.
+        # nothing. Hence 30, not unlimited. Render cost on high-entropy
+        # content, where tile dedup skips nothing at ~270 candidate writes per
+        # second, belongs to the native tile cache and not to this knob. A
+        # value of 0 disables the cap, and the env var is a field bisection
+        # tool; 20 restores the older pacing.
         self._video_write_hz = _env_float("DECKARD_VIDEO_WRITE_HZ", 30.0)
         self._last_video_write = 0.0
         # The same budget caps every touchscreen write, at the write point in
@@ -858,42 +861,33 @@ class MediaPlayerThread(threading.Thread):
         except Exception as e:
             log.error(f"Failed to write blank frames for Clear: {e}")
 
-        # A transition's Clear can execute after the frames it precedes. The
-        # caller submits it on the control queue, then enqueues the paints, so
-        # a tick that already drained control writes those paints and pops
-        # this Clear on its next pass. The seq filter above wipes queued
-        # tasks, and these already ran, so the blanks land last with nothing
-        # left to repaint the deck. Behind a showing screensaver that is
+        # A Clear can execute after the paints it was meant to precede. The
+        # caller queues it, then fills the task slots, so a tick that already
+        # drained control writes those paints and pops this Clear next pass.
+        # The seq filter above cannot help, because those paints already ran,
+        # and the blanks land last. Behind a showing screensaver that state is
         # terminal, because a still image animates nothing and no other
-        # producer runs. Arm the repaint retry, the same recovery a failed
-        # device write gets, and let _run_pending_repaint restore the imagery.
-        # Only the media thread writes this state; never arm it from the
-        # submitting thread.
+        # producer runs, so the deck stays blank until the screensaver is
+        # dismissed. Arm the repaint retry, which _run_pending_repaint
+        # services, from the media thread only.
         #
-        # _max_executed_seq means a frame stamped after this Clear already
-        # reached the device, and nothing weaker will do. Arming on an
-        # ordinary transition is harmful. _run_pending_repaint composites and
-        # encodes the whole deck from the media thread with no lock, at the
-        # top of a tick and ahead of the task drain, while the transition's
-        # update_all_inputs() still runs under _load_page_lock on another
-        # thread. ControllerKey.update() does not synchronise its
-        # _last_enqueued_hash and add_image_task pair, so a repaint composited
-        # against the pre-swap background can land last and stick, leaving the
-        # old page's imagery with both dedup hashes agreeing. Queue occupancy
-        # cannot tell the two apart, because the screensaver calls
-        # clear_media_player_tasks() between its Clear and its paints, which
-        # empties image_tasks and nulls the touchscreen slot, so the slots are
-        # empty at Clear time on an ordinary transition too. This counter
-        # moves only when a frame goes out, so it exceeds this Clear's seq
-        # only in the interleave where the paints went out and these blanks
-        # overwrote them.
+        # The test must be exactly that a frame stamped after this Clear
+        # reached the device. An arm on an ordinary transition is harmful,
+        # because _run_pending_repaint composites the whole deck unlocked from
+        # the media thread ahead of the task drain, racing an
+        # update_all_inputs() under _load_page_lock, and ControllerKey.update()
+        # leaves _last_enqueued_hash and add_image_task unsynchronised, so a
+        # pre-swap repaint can land last and stick with both dedup hashes
+        # agreeing. Queue occupancy cannot tell the two apart, because the
+        # screensaver clears the slots between its Clear and its paints. This
+        # counter moves only when a frame goes out, so it exceeds this Clear's
+        # seq only where the paints went out and these blanks overwrote them.
         #
-        # expects_repaint keeps the recovery to a caller that meant to
-        # repaint. The screensaver's entry and exit stamp it True; load_page's
-        # page-is-None branch does not, because a blank deck is the requested
-        # end state there. It is the submitter's stamp and not a
-        # screen_saver.showing read, because hide() clears that flag one
-        # statement after it submits its Clear.
+        # DeckController.clear() has three callers. The screensaver's entry and
+        # exit stamp expects_repaint True; load_page's page-is-None branch does
+        # not, because there a blank deck is the requested end state. The
+        # submitter stamps it, because hide() clears showing one statement
+        # later.
         if msg.expects_repaint and self._max_executed_seq > msg.seq:
             self.deck_controller._schedule_full_repaint()
 
