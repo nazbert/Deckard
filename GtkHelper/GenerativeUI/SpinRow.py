@@ -16,7 +16,7 @@ class SpinRow(GenerativeUI[float]):
     using spin buttons. The widget can be customized with properties such as minimum, maximum, step size, and
     the number of digits displayed.
 
-    Inherits from `GenerativeUI` to manage the UI and provide common functionality for interactive elements.
+    Inherits from GenerativeUI to manage the UI and provide common functionality for interactive elements.
 
     Attributes:
         value (float): The current value of the spin row.
@@ -84,9 +84,8 @@ class SpinRow(GenerativeUI[float]):
         """
         Disconnects the signal handlers for the spin row widget.
         """
-        # `.widget` builds first if needed -- build() sets both `_widget`
-        # and `_adjustment`, so touch it before referencing `_adjustment`
-        # (which otherwise wouldn't exist yet on an unbuilt row).
+        # Read .widget first, because it builds when needed and build() sets
+        # both _widget and _adjustment. An unbuilt row has no _adjustment.
         widget = self.widget
         better_disconnect(self._adjustment, self._correct_step_amount)
         better_disconnect(widget, self._value_changed)
@@ -106,9 +105,9 @@ class SpinRow(GenerativeUI[float]):
 
     def get_number(self) -> float:
         """
-        Retrieves the current value of the spin row. Falls back to the
-        settings-backed value layer if the widget hasn't been built yet --
-        reading the value is a value query and must not force a build.
+        Retrieves the current value of the spin row. It falls back to the
+        settings value layer while the widget is unbuilt, because a read is a
+        value query and must not force a build.
 
         Returns:
             float: The current value of the spin row.
@@ -154,10 +153,11 @@ class SpinRow(GenerativeUI[float]):
         adjustment.set_value(rounded_value)
 
     def _get_adjustment(self) -> Gtk.Adjustment:
-        """`_adjustment` is created alongside the widget in build(). min/max/
-        step are widget-construction config with no settings-layer
-        equivalent, so touching them legitimately forces a build if one
-        hasn't happened yet."""
+        """The adjustment, which build() creates beside the widget.
+
+        The min, max and step values are widget-construction config, and the
+        settings layer holds no equivalent, so a read of them forces a build.
+        """
         if self._widget is None:
             _ = self.widget
         return self._adjustment

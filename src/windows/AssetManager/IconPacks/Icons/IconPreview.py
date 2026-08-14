@@ -50,9 +50,10 @@ class IconPreview(Preview):
     def set_icon(self, icon: "Icon") -> None:
         self.icon = icon
 
-        # Called from DynamicFlowBox._apply_range's main-loop callback (the
-        # only caller is the chooser's factory func): set text/image directly.
-        # Deferring them through idle_add left the recycled child visible for
-        # a frame with the PREVIOUS item's name/thumbnail.
+        # This runs inside the main-loop callback of
+        # DynamicFlowBox._apply_range, and the factory function of the chooser
+        # is the one caller, so set the text and the image here. A deferral
+        # through idle_add leaves the recycled child visible for a frame with
+        # the name and thumbnail of the earlier item.
         self.set_text(os.path.splitext(os.path.basename(self.icon.path))[0])
         self.set_image(self.icon.path)

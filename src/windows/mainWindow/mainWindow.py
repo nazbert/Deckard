@@ -319,10 +319,10 @@ class MainWindow(Adw.ApplicationWindow):
         GLib.idle_add(self._add_toast, text, Adw.ToastPriority.NORMAL, 3)
 
     def show_error_toast(self, text: str) -> None:
-        # Safe to call from any thread. Errors linger longer and jump the
-        # queue -- they explain missing functionality (e.g. plugins that
-        # failed to load), and callers reach this from background threads
-        # (plugin/store loads).
+        # Safe from any thread. An error toast stays longer and jumps the
+        # queue, because it explains missing functionality, such as a plugin
+        # that failed to load. A caller reaches this from a background
+        # thread, such as a plugin load or a store load.
         GLib.idle_add(self._add_toast, text, Adw.ToastPriority.HIGH, 7)
 
     def _add_toast(self, text: str, priority: Adw.ToastPriority, timeout: int) -> bool:
@@ -342,14 +342,17 @@ class MainWindow(Adw.ApplicationWindow):
         return visible_child.deck_controller
 
     def get_active_page(self) -> Page | None:
-        """The page shown by the selected deck, or None while nothing is
-        selected/loaded. Callers must tolerate None -- it is the normal
-        state between deck selection and the first page load."""
+        """The page that the selected deck shows, or None.
+
+        The result is None while nothing is selected and nothing is loaded.
+        A caller must accept None, which is the normal state between the deck
+        selection and the first page load.
+        """
         controller = self.get_active_controller()
         if controller is None:
-            # Was `return gl.page_manager.dummy_page`, an attribute that
-            # exists nowhere in the codebase -- so the no-deck-selected path
-            # raised AttributeError instead of reporting "no page".
+            # Return None here. gl.page_manager has no dummy_page attribute,
+            # so a read of one raises AttributeError instead of reporting
+            # that no page exists.
             return None
         if hasattr(controller, "active_page"):
             return controller.active_page

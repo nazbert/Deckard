@@ -28,7 +28,7 @@ import globals as gl
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    # Runtime import would cycle: DeckSettingsPage imports this module.
+    # A runtime import cycles, because DeckSettingsPage imports this module.
     from src.windows.mainWindow.elements.DeckSettings.DeckSettingsPage import DeckSettingsPage
 
 # Import own modules
@@ -99,10 +99,10 @@ class Rotation(Adw.PreferencesRow):
         self.settings_page.deck_controller.set_rotation(rot)
 
     def load_default(self, *args):
-        # By handler, not by signal name: better_disconnect takes the callable
-        # and quietly swallows what it cannot disconnect, so a name here left
-        # the handler connected -- and the set_active_name below then saved and
-        # re-applied a rotation nobody had touched, one handler more per open.
+        # Pass the handler, not the signal name. better_disconnect takes the
+        # callable and accepts a miss without a word, so a name here leaves
+        # the handler connected. set_active_name below then saves and applies
+        # a rotation that nobody changed, once more per open.
         better_disconnect(self.toggle_group, self.on_value_changed)
 
         rot = gl.settings_manager.deck(self.deck_serial_number).get("rotation")
@@ -173,26 +173,26 @@ class Brightness(Adw.PreferencesRow):
             self.on_map_tasks.append(lambda: self.load_default())
             return
 
-        # Read-only, and with the handler off. This runs on every open of the
-        # page: filling the missing key here would persist a brightness nobody
-        # chose, and letting the scale's handler see the load would save it AND
-        # push it to the physical deck -- opening a settings page is not a
-        # decision to change the deck.
+        # Read only, and with the handler off. This runs at every open of the
+        # page. A write of the missing key here persists a brightness that
+        # nobody chose, and a load that the scale handler sees saves that
+        # value and pushes it to the physical deck. An open of a settings page
+        # is not a decision to change the deck.
         better_disconnect(self.scale, self.on_value_changed)
         self.scale.set_value(gl.settings_manager.deck(self.deck_serial_number).get("brightness", "value"))
         self.scale.connect("value-changed", self.on_value_changed)
 
 
 class Saturation(Adw.PreferencesRow):
-    """Per-deck display saturation boost (PIL ImageEnhance.Color factor).
+    """Per-deck display saturation boost, a PIL ImageEnhance.Color factor.
 
-    Stored as deck settings["display"]["saturation"] (default 1.0, a strict
-    no-op everywhere it's applied). Unlike Brightness there is no live
-    per-frame setter to call -- the factor is baked into media at load/cache-
-    build time -- so changing it reloads the active page instead
-    (DeckController.set_display_saturation), which re-enhances static media
-    immediately and, for background/key video, lazily rebuilds the video
-    cache under the new factor's cache filename on next playthrough.
+    It lives in the deck settings under display and saturation, and its
+    default of 1.0 changes nothing. Brightness has a live per-frame setter,
+    and this factor has none, because the media takes the factor at load time
+    and at cache-build time. A change therefore reloads the active page
+    through DeckController.set_display_saturation, which enhances the static
+    media at once and rebuilds the video cache under the cache filename of the
+    new factor at the next playthrough.
     """
     def __init__(self, settings_page: "DeckSettingsPage", deck_serial_number, **kwargs):
         super().__init__()
@@ -203,7 +203,7 @@ class Saturation(Adw.PreferencesRow):
         self.on_map_tasks: list = []
         self.connect("map", self.on_map)
 
-        self.load_default()  # defers at construction -- see Brightness above
+        self.load_default()  # defers at construction; see Brightness above
         self.scale.connect("value-changed", self.on_value_changed)
 
     def on_map(self, widget):
@@ -225,10 +225,10 @@ class Saturation(Adw.PreferencesRow):
         self.main_box.append(self.scale)
 
     def on_value_changed(self, scale):
-        # Trailing debounce: value-changed fires on every drag step, and
-        # applying saturation is a full page reload plus (for video
-        # backgrounds) a cache rebuild -- apply once, 300ms after the drag
-        # settles, instead of ~10 times across a 1.0->1.5 drag.
+        # A trailing debounce. value-changed fires on every drag step, and an
+        # apply of the saturation is a full page reload, plus a cache rebuild
+        # for a video background. Apply once, 300 ms after the drag stops,
+        # instead of about ten times across one drag.
         if getattr(self, "_apply_source", None) is not None:
             GLib.source_remove(self._apply_source)
         self._apply_source = GLib.timeout_add(300, self._apply_value)
@@ -237,8 +237,9 @@ class Saturation(Adw.PreferencesRow):
         self._apply_source = None
         value = round(self.scale.get_value(), 2)
 
-        # Persists to deck settings, refreshes DeckController's cached value,
-        # and reloads the active page -- see DeckController.set_display_saturation.
+        # This persists to the deck settings, refreshes the cached value in
+        # DeckController, and reloads the active page. See
+        # DeckController.set_display_saturation.
         self.settings_page.deck_controller.set_display_saturation(value)
         return GLib.SOURCE_REMOVE
 
@@ -248,9 +249,9 @@ class Saturation(Adw.PreferencesRow):
             self.on_map_tasks.append(lambda: self.load_default())
             return
 
-        # Read-only, and with the handler off -- same reason as Brightness
-        # above: an open of the page must neither write the file nor reload
-        # the page behind a factor nobody changed.
+        # Read only, and with the handler off, for the reason that Brightness
+        # above gives. An open of the page must not write the file, and must
+        # not reload the page behind a factor that nobody changed.
         better_disconnect(self.scale, self.on_value_changed)
         self.scale.set_value(gl.settings_manager.deck(self.deck_serial_number).get("display", "saturation"))
         self.scale.connect("value-changed", self.on_value_changed)
@@ -365,10 +366,9 @@ class Screensaver(Adw.PreferencesRow):
 
     def load_defaults(self):
         self.disconnect_signals()
-        # One read, and read-only: the missing keys show the deck-settings
-        # schema's defaults without being written into the file. Persisting
-        # them here would pin today's default onto every deck whose settings
-        # page has ever been opened.
+        # One read, and read only. A missing key shows the default from the
+        # deck-settings schema and reaches no file. A write here pins the
+        # current default onto every deck whose settings page a user opened.
         config = gl.settings_manager.deck(self.deck_serial_number).section("screensaver")
 
         # Update ui
@@ -466,8 +466,8 @@ class Screensaver(Adw.PreferencesRow):
         settings.save()
 
         deck_controller = self.settings_page.deck_controller
-        # No active page (e.g. right after connect or with zero pages) means
-        # there is nothing to reload the screensaver against; load_screensaver
-        # dereferences page.dict, so a None here would raise.
+        # No active page, which happens right after a connect and with zero
+        # pages, leaves nothing to reload the screensaver against.
+        # load_screensaver reads page.dict, so a None here raises.
         if deck_controller.active_page is not None:
             deck_controller.load_screensaver(deck_controller.active_page)

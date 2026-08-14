@@ -42,8 +42,8 @@ class IconPackChooser(GenericPackChooserPage):
 
     def get_packs(self) -> dict:
         if gl.icon_pack_manager is None:
-            # Boot order: the window cannot be opened before the manager
-            # exists, but the type says it may be absent.
+            # The boot order keeps the window shut until the manager exists,
+            # and the type still allows None.
             return {}
         return gl.icon_pack_manager.get_icon_packs()
 
@@ -51,6 +51,6 @@ class IconPackChooser(GenericPackChooserPage):
         return self.stack.icon_chooser
 
     def on_build_finished(self) -> None:
-        # The icon stack gates deferred show_for_path tasks on BOTH its
-        # pages' build_finished flags.
+        # The icon stack gates a deferred show_for_path task on the
+        # build_finished flag of each of its two pages.
         self.stack.on_load_finished()

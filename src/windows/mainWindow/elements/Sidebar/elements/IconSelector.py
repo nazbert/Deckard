@@ -39,9 +39,9 @@ class IconSelector(Gtk.Box):
         self.active_identifier: InputIdentifier = None
         self.active_state: int = None
 
-        # next() on a count is atomic; a read-modify-write on latest_task_id
-        # would hand two frames the same id now that producers are threads,
-        # letting a stale one pass the check in set_pixbuf_and_del.
+        # next() on a count is atomic. A read-modify-write on latest_task_id
+        # gives two frames the same id, because the producers are threads, and
+        # a stale frame then passes the check in set_pixbuf_and_del.
         self.task_ids = itertools.count()
         self.latest_task_id: int = None
         self.build()
@@ -134,8 +134,8 @@ class IconSelector(Gtk.Box):
         if page is None:
             return
 
-        # No save of our own: the setter persists what it sets, so the second
-        # one only marked the page a second time for the same change.
+        # This makes no save of its own. The setter persists what it sets, so
+        # a second save marks the page again for the same change.
         page.set_media_path(identifier=self.active_identifier, state=self.active_state, path=path)
 
         # Update remove button visibility

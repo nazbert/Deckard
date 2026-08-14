@@ -17,7 +17,7 @@ class ExpanderRow(GenerativeUI[bool]):
     A class that represents a UI expander row widget with additional functionality
     to manage its expansion state and to add child widgets.
 
-    Inherits from `GenerativeUI` to provide generic UI management and functionality.
+    Inherits from GenerativeUI to provide generic UI management and functionality.
 
     Attributes:
         expanded (bool): Whether the expander is currently expanded or collapsed.
@@ -80,7 +80,7 @@ class ExpanderRow(GenerativeUI[bool]):
         """
         Disconnects the signal handler for the 'notify::enable-expansion' signal.
 
-        This method prevents further handling of expansion state changes when the widget is no longer in use
+        The widget then handles no further expansion state change.
         or when the signals should be stopped.
         """
         better_disconnect(self.widget, self._value_changed)
@@ -100,9 +100,9 @@ class ExpanderRow(GenerativeUI[bool]):
 
     def get_enable_expansion(self) -> bool:
         """
-        Retrieves the current expansion state of the expander. Falls back to
-        the settings-backed value layer if the widget hasn't been built yet
-        -- reading the state is a value query and must not force a build.
+        Retrieves the current expansion state of the expander. It falls back
+        to the settings value layer while the widget is unbuilt, because a
+        read is a value query and must not force a build.
 
         Returns:
             bool: The current state of the expander's enabled expansion.

@@ -90,9 +90,9 @@ class MissingRow(Adw.PreferencesRow):
         if plugin is None:
             self.show_install_error()
             return
-        # Install plugin. An Err is a failure -- anything else is the single
-        # success. Reading the result is what keeps a failed install from
-        # falling through to the "installed" UI reset.
+        # Install the plugin. An Err is a failure, and any other result is
+        # the one success. The read of the result keeps a failed install from
+        # reaching the installed UI reset.
         result = gl.store_backend.install_plugin(plugin)
         if isinstance(result, Err):
             self.show_install_error()
@@ -110,13 +110,12 @@ class MissingRow(Adw.PreferencesRow):
         GLib.idle_add(self.spinner.set_visible, False)
         GLib.idle_add(self.spinner.stop)
         GLib.idle_add(self.label.set_text, self.install_failed_label)
-        # ADD the error class (it was remove_css_class before, so the error
-        # styling never actually showed); hide_install_error removes it.
+        # Add the error class here, and hide_install_error removes it again.
         GLib.idle_add(self.add_css_class, "error")
         GLib.idle_add(self.set_sensitive, False)
 
-        # Hide error after 3s -- via idle_add: hide_install_error mutates
-        # GTK widgets, and wheel callbacks fire on a worker thread.
+        # Hide the error after 3 s, through idle_add. hide_install_error
+        # changes GTK widgets, and a wheel callback runs on a worker thread.
         timer_wheel.schedule(3, lambda: GLib.idle_add(self.hide_install_error), name="missing_row_hide_install_error")
 
     def hide_install_error(self):
@@ -129,13 +128,14 @@ class MissingRow(Adw.PreferencesRow):
         controller = gl.app.main_win.leftArea.deck_stack.get_visible_child().deck_controller
         page = controller.active_page
 
-        # Remove only the addressed action entry. Deleting the whole
-        # action_objects[type][key] subtree (as before) would drop every
-        # other state's/index's action on this input too (design-doc bug 29).
+        # Remove only the action entry that the caller names. A delete of the
+        # whole action_objects[type][key] subtree also drops the action of
+        # every other state and index on this input.
         state_dict = page.action_objects.get(self.identifier.input_type, {}).get(self.identifier.json_identifier, {}).get(self.state, {})
         action = state_dict.pop(self.index, None)
-        # Framework-owned teardown: notify then unconditionally clean_up()
-        # on exactly what was removed (D1). No-op for None/non-ActionCore.
+        # The framework owns the teardown. It notifies, then calls clean_up()
+        # on the removed object. It does nothing for None, and for an object
+        # that is not an ActionCore.
         ActionCore.teardown(action)
 
         # Remove from page json

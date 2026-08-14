@@ -51,8 +51,9 @@ class CustomAssetChooserFlowBox(DynamicFlowBox):
 
         self.flow_box.connect("child-activated", self.on_child_activated)
 
-        # There is only ever one "pack" for custom assets (the whole backend list), so it can
-        # be loaded eagerly once the recycler itself is built -- see DynamicFlowBox docstring.
+        # Custom assets have one pack, the whole backend list, so the load
+        # runs as soon as the recycler exists. See the DynamicFlowBox
+        # docstring.
         self.load_assets()
 
     def load_assets(self) -> None:
@@ -117,19 +118,19 @@ class CustomAssetChooserFlowBox(DynamicFlowBox):
         return 0
 
     def on_child_activated(self, flow_box, child):
-        # Capture the selection and callback *before* spawning the thread (P4.2 prerequisite b):
-        # under window reuse, a stale thread that re-reads `self.asset_chooser.asset_manager`
-        # from inside the thread body could end up calling a *new* callback with a *new*
-        # window's state if the user reopens the Asset Manager while this thread is still
-        # in flight.
+        # Capture the selection and the callback before the thread starts.
+        # Each open reuses the window, so a thread that reads
+        # self.asset_chooser.asset_manager from its own body can call a new
+        # callback with the state of a new window, when the user reopens the
+        # Asset Manager while the thread runs.
         asset_path = child.asset["internal-path"]
         callback = self.asset_chooser.asset_manager.callback_func
         callback_args = self.asset_chooser.asset_manager.callback_args
         callback_kwargs = self.asset_chooser.asset_manager.callback_kwargs
 
-        # Captured -- drop the manager's own refs so the hidden singleton
-        # doesn't keep pinning the opener's bound callback (and through it
-        # the action/page graph) until the next show_for_path.
+        # The capture is done, so drop the references of the manager. The
+        # hidden window must not pin the bound callback of the opener, and
+        # through it the action and page graph, until the next show_for_path.
         self.asset_chooser.asset_manager.callback_func = None
         self.asset_chooser.asset_manager.callback_args = ()
         self.asset_chooser.asset_manager.callback_kwargs = {}
@@ -142,9 +143,10 @@ class CustomAssetChooserFlowBox(DynamicFlowBox):
             )
             callback_thread.start()
 
-        # Hide (not close()) so the window survives for reuse (P4.2): close() falls through to
-        # GTK4's default close-request handling, which destroys the window on the next
-        # main-loop iteration even without an explicit destroy() call (verified empirically).
+        # Call hide, not close, so the window survives for the next open.
+        # close() reaches the default GTK4 close-request handling, which
+        # destroys the window on the next main-loop iteration, with no
+        # explicit destroy() call.
         self.asset_chooser.asset_manager.hide()
 
     @log.catch

@@ -195,23 +195,23 @@ class Sidebar(Adw.NavigationPage):
             return
 
         self.main_stack.set_transition_duration(0)
-        # key_editor is a child of configurator_stack, not of main_stack --
-        # targeting it here was a GTK-warning no-op that left the error page
-        # up. configurator_stack still shows whichever editor was last
-        # selected inside it.
+        # key_editor is a child of configurator_stack and not of main_stack,
+        # so a call with key_editor here logs a GTK warning, does nothing, and
+        # leaves the error page up. configurator_stack still shows the editor
+        # that the user last selected inside it.
         self.main_stack.set_visible_child(self.configurator_stack)
         self.main_stack.set_transition_duration(200)
 
     def update(self):
         identifier = self.active_identifier
         state = self.active_state
-        # Refresh follows the input's OWN current state: the remembered
-        # active_state can belong to a previous page's input (page changes
-        # keep the sidebar selection), and replaying it would repaint the
-        # device from a UI-refresh path (KeyEditor.load_for_identifier calls
-        # c_input.set_state) and ERROR-spam whenever the new page's input
-        # has fewer states. User-driven state selection still passes its
-        # state explicitly through load_for_*.
+        # The refresh follows the current state of the input. The remembered
+        # active_state can belong to an input of an earlier page, because a
+        # page change keeps the sidebar selection. A replay of it repaints the
+        # device from a UI-refresh path, since KeyEditor.load_for_identifier
+        # calls c_input.set_state, and it logs an error for every state that
+        # the new input lacks. A user-driven state selection still passes its
+        # state through load_for_*.
         controller = self.main_window.get_active_controller()
         if controller is not None and identifier is not None:
             c_input = controller.get_input(identifier)

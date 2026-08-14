@@ -17,7 +17,7 @@ class ScaleRow(GenerativeUI[float]):
     using a slider. The widget can be configured with various properties such as min, max, step, and the display of
     a text entry field for manual value input.
 
-    Inherits from `GenerativeUI` to provide generic UI management and functionality.
+    Inherits from GenerativeUI to provide generic UI management and functionality.
 
     Attributes:
         value (float): The current value of the scale.
@@ -96,8 +96,7 @@ class ScaleRow(GenerativeUI[float]):
         """
         Disconnects the signal handler for the 'value-changed' signal.
 
-        This method prevents further handling of scale value changes when the widget is no longer in use or
-        when the signals should be stopped.
+        The widget then handles no further scale value change.
         """
         better_disconnect(self.widget.scale, self._value_changed)
 
@@ -116,9 +115,9 @@ class ScaleRow(GenerativeUI[float]):
 
     def get_number(self) -> float:
         """
-        Retrieves the current value of the scale. Falls back to the
-        settings-backed value layer if the widget hasn't been built yet --
-        reading the value is a value query and must not force a build.
+        Retrieves the current value of the scale. It falls back to the
+        settings value layer while the widget is unbuilt, because a read is a
+        value query and must not force a build.
 
         Returns:
             float: The current value of the scale.
@@ -249,8 +248,8 @@ class ScaleRow(GenerativeUI[float]):
         Returns:
             int: The number of digits for the scale value.
         """
-        # `digits` is widget-construction config, not a settings value --
-        # there's no value-layer equivalent, so this legitimately builds.
+        # digits is widget-construction config, and the value layer holds no
+        # equivalent, so this read builds the widget.
         return self.widget.digits
 
     @digits.setter

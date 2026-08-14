@@ -1,13 +1,14 @@
-"""Single source of truth for the application's identity strings.
+"""The identity strings of the application, defined once.
 
-Stdlib-only and side-effect-free, so it can be imported from anywhere --
-including ``rebrand_migration.py`` before ``import globals`` and the test
-harness. Do NOT import ``globals`` or any ``src.*`` module here, or the
-pre-``globals`` import contract of the rebrand migration breaks.
+This module uses the standard library only and has no import-time side
+effects, so any module can import it. That includes rebrand_migration.py,
+which runs before the globals import, and the test harness. Do not import
+globals, or any src module, here. Either one breaks the pre-globals import
+contract of the rebrand migration.
 
-Every derived spelling (D-Bus object path, ayatana underscore form, dotted
-suffixes) is built from ``APP_ID`` here so a future id change is a one-line
-edit instead of a multi-file, multi-spelling grep.
+Every derived spelling comes from APP_ID below, which covers the D-Bus object
+path, the ayatana underscore form and the dotted suffixes. An id change is
+therefore one edit.
 """
 
 APP_ID = "io.github.nazbert.Deckard"

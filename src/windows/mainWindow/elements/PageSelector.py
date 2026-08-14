@@ -129,13 +129,13 @@ class PageSelector(Gtk.Box):
 
         active = drop_down.get_active()
         if active < 0:
-            # No row selected -- get_active() returns -1, which would
-            # negative-index the model and silently load the LAST page.
+            # No row is selected. get_active() returns -1, which indexes the
+            # model from the end and loads the last page.
             return
         page_path = self.pages_model[active][1]
         if active_controller.active_page is not None and active_controller.active_page.json_path == page_path:
-            # Selector synced to a deck-triggered switch; the page is already
-            # loading/loaded -- don't kick off a redundant second load.
+            # The selector matches a switch that the deck triggered, so the
+            # page already loads or is loaded. Do not start a second load.
             return
         page = gl.page_manager.get_page(path=page_path, deck_controller = active_controller)
         log.info(f"Load page: {page}")

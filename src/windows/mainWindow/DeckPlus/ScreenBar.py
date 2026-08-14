@@ -38,9 +38,10 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.windows.mainWindow.elements.PageSettingsPage import PageSettingsPage
 
-# (icon selector, dial pixbuf, its task id), or None when no dial is selected.
+# An icon selector, a dial pixbuf and its task id, or None when the user
+# selected no dial.
 DialPreview = tuple[Any, Any, int] | None
-# What one mirrored strip frame carries: (pixbuf, task id, dial preview).
+# One mirrored strip frame carries a pixbuf, a task id and a dial preview.
 MirrorFrame = tuple[Any, int, DialPreview]
 
 class ScreenBar(Gtk.Frame):
@@ -83,7 +84,8 @@ class ScreenBar(Gtk.Frame):
         self.min_drag_distance = 20
         self.long_press_treshold = 0.5
 
-        # Both None outside a drag -- reset on every press (see on_drag_*).
+        # Both stay None outside a drag, and every press resets them. See the
+        # on_drag_ handlers.
         self.drag_start_xy: tuple[int, int] | None = None
         self.drag_start_time: float | None = None
 
@@ -112,10 +114,10 @@ class ScreenBar(Gtk.Frame):
         self.load_from_changes()
 
     def load_from_changes(self) -> None:
-        # Apply changes accumulated before creation of self, or while the
-        # window was hidden (mem plan P5.4): the entry is a dirty MARKER, not
-        # a stashed PIL image -- recomposite the current frame and push it
-        # through the same set-image path a live update would use.
+        # Apply the changes that arrived before this widget existed, or while
+        # the window was hidden. Each entry is a dirty marker and not a stored
+        # PIL image, so this composites the current frame again and pushes it
+        # through the set-image path that a live update uses.
         if not hasattr(self.deck_controller, "ui_image_changes_while_hidden"):
             return
         tasks = self.deck_controller.ui_image_changes_while_hidden
@@ -227,11 +229,10 @@ class ScreenBar(Gtk.Frame):
         if state_key not in self.identifier.get_states(active_page):
             return
 
-        # Taking the state out IS the save: inside the block the page's own
-        # lock is held, so the removal cannot be snapshotted halfway by a
-        # write in flight, and it is marked once on the way out. Re-read
-        # inside rather than reusing the dict the check above looked at,
-        # which was read without the lock.
+        # The removal of the state is the save. The block holds the page
+        # lock, so a write in flight cannot snapshot the removal half done,
+        # and the exit marks the page once. Read the dict again inside the
+        # block, because the check above read it without the lock.
         with active_page.edit():
             self.identifier.get_states(active_page).pop(state_key, None)
 
@@ -254,11 +255,11 @@ class ScreenBarImage(Gtk.Picture):
         self.on_map_tasks: list[Callable[[], Any]] = []
         self.connect("map", self.on_map)
 
-        # next() on a count is atomic, so no two frames are handed the same id
-        # now that producers are threads. Publishing it is still a plain
-        # store, so two producers can land their ids out of order and the
-        # older one wins the check in set_pixbuf_and_del; the next frame
-        # corrects it, and one producer per screenbar is the normal case.
+        # next() on a count is atomic, so two frames never take the same id,
+        # and the producers are threads. The publish is a plain store, so two
+        # producers can land their ids out of order and the older one wins the
+        # check in set_pixbuf_and_del. The next frame corrects that, and one
+        # producer per screenbar is the normal case.
         self.task_ids = itertools.count()
         # None until the first frame is queued.
         self.latest_task_id: int | None = None
@@ -272,28 +273,29 @@ class ScreenBarImage(Gtk.Picture):
         return next(self.task_ids)
 
     def set_image(self, image: Image.Image):
-        # Callable from any thread; the map-time replay path. Live frames come
-        # through the UI adapter, which calls the same two halves but
-        # coalesces the paints into one per input.
-        # Default idle priority: high-priority pixbuf updates every frame can
-        # starve the main loop's layout/draw.
+        # Callable from any thread. This is the map-time replay path. A live
+        # frame arrives through the UI adapter, which calls the same two
+        # halves and coalesces the paints into one per input. The idle takes
+        # the default priority, because a high-priority pixbuf update on every
+        # frame starves the layout and draw of the main loop.
         GLib.idle_add(self.paint_mirror_frame, self.prepare_mirror_frame(image))
 
     def prepare_mirror_frame(self, image: Image.Image) -> MirrorFrame:
-        """The paint-ready payload for `paint_mirror_frame`.
+        """The paint-ready payload for paint_mirror_frame.
 
-        Any thread: the thumbnail and every conversion are pure PIL +
-        GdkPixbuf, so they run on the caller (the media thread for live
-        frames) and only the paint needs the loop. The mapped check lives in
-        set_pixbuf_and_del - widget state can't be read from off-main.
+        Any thread may call it. The thumbnail and every conversion use only
+        PIL and GdkPixbuf, so they run on the caller, which is the media
+        thread for a live frame, and only the paint needs the loop. The mapped
+        check lives in set_pixbuf_and_del, because widget state needs the main
+        thread.
 
-        The task id travels WITH the pixbuf so a paint that lost the race to a
-        newer frame still drops out in set_pixbuf_and_del. It is stamped on
-        THIS widget while the mirror's drain re-resolves the screenbar from
-        the deck stack, so the stamp only decides between frames of one
-        widget: a screenbar replaced between a push and its paint would take
-        the id with it, and the replacement's own frames re-stamp from its own
-        counter.
+        The task id travels with the pixbuf, so a paint that lost the race to
+        a newer frame still drops out in set_pixbuf_and_del. The stamp goes on
+        this widget while the mirror drain resolves the screenbar from the
+        deck stack again, so the stamp decides only between frames of one
+        widget. A screenbar that is replaced between a push and its paint
+        takes the id with it, and the replacement stamps its own frames from
+        its own counter.
         """
         width = 385 #TODO: Find a better way to do this
         thumbnail = image.copy()
@@ -309,13 +311,13 @@ class ScreenBarImage(Gtk.Picture):
         return pixbuf, task_id, self._prepare_dial_preview(image)
 
     def paint_mirror_frame(self, payload: MirrorFrame) -> bool:
-        # Main loop only. Returns False: a GLib idle callback that returns
-        # truthy re-arms forever.
+        # Main loop only. It returns False, because a GLib idle callback that
+        # returns a true value re-arms.
         pixbuf, task_id, dial = payload
         self.set_pixbuf_and_del(pixbuf, task_id)
         if dial is not None:
-            # Already on the loop, so this needs no idle of its own -- and
-            # riding the strip's payload is what keeps it coalesced.
+            # This code already runs on the loop, so it needs no idle of its
+            # own, and the payload of the strip keeps it coalesced.
             icon_selector, dial_pixbuf, dial_task_id = dial
             icon_selector.set_pixbuf_and_del(dial_pixbuf, dial_task_id)
         return False
@@ -336,9 +338,9 @@ class ScreenBarImage(Gtk.Picture):
         identifier = gl.app.main_win.sidebar.active_identifier
         if not isinstance(identifier, Input.Dial):
             return None
-        # Own controller, not whichever deck happens to be visible: this
-        # widget belongs to one deck, and resolving via the deck stack
-        # would be a GTK read on the producer thread.
+        # Use the own controller, not the visible deck. This widget belongs
+        # to one deck, and a lookup through the deck stack is a GTK read on
+        # the producer thread.
         touch_screen = self.screenbar.deck_controller.get_input(Input.Touchscreen("sd-plus"))
         if touch_screen is None:
             return None
@@ -346,11 +348,10 @@ class ScreenBarImage(Gtk.Picture):
         icon_selector = gl.app.main_win.sidebar.key_editor.icon_selector
         dial_image = image.crop(touch_screen.get_dial_image_area(identifier))
         pixbuf = image2pixbuf(dial_image.convert("RGBA"), force_transparency=True)
-        # Same benign read-modify-write as the screenbar's own stamp: the id
-        # this frame carries is re-read after the store, so with two producers
-        # it can come back as a newer frame's and this one drops in
-        # set_pixbuf_and_del. The next frame corrects it, and one producer per
-        # screenbar is the normal case.
+        # The same read-modify-write as the screenbar stamp. This frame reads
+        # the id back after the store, so with two producers it can read the
+        # id of a newer frame, and this frame drops in set_pixbuf_and_del. The
+        # next frame corrects that, and one producer per screenbar is normal.
         icon_selector.latest_task_id = icon_selector.get_new_task_id()
         return icon_selector, pixbuf, icon_selector.latest_task_id
 
@@ -363,9 +364,9 @@ class ScreenBarImage(Gtk.Picture):
         # callback: painting a disposed widget crashes GTK.
         try:
             if not self.get_mapped():
-                # Replay this pixbuf on map. Secondary net only: the P5.4
-                # dirty-mark path recomposites a fresh frame when the window
-                # comes back, which is what normally repaints the preview.
+                # Replay this pixbuf on the map. This is a second net. The
+                # dirty-mark path composites a fresh frame when the window
+                # returns, and that repaints the preview.
                 self.on_map_tasks = [lambda: self.set_pixbuf_and_del(pixbuf)]
                 return
             self.set_pixbuf(pixbuf)

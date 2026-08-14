@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """Derive the CI flatpak manifest from the committed one.
 
-The committed manifest (io.github.nazbert.Deckard.yml) builds the app
-module from the fork's GitHub repo — right for flathub, wrong for CI,
-which must build the commit under test. This swaps the Deckard module's
-sources for a local directory (a clean
-`git archive` export staged by .gitlab-ci.yml, relative to the manifest)
-and leaves every other module untouched. Same rewrite flatpak/install.sh
-performs with yq for local builds.
+The committed manifest, io.github.nazbert.Deckard.yml, builds the app module
+from the GitHub repo of the fork. That is right for flathub and wrong for CI,
+which must build the commit under test. This script swaps the sources of the
+Deckard module for a local directory, a clean git archive export that
+.gitlab-ci.yml stages beside the manifest, and it leaves every other module
+alone. flatpak/install.sh makes the same rewrite with yq for a local build.
 
 Usage: make_ci_manifest.py <manifest.yml> <src-dir-relative-to-manifest>
-Rewrites <manifest.yml> in place. Comments/formatting are not preserved —
-the output is a throwaway build input, never committed.
+
+It rewrites <manifest.yml> in place. The output loses the comments and the
+formatting, because it is a throwaway build input that nobody commits.
 """
 import sys
 

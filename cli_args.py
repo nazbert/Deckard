@@ -1,11 +1,12 @@
-"""The command-line argument parser, extracted so it can be imported without
-pulling in globals (which resolves and creates the data dir at import time).
+"""The command-line argument parser, in a module of its own.
 
-Stdlib-only and side-effect-free: safe to import before `import globals`,
-including from rebrand_migration.py. globals.py imports `argparser` from here,
-so every existing `gl.argparser` reference keeps working, and the rebrand
-migration can resolve a --data override with the exact same parser (matching
-argparse abbreviations and flag/value handling instead of guessing).
+A caller imports it without globals, which resolves and creates the data
+directory at import time. This module uses the standard library only and has
+no import-time side effects, so a module can import it before globals. That
+includes rebrand_migration.py. globals.py imports argparser from here, so
+every gl.argparser reference works, and the rebrand migration resolves a
+--data override with the same parser, which matches the argparse
+abbreviations and the flag handling.
 """
 import argparse
 

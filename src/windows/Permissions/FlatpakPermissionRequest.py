@@ -40,12 +40,11 @@ class FlatpakPermissionRequestWindow(Gtk.ApplicationWindow):
             self.set_modal(True)
         self.set_default_size(600, 600)
 
-        # Both optional so the generic request -- app.show_permissions(),
-        # which knows no specific command or reason -- can construct the
-        # window at all; it used to raise TypeError. build() feeds
-        # both straight into Gtk.Label, which rejects None, so the
-        # description falls back to the same generic string the per-command
-        # requests use when their caller passes none.
+        # Both arguments are optional, so app.show_permissions(), which knows
+        # no command and no reason, can construct the window. build() passes
+        # both into Gtk.Label, which rejects None, so the description falls
+        # back to the generic string that a per-command request also uses when
+        # its caller passes none.
         self.command = command if command is not None else ""
         if description is None:
             description = gl.lm.get("permissions.request.default-description")

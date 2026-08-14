@@ -88,9 +88,8 @@ class AssetManager(Gtk.ApplicationWindow):
         self.callback_args = callback_args
         self.callback_kwargs = callback_kwargs
 
-        # The window is reused across opens (see deliver_selection), so a new
-        # session must not inherit the previous one's drill-in position or
-        # search filter.
+        # Each open reuses the window. See deliver_selection. A new session
+        # must not inherit the drill-in position or the search filter.
         self._reset_session_state()
 
         self.asset_chooser.show_for_path(path)
@@ -98,10 +97,12 @@ class AssetManager(Gtk.ApplicationWindow):
         self.present()
 
     def _reset_session_state(self) -> None:
-        """Clears navigation + filter state left over from the previous open:
-        backs every pack stack out of its drilled-in chooser and empties every
-        stale search entry. A leftover filter could otherwise hide the very
-        asset show_for_path is about to pre-select."""
+        """Clear the navigation and filter state from the previous open.
+
+        It backs every pack stack out of its drilled-in chooser and empties
+        every stale search entry. A left filter hides the asset that
+        show_for_path is about to select.
+        """
         chooser = self.asset_chooser
 
         chooser.icon_pack_chooser.set_visible_child_name("pack-chooser")
@@ -119,9 +120,9 @@ class AssetManager(Gtk.ApplicationWindow):
             chooser.sd_plus_bar_wallpaper_pack_chooser.wallpaper_chooser,
         )
         for page in pages:
-            # A page whose build failed (the main loop did not service its
-            # marshal in time) shows an error instead of a grid; reopening the
-            # window is the retry. No-op for a healthy page.
+            # A page whose build failed shows an error instead of a grid,
+            # because the main loop did not run its marshal in time. A reopen
+            # retries the build, and a healthy page does nothing here.
             retry_build = getattr(page, "retry_build", None)
             if callable(retry_build):
                 retry_build()
@@ -129,27 +130,27 @@ class AssetManager(Gtk.ApplicationWindow):
             search_entry = getattr(page, "search_entry", None)
             if search_entry is None:
                 continue
-            # Only touch entries that actually hold a stale filter: set_text
-            # fires search-changed, and e.g. CustomAssetChooser's handler
-            # dereferences widgets its background build() may not have
-            # attached yet on a truly fresh window.
+            # Touch only an entry that holds a stale filter. set_text fires
+            # search-changed, and a handler such as the one in
+            # CustomAssetChooser reads widgets that its background build() may
+            # not have attached yet on a fresh window.
             if search_entry.get_text():
                 search_entry.set_text("")
 
     def deliver_selection(self, path: str) -> None:
-        """Invokes the opener's selection callback and hides the window.
+        """Run the selection callback of the opener, then hide the window.
 
-        The callback is guarded: the window can be up without one. hide(), not
-        close() -- GTK4's default close-request handling destroys the window on
-        the next main-loop iteration even without an explicit destroy() call,
-        and this window is reused across opens (P4.2).
+        The callback needs a guard, because the window can be up without one.
+        This calls hide() and not close(), because the default GTK4
+        close-request handling destroys the window on the next main-loop
+        iteration, and each open reuses this window.
         """
         callback_func = self.callback_func
         callback_args = self.callback_args
         callback_kwargs = self.callback_kwargs
-        # Drop the refs before invoking: the hidden singleton must not keep
-        # pinning the opener's bound callback (and through it the action/page
-        # graph) until the next show_for_path.
+        # Drop the references before the call. The hidden window must not pin
+        # the bound callback of the opener, and through it the action and page
+        # graph, until the next show_for_path.
         self.callback_func = None
         self.callback_args = ()
         self.callback_kwargs = {}
@@ -219,9 +220,9 @@ class AssetChooser(Gtk.Stack):
 
     def show_for_path(self, path):
         if gl.asset_manager_backend.has_by_internal_path(path):
-            # Is custom asset -- switch the tab too (the icon-pack branch does
-            # this inside IconPackChooserStack.show_for_path); without it a
-            # reopen after drilling into a pack kept showing the old grid.
+            # This is a custom asset, so switch the tab too. The icon-pack
+            # branch does that inside IconPackChooserStack.show_for_path.
+            # Without it, a reopen after a drill-in shows the old grid.
             self.custom_asset_chooser.show_for_path(path)
             self.set_visible_child_name("custom-assets")
             self.asset_manager.back_button.set_visible(False)

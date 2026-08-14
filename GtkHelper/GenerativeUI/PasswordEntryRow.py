@@ -17,7 +17,7 @@ class PasswordEntryRow(GenerativeUI[str]):
     A class that represents a password entry row widget, which allows the user to input and manage passwords.
     This widget includes functionality for setting, getting, and securely handling passwords, with encoding for storage.
 
-    Inherits from `GenerativeUI` to provide generic UI management and functionality.
+    Inherits from GenerativeUI to provide generic UI management and functionality.
 
     Attributes:
         password (str): The currently entered password, encoded and decoded as needed for storage.
@@ -66,7 +66,7 @@ class PasswordEntryRow(GenerativeUI[str]):
         """
         Disconnects the signal handler for the 'changed' signal.
 
-        This method prevents further handling of password changes when the widget is no longer in use
+        The widget then handles no further password change.
         or when the signals should be stopped.
         """
         better_disconnect(self.widget, self._value_changed)
@@ -86,11 +86,10 @@ class PasswordEntryRow(GenerativeUI[str]):
 
     def get_password(self) -> str:
         """
-        Retrieves the current password entered in the password entry field.
-        Falls back to the settings-backed value layer (already base64-
-        decoded by this class's get_value() override) if the widget hasn't
-        been built yet -- reading the password is a value query and must
-        not force a build.
+        Retrieves the current password from the password entry field. It
+        falls back to the settings value layer, which the get_value() override
+        of this class already decodes from base64, while the widget is
+        unbuilt. A read is a value query and must not force a build.
 
         Returns:
             str: The current password entered in the widget.
@@ -135,9 +134,8 @@ class PasswordEntryRow(GenerativeUI[str]):
         Args:
             new_value (str): The new password to store, encoded in base64.
         """
-        # Local annotation, not a cast: ActionCore.get_settings is declared
-        # `-> dir` (typo for dict) upstream of this file, so its declared
-        # return type cannot be relied on here.
+        # A local annotation, not a cast. ActionCore.get_settings declares a
+        # return type of dir, a typo for dict, so this file cannot use it.
         settings: dict = self._action_core.get_settings()
 
         encoded = base64.b64encode(new_value.encode("utf-8")).decode("utf-8")

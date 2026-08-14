@@ -91,8 +91,8 @@ class FileDialogRow(Adw.ActionRow):
             if self._callback:
                 self._callback(self.selected_file)
         except GLib.Error:
-            # Dismissing the dialog fails open_finish() -- not an error.
-            # Anything the callback raises is a real bug and now surfaces.
+            # A dismissed dialog fails open_finish(), which is not an error.
+            # An exception from the callback is a defect, and it propagates.
             pass
 
     def load_from_path(self, path: str):

@@ -316,8 +316,8 @@ class LabelRow(Adw.PreferencesRow):
 
         self.connect_signals()
 
-    # None means the label does not set this property; the widget
-    # then keeps its current value rather than being handed a None.
+    # None means the label sets no value for this property, so the widget
+    # keeps its current value.
     def set_color(self, color_values: list | None):
         if color_values is None:
             return

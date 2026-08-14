@@ -52,9 +52,9 @@ class ToggleRow(GenerativeUI[int]):
             self.set_value(new_value)
 
         if trigger_callback and self.on_change:
-            # Resolving toggle objects needs the widget, so this branch is
-            # only reachable once one exists (see reset_value/_value_changed
-            # -- both guarantee a built widget before getting here).
+            # A toggle object needs the widget, so this branch runs only
+            # after the widget exists. reset_value and _value_changed both
+            # guarantee a built widget before this point.
             new_toggle = self._widget.get_toggle_at(new_value)
             old_toggle = self._widget.get_toggle_at(old_value)
 
@@ -75,10 +75,12 @@ class ToggleRow(GenerativeUI[int]):
         self.widget.set_active_toggle(value)
 
     def reset_value(self):
-        """Resets the active toggle to its default. An unbuilt row has no
-        toggle objects to resolve old/new against, so it just persists the
-        default and skips the on_change callback -- it must not force a
-        build just to reset a setting."""
+        """Reset the active toggle to its default.
+
+        An unbuilt row has no toggle objects to resolve the old and new values
+        against, so it persists the default and skips the on_change callback.
+        A reset must not force a build.
+        """
         if self._widget is None:
             self.set_value(self._default_value)
             return

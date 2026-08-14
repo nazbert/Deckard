@@ -84,7 +84,7 @@ class ToggleRow(Adw.ActionRow):
         toggle = self.toggle_group.get_toggle_by_name(name)
         if toggle is None:
             # get_toggle_by_name returns NULL for an unknown name, and
-            # ToggleGroup.remove rejects None ("does not allow None as a value").
+            # ToggleGroup.remove rejects None.
             return
         self.toggle_group.remove(toggle)
 

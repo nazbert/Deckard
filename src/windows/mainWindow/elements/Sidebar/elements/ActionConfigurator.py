@@ -292,7 +292,7 @@ class RemoveButton(Gtk.Button):
         # Reload configurator
         self.configurator.sidebar.update()
 
-        # Check whether we have to reload the key
+        # Decide whether the key needs a reload
         load = not page.has_key_an_image_controlling_action(self.action.input_ident, self.action.state)
         load = True # TODO
         if load:
@@ -491,8 +491,8 @@ class EventAssignerRow(Adw.ComboRow):
                     self.set_selected(i)
                     self._connect_signal()
                     return
-                # Not the "None" entry -- keep looking. Falling through here
-                # dereferenced the None event_assigner below.
+                # This is not the None entry, so keep looking. A fall-through
+                # here reads the None event_assigner below.
                 continue
 
             if e.id == event_assigner.id:
