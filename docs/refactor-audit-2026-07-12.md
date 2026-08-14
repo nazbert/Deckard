@@ -146,7 +146,7 @@ Two fragilities stacked:
    runtime — nothing in the file signals the dependency.
 
 **Recommendation:** an explicit module-level registry `{Input.Key: ControllerKey, …}` (the 2026-07-10
-audit's Refactor #1 prerequisite). Also removes both `import *` lines (40-41), the only wildcard imports
+audit's first refactor prerequisite). Also removes both `import *` lines (40-41), the only wildcard imports
 in the codebase — they pollute the namespace and make every bare name's origin unknowable.
 
 ### 3b. `recursive_hasattr(gl, "app.main_win.sidebar…")` — dotted-string singleton navigation
@@ -178,7 +178,7 @@ audit keeps finding step-ordering hazards in; decomposing into named sub-steps
   return `None` / `False` / `int` HTTP codes / **`NoConnectionError` instances** / `True`, forcing
   `isinstance(x, NoConnectionError)` at **15+ call sites** — and several install call sites
   (`IconPage`/`WallpaperPage`/`SDPlusBarWallpaperPage` `.install`) **don't check the return at all**,
-  blindly marking "installed". One typed result channel (2026-07-10 Redesign #4) removes the ambiguity.
+  blindly marking "installed". One typed result channel (redesign item 4 in the 2026-07-10 audit) removes the ambiguity.
 - **`StoreCache.set_files` rewrites the entire index file on every `open_cache_file`** (StoreCache.py:298,
   including pure cache hits). It's atomic now, but that's a full-file JSON dump per cache access on the
   loop thread. In-memory index + debounced flush.
@@ -203,7 +203,7 @@ audit keeps finding step-ordering hazards in; decomposing into named sub-steps
 | 6 | **Finish atomic-write migration** (2 migrator stragglers) + **error-handling house style** (§4) | Low-Med | Low | Quick wins |
 | 7 | Media-setter/label/tick-loop helpers in DeckController (§2c); decompose `close()`/`load_page()` (§3c) | Med | Med | Coordinate with any upstream merge train to minimize conflicts |
 
-**Single highest-value move:** #1 — the decorator-adoption gap is the most repeated, most mechanical, and
+**Single highest-value move:** item 1 — the decorator-adoption gap is the most repeated, most mechanical, and
 touches the most files, and every migrated site inherits exception-logging, bounded concurrency, and
 clean shutdown for free.
 

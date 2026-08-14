@@ -29,7 +29,7 @@ bump label would only invoke `auto-release`, which no-ops on the missing prior t
 v0.1.0 onward, the bump-label flow owns versioning.
 
 **Verified good:**
-- Pipeline #555 green on the combined tree — the build is the real gate and it passes.
+- The combined-tree pipeline is green — the build is the real gate and it passes.
 - Release-notes `awk` correctly extracts the whole `## [0.1.0]` section, including the
   folded-in native-packaging bullets.
 - Manifest-referenced build files all present (`flatpak/launch.sh`, `icon_256.png`,
@@ -73,8 +73,7 @@ logic is correct — but its prerequisites are not in place:
 - **`tag-release` tags before the build gate.** It has `needs: []`, so on the bootstrap
   it creates `v0.1.0` without waiting for `build:flatpak` to prove the bundle builds
   (unlike `auto-release`, which `needs build:flatpak`). If the build were broken you'd
-  get a dangling tag + a failed tag-pipeline and no release. **Mitigated:** #555's
-  `build:flatpak` is green on this exact tree, so the tag pipeline's build will pass.
+  get a dangling tag + a failed tag-pipeline and no release. **Mitigated:** `build:flatpak` is green on this exact tree, so the tag pipeline's build will pass.
 - **`release-cli create` is not idempotent.** A retry of `release:gitlab` after the
   release exists would fail (unlike `release:github`, which reconciles). Fine for a
   first release; a retry wart.

@@ -1,7 +1,6 @@
 # CI: flatpak release pipeline — design
 
-**Status: implemented on branch `ci/flatpak-releases`** (this doc rides along in the
-MR; the same plan is posted as a note on #128).
+**Status: implemented on branch `ci/flatpak-releases`** (this doc rides along in the MR).
 
 Goal: GitLab CI on this fork that produces installable flatpak releases, reusing
 the nb-labs/ci-automation bump-labeled-MR release bot already running on
@@ -57,7 +56,7 @@ mirrors that release to the GitHub fork (see Key decisions).
 - **Test gate**: `test:compile` byte-compiles the tree (syntax-level only;
   imports need GTK4/PyGObject). Honest but thin — the flatpak build is the real
   gate. Running the scenario harness (`tests/run_all.py`) in CI is follow-up
-  work, tracked on #128.
+  work.
 - **Release artifact**: `deckard-<X.Y.Z>-x86_64.flatpak` uploaded to
   the generic package registry (durable) and linked as a package asset on the
   GitLab Release; notes = that version's CHANGELOG.md section (awk extraction,
