@@ -1,73 +1,69 @@
-"""
-The CLI half of the control plane: what an invocation carrying
-``--change-page`` / ``--change-state`` does with the requests it was given.
+"""The CLI half of the control plane. This decides what an invocation that
+carries --change-page or --change-state does with the requests it was given.
 
-An invocation that names a deck has two entirely different jobs depending on
-whether Deckard is already running. With nothing running (or with
-``--close-running``, which is about to stop whatever is), the invocation
-BECOMES the instance: it parks its requests for the deck that has not
-enumerated yet and goes on to boot (see src/backend/startup_queue.py legs
-B/C). With an instance running, the requests are FORWARDED to it over the bus
-and this process is done.
+An invocation that names a deck has two different jobs, by whether Deckard
+already runs. With nothing running, and with --close-running, which is about
+to stop whatever runs, the invocation becomes the instance. It parks its
+requests for the deck that has not enumerated yet, and goes on to boot; see
+legs B and C in src/backend/startup_queue.py. With an instance running, the
+requests go over the bus to that instance and this process ends.
 
-Which of the two it is has to be decided before the process knows whether it
-will BE the instance -- parking exists for the boot that comes after it, so it
-cannot wait for the name to be settled. A launch that parks and then loses that
-race is therefore holding requests that belong to another process, and
-``forward_parked_requests`` is the way they get there instead of dying with
-this one.
+The choice between the two comes before the process knows whether it becomes
+the instance. Parking serves the boot that follows it, so it cannot wait for
+the name to settle. A launch that parks and then loses that race holds
+requests that belong to another process, and forward_parked_requests takes
+them there rather than let them die with this one.
 
-WHY THIS IS NOT IN main.py
+Why this is not in main.py
 
-main.py cannot be imported by anything: its module body re-execs the process
-and runs the rebrand migration against the real user directories. Everything
-that lived there was therefore untestable, and it showed -- forwarding
-returned after the first request it sent, so a command carrying several page
-or state changes silently applied one of them and dropped the rest. This
-module is the extraction that makes that provable; main.py keeps the two
-things that cannot leave it, reading argv and exiting the process.
+Nothing can import main.py, because its module body re-execs the process and
+runs the rebrand migration against the real user directories. Everything that
+lived there was untestable, and it showed. Forwarding returned after the first
+request it sent, so a command that carried several page or state changes
+applied one and dropped the rest. This module is the extraction that makes
+that provable. main.py keeps the two things that cannot leave it, which are
+the argv read and the process exit.
 
-SYNTAX HERE, MEANING THERE
+Syntax here, meaning there
 
-The only questions asked here are ones answerable without a device: do the
-coordinates read as two non-negative integers, does the state read as a
-non-negative integer. Whether (9,9) is on the deck, whether state 19 exists on
-that input, whether the page or the serial is real -- those are the running
-instance's to answer, and it answers them from the device's own truth. The
-caps this file used to apply (coordinates <= 10, state <= 20) were invented
-numbers matching no hardware, and they rejected valid requests for large decks
-before anything with a device ever saw them.
+This file answers only what needs no device. Do the coordinates read as two
+non-negative integers, and does the state read as a non-negative integer. The
+running instance answers whether (9,9) sits on the deck, whether state 19
+exists on that input, and whether the page or the serial is real, and it
+answers from the device itself. The caps this file once applied, of
+coordinates at most 10 and state at most 20, matched no hardware and rejected
+valid requests for a large deck before anything with a device saw them.
 
-FAILURES ARE THE CALLER'S TO SEE
+The caller must see a failure
 
-Forwarding used to be fire-and-forget over a Gio action, so a mistyped page
-name produced a line in the RUNNING instance's log and total silence in the
-terminal that typed it. The bus methods answer with a sentence instead, and
-those sentences come back in the verdict for main.py to print. A request that
-fails does not stop the ones behind it: each is independent, and a person who
-asked for four changes is better served by three applied and one explained
-than by an arbitrary prefix.
+Forwarding once travelled over a Gio action and expected no answer, so a
+mistyped page name produced a line in the running instance's log and silence
+in the terminal that typed it. The bus methods answer with a sentence, and
+those sentences reach the verdict for main.py to print. A failed request does
+not stop the ones behind it. Each one is independent, and a person who asked
+for four changes is better served by three applied and one explained than by
+a prefix.
 
-VERSION SKEW, BOTH DIRECTIONS
+Version skew, in both directions
 
-Forwarding used to travel over Gio actions, which are gone. A CLI from an
-older install therefore forwards `change_page`/`change_state` actions that a
+Forwarding once travelled over Gio actions, which are gone. A CLI from an
+older install therefore forwards a change_page or change_state action that a
 current instance does not register, and org.gtk.Actions answers an unknown
-action by doing nothing at all -- so that direction fails silently and cannot
-be made to do otherwise from this side. It needs both a current and an older
-install on one machine to happen, it goes away as soon as the old one does,
-and the parked/boot path is unaffected; that is why it is documented rather
-than defended against. This direction -- a current CLI meeting an instance
-without the methods -- is the one that can speak, and it says SKEW_MESSAGE.
+action by doing nothing, so that direction fails in silence and this side
+cannot change it. It needs both a current and an older install on one machine,
+it ends as soon as the old install goes, and the parked boot path stays
+correct, so this documents it rather than defends against it. The other
+direction, a current CLI that meets an instance without the methods, can
+speak, and it says SKEW_MESSAGE.
 
-THE TRANSPORT IS INJECTABLE
+The transport is injectable
 
-``forward_cli_requests`` takes the thing that talks to the running instance,
-so the forwarding rules can be driven without a bus, a daemon or a second
-process. The default is the real one; it imports the toolkit when it is
-constructed rather than at module import, which is what keeps this module's
-body importable on the deployment floor with nothing but the standard library
-present (scenario_floor_import executes it there).
+forward_cli_requests takes the object that talks to the running instance, so a
+test drives the forwarding rules without a bus, a daemon or a second process.
+The default is the real one, and it imports the toolkit when it is
+constructed rather than at module import, which keeps this module's body
+importable on the deployment floor with the standard library alone.
+scenario_floor_import executes it there.
 """
 from __future__ import annotations
 
@@ -95,30 +91,28 @@ if TYPE_CHECKING:
             """Empty on success, else the reason the instance gave."""
 
 
-# Every CLI-side D-Bus call carries this instead of the 25s bus default:
-# without it a wedged instance that accepts but never replies blocks startup
-# for that long. main.py's own probes import it from here so there is one
-# number rather than two that can drift apart.
+# Every CLI-side D-Bus call carries this rather than the 25s bus default.
+# Without it a wedged instance that accepts and never replies blocks startup
+# for that long. The probes in main.py import it from here, so one number
+# serves both and no two numbers drift apart.
 DBUS_CALL_TIMEOUT_MS = 5000
 
-# The interface the top-level object carries -- the app id itself.
+# The interface that the top-level object carries, which is the app id.
 TOP_IFACE = appinfo.APP_ID
 
-# What comes back when the methods are not there to call. GDBus uses these two
-# spellings for a missing method depending on its version, and for a missing
-# OBJECT as well -- both answered from its own worker thread, so they arrive
-# promptly whether or not the instance is dispatching anything (measured).
+# What comes back when the methods are absent. GDBus uses these two spellings
+# for a missing method, by its version, and for a missing object as well. It
+# answers both from its own worker thread, so they arrive promptly whether or
+# not the instance dispatches anything, which measurement confirms.
 #
-# This used to be the STARTING instance's answer too, and could not be told
-# from an old build's. It no longer is: the app publishes its objects before it
-# takes the bus name (src/backend/instance_gate.py), so a name owned by a build
-# that does this always has the methods behind it. What is left reaching here
-# is a build too old to have them, or an instance on its way OUT -- teardown
-# takes the interface off the bus first and keeps the name until the process
-# ends. (An instance whose publish failed outright looks the same, and says so
-# in its own log.) A WEDGED instance is a different answer entirely: its
-# objects are up, the call queues behind whatever the loop is stuck on, and the
-# caller gets the timeout below rather than this.
+# A starting instance does not answer this way. The app publishes its objects
+# before it takes the bus name (src/backend/instance_gate.py), so a name owned
+# by such a build always has the methods behind it. Two cases still reach here. A build too old to carry
+# them, and an instance on its way out, because teardown takes the interface
+# off the bus first and keeps the name until the process ends. An instance
+# whose publish failed looks the same, and says so in its own log. A wedged
+# instance answers differently. Its objects are up, the call queues behind
+# whatever blocks the loop, and the caller gets the timeout below.
 _METHOD_MISSING = (
     "org.freedesktop.DBus.Error.UnknownMethod",
     "org.freedesktop.DBus.Error.UnknownInterface",
@@ -145,44 +139,41 @@ Parameters:
 
 
 class OlderInstance(Exception):
-    """The running instance has no control methods on the bus -- see
-    _METHOD_MISSING for what is left that produces this."""
+    """The running instance carries no control methods on the bus. See
+    _METHOD_MISSING for the cases that reach this."""
 
 
 class TransportError(Exception):
-    """The conversation with the running instance failed: it never replied,
-    the connection went away, it refused the call. Carries the bus's own text,
-    and exists so nothing outside this module has to know what a GLib.Error
-    is."""
+    """The conversation with the running instance failed. It never replied,
+    the connection went away, or it refused the call. This carries the bus's
+    own text, so nothing outside this module needs to know a GLib.Error."""
 
 
 @dataclass(frozen=True)
 class Verdict:
     """What the invocation should do next.
 
-    ``handled`` means a running instance took the requests and this process
-    has nothing left to do; False means the requests are parked (or there were
-    none) and this process carries on booting. ``failures`` are the sentences
-    to put in front of the person who typed the command -- a non-empty list is
-    a failed invocation whatever ``handled`` says.
+    handled means that a running instance took the requests and this process
+    has nothing left to do. False means that the requests are parked, or that
+    none arrived, and this process boots on. failures holds the sentences for
+    the person who typed the command. A non-empty list marks a failed
+    invocation, whatever handled says.
     """
 
     handled: bool = False
     failures: list[str] = field(default_factory=list)
 
 
-# ===================================================================== #
-# Syntax                                                                #
-# ===================================================================== #
+# Syntax
 
 def _parse_state_requests(raw: list) -> tuple[list[tuple[str, str, str, int]],
                                               list[str]]:
-    """Read the ``--change-state`` groups into (serial, page, coords, state).
+    """Read the --change-state groups into (serial, page, coords, state).
 
-    All-or-nothing, as it has always been: a command with one malformed group
-    applies none of its requests, because a partly-applied command is the
-    worst of the three possible outcomes. Only shapes are judged here -- see
-    the module docstring on why the bounds are not.
+    All or nothing. A command with one malformed group applies none of its
+    requests, because a part-applied command costs more than either other
+    outcome. This judges shapes alone; see the module docstring on why it
+    judges no bounds.
     """
     parsed: list[tuple[str, str, str, int]] = []
     failures: list[str] = []
@@ -224,14 +215,12 @@ def _parse_state_requests(raw: list) -> tuple[list[tuple[str, str, str, int]],
     return parsed, failures
 
 
-# ===================================================================== #
-# The two things an invocation can do with its requests                 #
-# ===================================================================== #
+# The two things an invocation can do with its requests
 
 def _park(page_requests: list, state_requests: list[tuple[str, str, str, int]]) -> None:
-    """Hand every request to the startup queue, for the decks this process is
-    about to enumerate. Keyed by serial and last-write-wins, which is the
-    parking contract, not an accident of this loop."""
+    """Hand every request to the startup queue, for the decks this process
+    enumerates next. The serial keys each request and the last write wins,
+    which is the parking contract rather than an effect of this loop."""
     queue = startup_queue.get()
     for serial_number, page_name in page_requests:
         queue.park_page_request(serial_number, page_name)
@@ -247,15 +236,15 @@ def _forward(transport: Transport, page_requests: list,
              state_requests: list[tuple[str, str, str, int]]) -> list[str]:
     """Send every request to the running instance and collect what it said.
 
-    EVERY request: the loops below used to return as soon as one had been
-    sent, so `--change-page A X --change-page B Y` moved deck A and left deck
-    B alone, and any `--change-state` on a command that also carried a
-    `--change-page` never left the process at all.
+    This sends every request. A return after the first send moves deck A and
+    leaves deck B alone for --change-page A X --change-page B Y, and it keeps
+    a --change-state on a command that also carries a --change-page inside
+    the process.
 
-    Order is every page request as argv gave them, then every state request as
-    argv gave them. argparse collects the two flags into two separate lists,
-    so the interleaving between them is not recoverable here -- and this is the
-    order the CLI has always applied, so nothing about it changes today.
+    The order is every page request as argv gave them, then every state
+    request as argv gave them. argparse collects the two flags into two lists,
+    so nothing here recovers how they interleaved, and this is the order the
+    CLI applies.
     """
     failures: list[str] = []
     try:
@@ -268,25 +257,25 @@ def _forward(transport: Transport, page_requests: list,
             if message:
                 failures.append(message)
     except OlderInstance:
-        # Every request behind this one would fail identically, and the
-        # answer is the same for all of them.
+        # Every request behind this one fails the same way, and one answer
+        # covers all of them.
         failures.append(SKEW_MESSAGE)
     except TransportError as e:
-        # The conversation itself broke. It will not heal inside one command,
-        # and retrying each remaining request would spend the call timeout
-        # again per request against an instance that is not answering -- so
-        # the failure is reported once and the rest are abandoned.
+        # The conversation broke. It does not heal inside one command, and a
+        # retry of each remaining request spends the call timeout again per
+        # request against an instance that answers nothing. Report the failure
+        # once and drop the rest.
         failures.append(str(e))
     return failures
 
 
 def forward_cli_requests(args: Namespace,
                          transport: Transport | None = None) -> Verdict:
-    """Apply the invocation's ``--change-page`` / ``--change-state`` requests.
+    """Apply the invocation's --change-page and --change-state requests.
 
-    Parked for this process to pick up as it boots, or forwarded to the
-    instance already running -- see the module docstring. Never exits and
-    never prints: the verdict says what happened and main.py owns both.
+    It parks them for this process to pick up as it boots, or forwards them to
+    the instance already running; see the module docstring. It never exits and
+    never prints. The verdict says what happened, and main.py owns both.
     """
     page_requests = args.change_page or []
     raw_state_requests = args.change_state or []
@@ -295,7 +284,7 @@ def forward_cli_requests(args: Namespace,
 
     state_requests, failures = _parse_state_requests(raw_state_requests)
     if failures:
-        # Nothing has been parked or sent yet, and nothing will be.
+        # Nothing is parked or sent yet, and nothing gets parked or sent.
         return Verdict(handled=False, failures=failures + [USAGE])
 
     if transport is None:
@@ -310,24 +299,24 @@ def forward_cli_requests(args: Namespace,
 
 
 def forward_parked_requests(transport: Transport | None = None) -> list[str]:
-    """Hand this process's PARKED requests to the instance that owns the name.
+    """Hand this process's parked requests to the instance that owns the name.
 
-    For the launch that parked and then lost. Parking happens before the race
-    for the application name is decided -- it has to, since the requests exist
-    to be applied by the boot that follows -- so an invocation can park, get as
-    far as registering, and only there learn that another launch got the name
-    first. The requests are then sitting in a process that is about to exit
-    without opening a deck: without this they left with it, applying nothing
-    and reporting success.
+    This serves the launch that parked and then lost. Parking happens before
+    the race for the application name settles, and it must, because the
+    requests exist for the boot that follows. So an invocation parks, gets as
+    far as registering, and learns there that another launch took the name
+    first. The requests then sit in a process that exits without a deck open,
+    and without this call they leave with it, apply nothing, and report
+    success.
 
-    Nothing is probed first. The caller has just been told that another
-    instance owns the name, which is a better answer than asking again; if that
-    instance disappeared in between, the send fails and says so, exactly as any
-    other forward does. The shapes come out of this module's own parking a
-    moment earlier, so they need no re-reading -- the state is already the
-    integer the bus method takes.
+    This probes nothing first. The caller just learned that another instance
+    owns the name, which beats a second question. When that instance went away
+    in between, the send fails and says so, like any other forward. The shapes
+    come from this module's own parking a moment earlier, so nothing re-reads
+    them, and the state is already the integer the bus method takes.
 
-    Returns the failures to print. Empty means everything was sent and taken.
+    Returns the failures to print. An empty list means that the instance took
+    everything.
     """
     page_requests, parked_states = startup_queue.get().claim_parked_requests()
     if not page_requests and not parked_states:
@@ -340,17 +329,15 @@ def forward_parked_requests(transport: Transport | None = None) -> list[str]:
     ])
 
 
-# ===================================================================== #
-# The real transport                                                    #
-# ===================================================================== #
+# The real transport
 
 class _BusTransport:
     """The running instance, over the session bus.
 
-    The toolkit is imported here rather than at module scope so this module's
-    body stays standard-library-only: it is executed on the deployment floor
-    with every import stubbed out, and a CLI invocation that carries no
-    requests never builds one of these at all.
+    The import of the toolkit sits here rather than at module scope, so this
+    module's body stays standard-library-only. The deployment floor executes
+    that body with every import stubbed out, and a CLI invocation that carries
+    no request never builds one of these.
     """
 
     def __init__(self) -> None:
@@ -361,13 +348,12 @@ class _BusTransport:
         self._connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
 
     def is_running(self) -> bool:
-        """Is the app's name owned on the bus right now?
+        """Does anything own the app's name on the bus right now?
 
-        Asked of the bus daemon, and with NO_AUTO_START: addressing the
-        well-known name directly would D-Bus-activate it, which turns a probe
-        into a launch. A probe that cannot complete reads as "nobody home",
-        which is what makes a bus hiccup park the requests and boot rather
-        than lose them.
+        This asks the bus daemon and passes NO_AUTO_START. A call addressed to
+        the well-known name activates it over D-Bus, which turns a probe into
+        a launch. A probe that cannot complete reads as "nobody home", so a
+        bus error parks the requests and boots rather than lose them.
         """
         try:
             reply = self._connection.call_sync(
@@ -410,10 +396,10 @@ class _BusTransport:
         except self._glib.Error as e:
             if self._gio.DBusError.get_remote_error(e) in _METHOD_MISSING:
                 raise OlderInstance from e
-            # Anything else -- a timeout against a wedged instance, a dropped
-            # connection, a refused call -- becomes something the caller can
-            # print. Left as a GLib.Error it escaped the CLI entirely and was
-            # logged as a crash, which put a traceback on screen and still
-            # exited zero: the silent success this command set out to fix.
+            # Every other error, such as a timeout against a wedged
+            # instance, a dropped connection or a refused call, becomes text
+            # the caller prints. A GLib.Error left in place escapes the CLI
+            # and logs as a crash, which puts a traceback on screen and still
+            # exits zero, which reads as success.
             raise TransportError(str(e)) from e
         return str(reply.unpack()[0])

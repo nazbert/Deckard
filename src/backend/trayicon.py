@@ -87,15 +87,15 @@ class DBusService:
 
     def register(self):
         if self.registration_id is not None:
-            # Already registered: a second register() with no intervening
-            # unregister() (double-register path: TrayIcon.initialize() +
-            # the Settings-panel start()) would otherwise orphan the prior
-            # object registration on the connection. Early-return so the
-            # existing registration is kept as-is. NOTE: do NOT unregister-
-            # then-reregister here -- self.unregister() dispatches virtually
-            # to StatusNotifierItemService.unregister(), which cascades
-            # self._menu.unregister() and would leave the tray menu object
-            # dead (the base register() only re-registers the SNI object).
+            # This object already registered. A second register() with no
+            # unregister() between them, which TrayIcon.initialize() and the
+            # Settings-panel start() together produce, orphans the earlier
+            # object registration on the connection. Return early and keep the
+            # existing registration. Do not unregister and register again
+            # here. self.unregister() dispatches to
+            # StatusNotifierItemService.unregister(), which also calls
+            # self._menu.unregister() and leaves the tray menu object dead,
+            # because the base register() registers the SNI object alone.
             return
         self.registration_id = self.bus.register_object(
             object_path=self.object_path,
@@ -153,8 +153,9 @@ class DBusMenuService(DBusService):
 
     revision = 0
 
-    # Menu items are plain dicts ('id', 'label', 'enabled', 'children', ...);
-    # idToItems is the flattened id -> item index built by getItemsFlat().
+    # A menu item is a plain dict with the keys id, label, enabled and
+    # children. idToItems is the flat index from id to item that
+    # getItemsFlat() builds.
     items: list[dict[str, Any]] = []
     idToItems: dict[int, dict[str, Any]] = {}
 
@@ -364,13 +365,13 @@ class StatusNotifierItemService(DBusService):
         self._menu.register()
         super().register()
 
-        # A one-shot RegisterStatusNotifierItem call loses the icon for the
-        # rest of the app's lifetime whenever the StatusNotifierWatcher
-        # restarts (e.g. plasmashell/waybar crash) or appears late (GNOME's
-        # AppIndicator support loading after us): a fresh watcher instance
-        # knows nothing about previously registered items. Watch the
-        # well-known name instead and (re-)announce the item every time the
-        # name gains an owner.
+        # A single RegisterStatusNotifierItem call loses the icon for the
+        # rest of the app's life whenever the StatusNotifierWatcher restarts,
+        # after a plasmashell or waybar crash, or appears late, as GNOME's
+        # AppIndicator support does. A fresh watcher instance knows no item
+        # that an earlier instance registered. Watch the well-known name
+        # instead, and announce the item again each time the name gains an
+        # owner.
         if self._watcher_watch_id is None:
             self._watcher_watch_id = Gio.bus_watch_name_on_connection(
                 self.bus,

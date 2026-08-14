@@ -27,7 +27,7 @@ class Migrator_1_5_0(Migrator):
         self.migrate_pages()
         self.migrate_deck_settings()
 
-        # Update icons and wallapers to id system
+        # Rename the built-in icon and wallpaper packs to their manifest ids.
         if os.path.exists(os.path.join(gl.DATA_PATH, "icons", "Core447::Material Icons")):
             os.rename(os.path.join(gl.DATA_PATH, "icons", "Core447::Material Icons"), os.path.join(gl.DATA_PATH, "icons", "com_core447_MaterialIcons"))
 
@@ -95,19 +95,12 @@ class Migrator_1_5_0(Migrator):
 
             for key in page.get("keys", {}):
                 key_dict = page["keys"][key]
-                # Migrator_1_5_0_beta_5 sorts before this migrator
-                # (1.5.0-beta.5 < 1.5.0) and nests each key's labels/media
-                # under states.0, so a pre-beta.5 page is already
-                # states-shaped by the time this walker runs. Handle both
-                # that nested shape and the legacy flat one.
-                #
-                # Also rewrite the key dict's OWN labels/media even when
-                # states are present: a hand-edited or partially-migrated key
-                # can carry stray top-level labels/media alongside states, and
-                # beta_5 skips (does not nest) any key that already has states,
-                # so those would otherwise dangle. The `id()` set guards
-                # against processing the same dict twice (a flat key IS its own
-                # only "state").
+                # Migrator_1_5_0_beta_5 sorts first (1.5.0-beta.5 < 1.5.0) and
+                # nests each key's labels and media under states.0, so handle
+                # the nested shape and the flat one. Rewrite the key dict
+                # itself as well, because beta_5 skips a key that already has states,
+                # so stray top-level labels and media stay behind. The id() set
+                # stops a second pass over a flat key, which is its own state.
                 rewrite_dicts = []
                 seen_ids = set()
                 for candidate in ([key_dict] + list(key_dict.get("states", {}).values())):

@@ -1,56 +1,56 @@
-"""
-Typed accessors for the process-wide services that live on ``globals``.
+"""Typed accessors for the process-wide services that live on globals.
 
-The `gl` module is a namespace of late-initialised slots, and the four hottest
-of them -- the locale manager, the App, the settings manager and the page
-manager backend -- are read from well over six hundred places. Every one of
-those reads is an invisible dependency edge: `gl.lm` names nothing a reader can
-follow, nothing a rename can track, and nothing a test can substitute without
-reaching into another module's namespace. This module gives those four reads a
-name each.
+The gl module is a namespace of late-initialised slots, and well over six
+hundred places read the four hottest of them, which are the locale manager,
+the App, the settings manager and the page manager backend. Each of those
+reads is an invisible dependency edge. gl.lm names nothing a reader follows,
+nothing a rename tracks, and nothing a test substitutes without a reach into
+another module's namespace. This module gives those four reads a name each.
 
-WHAT AN ACCESSOR BUYS OVER THE RAW READ
+What an accessor buys over the raw read
 
-* It is CHECKED. Most raw reads sit in unannotated defs, whose bodies mypy does
-  not look at at all; an accessor is one annotated function, checked once,
-  whose callers inherit a concrete type.
-* It puts the None-guard in ONE place. `main_window()` is the hand-rolled
-  ``if gl.app is not None and hasattr(gl.app, "main_win")`` dance, written
-  once; the ``require_*`` pair turns "AttributeError on NoneType" into a named
-  boot-phase error that says which construction step has not run yet.
-* It is a SEAM. The body can change -- injection, a per-test double, a lazily
-  built service -- without touching a caller.
-* It is GREPPABLE. ``from src.backend.services import tr`` is an import edge
-  the language server resolves and a rename follows.
+It is checked. Most raw reads sit in unannotated defs, whose bodies mypy skips.
+An accessor is one annotated function, checked once, and its callers inherit a
+concrete type.
 
-WHAT IT DELIBERATELY IS NOT
+It puts the None guard in one place. main_window() holds the hand-rolled
+"if gl.app is not None and hasattr(gl.app, "main_win")" dance once, and the
+require_* pair turns an AttributeError on NoneType into a named boot-phase
+error that names the construction step which has not run.
 
-Not a service locator, not a registry, not a container. Nothing is registered
-here and nothing is constructed here: every function is a read of the same slot
-the raw expression reads, performed on every call so that a slot rebound
-underneath it (which is exactly what the test harness does) is honoured. The
-slots stay where they are; only the protocol gets a name.
+It is a seam. The body can change, to an injection, a per-test double or a
+lazily built service, and no caller changes.
 
-HONEST OPTIONALS
+It is greppable. "from src.backend.services import tr" is an import edge that
+the language server resolves and a rename follows.
 
-``app()`` and ``page_manager()`` return ``| None`` because those slots really
-are absent to running code -- before ``Main.__init__`` publishes the App, and
-during the DBus API's and the deck controller teardown's None-checks
-respectively. The ``require_*`` variants are for the sites whose None branch
-cannot be reached post-boot; adopting one at a site whose None branch IS live
-would delete a real guard, so the pair exists to keep that choice explicit
-rather than implicit.
+What it is not
 
-IMPORTS
+It is no service locator, no registry and no container. Nothing registers here
+and nothing is constructed here. Every function reads the same slot the raw
+expression reads, on every call, so a slot rebound underneath it, which the
+test harness does, still applies. The slots stay where they are, and only the
+protocol gets a name.
 
-``globals`` at runtime and nothing else first-party; every type is imported
-under ``TYPE_CHECKING`` and every annotation is a string by way of
-``from __future__ import annotations``. So any layer may import this -- the
-render engine's widget-free closure, GtkHelper, the windows -- with no cycle
-and no toolkit dragged along. The deployment floor (Python 3.13) evaluates
-parameter and return annotations at def time, which the future-import is what
-prevents; scenario_floor_import executes this module body on that interpreter
-to keep it true.
+Honest optionals
+
+app() and page_manager() return "| None", because running code really does
+find those slots absent, before Main.__init__ publishes the App, and inside
+the None checks of the D-Bus API and of the deck controller teardown. The
+require_* variants serve a site whose None branch cannot run after boot. A
+require_* at a site whose None branch is live deletes a real guard, so the
+pair keeps that choice explicit.
+
+Imports
+
+globals at runtime and nothing else first-party. Every type imports under
+TYPE_CHECKING, and "from __future__ import annotations" makes every annotation
+a string. So any layer can import this, including the render engine's
+widget-free closure, GtkHelper and the windows, with no cycle and no toolkit.
+The deployment floor runs Python 3.13, which evaluates a parameter and return
+annotation at def time, and the future import prevents that.
+scenario_floor_import executes this module body on that interpreter to keep it
+true.
 """
 from __future__ import annotations
 
@@ -66,39 +66,37 @@ if TYPE_CHECKING:
     from src.windows.mainWindow.mainWindow import MainWindow
 
 
-# ====================================================================== #
-# Translations                                                           #
-# ====================================================================== #
+# Translations
 
 def tr(key: str, fallback: str | None = None) -> str:
-    """The translation for `key` in the active language.
+    """The translation for key in the active language.
 
-    Straight ``gl.lm.get``, whose resolution order is worth stating because it
-    is not the order the parameter name suggests: the active language, then the
-    fallback locale DEFAULTING TO THE KEY ITSELF, and only a value that is
-    still None after that reaches `fallback`. So `fallback` does not answer an
-    unknown key -- ``tr("missing", "FB")`` is ``"missing"``, not ``"FB"``. The
-    result is HTML-escaped for GTK markup.
+    This forwards to gl.lm.get, whose resolution order differs from what the
+    parameter name suggests. It reads the active language, then the fallback
+    locale, which defaults to the key itself, and only a value still None
+    after that reaches fallback. So fallback does not answer an unknown key,
+    and tr("missing", "FB") returns "missing" and not "FB". The result is
+    HTML-escaped for GTK markup.
 
-    Passing no fallback and passing ``None`` mean the same thing to the locale
-    manager, which is why this hands the call over in two shapes rather than
-    forwarding a None the parameter is not typed to take.
+    No fallback and a fallback of None mean the same thing to the locale
+    manager, so this hands the call over in two shapes rather than forward a
+    None that the parameter is not typed to take.
 
-    `key` is typed ``str`` and is not defended: ``get`` resolves a None key to
-    None, and that None comes straight back out through the ``-> str``. mypy
-    rejects it at every annotated call site, so it can only arrive from an
-    unchecked one -- the Store badge rows record that shape in a comment and
-    short-circuit rather than lean on it.
+    key is typed str and this guards it in no way. get resolves a None key to
+    None, and that None comes back out through the "-> str". mypy rejects it
+    at every annotated call site, so it can arrive from an unchecked one
+    alone. The Store badge rows record that shape in a comment and return
+    early rather than depend on it.
 
-    Raises RuntimeError when called before ``main.create_global_objects()``
-    builds the locale manager -- the raw read raises there too (an
-    AttributeError on None naming neither the slot nor the phase), and this is
-    the same crash with the cause written on it.
+    Raises RuntimeError before main.create_global_objects() builds the locale
+    manager. The raw read raises there too, with an AttributeError on None
+    that names neither the slot nor the phase, and this is the same crash with
+    the cause written on it.
     """
-    # gl.lm is annotated concretely (late-init), so widening here is what keeps
-    # the pre-boot branch a branch: it is genuinely reachable, and a None-check
-    # against a non-Optional narrows to an uninhabited type whose body mypy
-    # then skips entirely.
+    # gl.lm carries a concrete annotation, because the slot is late-init, so
+    # this widening keeps the pre-boot branch alive. Code reaches that branch,
+    # and a None check against a non-optional type narrows to an uninhabited
+    # type, whose body mypy skips.
     lm: LocaleManager | None = gl.lm
     if lm is None:
         raise RuntimeError(
@@ -110,15 +108,13 @@ def tr(key: str, fallback: str | None = None) -> str:
     return lm.get(key, fallback)
 
 
-# ====================================================================== #
-# The application and its window                                         #
-# ====================================================================== #
+# The application and its window
 
 def app() -> App | None:
-    """The running App, or None before ``Main.__init__`` publishes it.
+    """The running App, or None before Main.__init__ publishes it.
 
-    The honest read: callers that genuinely run during boot get to see the
-    absence. Use ``require_app()`` where the None cannot happen.
+    This is the honest read, so a caller that runs during boot sees the
+    absence. Use require_app() where the None cannot happen.
     """
     return gl.app
 
@@ -126,14 +122,13 @@ def app() -> App | None:
 def require_app() -> App:
     """The running App, never None.
 
-    For the sites whose None branch is unreachable once the app is up -- a
-    window handler, a plugin callback, an action. Raises RuntimeError rather
-    than handing back a None that would crash one dereference later somewhere
-    with no boot phase in the message.
+    For a site whose None branch cannot run once the app is up, such as a
+    window handler, a plugin callback or an action. It raises RuntimeError
+    rather than hand back a None that crashes one dereference later, in a
+    place whose message names no boot phase.
 
-    Adopt it only where that unreachability is real: converting a site whose
-    None branch is live deletes a guard. The ``require_*`` pair moves the
-    guard into one place, it never removes one.
+    Adopt it only where that is true. A site whose None branch is live loses a
+    guard. The require_* pair moves a guard into one place and removes none.
     """
     running = gl.app
     if running is None:
@@ -148,21 +143,21 @@ def require_app() -> App:
 def main_window() -> MainWindow | None:
     """The main window, or None while there is not one.
 
-    Subsumes the two-step guard its callers hand-roll, because there are two
-    distinct ways for the window to be missing and only one of them is a None:
-    ``gl.app`` itself is absent until it is published, and ``main_win`` is not
-    BOUND at all -- no class-body declaration -- until ``App.on_activate``
-    constructs it. So a plain ``gl.app.main_win`` raises AttributeError in the
-    window between those two points, which is why this reads the attribute
-    defensively rather than testing it for None.
+    This holds the two-step guard that its callers hand-roll, because the
+    window goes missing in two ways and only one of them gives a None. gl.app
+    itself is absent until it publishes, and nothing binds main_win at all,
+    because no class body declares it, until App.on_activate constructs it. A
+    plain gl.app.main_win therefore raises AttributeError between those two
+    points, so this reads the attribute with getattr rather than test it for
+    None.
 
-    NOT None once the window is gone, though. ``App._destroy_main_window``
-    destroys the widget and leaves the attribute bound, and nothing else
-    clears it, so after that point this hands back a destroyed-but-truthy
-    window -- reachably, because the AppQuit fan-out that runs plugin teardown
-    hooks comes after the destroy. Callers on the quit path must not repaint
-    or present through what they get here. Clearing the slot in the teardown
-    is the fix that would make the absence honest.
+    It does not return None once the window is gone.
+    App._destroy_main_window destroys the widget and leaves the attribute
+    bound, and nothing else clears it, so after that this hands back a
+    destroyed and truthy window. Code reaches that state, because the AppQuit
+    fan-out that runs the plugin teardown hooks comes after the destroy. A
+    caller on the quit path must not repaint or present through what it gets
+    here. A cleared slot in the teardown would make the absence honest.
     """
     running = gl.app
     if running is None:
@@ -174,20 +169,20 @@ def main_window() -> MainWindow | None:
 def require_main_window() -> MainWindow:
     """The main window, never None.
 
-    This is what the raw ``gl.app.main_win`` dereference actually means at the
-    overwhelming majority of its sites -- a window handler, a dialog, a page or
-    action editor, a plugin's UI callback. None of them has a None branch, and
-    neither of the other two accessors fits: ``main_window()`` would make each
-    one invent a branch it never had, and ``require_app().main_win`` types as
-    Any, because ``App.on_activate`` is unannotated and nothing declares the
-    attribute. This one hands back a concrete window.
+    This is what the raw gl.app.main_win dereference means at almost every
+    one of its sites, such as a window handler, a dialog, a page or action
+    editor, and a plugin's UI callback. None of them carries a None branch,
+    and neither other accessor fits. main_window() makes each one invent a
+    branch it never had, and require_app().main_win types as Any, because
+    App.on_activate carries no annotation and nothing declares the attribute.
+    This one hands back a concrete window.
 
-    Absence here means the window has not been built yet -- before
-    ``App.on_activate``, whether because the App itself is not published or
-    because the attribute is not bound. Absence does NOT cover the quit path:
-    the attribute stays bound past the destroy (see ``main_window()``), so a
-    caller running during teardown gets a destroyed window rather than an
-    error, and must not paint through it.
+    An absence here means that nothing built the window yet, before
+    App.on_activate, because the App itself has not published or because the
+    attribute is unbound. It does not cover the quit path. The attribute stays
+    bound past the destroy (see main_window()), so a caller during teardown
+    gets a destroyed window rather than an error, and must not paint through
+    it.
     """
     window = main_window()
     if window is None:
@@ -199,17 +194,15 @@ def require_main_window() -> MainWindow:
     return window
 
 
-# ====================================================================== #
-# Settings                                                               #
-# ====================================================================== #
+# Settings
 
 def settings() -> SettingsManager:
     """The settings manager.
 
-    A passthrough, and typed concretely on purpose: the slot is late-init but
-    is never observed absent by anything that runs, so a caller inherits a real
-    type instead of a union it would have to narrow. Called before
-    ``main.create_global_objects()`` it hands back the None the raw read does.
+    A passthrough with a concrete type. The slot is late-init, and nothing
+    that runs observes it absent, so a caller inherits a real type rather than
+    a union to narrow. Before main.create_global_objects() it hands back the
+    None that the raw read gives.
     """
     return gl.settings_manager
 
@@ -217,13 +210,14 @@ def settings() -> SettingsManager:
 def app_settings() -> AppSettings:
     """A typed view onto the app settings.
 
-    ``AppSettings`` wraps the shared settings dict without copying it, so the
-    view is cheap and writes through; build one per use rather than holding it.
+    AppSettings wraps the shared settings dict and copies nothing, so the
+    view is cheap and a write reaches the settings. Build one per use rather
+    than hold it.
 
-    Dereferences the settings manager, so before
-    ``main.create_global_objects()`` builds it this raises the raw, unnamed
-    AttributeError on None -- ``tr()`` is the one accessor that trades that for
-    a named error, because its slot is read from hundreds of places.
+    This dereferences the settings manager, so before
+    main.create_global_objects() builds it this raises the raw AttributeError
+    on None. tr() is the one accessor that trades that for a named error,
+    because hundreds of places read its slot.
     """
     return gl.settings_manager.app()
 
@@ -231,26 +225,24 @@ def app_settings() -> AppSettings:
 def deck_settings(serial_number: str) -> dict:
     """This deck's settings, as the settings manager hands them out.
 
-    A fresh deep copy per call in production, so mutating the result is safe
-    and is also NOT persisted -- pair it with ``save_deck_settings`` exactly as
-    the raw call site does.
+    Production returns a fresh deep copy per call, so a mutation of the result
+    is safe and persists nothing. Pair it with save_deck_settings, as the raw
+    call site does.
 
-    Dereferences the settings manager, so pre-boot it raises the same unnamed
-    AttributeError on None that the raw call site does.
+    This dereferences the settings manager, so before boot it raises the same
+    AttributeError on None that the raw call site raises.
     """
     return gl.settings_manager.get_deck_settings(serial_number)
 
 
-# ====================================================================== #
-# Pages                                                                  #
-# ====================================================================== #
+# Pages
 
 def page_manager() -> PageManagerBackend | None:
     """The page manager backend, or None when there is not one.
 
-    Honestly Optional: the DBus API can be reached before
-    ``main.create_global_objects()`` builds it, and deck controller teardown
-    runs after it is gone. Both of those None branches are live code.
+    Honestly optional. A call can reach the D-Bus API before
+    main.create_global_objects() builds this, and deck controller teardown
+    runs after it is gone. Code runs on both None branches.
     """
     return gl.page_manager
 
@@ -258,9 +250,9 @@ def page_manager() -> PageManagerBackend | None:
 def require_page_manager() -> PageManagerBackend:
     """The page manager backend, never None.
 
-    For the sites reached only with pages loaded -- page editing, action
-    configuration, the deck UI. Adopt it only where the None branch is
-    genuinely unreachable: at a site that has one, the guard has to stay.
+    For a site reached with the pages loaded alone, such as page editing,
+    action configuration and the deck UI. Adopt it only where nothing reaches
+    the None branch. At a site that reaches it, the guard stays.
     """
     manager = gl.page_manager
     if manager is None:

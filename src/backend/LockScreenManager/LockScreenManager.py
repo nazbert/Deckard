@@ -28,13 +28,13 @@ class LockScreenManager:
         self.locked = False
         self.detector = None
 
-        threading.Thread(target=self.setup, daemon=True).start() # Run in separate thread incase something gets stuck
+        threading.Thread(target=self.setup, daemon=True).start() # Detector setup can block, so keep it off the caller's thread
 
     @log.catch
     def setup(self):
-        # XDG_CURRENT_DESKTOP is a colon-separated list ("ubuntu:GNOME",
-        # "GNOME-Classic:GNOME") -- an exact match on the whole string meant
-        # lock detection silently never engaged on such setups.
+        # XDG_CURRENT_DESKTOP holds a colon-separated list ("ubuntu:GNOME",
+        # "GNOME-Classic:GNOME"), so match one component. A match on the whole
+        # string misses these sessions and lock detection never starts.
         env_components = desktop_components()
         if "gnome" in env_components:
             self.detector = GnomeLockScreenDetector(self)
@@ -51,13 +51,10 @@ class LockScreenManager:
     def lock(self, active):
         gl.screen_locked = active
         if gl.presence_monitor:
-            # Position is deliberate: the monitor must see the lock
-            # before the screensaver work below reads its consequences. Which
-            # makes self-containment the price -- this method's @log.catch
-            # would swallow an exception from the monitor by returning, and
-            # the lock would then never reach allow_interaction, the
-            # screensaver, or self.locked. A presence signal is an optional
-            # extra; the lock screen is not.
+            # Tell the monitor before the screensaver work below reads the
+            # lock. Catch here, because this method's @log.catch returns on an
+            # exception, which stops the lock from reaching allow_interaction,
+            # the screensaver, and self.locked.
             try:
                 gl.presence_monitor.on_lock_changed(active)
             except Exception:

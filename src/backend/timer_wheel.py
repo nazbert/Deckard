@@ -12,37 +12,27 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
-# Single daemon scheduler thread, replacing the N sleeping threading.Timer
-# threads that used to sit around per screensaver-reset-per-keypress,
-# overlay-hide and key-hold delay (docs/memory-footprint-impl-plan.md P5.3).
-# Every keypress used to cancel+recreate its own Timer (its own OS thread,
-# parked in a timed wait); a single min-heap + Condition does the same job
-# with exactly one thread asleep at a time, regardless of how many delays
-# are outstanding.
+# One daemon scheduler thread for every delay in the app, which are the
+# screensaver reset per keypress, the overlay hide, and the key-hold delay. A min-heap
+# and a Condition keep exactly one thread asleep, whatever the number of
+# outstanding delays.
 #
-# Handle semantics deliberately track threading.Timer close enough that the
-# existing cancel-and-recreate call sites port with only an import change:
-#   - schedule(delay_s, callback) arms immediately (mirrors `Timer(...);
-#     .start()`) and returns a handle.
-#   - handle.cancel() is idempotent and safe to call after the callback has
-#     already fired -- it just can't un-fire it, same as Timer.cancel().
+# The handles match threading.Timer, so a cancel-and-recreate call site needs
+# only an import change:
+#   - schedule(delay_s, callback) arms at once and returns a handle.
+#   - handle.cancel() is idempotent and safe after the callback fired. It
+#     cannot un-fire the callback, the same as Timer.cancel().
 #
-# The scheduler thread itself only pops due handles off the heap and hands
-# them off; it never runs a callback inline. Ported callbacks are not cheap
-# (ScreenSaver.show() prebuilds a background -- hashes the source file,
-# possibly opens a video capture -- before it even takes a lock), so running
-# one on the scheduler thread would delay every other pending timer in the
-# process behind it (the "50 concurrent schedules" / "slow callback doesn't
-# delay an unrelated timer" scenarios in scenario_timer_wheel.py exist
-# precisely to catch that class of regression). Each fire is dispatched to
-# its own short-lived daemon thread rather than main_loop's shared
-# `@background` pool: that pool is documented I/O-bound-only and shared with
-# plugin/asset work (8 workers total), so routing screensaver/overlay/hold
-# fires through it would contend with unrelated plugin work. Timer fires
-# here are rare (per-keypress reset, one overlay-hide, one hold-timer) so a
-# fresh daemon thread per fire is cheap and keeps this module free of even a
-# GLib dependency (stdlib + loguru only), which the test harness exercises
-# headless.
+# The scheduler thread pops due handles and hands them off. It never runs a
+# callback inline, because a callback is expensive. ScreenSaver.show() hashes the
+# source file and can open a video capture before it takes a lock), and an
+# inline run delays every other pending timer in the process. Each fire gets
+# its own short-lived daemon thread, not main_loop's shared @background pool.
+# That pool holds 8 workers for I/O-bound plugin and asset work, and these
+# fires would contend with it. A fire here is rare (one reset per keypress,
+# one overlay hide, one hold timer), so a fresh daemon thread per fire is
+# cheap. It also keeps this module on stdlib and loguru, with no GLib, which
+# the headless test harness needs.
 import heapq
 import itertools
 import threading
@@ -68,23 +58,20 @@ class TimerHandle:
         self._fired = False
 
     def cancel(self) -> None:
-        """Prevent this timer from firing if it hasn't already. Idempotent,
-        and a no-op (not an error) if it already fired -- matches
-        threading.Timer.cancel()'s semantics so existing
-        cancel-then-maybe-recreate call sites need no other changes."""
+        """Stop this timer before it fires. Idempotent, and a no-op after the
+        timer fired, the same as threading.Timer.cancel()."""
         self._wheel._cancel(self)
 
     def is_alive(self) -> bool:
-        """True while still pending (not yet fired or cancelled). Named to
-        match threading.Timer's method of the same name/purpose for ported
-        call sites that probe it."""
+        """True while the timer is pending. The name matches
+        threading.Timer.is_alive() for call sites that probe it."""
         return not (self._cancelled or self._fired)
 
 
 class TimerWheel:
-    """One daemon scheduler thread backing arbitrarily many independent
-    delays. Safe to share across threads; schedule()/cancel() only ever hold
-    the wheel's own lock briefly."""
+    """One daemon scheduler thread behind any number of independent delays.
+    Any thread can share it, because schedule() and cancel() hold the wheel's
+    own lock for a short time only."""
 
     def __init__(self, name: str = "TimerWheel"):
         self._cond = threading.Condition()
@@ -109,9 +96,9 @@ class TimerWheel:
             if handle._fired:
                 return
             handle._cancelled = True
-            # Lazily dropped from the heap by _run when it next reaches the
-            # front -- cheaper than a linear scan-and-remove per cancel(),
-            # and correctness doesn't depend on prompt removal.
+            # _run drops the handle once it reaches the front of the heap. A
+            # scan-and-remove per cancel() costs more, and a late removal
+            # changes nothing.
             self._cond.notify_all()
 
     def _run(self) -> None:
@@ -138,8 +125,8 @@ class TimerWheel:
 
     @staticmethod
     def _dispatch(handle: TimerHandle) -> None:
-        # Off the scheduler thread: a slow/blocking callback must not delay
-        # any other timer due around the same time.
+        # Run off the scheduler thread. A slow callback must not delay another
+        # timer due at about the same time.
         t = threading.Thread(target=TimerWheel._run_callback, args=(handle,), name=handle._name, daemon=True)
         t.start()
 
@@ -151,9 +138,8 @@ class TimerWheel:
             log.opt(exception=True).error(f"timer_wheel: callback '{handle._name}' raised")
 
 
-# One process-wide wheel: this is the whole point of P5.3 (screensaver reset,
-# overlay hide and hold-timer all used to each spin up their own
-# threading.Timer thread; now they share this single scheduler thread).
+# One process-wide wheel. The screensaver reset, the overlay hide and the
+# hold timer all share this single scheduler thread.
 _default_wheel = TimerWheel(name="TimerWheel")
 
 

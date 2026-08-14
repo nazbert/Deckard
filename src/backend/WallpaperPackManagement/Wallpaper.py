@@ -15,7 +15,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import os
 
-# Import typing
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.backend.WallpaperPackManagement.WallpaperPack import WallpaperPack

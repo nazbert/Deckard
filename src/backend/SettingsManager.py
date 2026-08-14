@@ -12,13 +12,12 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
-# Import own modules
 from src.backend import settings_store
 
 # The app-settings table, its font subtable and its typed view live with the
-# surface they describe, next to every other settings surface. Re-exported
-# under their long-standing names -- the same objects, not copies -- because
-# roughly a hundred call sites and the table's own pin import them from here.
+# surface they describe, next to every other settings surface. These names
+# re-export the same objects, because about a hundred call sites and the
+# table's own pin import them from here.
 from src.backend.settings_store import (  # noqa: F401
     APP_DEFAULTS as DEFAULTS,
     APP_FONT_DEFAULTS as FONT_DEFAULTS,
@@ -38,36 +37,33 @@ class SettingsManager:
 
     @staticmethod
     def load_settings_reporting_corruption(file_path: str) -> tuple[dict, bool]:
-        """Load JSON, returning ``(data, corrupt)``.
+        """Load JSON and return (data, corrupt).
 
-        ``corrupt`` is True *only* when the file was present but unparseable
-        -- NOT for a legitimately empty ``{}`` and NOT for a missing file.
-        Callers that hold a backup (get_page_data) heal on this flag rather
-        than on the quarantine side-effect having removed the primary: a
-        corrupt file is corrupt whether or not it could be moved aside, so
-        the recovery must not depend on the rename succeeding.
+        corrupt is True only for a file that exists and does not parse. An
+        empty {} and a missing file both read as not corrupt. A caller that
+        holds a backup (get_page_data) heals on this flag, not on the
+        quarantine rename, because a corrupt file stays corrupt whether or not
+        the rename succeeds.
 
-        A forward, not a second implementation: the read-with-heal lives in
-        the settings store, and the ~30 call sites that reach it through this
-        name are the reason the name stays.
+        This forwards to the settings store, which owns the read-with-heal.
+        About 30 call sites reach it through this name.
         """
         return settings_store.get().load_file(file_path)
 
     @staticmethod
     def save_settings_to_file(file_path: str, settings: dict) -> None:
-        # A forward: the store writes atomically (tmp file + fsync +
-        # os.replace, so an interrupted write can't truncate the settings
-        # file) and drops any cached surface living at that path.
-        # Nothing else is swept: this manager holds no cache of its own, and a
-        # store surface is dropped by the file the write landed on rather than
-        # by a sweep of every cache within reach of a writer.
+        # This forwards to the store, which writes atomically (a temp file, an
+        # fsync and an os.replace, so an interrupted write cannot truncate the
+        # settings file) and drops the cached surface at that path. Nothing
+        # else drops, because this manager holds no cache and the store drops
+        # by the file the write landed on.
         settings_store.get().save_file(file_path, settings)
 
     def get_deck_settings(self, deck_serial_number: str) -> dict:
         """
         Retrieves the deck settings for a given deck serial number.
-        Cached (invalidated on save) and deep-copied per call, so callers can
-        still freely mutate the result without touching the cache.
+        The store caches the settings, drops the cache on a save, and
+        deep-copies per call, so a caller can mutate the result freely.
 
         Args:
             deck_serial_number (str): The serial number of the deck.
@@ -81,9 +77,9 @@ class SettingsManager:
         """
         Saves the settings for a deck.
 
-        The write is atomic and invalidates this deck's cached copy -- and
-        only this deck's: a settings write elsewhere in the tree cannot change
-        what is in a deck's file, so it has no business clearing it.
+        The write is atomic and drops this deck's cached copy only. A settings
+        write elsewhere in the tree cannot change a deck's file, so it must
+        not clear that deck's cache.
 
         Args:
             deck_serial_number (str): The serial number of the deck.
@@ -98,8 +94,8 @@ class SettingsManager:
         """Typed view onto one deck's settings, with the schema's defaults
         applied at read and unknown keys refused at write.
 
-        One file read per view: build it once at the top of a load path and
-        destructure it, rather than asking per key.
+        One file read per view. Build it once at the top of a load path and
+        destructure it, rather than ask per key.
         """
         return settings_store.DeckSettings(
             self.get_deck_settings(deck_serial_number), deck_serial_number
@@ -108,20 +104,20 @@ class SettingsManager:
     def deck_view(self, settings: dict) -> settings_store.DeckSettings:
         """The same view over deck settings the caller already read.
 
-        For readers that decide for themselves whether the file is read at all
-        -- the deck controller short-circuits to an empty dict once its deck is
-        gone, and that decision must stay in front of the read.
+        For a reader that decides whether to read the file at all. The deck
+        controller returns an empty dict once its deck is gone, and that
+        decision must stay in front of the read.
         """
         return settings_store.DeckSettings(settings)
 
     def get_app_settings(self) -> dict:
         """The app settings, as the one dict every reader of them holds.
 
-        Not a copy: the settings dialog's rows, the store pages and the launch
-        counter all read this, write into it, and save it back, and they have
-        to be looking at the same object for a write to be visible before the
-        save. Cached by the store and dropped the moment the file is written,
-        so the copy handed out here is never behind the disk.
+        This hands out the shared dict. The settings dialog rows, the store
+        pages and the launch counter read it, write into it and save it back,
+        and they must see one object for a write to show before the save. The
+        store caches it and drops the cache on a write, so this dict never
+        falls behind the disk.
         """
         return settings_store.get().read(settings_store.APP)
 
@@ -130,12 +126,12 @@ class SettingsManager:
         return AppSettings(self.get_app_settings())
 
     def app_snapshot(self) -> AppSettings:
-        """Typed view onto a PRIVATE copy of the app settings, read from disk.
+        """Typed view onto a private copy of the app settings, read from disk.
 
         For an editor that collects several changes against one picture of the
-        file and writes the whole picture back at the end -- the settings
-        dialog. It must not join the shared dict: its unfinished edits would
-        read as settled to everyone else.
+        file and writes the whole picture back at the end, such as the
+        settings dialog. It must stay off the shared dict, because every other
+        reader would take its unfinished edits as settled.
         """
         return AppSettings(settings_store.get().read_fresh(settings_store.APP))
 
@@ -146,10 +142,10 @@ class SettingsManager:
         """
         Returns always the same settings, no matter what the data path is set to.
 
-        The store's STATIC surface reads the same fixed file the data-path
-        override lives in. The one reader of it that does NOT come through here
-        is globals.py's bootstrap read, which runs before this (or anything)
-        is importable and is the read that defines the data path.
+        The store's STATIC surface reads the fixed file that holds the
+        data-path override. One reader skips this method, the bootstrap read
+        in globals.py, which runs before this module imports and which defines
+        the data path.
         """
         return settings_store.get().read(settings_store.STATIC)
 
@@ -160,10 +156,9 @@ class SettingsManager:
         self.font_defaults = self.app().default_font
 
     def save_font_defaults(self) -> None:
-        # Merge into the existing general section -- replacing it wholesale
-        # silently destroyed every other general.* setting (hold-time,
-        # rolling-labels, app-launches, show-donate-window) whenever a font
-        # default was changed.
+        # Merge into the existing general section. A wholesale replacement
+        # destroys every other general setting (hold-time, rolling-labels,
+        # app-launches, show-donate-window) on a font default change.
         app = self.app()
         app.default_font = self.font_defaults
         app.save()

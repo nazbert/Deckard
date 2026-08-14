@@ -1,17 +1,10 @@
-"""
-Desktop-session identification, shared by every consumer that adapts to the
-running desktop (window grabbing, lock-screen detection).
+"""Desktop-session identification for window grabbing and lock-screen detection.
 
-``XDG_CURRENT_DESKTOP`` is a colon-separated *list* of names ordered most
-specific first -- "ubuntu:GNOME", "GNOME-Classic:GNOME",
-"sway:wlroots:swayfx" -- so a whole-string comparison matches only the
-handful of desktops that happen to publish a single name, and silently
-misses stock distro sessions. Matching happens per component; this module is
-the single place that knows how to split them.
-
-Stdlib only on purpose: both consumers are constructed early and one of them
-(the lock screen manager) runs its detection on a worker thread, so this must
-stay importable without pulling in ``globals`` or GTK.
+XDG_CURRENT_DESKTOP holds a colon-separated list of names, most specific first
+("ubuntu:GNOME", "sway:wlroots:swayfx"), so callers must match one component.
+A whole-string comparison misses stock distro sessions.
+This module stays stdlib-only, because the lock screen manager detects on a
+worker thread, before globals and GTK are safe to import.
 """
 import os
 

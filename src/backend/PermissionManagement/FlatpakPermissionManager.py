@@ -46,49 +46,39 @@ class FlatpakPermissionManager:
     
     def get_flatpak_permissions(self) -> dict[str, Any]:
         command = self.add_spawn_prefix_if_needed(f"flatpak info --show-permissions {self.app_id}")
-        # Execute the command, capturing stdout and stderr
         process = subprocess.Popen(shlex.split(command), stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd="/")
         stdout, stderr = process.communicate()
 
-        # If there is an error (captured in stderr), raise an exception
         if stderr:
             log.error(f"Error running command: {stderr.decode()}")
             return {}
         
-        # Decode the stdout to get the permissions output as a string
         permissions_output = stdout.decode()
-        # Initialize an empty dictionary to hold the parsed permissions
-        # Two shapes by section: the context section maps to a dict, the bus
-        # policy sections to a list.
+        # The shape differs per section. The context section maps to a dict,
+        # and a bus policy section maps to a list.
         permissions_dict: dict[str, Any] = {}
         
-        # Split the output into sections based on double newline characters
         sections = permissions_output.split('\n\n')
         for section in sections:
-            # Split the section into lines and extract the header
             lines = section.strip().split('\n')
             header = lines.pop(0).strip('[]').lower().replace(' ', '-')
-            # Parse the 'Context' section differently from the policy sections
             if header == 'context':
                 context_dict = {}
                 for line in lines:
-                    # Split each line on '=' and construct a list of values, ignoring the last empty string
+                    # Each value ends with ';', so drop the empty last element.
                     if '=' in line:
                         key, value = line.split('=')
                         context_dict[key] = value.split(';')[:-1]
-                # Add the context dictionary to the permissions dictionary
                 permissions_dict[header] = context_dict
             else: # For 'Session Bus Policy' and 'System Bus Policy' sections
                 policy_list = []
                 for line in lines:
-                    # For each policy, remove the '=talk' part and add the policy to the list
+                    # Each line reads '<name>=talk'; keep the name.
                     if '=' in line:
                         policy = line.split('=')[0]
                         policy_list.append(policy)
-                # Add the policy list to the permissions dictionary
                 permissions_dict[header] = policy_list
 
-        # Return the complete permissions dictionary
         return permissions_dict
     
     def has_dbus_permission(self, name: str, bus: str="session") -> bool:
@@ -126,7 +116,7 @@ class FlatpakPermissionManager:
 
         command = self.get_dbus_permission_add_command(name, bus)
         window = None
-        # Checks are required because the request might come before the mainwin has been created
+        # The request can arrive before the main window exists, so check both.
         app = gl.app
         if app is not None and hasattr(app, "main_win"):
             if app.main_win is not None:
@@ -138,4 +128,4 @@ class FlatpakPermissionManager:
 
         window = FlatpakPermissionRequestWindow(gl.app, window, command=command, description=description)
         # window.present()
-        GLib.idle_add(window.present) # GLib should not be necessary, but without it the window flickers
+        GLib.idle_add(window.present) # Present on the idle loop, because a direct present() flickers

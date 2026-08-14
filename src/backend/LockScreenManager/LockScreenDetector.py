@@ -30,18 +30,17 @@ class LockScreenDetector:
     def subscribe_to_screen_saver(self, bus_name: str | None, object_path: str, interface: str, callback: Callable[..., Any]) -> None:
         """Listen for the ScreenSaver ActiveChanged signal on the session bus.
 
-        bus_name is the sender to match; the DE detectors pass None (any
-        sender), matching the behavior they had before this was hoisted.
+        bus_name is the sender to match. The desktop detectors pass None and
+        accept any sender.
         """
         try:
-            # Connect to the Session Bus. Kept referenced: the subscription
-            # below lives exactly as long as the connection does.
+            # Keep the connection referenced. The subscription below lives
+            # exactly as long as the connection does.
             self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
 
-            # Define the signal to listen to. setup() runs on the manager's
-            # daemon thread, which has no thread-default main context, so
-            # GDBus dispatches the callback on the global default one -- the
-            # GTK main loop, same as the old glib mainloop integration.
+            # setup() runs on the manager's daemon thread, which has no
+            # thread-default main context, so GDBus dispatches the callback on
+            # the global default one, which is the GTK main loop.
             self.bus.signal_subscribe(
                 bus_name,
                 interface,
