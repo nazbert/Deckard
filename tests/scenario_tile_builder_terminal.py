@@ -129,7 +129,6 @@ def leg_writer_open_fail() -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
 # Leg 3. A truncated source. The container metadata promises N frames but the
 # file delivers fewer. Byte-truncating an mp4v file is all-or-nothing here
 # (the moov atom sits in the trailing bytes, so any truncation that drops

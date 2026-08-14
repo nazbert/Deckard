@@ -49,9 +49,9 @@ def main() -> None:
 
         bleeds = []
         for i in range(TRIALS):
-            # Establish an action-owned image DETERMINISTICALLY. Load the
-            # action page, wait for it to settle, then force a fresh paint on
-            # the stabilized state.
+            # Establish an action-owned image without racing the load. Load
+            # the action page, wait for it to settle, then force a fresh
+            # paint on the stabilized state.
             action_page = gl.page_manager.get_page(
                 fixtures.seed_action_page(f"LatchNB{i}", key_ident), controller)
             controller.load_page(action_page, allow_reload=True)

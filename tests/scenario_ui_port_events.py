@@ -232,8 +232,9 @@ def check_mirror_pushes_coalesce() -> None:
     adapter.bind(controller, _fake_mirror_child(button, strip))
     adapter._window_mapped = True
 
-    # Every scheduled callback lands here first. Push_input_image resolves
-    # self._drain_mirror at schedule time, so an instance attribute wins.
+    # Every scheduled callback lands here first, because push_input_image
+    # resolves self._drain_mirror at schedule time, so an instance attribute
+    # wins.
     drains: list = []
     real_drain = adapter._drain_mirror
 
@@ -509,10 +510,10 @@ def check_port_methods_headless_safe() -> None:
     identifier = Input.Key("0x0")
     controller = object()
 
-    # Anything the adapter logs at WARNING+ is a failure for the quiet-no-op
-    # half below. Push_input_image's broad except REPORTS through the log, so
-    # without this sink a guard that silently degraded into the except path
-    # would look identical to a guard that worked.
+    # Anything the adapter logs at WARNING or above is a failure for the
+    # quiet-no-op half below. push_input_image's broad except reports through
+    # the log, so without this sink a guard that degraded into the except
+    # path would look identical to a guard that worked.
     warnings: list = []
     sink_id = log.add(
         lambda msg: warnings.append(msg.record["message"]),
@@ -593,8 +594,8 @@ def check_port_methods_headless_safe() -> None:
 
     # push_input_image's except path (the containment that keeps a failing
     # preview from throttling the media writer). Exercised with a widget that
-    # raises, since every OTHER refusal returns False through a guard and
-    # never reaches the except at all.
+    # raises, because a refusal of any other kind returns False through a
+    # guard and never reaches the except at all.
     adapter.bind(controller, _fake_key_child(_RaisingButton()))
     adapter._window_mapped = True
     warnings.clear()
