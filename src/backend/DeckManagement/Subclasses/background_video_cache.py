@@ -16,17 +16,11 @@ if TYPE_CHECKING:
 class BackgroundVideoCache(Mp4FrameCache):
     """Background video, cached as a re-encoded video at deck-canvas resolution.
 
-    The source video is decoded once (during the first playthrough); each
-    canvas-fitted frame is appended to a small mp4 in the cache directory.
-    From then on frames are decoded on demand from that file, so no frame
-    data is held in RAM beyond the decoder's own buffers. Key tiles and the
-    touchscreen strip slice are cropped out of the canvas frame per request.
-
     Mp4FrameCache (mp4_tile_cache.py) owns the build, promote and
-    decode-ahead discipline. This class keeps the tiling, strip and
-    saturation-crop logic of the background path: one instance, a build
-    interleaved with playback ticks, and the on-disk directory layout and
-    naming.
+    decode-ahead discipline, which decodes the source once and then decodes
+    each frame on demand from the cache mp4. This class keeps the tiling,
+    strip and saturation-crop logic of the background path: one instance, a
+    build interleaved with playback ticks, and the on-disk layout and naming.
     """
 
     def __init__(self, video_path, deck_controller: "DeckController", extend_touchscreen: bool = False) -> None:
@@ -42,7 +36,7 @@ class BackgroundVideoCache(Mp4FrameCache):
         # is taller. Extended caches are therefore incompatible with plain
         # ones and live in their own directory.
         self.extend_touchscreen = extend_touchscreen and self.deck_controller.deck.is_touch()
-        # The annotation follows the real value: a (width, height) pair.
+        # The annotation follows the real value, a (width, height) pair.
         self.strip_size: tuple[int, int] | None = (
             self.deck_controller.get_touchscreen_image_size()
             if self.extend_touchscreen else None)
@@ -84,8 +78,8 @@ class BackgroundVideoCache(Mp4FrameCache):
         canvas_height = key_height + total_spacing_y
 
         # Extend the canvas below the key grid, so the frame continues onto
-        # the touchscreen strip: one bezel gap plus the strip mapped into
-        # canvas coordinates. This matches BackgroundImage geometry.
+        # the touchscreen strip. That is one bezel gap plus the strip mapped
+        # into canvas coordinates, the same geometry as BackgroundImage.
         if self.extend_touchscreen:
             canvas_height += spacing_y + self._get_strip_canvas_height(canvas_width)
 
@@ -130,7 +124,8 @@ class BackgroundVideoCache(Mp4FrameCache):
         return strip_size
 
     def _generate_alpha_frame(self) -> list:
-        """Fallback frame: transparent key tiles (and strip slice if extended)."""
+        """Fallback frame of transparent key tiles, plus the strip slice when
+        the frame extends onto the touchscreen."""
         entries = [self.deck_controller.generate_alpha_key() for _ in range(self.key_count)]
         if self.extend_touchscreen:
             entries.append(Image.new("RGBA", self._require_strip_size(), (0, 0, 0, 0)))
@@ -151,6 +146,8 @@ class BackgroundVideoCache(Mp4FrameCache):
         return self.get_frame_and_index(n)
 
     def _payload_from_bgr(self, frame_bgr: np.ndarray) -> list[Image.Image]:
+        # Crop the key tiles and the strip slice out of the canvas frame per
+        # request, so no frame data stays in RAM beyond the decoder's buffers.
         canvas = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
         entries = [
             self.crop_key_image_from_deck_sized_image(canvas, key)

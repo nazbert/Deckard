@@ -36,7 +36,7 @@ class Media:
             Media: A new Media object with the added image layer.
         """
         # from_image_path returns None for a path that is neither an image nor
-        # an SVG. Do not build a [None] layer list: get_final_media reads
+        # an SVG. Do not build a [None] layer list. get_final_media reads
         # self.layers[0].image before its own layer guard runs, so an unusable
         # path dies inside the composite on an arbitrary worker thread. An
         # empty layer list makes get_final_media return None, which is the

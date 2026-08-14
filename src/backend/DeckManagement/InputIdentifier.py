@@ -45,7 +45,7 @@ class InputIdentifier:
     # self.dict verbatim. Int keys are legitimate only in the in-memory
     # action_objects registry. str(state) below is the one place that coerces
     # them, so callers can pass either. Each accessor returns the live nested
-    # dict or list: callers mutate in place, and page.save() writes self.dict
+    # dict or list. Callers mutate in place, and page.save() writes self.dict
     # wholesale.
 
     def get_states(self, page: "Page") -> dict:

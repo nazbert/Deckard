@@ -49,11 +49,8 @@ def close_all_controllers(controllers, join_timeout: float = 2.0) -> None:
     DeckManager.close_all drive the same code.
 
     The function submits the terminal ClearAndClose to every open controller
-    first, then joins each media thread with a bound. The message drives the
-    writer's own clear and close, so the join only waits for that work to land.
-    The app force_quit timer backstops a stuck writer. The headerBar quit path
-    has no such timer, so this bounded join is its only safety. A controller
-    with no media_player thread closes directly.
+    first, then joins each media thread with a bound. A controller with no
+    media_player thread closes directly.
     """
     pending_joins = []
     for controller in list(controllers):
@@ -78,13 +75,17 @@ def close_all_controllers(controllers, join_timeout: float = 2.0) -> None:
         except Exception as e:
             log.error(f"Failed to submit ClearAndClose for deck: {e}")
 
+    # The message drives the writer's own clear and close, so this join only
+    # waits for that work to land. The app force_quit timer backstops a stuck
+    # writer. The headerBar quit path has no such timer, so this bounded join
+    # is its only safety.
     for controller in pending_joins:
         controller.media_player.stop(timeout=join_timeout)
 
 
 class DeckManager:
-    # Backoff schedule for the startup re-enumeration: ~60s
-    # total window. Instance-overridable so the harness can shrink it.
+    # Backoff schedule for the startup re-enumeration, about 60 s in total.
+    # An instance can override it, so the harness can shrink it.
     BOOT_RESCAN_DELAYS: tuple[float, ...] = (2.0, 3.0, 5.0, 10.0, 15.0, 25.0)
 
     def __init__(self):
@@ -93,8 +94,9 @@ class DeckManager:
         # Guards concurrent add/remove of deck_controller (called from the USB
         # monitor, resume, Flatpak poll and media-thread error paths).
         self._controllers_lock = threading.Lock()
-        # Serializes connect_new_decks() callers: the USB hotplug monitor and
-        # the boot rescan below. The already-loaded check and the registration
+        # Serializes the two connect_new_decks() callers, the USB hotplug
+        # monitor and the boot rescan below. The already-loaded check and the
+        # controller registration
         # must be atomic, or two concurrent enumerations of one fresh deck
         # both pass the check and register it twice.
         self._connect_decks_lock = threading.Lock()
@@ -135,7 +137,7 @@ class DeckManager:
             self.deck_controller.append(controller)
             publish_controller(controller)
             # Announce once per newly registered controller. Do not walk every
-            # remote controller here: that sends N announcements for deck N,
+            # remote controller here. That sends N announcements for deck N,
             # which is N duplicate add_page calls for the first deck.
             ui_port.get().on_deck_added(controller)
 
@@ -159,10 +161,10 @@ class DeckManager:
         for deck in decks:
             self.load_hardware_deck(deck)
         if not decks:
-            # Autostart can race USB device init at boot: the deck is not yet
+            # Autostart can race USB device init at boot. The deck is not yet
             # enumerable, and the USB monitor reports only future hotplug
             # events, so without a re-scan the user must replug and restart.
-            # Warn only when deck settings exist: a machine that never had a
+            # Warn only when deck settings exist. A machine that never had a
             # hardware deck reaches this branch normally.
             message = "No decks enumerable at startup; starting bounded re-enumeration"
             if self._hardware_decks_expected():
@@ -195,11 +197,6 @@ class DeckManager:
         thread is a daemon, so it never blocks startup. It stops on the first
         registration (not on mere enumerability, see _boot_rescan_loop), on
         exhausted backoff, or on app quit through stop_boot_rescan.
-
-        Registration goes through connect_new_decks(), whose lock and
-        already-loaded check keep a deck that arrives from the USB hotplug
-        monitor mid-backoff from registering twice. This only adds fresh
-        controllers. It never touches or resurrects an existing or closed one.
         """
         if self._boot_rescan_thread is not None and self._boot_rescan_thread.is_alive():
             return
@@ -218,12 +215,16 @@ class DeckManager:
             if not gl.threads_running:
                 return
             try:
+                # connect_new_decks() only adds fresh controllers, and it never
+                # touches or resurrects an existing or closed one. Its lock and
+                # already-loaded check keep a deck that arrives from the USB
+                # hotplug monitor mid-backoff from registering twice.
                 n_registered = self.connect_new_decks()
             except Exception as e:
                 log.error(f"Boot deck rescan attempt {attempt} failed: {e}")
                 continue
             # Stop only once a deck registers (a controller exists), never on
-            # mere enumerability: a deck that appears but flakes its open
+            # mere enumerability. A deck that appears but flakes its open
             # (TransportError -1, the boot-storm failure) fires no further
             # hotplug event, so a stop here strands it behind a success log.
             # A failed pickup leaves the deck unloaded, so the next round's
@@ -259,13 +260,14 @@ class DeckManager:
         # Opening a deck and reading its serial right after open is sometimes
         # flaky (TransportError -1). Retry, and never let one bad deck crash
         # startup. The startup path (load_hardware_deck) and the hotplug and
-        # boot-rescan path (add_newly_connected_deck) share this: a deck the
-        # rescan picks up mid-boot flakes as often as one enumerated at start.
+        # boot-rescan path (add_newly_connected_deck) share this, because a
+        # deck the rescan picks up mid-boot flakes as often as one enumerated
+        # at startup.
         for attempt in range(1, attempts + 1):
             try:
                 if not deck.is_open():
-                    # Resume-from-suspend handle reopen is the library's only
-                    # mode. Always on.
+                    # The library always opens with resume-from-suspend
+                    # enabled.
                     deck.open(True)
                 return DeckController(self, deck)
             except StreamDeck.TransportError as e:
@@ -284,7 +286,7 @@ class DeckManager:
 
     def load_fake_decks(self):
         old_n_fake_decks = len(self.fake_deck_controller)
-        # int(): the spin row writes an int. A hand-edited settings file can
+        # The spin row writes an int, but a hand-edited settings file can
         # leave a float or a numeric string here, and the comparisons below
         # are counts.
         n_fake_decks = int(gl.settings_manager.app().n_fake_decks)
@@ -322,18 +324,14 @@ class DeckManager:
     def connect_new_decks(self) -> int:
         """Register every enumerable deck that isn't already loaded.
 
-        _connect_decks_lock serializes this: the USB hotplug monitor and the
-        boot rescan (start_boot_rescan) can call it at the same time, and the
-        already-loaded check plus the registration below must be atomic, or
-        the same deck registers twice.
-
         Returns the number of enumerated decks that are registered after this
         pass, whether already loaded or picked up here. That count is the boot
         rescan's stop condition. A deck that enumerated but failed to
         initialize does not count, so the rescan keeps retrying it.
         """
-        # The serialization is global, not per-deck: a slow open or retry of
-        # deck A delays deck B's pickup. The usbmonitor is a poll-diff loop
+        # The serialization is global and not per-deck, so a slow open or
+        # retry of deck A delays deck B's pickup. The usbmonitor is a poll-diff
+        # loop
         # that merges device changes and drops no event while this lock is
         # held. The deferred deck arrives when its caller gets the lock.
         with self._connect_decks_lock:
@@ -357,7 +355,7 @@ class DeckManager:
             n_registered = sum(1 for deck in decks if deck.id() in loaded_after)
 
         # The port is null-safe, and the adapter idles the call onto the main
-        # thread: this method runs on the USB monitor thread or the boot
+        # thread. This method runs on the USB monitor thread or the boot
         # rescan thread, and check_for_errors() is pure GTK work.
         ui_port.get().refresh_deck_availability()
 
@@ -416,7 +414,7 @@ class DeckManager:
         return None
 
     def add_newly_connected_deck(self, deck:StreamDeck, is_fake: bool = False):
-        # Retry the init instead of constructing a DeckController directly: a
+        # Retry the init instead of constructing a DeckController directly. A
         # deck that arrives mid-boot-storm through hotplug or the boot rescan
         # hits the same flaky open and serial read the startup path retries.
         # On final failure this returns without registering, so a later rescan

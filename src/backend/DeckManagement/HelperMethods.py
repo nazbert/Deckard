@@ -305,8 +305,9 @@ def _load_pango():
 
 
 def color_values_to_gdk(color_values: Sequence[int]) -> "Gdk.RGBA":
-    # Sequence, not a tuple union: the persisted label and font colors are
-    # JSON lists, and that is what most callers hand over. The body copies
+    # The annotation is Sequence and not a tuple union. The persisted label
+    # and font colors are JSON lists, and that is what most callers hand
+    # over. The body copies
     # into a list and works off the length, so it accepts any 3- or 4-element
     # sequence of channel values (scenario_helper_methods pins that contract).
     Gdk = _load_gdk()
@@ -316,7 +317,7 @@ def color_values_to_gdk(color_values: Sequence[int]) -> "Gdk.RGBA":
     if len(values) == 3:
         values.append(255)
     color = Gdk.RGBA()
-    # Every caller works in 0-255 on all four channels: gdk_color_to_values
+    # Every caller works in 0-255 on all four channels. gdk_color_to_values
     # hands back that range, and the label and font settings persist it. CSS
     # rgba() takes the channels in 0-255 but the alpha in 0-1, so this scales
     # the raw value. An unscaled alpha clamps every alpha at or above 1 to
@@ -400,15 +401,11 @@ def run_command(command):
     command is a command line, not an argv list. Callers, plugins included,
     rely on shell syntax such as pipes, && and variable expansion, and the
     flatpak prefix splices in as a string. This is de-facto plugin API
-    surface. Do not change it to shlex.split and argv: build the argv
+    surface. Do not change it to shlex.split and argv. Build the argv
     yourself and call subprocess directly if you need that.
 
     The command gets its own session, its stdio pointed at /dev/null and ~ as
     its cwd, so it outlives the app cleanly.
-
-    This function logs a spawn failure and never raises one. Callers are
-    plugin action callbacks, and they cannot handle an OSError from a missing
-    /bin/sh, a missing HOME, or a fork refused under load.
     """
     if command is None:
         return
@@ -421,6 +418,9 @@ def run_command(command):
                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, cwd=os.path.expanduser("~"))
     except OSError as e:
+        # Log a spawn failure and never raise it. Callers are plugin action
+        # callbacks, and they cannot handle an OSError from a missing /bin/sh,
+        # a missing HOME, or a fork refused under load.
         log.error(f"Failed to run command {command!r}: {e}")
         return
     # Reap the direct child, or it stays a zombie for the life of the app.

@@ -55,7 +55,7 @@ class InputImage(SingleKeyAsset):
         # One-time enhancement at load. This constructor runs once per page or
         # state load, well before per-frame label compositing, and covers key
         # and dial static media. At the default factor the enhance call is
-        # skipped. It applies to the raw media layer only: the caller
+        # skipped. It applies to the raw media layer only. The caller
         # composites labels on top of get_raw_image(), so text is never
         # re-tinted. Store the factor, because _ensure_fits_composed()
         # reapplies it to a fresh decode.
@@ -65,9 +65,9 @@ class InputImage(SingleKeyAsset):
 
         self.path = path
         # Native size of the source file, captured on the first re-decode in
-        # _ensure_fits_composed(). None until then: the constructor's image
-        # argument may already be a fitted copy, so its size is not the
-        # source's.
+        # _ensure_fits_composed(). It is None until then, because the
+        # constructor's image argument may already be a fitted copy, whose
+        # size is not the source's.
         self._source_native_size = None
         # close() clears this to None and then deletes it. Every reader guards
         # on both hasattr and None.
@@ -163,7 +163,7 @@ class InputImage(SingleKeyAsset):
         if fresh.width > budget[0] or fresh.height > budget[1]:
             fresh.thumbnail(budget, Image.Resampling.LANCZOS)
 
-        # Do not close the swapped-out image: the media thread may still be
+        # Do not close the swapped-out image. The media thread may still be
         # compositing the reference that get_raw_image() handed it, and a
         # close raises "Operation on closed image" under load. Drop the
         # reference instead. The collector frees it once the last composite

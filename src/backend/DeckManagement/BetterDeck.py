@@ -71,11 +71,10 @@ class BetterDeck():
         run_read_thread flag (StreamDeck.py:_read_with_resume_from_suspend).
         Without this stop, the reader's resume-from-suspend loop re-opens the
         device for up to 10 s after close() returns (StreamDeck.py:209-262).
-
-        FakeDeck and RemoteDeck have no read thread, and no run_read_thread
-        attribute, so the hasattr guard below returns early for them.
         """
         device = self.deck
+        # FakeDeck and RemoteDeck have no read thread and no run_read_thread
+        # attribute, so this guard returns early for them.
         if not hasattr(device, "run_read_thread"):
             return
         device.run_read_thread = False
@@ -560,10 +559,10 @@ class BetterDeck():
 
         The device reports physical indexes, e.g. key_states(). The mapping
         under the current rotation is out[get_logical_index(p)] = orig[p]. Do
-        not invert it to out[p] = orig[get_logical_index(p)]: that applies the
-        inverse rotation, which is self-inverse only at 0 and 180. It
-        scrambles key_states() at 90 and 270, and ControllerKey.__init__ then
-        reads the wrong key's press state.
+        not invert it to out[p] = orig[get_logical_index(p)]. That form
+        applies the inverse rotation, which is self-inverse only at 0 and 180.
+        It scrambles key_states() at 90 and 270, and ControllerKey.__init__
+        then reads the wrong key's press state.
         """
         pysical_rows, physical_cols = self.deck.key_layout()
         total = pysical_rows * physical_cols

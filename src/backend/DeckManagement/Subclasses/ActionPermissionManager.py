@@ -68,8 +68,9 @@ class ActionPermissionManager:
         self.reload_pages(reload_pages, reload_self)
 
     ## Input dict
-    # deck_controller.active_page is optional: no page is loaded yet, or a page
-    # load failed. Every accessor below binds it once and stops on None. A read
+    # deck_controller.active_page is optional, because no page is loaded yet
+    # or a page load failed. Every accessor below binds it once and stops on
+    # None. A read
     # degrades to the empty dict that the .get(..., default) callers handle.
     # A write is dropped, because there is nothing to persist it to.
     def get_input_dict(self) -> dict:

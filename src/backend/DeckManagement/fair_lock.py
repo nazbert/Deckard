@@ -17,7 +17,7 @@ import time
 from typing import Literal
 
 # FIFO ticket lock. It serves as the Stream Deck per-device transport mutex.
-# CPython's threading.Lock is unfair: a thread that releases and immediately
+# CPython's threading.Lock is unfair. A thread that releases and immediately
 # re-acquires beats a waiter parked for milliseconds, so an unpaced write
 # burst out-races the library's HID read poll on this shared per-device
 # mutex. Input events then arrive coalesced and dials lag. Ticket order
@@ -53,7 +53,7 @@ class FairLock:
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
         with self._cond:
             if not blocking:
-                # Do not take a ticket that can go unclaimed: succeed only
+                # Do not take a ticket that can go unclaimed. Succeed only
                 # when no thread owns or queues for the lock.
                 if self._serving != self._next_ticket:
                     return False
@@ -97,8 +97,9 @@ class FairLock:
         while self._serving in self._abandoned:
             self._abandoned.discard(self._serving)
             self._serving += 1
-        # notify_all, not notify: the waiters are the transport reader and the
-        # writing thread, two or three at a time. The wasted wakeups cost less
+        # Use notify_all and not notify. The waiters are the transport reader
+        # and the writing thread, two or three at a time. The wasted wakeups
+        # cost less
         # than a USB chunk, and each waiter re-checks its own ticket, so no
         # wakeup is lost.
         self._cond.notify_all()

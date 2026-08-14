@@ -27,21 +27,19 @@ def native_tile_cache_max_bytes() -> int:
     DECKARD_NATIVE_TILE_CACHE_MB.
 
     0 disables the frame-identity path and falls playback back to the
-    pixel-hash encode memo. A malformed value degrades to the default and logs
-    a warning. It must never raise out of DeckController.__init__, where
-    DeckManager reports it as "Failed to initialize deck" and skips the whole
-    device.
-
-    Malformed includes the values float() accepts and int() cannot take:
-    "nan", "inf", and any overflowing literal such as "1e400". They parse and
-    pass the sign test, because every nan comparison is False, and then the
-    int() below raises ValueError for nan and OverflowError for inf.
+    pixel-hash encode memo. A malformed value degrades to the default.
     """
     raw = os.environ.get("DECKARD_NATIVE_TILE_CACHE_MB")
     if raw is None:
         return DEFAULT_MAX_MB * 1024 * 1024
     try:
         mb = float(raw)
+        # isfinite, not just float(): "nan", "inf" and an overflowing literal
+        # such as "1e400" parse and pass the sign test below, because every
+        # nan comparison is False, and then int() raises ValueError for nan
+        # and OverflowError for inf. This function must never raise out of
+        # DeckController.__init__, where DeckManager reports it as "Failed to
+        # initialize deck" and skips the whole device.
         usable = math.isfinite(mb)
     except ValueError:
         usable = False
@@ -60,27 +58,20 @@ class NativeTileCache(ByteLRUCache):
     """LRU of encoded, device-native background key tiles.
 
     The key is the frame identity: video md5, frame index, key index,
-    rotation, quality and native format. It is not the composited pixels. The
-    total byte size caps the cache. The cache is thread-safe, and values must
-    be immutable bytes.
+    rotation, quality and native format. It is not the composited pixels. A
+    bare key over a video background composites to the shared background tile,
+    so its native bytes are a pure function of that tuple, and the tile needs
+    no serialization and no hash. A looping video pays its encodes on the
+    first playthrough, and every later loop is a dict lookup.
 
-    A bare key over a video background composites to the shared background
-    tile, so its native bytes are a pure function of that tuple. The tile
-    needs no serialization and no hash. A looping video pays its encodes on
-    the first playthrough, and every later loop is a dict lookup.
-
-    This cache has no doorkeeper, unlike EncodedImageCache. A doorkeeper
-    admits a key on its second sighting, which protects a pixel-hash
+    This class keeps ByteLRUCache's default first-sighting admission and adds
+    no doorkeeper. EncodedImageCache's doorkeeper protects a pixel-hash
     namespace where high-entropy content produces keys that never repeat.
     Identity keys come from a finite, repeating space, the frames times the
     keys of the loaded video, so first-sighting admission is what makes the
     second loop encode-free, and the byte cap bounds it.
 
-    Keep this separate from encode_memo: identity keys and pixel-hash keys
-    collide in one key space, and the two need independent sizing.
-
-    ByteLRUCache provides the byte accounting, the LRU order, clear(), the
-    <= 0 kill switch and the budget-participant surface. This class is that
-    core with the default first-sighting admission and no extra teardown.
+    Keep this separate from encode_memo. In one shared key space the two kinds
+    of key collide, and the two need independent sizing.
     """
 

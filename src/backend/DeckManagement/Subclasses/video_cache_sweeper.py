@@ -84,7 +84,7 @@ def _sweep_legacy_key_video_dirs() -> None:
     because key_video_cache.py is gone. Unlike sweep_stale_video_caches below,
     this bypasses the referenced-hash check. A still-referenced video's old
     JPEG frames are as unreachable as an unreferenced one's, because nothing
-    decodes them again either way. It is idempotent: once removed, os.listdir
+    decodes them again either way. It is idempotent. Once removed, os.listdir
     stops finding them on every later startup.
     """
     if not os.path.isdir(VID_CACHE):
@@ -200,14 +200,6 @@ def collect_active_sat_suffixes() -> set[str]:
     again the moment a deck resets to 1.0. Any other .satNNN variant of a
     referenced video is a leftover from a factor tried and abandoned, which is
     bounded but permanent disk growth unless the sweep removes it.
-
-    This clamps the persisted factor exactly as the runtime clamps it (see
-    _clamp_saturation), so the suffix collected here is the one playback
-    writes. An out-of-range or hand-edited value cannot make the sweep protect
-    a variant name the runtime never produces. An unreadable deck file
-    contributes nothing. The sweep can then wrongly remove its variant, but a
-    reader that finds its ready cache missing invalidates the registry entry
-    and rebuilds (see mp4_tile_cache._maybe_adopt_shared_cache).
     """
     suffixes = {""}
     decks_dir = os.path.join(gl.DATA_PATH, "settings", "decks")
@@ -221,8 +213,16 @@ def collect_active_sat_suffixes() -> set[str]:
                 os.path.join(decks_dir, name)
             ) or {}
             raw = settings.get("display", {}).get("saturation", 1.0)
+            # Clamp the persisted factor exactly as the runtime clamps it, so
+            # the suffix collected here is the one playback writes. An
+            # out-of-range or hand-edited value then cannot make the sweep
+            # protect a variant name the runtime never produces.
             suffixes.add(sat_suffix(_clamp_saturation(raw)))
         except Exception:
+            # An unreadable deck file contributes nothing. The sweep can then
+            # wrongly remove its variant, but a reader that finds its ready
+            # cache missing invalidates the registry entry and rebuilds (see
+            # mp4_tile_cache._maybe_adopt_shared_cache).
             log.opt(exception=True).warning(f"Could not read display saturation from {name}")
     return suffixes
 

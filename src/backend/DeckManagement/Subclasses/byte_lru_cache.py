@@ -30,11 +30,6 @@ class has this shape. Its cost there:
                 wake damping). Nothing outside this instance's lock.
     eviction    popitem scale, one lock, never nested with another.
 
-Last-use stamps live out of band, in a parallel dict[key, float], never as
-(data, ts) tuples inside _entries. _entries values stay the exact bytes object
-that put() received, because callers and the pinned scenarios introspect them
-and assert identity across a hit. A cache hit allocates nothing.
-
 Instances also implement cache_budget.BudgetParticipant. A process-wide
 manager uses it to compare LRU heads across caches and to shed from the
 globally-oldest one without holding two cache locks at once. See
@@ -48,7 +43,7 @@ from collections import OrderedDict
 from src.backend.DeckManagement.Subclasses import cache_budget
 
 # How long an evicted key stays in the thrash tripwire ring, and how many keys
-# the ring holds. Both hold bookkeeping only: one key and one float each. The
+# the ring holds. Both hold bookkeeping only, one key and one float each. The
 # ring makes a re-admission shortly after a global eviction countable, which
 # is the only field signal that separates a ceiling binding against a live
 # working set from one trimming cold entries.
@@ -60,29 +55,12 @@ class ByteLRUCache:
     """LRU of immutable bytes values, capped by total byte size.
 
     This is the shared core of EncodedImageCache (pixel-hash keys plus a
-    doorkeeper) and NativeTileCache (frame-identity keys plus a kill switch):
-    an OrderedDict whose iteration order is the LRU order, through a
-    move_to_end on every hit and every put, exact byte accounting, and one
-    instance lock. A subclass adds its admission policy through _admit() and
-    its teardown bookkeeping through _on_clear_locked(). Neither overrides get
-    or put.
-
-    Values must be immutable bytes. This cache hands them out by reference, so
-    refcounting keeps a paint that already holds one alive across an eviction.
-    Eviction is therefore a cost concern here and never a correctness one.
-
-    Last-use stamps stay out of band, in a parallel dict[key, float], never in
-    a (data, ts) tuple inside _entries. There are two reasons, in order of
-    importance. _entries values stay the raw bytes object that put() received,
-    because callers and pinned scenarios introspect them and assert identity
-    across a hit. A hit then costs one float store into an existing dict slot
-    instead of a fresh tuple allocation on the paint path.
-
-    The budget_ methods implement the cache_budget.BudgetParticipant protocol.
-    They let a process-wide manager compare LRU heads across caches and shed
-    from the globally-oldest one. Each of them takes only this cache's lock,
-    for a popitem-scale critical section, so no painter thread pays
-    cross-cache work.
+    doorkeeper) and NativeTileCache (frame-identity keys plus a kill switch).
+    The core is an OrderedDict whose iteration order is the LRU order, through
+    a move_to_end on every hit and every put, plus exact byte accounting and
+    one instance lock. A subclass adds its admission policy through _admit()
+    and its teardown bookkeeping through _on_clear_locked(). Neither overrides
+    get or put.
     """
 
     def __init__(self, max_bytes: int) -> None:
@@ -91,9 +69,17 @@ class ByteLRUCache:
         # extra branching. See NativeTileCache's env kill switch.
         self._max_bytes = max(0, max_bytes)
         self._lock = threading.Lock()
+        # Values must be immutable bytes. This cache hands them out by
+        # reference, so refcounting keeps a paint that already holds one alive
+        # across an eviction. Eviction is a cost concern here, never a
+        # correctness one.
         self._entries: "OrderedDict[object, bytes]" = OrderedDict()
         # Maps each key to its last-use monotonic time. Same key set as
-        # _entries, and always mutated under _lock alongside it.
+        # _entries, and always mutated under _lock alongside it. Keep the
+        # stamps out of band and never in a (data, ts) tuple inside _entries.
+        # _entries values then stay the raw bytes object that put() received,
+        # which callers and pinned scenarios assert identity on across a hit,
+        # and a hit costs one float store instead of a tuple allocation.
         self._stamps: dict[object, float] = {}
         self._total_bytes = 0
 
@@ -219,7 +205,10 @@ class ByteLRUCache:
         while len(self._recent_evicted) > THRASH_RING_SIZE:
             self._recent_evicted.popitem(last=False)
 
-    # cache_budget.BudgetParticipant.
+    # cache_budget.BudgetParticipant. These let a process-wide manager compare
+    # LRU heads across caches and shed from the globally-oldest one. Each takes
+    # only this cache's lock, for a popitem-scale critical section, so no
+    # painter thread pays cross-cache work.
 
     def budget_bytes(self) -> int:
         with self._lock:

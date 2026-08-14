@@ -27,10 +27,7 @@ whatever upstream makes importable. Upstream parity is the rule for that
 group: a name bound at this path upstream stays importable here.
 
 __all__ is the compat contract. New code imports from the package modules.
-No import here carries a lint suppression: __all__ marks these imports used,
-so an import that arrives without an __all__ entry still reports as unused,
-and the floor-import check catches an __all__ entry that arrives without an
-import. Keep this file to import statements and __all__.
+Keep this file to import statements and __all__.
 """
 from src.backend.DeckManagement.deck_controller.background_media import (
     Background, BackgroundImage, BackgroundVideo,
@@ -59,7 +56,7 @@ from src.backend.DeckManagement.deck_controller.media_writer import (
     _install_fair_transport_lock, encode_native_key, encode_native_touchscreen,
 )
 
-# Upstream parity, per the docstring: bound at this path there, so bound here.
+# Upstream binds these names at this path, so this module binds them too.
 from src.backend.DeckManagement.BetterDeck import BetterDeck
 from src.backend.DeckManagement.InputIdentifier import Input, InputEvent, InputIdentifier
 from src.backend.DeckManagement.Media.MediaConfig import MediaConfig
@@ -71,6 +68,10 @@ from src.backend.DeckManagement.Subclasses.KeyLayout import ImageLayout
 from src.backend.DeckManagement.Subclasses.KeyVideo import InputVideo
 from src.backend.DeckManagement.Subclasses.ScreenSaver import ScreenSaver
 
+# No import above carries a lint suppression. __all__ marks these imports
+# used, so an import that arrives without an __all__ entry still reports as
+# unused, and the floor-import check catches an __all__ entry that arrives
+# without an import.
 __all__ = [
     "ActionPermissionManager", "BOUNDED_TILE_VARIANT", "Background",
     "BackgroundImage", "BackgroundManager", "BackgroundVideo", "BetterDeck",

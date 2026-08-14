@@ -101,7 +101,7 @@ class KeyLabel:
             # Rasterizing needs a resolved file and a size.
             # DeckController.inject_defaults fills in font_size before
             # anything renders. A missing path means fontconfig is
-            # unreachable: no libfontconfig and no fc-match binary. Raise
+            # unreachable, with no libfontconfig and no fc-match binary. Raise
             # here instead of failing inside PIL's truetype loader.
             raise RuntimeError(
                 f"cannot load a font for this label (path={font_path!r}, size={font_size!r})")

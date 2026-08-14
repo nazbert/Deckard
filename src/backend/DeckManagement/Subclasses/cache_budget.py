@@ -23,13 +23,6 @@ however hard the hot one thrashes. This module adds the aggregate, a ceiling
 over the sum of the evictable caches and a cross-cache LRU that sheds from
 whichever cache owns the globally-oldest entry.
 
-What a painter thread pays
-    Nothing but its own per-cache lock, plus one Event.set() per about 1 MiB
-    of admitted bytes. There is no global lock, no cross-cache walk and no
-    cross-deck coordination on the paint path. That constraint shaped every
-    other decision here. Caches keep their own exact LRU, and this module only
-    compares their heads.
-
 The overshoot bound
     Enforcement is deferred, so the ceiling does not bound the sum at every
     instant. The real bound is
@@ -46,24 +39,10 @@ The overshoot bound
     puts cross-cache work on the sole device writer's thread.
 
 When it does nothing
-    - A ceiling of 0 (DECKARD_IMAGE_CACHE_MB=0, or negative) disables global
-      eviction. Every cache's own cap still applies, so the sum of the local
-      caps still bounds the total.
-    - A malformed ceiling warns once per distinct value and uses the default.
-      The DeckController.__init__ path reads this, so it must never raise.
-    - Degenerate pressure means the total is over the ceiling and every
-      registrant sits at its floor or is entirely younger than its min-age.
-      The pass warns loudly and stops. Reaching that state means the live
-      working set is physically larger than the ceiling, so an eviction only
-      re-encodes the frames the painter draws right now. The sum of the local
-      caps still bounds the total, the operator gets a log line naming the
-      knob, and the thrash tripwire counts any key that comes straight back.
-
-Why eviction is never a correctness risk
-    Cache values are immutable bytes handed out by reference, so refcounting
-    keeps any paint that already holds one alive across an eviction. An
-    eviction of the wrong entry costs one re-encode and never a wrong or torn
-    frame. That is why there is no pin API.
+    A ceiling of 0 disables global eviction (see ceiling_bytes), a malformed
+    ceiling degrades to the default (see ceiling_bytes), and degenerate
+    pressure stops the pass (see _warn_degenerate). In all three the sum of
+    the local caps still bounds the total.
 """
 import math
 import os
@@ -194,32 +173,26 @@ def ceiling_bytes() -> int:
     DECKARD_IMAGE_CACHE_MB.
 
     0 or a negative value disables global eviction. Every cache's own local
-    cap still applies, so the sum of the local caps still bounds the total. A
-    malformed value degrades to the default and warns once per distinct value,
-    because every pass reads this. It must never raise out of
-    DeckController.__init__, where DeckManager reports it as "Failed to
-    initialize deck".
-
-    Malformed includes the values float() accepts and int() cannot take:
-    "nan", "inf", and any overflowing literal such as "1e400". Those parse and
-    then raise two lines down, ValueError for int(nan) and OverflowError for
-    int(inf). From the daemon that reads as a "pass failed" log line every 5 s
-    forever with enforcement silently off, and from DeckController.__init__ as
-    a lost deck.
-
-    Every call re-reads os.environ instead of a snapshot taken at import, the
-    same as native_tile_cache_max_bytes(). The env legs of the scenarios must
-    be able to change it inside one process.
+    cap still applies, so the sum of the local caps still bounds the total.
     """
+    # Re-read os.environ on every call instead of a snapshot taken at import,
+    # the same as native_tile_cache_max_bytes(). The env legs of the scenarios
+    # must be able to change it inside one process.
     raw = os.environ.get(ENV_CEILING)
     if raw is None:
         return default_ceiling_bytes()
     try:
         mb = float(raw)
+        # isfinite, not just float(): "nan", "inf" and an overflowing literal
+        # such as "1e400" parse and then raise from the int() below,
+        # ValueError for nan and OverflowError for inf. The daemon then logs
+        # "pass failed" every 5 s forever with enforcement silently off, and
+        # DeckController.__init__ loses the deck.
         usable = math.isfinite(mb)
     except ValueError:
         usable = False
     if not usable:
+        # Warn once per distinct value, because every pass reads this.
         if raw not in _warned_ceiling_values:
             _warned_ceiling_values.add(raw)
             log.warning(
@@ -247,10 +220,6 @@ def register(cache, *, label: str, evictable: bool = True,
 
     label has the form group:instance, e.g. encode_memo:AB123. totals() sums
     by group, and logs name the instance.
-
-    This never raises. It runs from DeckController.__init__, where DeckManager
-    reports any exception as "Failed to initialize deck" and skips the whole
-    device. A telemetry and housekeeping feature must not cost a user a deck.
     """
     try:
         cache.budget_label = label
@@ -261,6 +230,9 @@ def register(cache, *, label: str, evictable: bool = True,
             _registry.add(cache)
         _ensure_thread()
     except Exception as e:
+        # Never raise. This runs from DeckController.__init__, where
+        # DeckManager reports any exception as "Failed to initialize deck" and
+        # skips the whole device. A housekeeping feature must not cost a deck.
         log.warning(f"cache-budget: could not register {label!r}: {e}")
 
 
@@ -297,8 +269,12 @@ def set_min_age(cache, min_age_s: float) -> None:
 
 def notify_grew() -> None:
     """A cache calls this after it releases its own lock and after it grows
-    past its notify watermark. It is one Event.set(), because the painter
-    thread never does budget work of its own."""
+    past its notify watermark."""
+    # This Event.set() is the whole cost of the budget to a painter thread.
+    # There is no global lock, no cross-cache walk and no cross-deck
+    # coordination on the paint path. That constraint shaped every other
+    # decision here. Caches keep their own exact LRU, and this module only
+    # compares their heads.
     _wake.set()
 
 
@@ -405,9 +381,9 @@ def _budget_loop() -> None:
         try:
             degenerate = _drain_once()
         except Exception as e:
-            # One bad pass costs one pass. This thread spawns exactly once and
-            # never respawns, so an escaping exception ends budget enforcement
-            # for the life of the process.
+            # This thread spawns exactly once and never respawns, so an
+            # escaping exception ends budget enforcement for the life of the
+            # process.
             log.warning(f"cache-budget: pass failed: {e}")
             degenerate = True
         next_allowed = time.monotonic() + (
@@ -430,6 +406,8 @@ def _drain_once() -> bool:
     ceiling = ceiling_bytes()
     caches = [c for c in _snapshot() if getattr(c, "budget_evictable", False)]
     _report_thrash(caches)
+    # A ceiling of 0 disables global eviction. Every cache's own cap still
+    # applies, so the sum of the local caps still bounds the total.
     if ceiling <= 0 or not caches:
         return True
 
@@ -481,6 +459,11 @@ def _drain_once() -> bool:
         if pick is None:
             break
         floor = min(int(getattr(pick, "budget_floor_bytes", DEFAULT_FLOOR_BYTES)), floor_cap)
+        # Eviction is never a correctness risk. Cache values are immutable
+        # bytes handed out by reference, so refcounting keeps any paint that
+        # already holds one alive across an eviction. Evicting the wrong entry
+        # costs one re-encode, never a wrong or torn frame, so there is no pin
+        # API.
         got = pick.budget_evict_oldest(
             total - target,
             float(getattr(pick, "budget_min_age_s", DEFAULT_MIN_AGE_S)),
@@ -533,14 +516,13 @@ def _warn_degenerate(total: int, ceiling: int) -> None:
     Every registrant sits at its floor or is entirely younger than its
     min-age. That requires a live working set physically larger than the
     ceiling protects, so an eviction only re-encodes the frames the painter
-    draws this instant. Stop, and be loud about it. The sum of the local caps
-    still bounds the total, and the operator needs to raise the ceiling.
-
-    The count is kept unconditionally, before the log rate-limiter. The
-    limiter stops a daemon that backs off every 5 s from repeating itself 12
-    times a minute, which also means the log cannot answer whether a pass was
-    degenerate.
+    draws this instant. The pass therefore stops and warns, the sum of the
+    local caps still bounds the total, the operator gets a log line naming the
+    knob, and the thrash tripwire counts any key that comes straight back.
     """
+    # Count unconditionally, before the rate-limiter below. That limiter stops
+    # a daemon backing off every 5 s from repeating itself 12 times a minute,
+    # which also means the log cannot answer whether a pass was degenerate.
     global _degenerate_passes
     with _lock:
         _degenerate_passes += 1

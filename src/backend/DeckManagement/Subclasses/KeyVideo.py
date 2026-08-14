@@ -32,10 +32,11 @@ class InputVideo(SingleKeyAsset):
         self.video_path = video_path
         self.fps = fps
         self.loop = loop
-        # natural_speed on: play at the source fps, whatever fps says, and fps
-        # then only caps how often the owner re-renders. The touchscreen
-        # background uses this. natural_speed off: fps is the playback rate,
-        # which is the key and dial media rule, where fps changes the speed.
+        # With natural_speed on, playback runs at the source fps whatever fps
+        # says, and fps then only caps how often the owner re-renders. The
+        # touchscreen background uses this. With natural_speed off, fps is the
+        # playback rate, which is the key and dial media rule where fps
+        # changes the speed.
         self.natural_speed = natural_speed
 
         # Shared-file registry. This instance owns its own reader (a
@@ -79,8 +80,9 @@ class InputVideo(SingleKeyAsset):
             if now is None:
                 now = time.time()
 
-            # Degenerate source, e.g. a corrupt file or bad metadata: 0 frames
-            # makes is_cache_complete() trivially true, and frame % 0 raises.
+            # A degenerate source, e.g. a corrupt file or bad metadata,
+            # reports 0 frames. That makes is_cache_complete() trivially true,
+            # and frame % 0 raises.
             if cache.n_frames <= 0:
                 return None
 
@@ -92,10 +94,10 @@ class InputVideo(SingleKeyAsset):
                 if self.natural_speed:
                     playback_fps = float(cache.get_source_fps() or playback_fps)
                 if self._play_start is None:
-                    # Seed the timebase from the current position, not zero:
-                    # the cache can complete mid-play through the sequential
-                    # decode, and a zero base replays a non-looping video or
-                    # jumps a looping one.
+                    # Seed the timebase from the current position and not
+                    # from zero. The cache can complete mid-play through the
+                    # sequential decode, and a zero base replays a non-looping
+                    # video or jumps a looping one.
                     self._play_start = now - (self.active_frame + 1) / playback_fps
                 elif self._last_frame_tick is not None and now - self._last_frame_tick > 1.0:
                     # Ticks stop while the page is away. Shift the timebase
@@ -107,10 +109,11 @@ class InputVideo(SingleKeyAsset):
                 if self.natural_speed:
                     # fps is the owner's render cap. Quantize the timebase, so
                     # the picked frame advances at most fps times per second.
-                    # The quantization belongs in this picker: other animated
-                    # content, such as a deck background video or a dial, can
-                    # re-trigger composites at any rate, and per-owner tick
-                    # gates never see that. Inside one cap window the pick is
+                    # The quantization belongs in this picker, because other
+                    # animated content, such as a deck background video or a
+                    # dial, can re-trigger composites at any rate, and
+                    # per-owner tick gates never see that. Inside one cap
+                    # window the pick is
                     # identical, so the owner's hash dedup drops the redundant
                     # device write.
                     cap = max(1.0, float(self.fps or 30))
@@ -152,10 +155,10 @@ class InputVideo(SingleKeyAsset):
 
         SingleKeyAsset's default close() does nothing, and this override must
         stay, or nothing releases the VideoCapture that video_cache holds and
-        ControllerKeyState.close_resources() leaks it. The method is
-        idempotent: a second call finds video_cache already None. _close_lock
-        serializes it against get_next_frame, so it waits for a frame in
-        flight, and every later call sees video_cache is None.
+        ControllerKeyState and ControllerDialState.close_resources() leak it.
+        The method is idempotent, and a second call finds video_cache already
+        None. _close_lock serializes it against get_next_frame, so it waits
+        for a frame in flight, and every later call sees video_cache is None.
         """
         with self._close_lock:
             if self.video_cache is not None:

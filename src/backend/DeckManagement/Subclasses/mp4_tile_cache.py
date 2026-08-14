@@ -8,17 +8,13 @@ sits in RAM. BackgroundVideoCache (background_video_cache.py) subclasses this
 as a single instance that is both the builder and the only consumer, with the
 build interleaved with playback ticks.
 
-KeyVideoCache below uses the same discipline differently. Many InputVideo
-instances can reference the same source, tile size and saturation. They must
-not share one cache instance: the build loop requires monotonically increasing
-frame requests, so interleaved consumers abort the writer, and after the build
-their independent wall-clock timelines seek-thrash the shared capture, which
-measured 0.05 ms to 0.92 ms per frame. The module-level registry below shares
-the cache file instead. Exactly one detached builder thread per md5, size and
-saturation decodes the source and encodes the tile mp4 independently of
-playback ticks. Every consumer of acquire() gets its own KeyVideoCache reader
-with its own cv2.VideoCapture and its own last-frame memo. A reader decodes
-straight from the source until the builder promotes, then switches over.
+KeyVideoCache below uses the same discipline differently. The module-level
+registry shares the cache file across consumers. Exactly one detached builder
+thread per md5, size and saturation decodes the source and encodes the tile
+mp4 independently of playback ticks. Every consumer of acquire() gets its own
+KeyVideoCache reader with its own cv2.VideoCapture and its own last-frame
+memo. A reader decodes straight from the source until the builder promotes,
+then switches over.
 """
 import hashlib
 import os
@@ -108,16 +104,13 @@ def sat_suffix(saturation: float) -> str:
     It is empty at the default factor, so plain "{md5}.mp4" caches stay valid
     and no enhance or mode conversion runs at 1.0. It derives from the same
     canonical rounding as the registry key (see _sat_centi).
-
-    centi == 100 treats [0.995, 1.005) as the default, which is the centi
-    rounding this whole module shares. The still-image and GIF bake elsewhere
-    instead gates on abs(sat - 1.0) > 0.001. The (1.001, 1.005) gap is
-    intended and the UI cannot reach it: the saturation slider steps by 0.05
-    and rounds to two decimals, so only exact 0.05 multiples arrive here, and
-    none fall in the gap. One shared centi rounding for every
-    saturation-derived name is worth more than a match of that epsilon.
     """
     centi = _sat_centi(saturation)
+    # centi == 100 treats [0.995, 1.005) as the default, the centi rounding
+    # this whole module shares. The still-image and GIF bake elsewhere gates on
+    # abs(sat - 1.0) > 0.001 instead. The UI cannot reach the (1.001, 1.005)
+    # gap, because the saturation slider steps by 0.05 and rounds to two
+    # decimals, so only exact 0.05 multiples arrive here.
     return "" if centi == 100 else f".sat{centi}"
 
 
@@ -127,14 +120,10 @@ class Mp4FrameCache:
     """Builds or reuses an mp4 per source, out_size and saturation. It decodes
     faster than the source and holds no per-frame data in RAM.
 
-    An instance is either a builder or a plain reader. A builder
-    (is_builder=True, the default) decodes the source and writes every frame
-    to a tmp mp4 that a promote makes atomic on completion. A reader
-    (is_builder=False) never writes, and it decodes whichever of the promoted
-    cache and the source is available. BackgroundVideoCache uses one instance
-    as both, a single consumer with the build interleaved with playback ticks.
-    The KeyVideoCache registry below splits the two roles into one detached
-    builder thread and N per-consumer readers.
+    A builder (is_builder=True, the default) decodes the source and writes
+    every frame to a tmp mp4 that a promote makes atomic on completion. A
+    reader (is_builder=False) never writes, and it decodes whichever of the
+    promoted cache and the source is available.
     """
 
     # A forward jump of up to this many frames is bridged by a decode and
@@ -158,6 +147,10 @@ class Mp4FrameCache:
         self.out_size = out_size
         self.saturation = canonical_saturation(saturation)
         self._sat_suffix = sat_suffix(self.saturation)
+        # BackgroundVideoCache uses one instance as both roles, a single
+        # consumer with the build interleaved with playback ticks. The
+        # KeyVideoCache registry splits them into one detached builder thread
+        # and N per-consumer readers.
         self.is_builder = is_builder
 
         self.video_md5 = get_video_md5(source_path)
@@ -387,13 +380,6 @@ class Mp4FrameCache:
         promoted the shared cache file, it switches over and closes the source
         capture. It does nothing for BackgroundVideoCache, which never sets
         _registry_entry, and nothing for the builder instance itself.
-
-        The retry is bounded. When the registry says ready but the file cannot
-        be opened, e.g. an external cleanup of the cache dir deleted or
-        corrupted it behind the registry's back, this degrades instead of
-        retrying forever. After MAX_ADOPT_FAILURES attempts it invalidates the
-        entry, so the next acquire() sees no ready flag and no builder and
-        rebuilds, and this reader detaches and keeps its own source decode.
         """
         entry = getattr(self, "_registry_entry", None)
         if entry is None or not entry.ready:
@@ -406,6 +392,11 @@ class Mp4FrameCache:
                     self.cap.release()
                     self.cap = None
                 return
+            # The registry says ready but the file will not open, e.g. an
+            # external cleanup of the cache dir deleted or corrupted it behind
+            # the registry's back. Bound the retry. After MAX_ADOPT_FAILURES
+            # attempts, invalidate the entry so the next acquire() rebuilds,
+            # and detach this reader onto its own source decode.
             self._adopt_failures += 1
             give_up = self._adopt_failures >= self.MAX_ADOPT_FAILURES
         if not give_up:
@@ -616,7 +607,12 @@ class KeyVideoCache(Mp4FrameCache):
         return os.path.join(cache_dir, f"{self.video_md5}{self._sat_suffix}.mp4")
 
 
-# File-level registry. It shares the cache file and not the instance.
+# File-level registry. It shares the cache file and not the instance. Many
+# InputVideo instances can reference the same source, tile size and
+# saturation, and they must not share one cache instance. The build loop
+# requires monotonically increasing frame requests, so interleaved consumers
+# abort the writer, and after the build their independent wall-clock timelines
+# seek-thrash the shared capture, measured at 0.05 ms to 0.92 ms per frame.
 
 def cache_videos_enabled() -> bool:
     return gl.settings_manager.app().cache_videos
@@ -660,11 +656,8 @@ def acquire(source_path: str, out_size: tuple[int, int], saturation: float = 1.0
     """Attach a new consumer to the shared tile-cache file for one source,
     out_size and saturation.
 
-    It starts exactly one detached builder thread the first time a given key
-    has no promoted cache on disk, and only while performance.cache-videos is
-    enabled. It returns a fresh KeyVideoCache reader that owns its own
-    cv2.VideoCapture and decode state. Release it with release(), which
-    InputVideo.close() does.
+    It returns a fresh KeyVideoCache reader that owns its own cv2.VideoCapture
+    and decode state. Release it with release(), which InputVideo.close() does.
 
     The builder demuxes the source with FFmpeg, so this entry point takes real
     video only. See acquire_from_frames for a source such as a GIF whose
@@ -683,6 +676,9 @@ def acquire(source_path: str, out_size: tuple[int, int], saturation: float = 1.0
             entry = _TileCacheEntry(path)
             _registry[key] = entry
         entry.refcount += 1
+        # Start exactly one detached builder the first time a key has no
+        # promoted cache on disk, and only while performance.cache-videos is
+        # enabled.
         if not entry.ready and entry.builder_thread is None and cache_videos_enabled():
             entry.builder_thread = threading.Thread(
                 target=_run_builder,
@@ -793,23 +789,12 @@ def acquire_from_frames(source_path: str, out_size: tuple[int, int], saturation:
 
     Returns None when the write or the read back fails. The caller then keeps
     whatever it already has, and it never gets a reader that decodes the
-    source instead.
-
-    frames is any iterable of PIL images, consumed lazily and exactly once. A
-    caller that holds the whole animation passes its list, and one that cannot
-    afford to passes a generator and stays O(1). This resizes an image to
-    out_size only when it is not already there, because the even-dimension
-    clamp mp4v needs can leave a fitted frame a pixel off.
-
-    Refcounting, sharing and release() match acquire(). Two keys showing the
-    same GIF share one file and one entry, and the write is skipped when the
-    artifact already exists.
-
-    variant separates renderings that are not interchangeable even though they
-    come from the same source at the same size. KeyGIF uses it to keep its
-    alpha-dropping over-budget artifact away from the lossless one, so a later
-    load cannot mistake the degraded file for proof that the GIF was opaque.
+    source instead. Refcounting, sharing and release() match acquire().
     """
+    # variant separates renderings that are not interchangeable even though
+    # they come from the same source at the same size. KeyGIF uses it to keep
+    # its alpha-dropping over-budget artifact away from the lossless one, so a
+    # later load cannot read the degraded file as proof the GIF was opaque.
     key = _registry_key(source_path, out_size, saturation, variant)
     path = _cache_file_path(key[0], out_size, saturation, variant)
 
@@ -819,9 +804,14 @@ def acquire_from_frames(source_path: str, out_size: tuple[int, int], saturation:
             entry = _TileCacheEntry(path)
             _registry[key] = entry
         entry.refcount += 1
+        # Two keys showing the same GIF share one file and one entry, so skip
+        # the write when the artifact already exists.
         needs_build = not entry.ready
 
     if needs_build:
+        # frames is any iterable of PIL images, consumed lazily and exactly
+        # once. A caller holding the whole animation passes its list, and one
+        # that cannot afford to passes a generator and stays O(1).
         if _write_tile_mp4(path, out_size, frames, fps) <= 0:
             _detach_entry(key, entry)
             return None
@@ -872,6 +862,8 @@ def _write_tile_mp4(path: str, out_size: tuple[int, int], frames, fps: float) ->
             return 0
         try:
             for frame in frames:
+                # Resize only off-size frames. The even-dimension clamp mp4v
+                # needs can leave an already-fitted frame a pixel off.
                 if frame.size != out_size:
                     frame = frame.resize(out_size, Image.Resampling.LANCZOS)
                 if frame.mode != "RGB":

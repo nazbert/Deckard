@@ -24,13 +24,9 @@ directly through ctypes, and it falls back to the fc-match binary when the
 shared library cannot load, e.g. on a minimal container image. Nothing here
 imports matplotlib.
 
-The weight scale mismatch is the biggest correctness risk here. The rest of
-the app speaks numeric Pango and CSS weights from 100 to 900, where 400 is
-normal and 700 is bold. The fontconfig weight scale runs 0 to 215, where
-regular is 80 and bold is 200, and it does not accept a raw OpenType or CSS
-value. fc-match "DejaVu Sans:weight=400" returns DejaVu Sans Bold, because 400
-on the fontconfig scale is well past bold. Every weight value that reaches
-fontconfig in this module goes through _ot_weight_to_fc first.
+The weight scale mismatch is the biggest correctness risk here. Every weight
+value that reaches fontconfig in this module goes through _ot_weight_to_fc
+first.
 """
 import ctypes
 import ctypes.util
@@ -81,7 +77,14 @@ _FC_MATCH_PATTERN = 0  # FcMatchKind.FcMatchPattern
 def _ot_weight_to_fc(weight: int | None) -> int:
     """Translate a numeric Pango or CSS weight, 100 to 900, into the
     fontconfig 0 to 215 scale, through the same piecewise-linear table
-    fontconfig uses."""
+    fontconfig uses.
+
+    The rest of the app speaks Pango and CSS weights, where 400 is normal and
+    700 is bold. The fontconfig scale runs 0 to 215, where regular is 80 and
+    bold is 200, and it rejects a raw OpenType or CSS value. fc-match
+    "DejaVu Sans:weight=400" returns DejaVu Sans Bold, because 400 on the
+    fontconfig scale is well past bold.
+    """
     if weight is None:
         weight = 400
     weight = max(0, min(1000, weight))

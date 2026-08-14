@@ -30,8 +30,8 @@ class SingleKeyAsset:
         self.deck_controller = controller_input.deck_controller
 
     def get_raw_image(self) -> Image.Image | None:
-        # None belongs to the hierarchy contract, not to this implementation:
-        # InputImage returns None once it closes its image
+        # None belongs to the hierarchy contract and not to this
+        # implementation. InputImage returns None once it closes its image
         # (KeyImage.get_raw_image), so the declaration must allow None here or
         # that override is not substitutable.
         global _error_image
