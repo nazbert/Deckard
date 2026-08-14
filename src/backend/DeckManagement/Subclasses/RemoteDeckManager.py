@@ -24,7 +24,6 @@ class RemoteDeckManager:
         if self._is_running:
             return
         self._is_running = True
-        # Start the webserver
         self.start_server()
 
         deck = RemoteDeck(self, serial_number="remote-deck-1", deck_type="Remote Deck 1")
@@ -34,7 +33,6 @@ class RemoteDeckManager:
         if not self._is_running:
             return
         self._is_running = False
-        # Stop the webserver
         self.stop_server()
 
         self.deck_controllers.clear()
@@ -43,7 +41,6 @@ class RemoteDeckManager:
     def start_server(self):
         """Start the HTTP server in a separate thread."""
         server_address = ('0.0.0.0', PORT)
-        # Create a handler class with access to this RemoteDeckManager instance
         self.handler_class = create_handler(self)
         self.httpd = HTTPServer(server_address, self.handler_class)
 
@@ -63,7 +60,7 @@ class RemoteDeckManager:
         print("=" * 60)
         print()
 
-        # Run server in a separate thread so it doesn't block
+        # A separate thread runs the server, so it does not block the caller.
         self.server_thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.server_thread.start()
 

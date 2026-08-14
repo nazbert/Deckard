@@ -33,7 +33,7 @@ class ImageLayer:
 
         Returns:
             ImageLayer: An instance of the ImageLayer class with the loaded
-                image, or None when `media_path` is neither an image nor an
+                image, or None when media_path is neither an image nor an
                 SVG.
         """
         if is_image(media_path):

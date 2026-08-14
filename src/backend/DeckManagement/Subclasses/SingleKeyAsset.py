@@ -30,21 +30,19 @@ class SingleKeyAsset:
         self.deck_controller = controller_input.deck_controller
 
     def get_raw_image(self) -> Image.Image | None:
-        # None is part of the contract for the hierarchy, not for this base
-        # implementation: InputImage returns None once its image has been
-        # closed (KeyImage.get_raw_image), so the declaration has to allow it
-        # here or that override is not substitutable.
-        #
-        # Decode the fallback/error image once; return a copy so callers can
-        # composite/close it freely.
+        # None belongs to the hierarchy contract, not to this implementation:
+        # InputImage returns None once it closes its image
+        # (KeyImage.get_raw_image), so the declaration must allow None here or
+        # that override is not substitutable.
         global _error_image
         if _error_image is None:
-            # Resolved against the repo root (globals.py's directory) -- a
-            # CWD-relative path breaks whenever the app is launched from
-            # anywhere but the checkout root.
+            # Resolve against the repo root (globals.py's directory). A
+            # CWD-relative path breaks when the app starts from anywhere but
+            # the checkout root.
             path = os.path.join(gl.top_level_dir, "Assets", "images", "error.png")
             with Image.open(path) as img:
                 _error_image = img.copy()
+        # Return a copy so callers can composite or close it freely.
         return _error_image.copy()
     
     def close(self):

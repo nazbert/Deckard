@@ -14,23 +14,23 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 ---
 
-Font resolution via fontconfig, replacing matplotlib.font_manager.
+Font resolution through fontconfig, in place of matplotlib.font_manager.
 
-matplotlib's font machinery (font_manager) is a multi-megabyte import that
-also does a synchronous system font scan the first time it's touched --
-fontconfig already does this job (better, since it IS the system's font
-database) and every font already goes through it once via Pango/GTK anyway.
-This module talks to fontconfig directly through ctypes (falling back to the
-`fc-match` binary if the shared library can't be loaded, e.g. on a minimal
-container image) so nothing here imports matplotlib.
+matplotlib's font_manager is a multi-megabyte import, and it runs a
+synchronous system font scan on first use. fontconfig does the same job
+better, because it is the system font database, and every font already goes
+through it once through Pango and GTK. This module talks to fontconfig
+directly through ctypes, and it falls back to the fc-match binary when the
+shared library cannot load, e.g. on a minimal container image. Nothing here
+imports matplotlib.
 
-Weight scale mismatch (the #1 correctness risk here): the rest of the app
-speaks Pango/CSS weights (numeric, 100-900, e.g. 400 = normal, 700 = bold).
-fontconfig's own weight scale is 0-215 (regular=80, bold=200) and does NOT
-accept raw OpenType/CSS values -- `fc-match "DejaVu Sans:weight=400"`
-literally returns DejaVu Sans **Bold**, because 400 on fontconfig's own scale
-is well past bold. Every weight value that reaches fontconfig in this module
-is first translated with `_ot_weight_to_fc`.
+The weight scale mismatch is the biggest correctness risk here. The rest of
+the app speaks numeric Pango and CSS weights from 100 to 900, where 400 is
+normal and 700 is bold. The fontconfig weight scale runs 0 to 215, where
+regular is 80 and bold is 200, and it does not accept a raw OpenType or CSS
+value. fc-match "DejaVu Sans:weight=400" returns DejaVu Sans Bold, because 400
+on the fontconfig scale is well past bold. Every weight value that reaches
+fontconfig in this module goes through _ot_weight_to_fc first.
 """
 import ctypes
 import ctypes.util
@@ -41,15 +41,14 @@ import threading
 from fontTools.ttLib import TTFont
 
 
-# --------------------------------------------------------------------- #
-# OpenType/CSS (100-900) -> fontconfig (0-215) weight mapping.
+# Weight mapping from the OpenType and CSS range, 100 to 900, into the
+# fontconfig range, 0 to 215.
 #
-# This is FcWeightFromOpenTypeDouble's own table (fontconfig's fcweight.c):
-# piecewise-linear interpolation between these anchor points. Values here
-# are load-bearing -- fontconfig's raw scale is NOT the same as the OT/CSS
-# scale the rest of the app uses, and passing an untranslated value silently
-# picks the wrong file (see module docstring).
-# --------------------------------------------------------------------- #
+# This is FcWeightFromOpenTypeDouble's own table, from fontconfig's
+# fcweight.c, and it interpolates piecewise-linearly between these anchor
+# points. Do not change a value here. The fontconfig raw scale differs from
+# the OpenType and CSS scale the rest of the app uses, and an untranslated
+# value silently picks the wrong file (see the module docstring).
 _OT_TO_FC_WEIGHT = (
     (0, 0),
     (100, 0),
@@ -80,8 +79,9 @@ _FC_MATCH_PATTERN = 0  # FcMatchKind.FcMatchPattern
 
 
 def _ot_weight_to_fc(weight: int | None) -> int:
-    """Translate a numeric Pango/CSS weight (100-900) to fontconfig's 0-215
-    scale, via the same piecewise-linear table fontconfig itself uses."""
+    """Translate a numeric Pango or CSS weight, 100 to 900, into the
+    fontconfig 0 to 215 scale, through the same piecewise-linear table
+    fontconfig uses."""
     if weight is None:
         weight = 400
     weight = max(0, min(1000, weight))
@@ -105,22 +105,24 @@ def _style_to_fc_slant(style: str) -> int:
 
 
 def _escape_fc_value(value: str) -> str:
-    """Escape characters that are syntactically significant in fontconfig's
-    pattern-string mini-language (used only for the fc-match subprocess
-    fallback -- the ctypes path sets pattern fields directly and never
-    parses a string)."""
+    """Escape the characters that carry syntax in the fontconfig pattern-string
+    mini-language. Only the fc-match subprocess fallback uses this. The ctypes
+    path sets pattern fields directly and parses no string."""
     for ch in ("\\", ",", ":", "="):
         value = value.replace(ch, "\\" + ch)
     return value
 
 
 class _FontConfig:
-    """Thin ctypes binding to the handful of libfontconfig entry points we
-    need. Lazily initialized (no work happens at import time); a single
-    FcConfig is loaded once and reused for the life of the process, guarded
-    by a lock since fontconfig's match calls are not documented as safe for
-    concurrent use from multiple threads on a shared FcConfig, and label
-    rendering can happen off the main thread."""
+    """Thin ctypes binding to the few libfontconfig entry points this module
+    needs.
+
+    It initializes lazily, so no work happens at import time. It loads one
+    FcConfig and reuses it for the life of the process, behind a lock. The
+    fontconfig match calls are not documented as safe for concurrent use from
+    several threads on a shared FcConfig, and label rendering can run off the
+    main thread.
+    """
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -182,10 +184,10 @@ class _FontConfig:
             return False
 
     def match(self, family: str, weight: int | None, style: str | None):
-        """Returns a dict with "family" and "file" (either may be None if
-        fontconfig didn't set that field on the match), or None if
-        fontconfig couldn't be reached at all (caller should fall back to
-        the fc-match subprocess)."""
+        """Returns a dict with "family" and "file". Either is None when
+        fontconfig set no such field on the match. The whole result is None
+        when fontconfig is unreachable, and the caller then falls back to the
+        fc-match subprocess."""
         with self._lock:
             if not self._ensure_loaded():
                 return None
@@ -230,9 +232,9 @@ _fontconfig = _FontConfig()
 
 
 def _match_via_subprocess(family: str, weight: int | None, style: str | None):
-    """fc-match fallback for environments where libfontconfig can't be
-    dlopen'd (e.g. a stripped-down flatpak runtime). Same matcher fontconfig
-    binaries and the ctypes path both use -- just invoked as a subprocess."""
+    """fc-match fallback for an environment that cannot dlopen libfontconfig,
+    e.g. a stripped-down flatpak runtime. It runs the same matcher the
+    fontconfig binaries and the ctypes path use, as a subprocess."""
     parts = [_escape_fc_value(family)]
     if weight is not None:
         parts.append(f"weight={_ot_weight_to_fc(weight)}")
@@ -267,15 +269,15 @@ def _resolve_pattern(family: str, weight: int | None, style: str | None):
 
 @functools.lru_cache(maxsize=256)
 def resolve(family: str | None, weight: int | None = 400, style: str | None = "normal") -> str | None:
-    """Resolve (family, weight, style) to a concrete font file path via
-    fontconfig, mirroring what Pango/GTK's own font picker would land on.
+    """Resolve a family, weight and style to a concrete font file path through
+    fontconfig. It lands where the Pango and GTK font picker lands.
 
-    weight is a numeric Pango/CSS weight (100-900); style is
-    "normal"/"italic"/"oblique". Any of the three may be passed as None
-    (e.g. a KeyLabel whose defaults haven't been injected yet) and is
-    coalesced to the CSS/fontconfig default. Returns None if fontconfig
-    couldn't be reached at all (missing library AND missing fc-match
-    binary).
+    weight is a numeric Pango or CSS weight from 100 to 900. style is
+    "normal", "italic" or "oblique". A caller can pass None for any of the
+    three, e.g. a KeyLabel whose defaults are not injected yet, and this
+    replaces None with the CSS and fontconfig default. It returns None when
+    fontconfig is unreachable, that is with a missing library and a missing
+    fc-match binary.
     """
     if weight is None:
         weight = 400
@@ -292,11 +294,12 @@ def resolve(family: str | None, weight: int | None = 400, style: str | None = "n
 
 @functools.lru_cache(maxsize=1)
 def fallback_font() -> str | None:
-    """Resolve fontconfig's generic "sans" alias to a concrete family name
-    (e.g. "DejaVu Sans" / "Noto Sans" depending on the system), the same
-    role the old `find_fallback_font()` played -- but without the
-    import-time full-system-font scan that used to back it. Cached: this is
-    still one fontconfig round trip, just deferred to first use."""
+    """Resolve the generic fontconfig "sans" alias to a concrete family name,
+    e.g. "DejaVu Sans" or "Noto Sans" on a given system.
+
+    The lru_cache holds the result, because this is one fontconfig round trip
+    and it happens at first use.
+    """
     result = _resolve_pattern("sans", None, None)
     if result is None:
         return "DejaVu Sans"
@@ -304,11 +307,12 @@ def fallback_font() -> str | None:
 
 
 def font_name_from_path(font_path: str) -> str | None:
-    """Read the human-readable family name out of a font file's `name`
-    table (IDs 1 "Font Family" / 16 "Typographic Family"), the same data
-    matplotlib.font_manager.FontProperties(fname=...).get_family() used to
-    surface -- via fontTools instead, which is already a hard dependency
-    (KeyLabel's symbol-font detection)."""
+    """Read the human-readable family name out of a font file name table,
+    IDs 1 "Font Family" and 16 "Typographic Family".
+
+    It reads through fontTools, which is already a hard dependency for
+    KeyLabel's symbol-font detection.
+    """
     try:
         font = TTFont(font_path, fontNumber=0, lazy=True)
     except Exception:
@@ -319,7 +323,8 @@ def font_name_from_path(font_path: str) -> str | None:
     except KeyError:
         return None
 
-    # nameID -> (priority, family name); see the priority comment below.
+    # Maps a nameID to a (priority, family name) pair. See the priority
+    # comment below.
     best: dict[int, tuple[tuple[int, int], str]] = {}
     for record in name_table.names:
         if record.nameID not in (1, 16):
@@ -330,9 +335,9 @@ def font_name_from_path(font_path: str) -> str | None:
             continue
         if not value:
             continue
-        # Prefer nameID 16 (Typographic Family) over 1 (Font Family), and
-        # within a nameID prefer Windows platform records (platformID 3)
-        # since that's what matplotlib/fontTools consumers usually expect.
+        # Prefer nameID 16 (Typographic Family) over 1 (Font Family). Inside
+        # one nameID, prefer a Windows platform record (platformID 3), which
+        # is what fontTools consumers usually expect.
         priority = (record.nameID, 1 if record.platformID == 3 else 0)
         if record.nameID not in best or priority > best[record.nameID][0]:
             best[record.nameID] = (priority, value)

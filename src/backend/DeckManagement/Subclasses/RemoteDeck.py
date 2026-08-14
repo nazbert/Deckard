@@ -39,9 +39,8 @@ class RemoteDeck:
         self._dial_count = 0
 
         # RemoteDeckManager reads deck.key_callback directly to deliver a
-        # remote press. This used to be a bare local (`key_callback: ... =
-        # None`, no `self.`), so the attribute simply did not exist until
-        # set_key_callback ran.
+        # remote press. Keep the self. prefix: a bare annotated local here
+        # leaves the attribute missing until set_key_callback runs.
         self.key_callback: Callable[..., Any] | None = None
 
     def deck_type(self):
@@ -100,8 +99,8 @@ class RemoteDeck:
         return True
     
     def is_touch(self) -> bool:
-        # Was `return self.is_touch` -- the bound method, i.e. always truthy,
-        # so every caller saw a remote deck as touch-capable.
+        # Return _is_touch, not is_touch: the latter is this bound method, so
+        # it is always truthy and every caller reads the deck as touch-capable.
         return self._is_touch
     
     def dial_count(self) -> int:

@@ -14,27 +14,23 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 ---
 
-The compatibility surface of the deck controller. Nothing is defined here:
-every class, function and constant this module used to hold now lives in
+Compatibility surface of the deck controller. This module defines nothing.
+The classes, functions and constants live in
 src/backend/DeckManagement/deck_controller/, and the imports below re-export
-them under the path importers have always used -- the plugin repos take
-DeckController from here, the label editor takes KeyLabel, the test harness
-takes the media writer and the private hooks it pins.
+them at the path importers use: the plugin repos take DeckController from
+here, the label editor takes KeyLabel, the test harness takes the media
+writer and the private hooks it pins.
 
-The second group was never this module's to define. Input, KeyLabel,
-MediaConfig and the rest live in other modules entirely and are re-exported
-because upstream binds them at this exact path -- store plugins are written
-against whatever upstream made importable, and the installs we can audit say
-nothing about the ones we cannot. Upstream parity is the rule for that
-group: a name bound at this path there stays importable here.
+The second group belongs to other modules. Upstream binds Input, KeyLabel,
+MediaConfig and the rest at this exact path, and store plugins import
+whatever upstream makes importable. Upstream parity is the rule for that
+group: a name bound at this path upstream stays importable here.
 
-__all__ is the compat contract; new code should import from the package's
-own modules. No import here carries a lint suppression, deliberately --
-__all__ already marks these imports used, so one that arrives WITHOUT an
-__all__ entry still reports as unused, and the floor-import check catches an
-__all__ entry that arrives without an import. The drift is covered both
-ways. This file stays import statements and __all__; code that belongs to a
-deck controller belongs in the package.
+__all__ is the compat contract. New code imports from the package modules.
+No import here carries a lint suppression: __all__ marks these imports used,
+so an import that arrives without an __all__ entry still reports as unused,
+and the floor-import check catches an __all__ entry that arrives without an
+import. Keep this file to import statements and __all__.
 """
 from src.backend.DeckManagement.deck_controller.background_media import (
     Background, BackgroundImage, BackgroundVideo,

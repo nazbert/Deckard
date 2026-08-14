@@ -31,12 +31,11 @@ class ScreenSaver:
     def __init__(self, deck_controller: "DeckController"):
         self.deck_controller: "DeckController" = deck_controller
 
-        # Init vars. original_inputs is the stashed `deck_controller.inputs`
-        # MAPPING (input type -> list of inputs), not a list: show() assigns
-        # the dict, hide()/close() call .clear() and .values() on it, and
-        # close() compares it against {}. The `[]` this used to start as was
-        # only ever a placeholder -- and the wrong shape for a close() that
-        # ran before any show().
+        # original_inputs is the stashed deck_controller.inputs mapping (input
+        # type to list of inputs), not a list: show() assigns the dict, hide()
+        # and close() call .clear() and .values() on it, and close() compares
+        # it against {}. A list is the wrong shape for a close() that runs
+        # before any show().
         self.original_inputs: dict = {}
         self.original_background: "Background | None" = None
         self.original_brightness: int = 0
@@ -44,37 +43,35 @@ class ScreenSaver:
         # Time when last key state changed
         self.last_key_change_time = time.time()
 
-        # Time delay
         self.time_delay = 5
 
         self.enable: bool = False
         self.showing: bool = False
 
         self.media_path: str | None = None
-        # The screensaver brightness default, same number the deck-settings
-        # schema carries: a config always reaches here through a load, and if
-        # one ever does not, an unreached load must degrade to the documented
-        # default rather than to a fifth number nothing else knows about.
+        # The screensaver brightness default, the same number the deck-settings
+        # schema carries. A config reaches here through a load. If no load
+        # runs, the value must degrade to the documented default and not to a
+        # fifth number nothing else knows.
         self.brightness: int = 30
         self.fps: int = 30
         self.loop: bool = True
-        # Non-None only while actually armed (enabled and not showing);
-        # see set_time/set_enable.
+        # Non-None only while armed, that is enabled and not showing. See
+        # set_time and set_enable.
         self.timer: "timer_wheel.TimerHandle | None" = None
-        # True once set_time() has run at least once. DeckController's
-        # config load calls set_enable() BEFORE set_time() (P1's own
-        # apply_config order), so set_enable(True) at that point must be a
-        # no-op rather than arming a timer against the not-yet-loaded
-        # time_delay default -- set_time() is what actually arms it.
+        # True once set_time() runs. DeckController's config load calls
+        # set_enable() before set_time(), so set_enable(True) at that point
+        # must do nothing rather than arm a timer against the not-yet-loaded
+        # time_delay default. set_time() arms the timer.
         self._timer_initialized: bool = False
 
     def _arm_timer(self) -> None:
-        # *60 to go from minutes (how it is stored) to seconds (how the
-        # timer needs it).
+        # *60 converts minutes, the stored unit, into the seconds the timer
+        # needs.
         self.timer = timer_wheel.schedule(self.time_delay * 60, self.on_timer_end, name="ScreenSaverTimer")
 
     def set_time(self, time_delay: int) -> None:
-        time_delay = max(1, time_delay) # Min 1 minute - too small values leading to instant load if the screensaver lead to errors
+        time_delay = max(1, time_delay) # Minimum 1 minute. A smaller value shows the screensaver instantly and causes errors
         if time_delay != self.time_delay:
             log.info(f"Setting screen saver time delay to {time_delay} minutes")
         self.time_delay = time_delay
@@ -86,9 +83,8 @@ class ScreenSaver:
             self._arm_timer()
 
     def set_media_path(self, media_path: str | None) -> None:
-        # None is the ordinary case, not an edge one: it is what every config
-        # without a chosen media says, and what the background layer takes to
-        # mean "blank".
+        # None is the ordinary case. Every config without a chosen media says
+        # None, and the background layer reads it as "blank".
         self.media_path = media_path
 
         if self.showing:
@@ -100,11 +96,9 @@ class ScreenSaver:
         if not self._timer_initialized:
             return
 
-        # Hide if showing
         if self.showing and not enable:
             self.hide()
 
-        # Stop timer if enable == False
         if enable:
             if self.timer is None and not self.showing:
                 self._arm_timer()
@@ -117,90 +111,85 @@ class ScreenSaver:
         self.show()
 
     def show(self):
-        """Serialized show transition (docs/presenter-migration-plan.md §4 M3).
+        """Serialized show transition (docs/presenter-migration-plan.md).
 
-        Three phases:
-          1. OUTSIDE any lock: pre-resolve the screensaver's background
-             object. Constructing a BackgroundVideo hashes the whole source
-             file and opens a capture -- can take seconds -- so this must
-             happen before touching _load_page_lock; otherwise every USB-
-             event/GTK/action-pool-thread caller of show()/hide()/load_page
-             would stall for the duration (G-B1/C-F7).
-          2. Under _load_page_lock: coalesce, flip `showing`, swap inputs,
-             bump the generation, submit brightness/clear control messages,
-             then swap the pre-built background in under
-             _background_load_lock with a generation re-check inside (C-F6:
-             this is what stops a straggling load_background() worker,
-             already blocked on this same lock from an older load_page,
-             from overwriting the screensaver's background after we
-             release). No plugin callbacks, no GTK marshaling, no file I/O
-             happen in this phase -- it's all pure object bookkeeping plus
-             the (cheap, no-file-I/O) per-key composite/encode that
-             update_all_inputs() already did here before this refactor.
-          3. show() has no phase 3: unlike hide(), it never calls load_page.
+        Phase 1 runs outside any lock and pre-resolves the screensaver
+        background object. A BackgroundVideo constructor hashes the whole
+        source file and opens a capture, which takes seconds, so it must
+        finish before this method takes _load_page_lock. Otherwise every USB
+        event, GTK and action-pool caller of show(), hide() and load_page
+        stalls for that time.
+
+        Phase 2 runs under _load_page_lock. It coalesces, flips showing, swaps
+        the inputs, bumps the generation, submits the brightness and clear
+        control messages, then swaps the pre-built background in under
+        _background_load_lock with a generation re-check inside. That re-check
+        stops a straggling load_background() worker, already blocked on the
+        same lock from an older load_page, from overwriting the screensaver
+        background after this method releases. This phase runs no plugin
+        callback, no GTK marshaling and no file I/O.
+
+        show() has no phase 3. Unlike hide(), it never calls load_page.
         """
         if getattr(self.deck_controller, "_closing", False):
-            # The deck is tearing down (plan P1.3): a straggling timer fire
-            # racing close() must not resurrect the screensaver's transient
-            # inputs/background on a controller that's mid-sweep.
+            # The deck is tearing down. A straggling timer fire that races
+            # close() must not resurrect the screensaver's transient inputs or
+            # background on a controller that is mid-sweep.
             return
         log.info("Showing screen saver")
 
-        # Phase 1 -- outside any lock.
+        # Phase 1 runs outside any lock.
         kind, payload = self.deck_controller.background.prebuild_from_path(
             self.media_path, fps=self.fps, loop=self.loop
         )
         if kind == "noop":
-            # A configured screensaver media file that no longer exists
-            # (deleted/moved, or a config carried to another machine)
-            # prebuilds as "noop" -- and apply_prebuilt() early-returns on
-            # "noop" WITHOUT touching the background. The
-            # underlying page's video capture would then stay open behind
-            # the showing screensaver and keep decoding/compositing at full
-            # rate for the screensaver's entire duration, which is exactly
-            # what showing it is supposed to stop. Nothing renderable
-            # exists in that case, so blank is both what the user sees and
-            # what releases the old page's media.
+            # A configured screensaver media file that is deleted, moved, or
+            # carried on a config to another machine prebuilds as "noop", and
+            # apply_prebuilt() returns early on "noop" without touching the
+            # background. The underlying page's video capture then stays open
+            # behind the showing screensaver and keeps decoding and
+            # compositing at full rate for the whole duration, which is what
+            # showing the screensaver must stop. Nothing renderable exists
+            # here, so blank is both what the user sees and what releases the
+            # old page's media.
             kind = "blank"
 
         with self.deck_controller._load_page_lock:
-            # Coalesce: a concurrent second show() (e.g. a manual show()
-            # racing the timer, or two of the six requesters firing at once)
-            # is a no-op once we're already showing.
+            # A concurrent second show() does nothing once the screensaver
+            # already shows. That covers a manual show() that races the timer,
+            # and two of the six requesters firing at once.
             if self.showing:
                 if payload is not None and hasattr(payload, "close"):
                     payload.close()
                 return
 
-            # Bump the generation atomically, same pattern as load_page (bump
-            # only -- active_page is untouched, this is not a page switch) so
-            # post-transition frames outrank pre-transition stragglers
-            # (docs/presenter-migration-plan.md §4 M1, pulled forward from M4).
+            # Bump the generation atomically, the same pattern as load_page.
+            # This is a bump only, and active_page stays untouched, because
+            # this is not a page switch. Post-transition frames then outrank
+            # pre-transition stragglers (docs/presenter-migration-plan.md).
             with self.deck_controller._page_gen_lock:
                 self.deck_controller._page_load_generation += 1
                 gen = self.deck_controller._page_load_generation
 
-            # Stop timer - in case this method is called manually
+            # Stop the timer, because a caller can invoke show() manually.
             if self.timer:
                 self.timer.cancel()
-            # Set showing = True - in case this method is called manually
             self.showing = True
 
             self.original_inputs = self.deck_controller.inputs
-            # No `inputs = {}` pre-clear: init_inputs is
-            # build-then-swap, so the concurrent media writer sees the old
-            # complete dict or the new complete dict, never empty/partial.
-            # In-flight key/dial gestures die with the stash: once the swap
-            # below lands, the physical release arrives on the REPLACEMENT
-            # input set (and is swallowed by the showing-screensaver guard),
-            # so a stashed input's hold timer would stay armed and fire
-            # HOLD_START into its pinned DOWN-time action snapshot after the
-            # finger already left -- mid-screensaver. Cancel them here, while
-            # the stashed inputs are still the ones a racing input event
-            # would reach. Pure bookkeeping (attribute stores + timer
-            # cancels); no callbacks, no locks beyond the ones already held.
-            # The touchscreen keeps no gesture state (its events arrive
-            # pre-classified, single-shot) -- nothing to cancel there.
+            # No inputs = {} pre-clear: init_inputs builds then swaps, so the
+            # concurrent media writer sees the old complete dict or the new
+            # complete dict, never an empty or partial one.
+            #
+            # Key and dial gestures in flight die with the stash. After the
+            # swap the physical release arrives on the replacement input set,
+            # where the showing-screensaver guard swallows it, so a stashed
+            # input's hold timer stays armed and fires HOLD_START into its
+            # pinned down-time action snapshot mid-screensaver. Cancel the
+            # gestures here, while a racing input event still reaches the
+            # stashed inputs. This is bookkeeping only: attribute stores and
+            # timer cancels. The touchscreen keeps no gesture state, because
+            # its events arrive pre-classified and single-shot.
             for key in self.original_inputs.get(Input.Key, []):
                 key.cancel_gesture()
             for dial in self.original_inputs.get(Input.Dial, []):
@@ -216,30 +205,29 @@ class ScreenSaver:
             # background follow immediately below, so these blanks are a
             # transition, not the intended end state.
             self.deck_controller.clear(expects_repaint=True)
-            # The seq-stamped ClearMsg (just submitted) wipes image/
-            # touchscreen slots; it does not touch the generic `tasks` list
-            # (e.g. a straggling load_all_inputs/
-            # _update_all_inputs_awaiting_background from an in-flight
-            # load_page). That generic wipe is the piece
-            # clear_media_player_tasks() still owns here (plan §3.1) -- kept
-            # unconditional (no gen arg) since we're inside _load_page_lock
-            # and our own gen cannot be superseded while we hold it.
+            # The seq-stamped ClearMsg just submitted wipes the image and
+            # touchscreen slots. It does not touch the generic tasks list,
+            # e.g. a straggling load_all_inputs or
+            # _update_all_inputs_awaiting_background from a load_page in
+            # flight. clear_media_player_tasks() owns that generic wipe. It
+            # takes no gen argument, because this code holds _load_page_lock
+            # and nothing can supersede its own gen during the hold.
             self.deck_controller.clear_media_player_tasks()
 
-            # Swap the pre-built background in under _background_load_lock,
-            # matching load_page's lock order (_load_page_lock ->
-            # _background_load_lock, never reversed) with a generation
-            # re-check inside (plan §4 M3, C-F6).
+            # Swap the pre-built background in under _background_load_lock.
+            # The lock order matches load_page: _load_page_lock first, then
+            # _background_load_lock, never the reverse. The generation
+            # re-check happens inside.
             with self.deck_controller._background_load_lock:
                 if self.deck_controller._page_is_current(gen):
                     self.deck_controller.background.apply_prebuilt(
                         kind, payload, fps=self.fps, loop=self.loop, update=True
                     )
                 elif payload is not None and hasattr(payload, "close"):
-                    # Superseded before we could apply it (shouldn't happen
-                    # in practice -- gen was bumped by us, under the same
-                    # lock hold, just above -- but close it defensively
-                    # rather than leaking a cv2 capture handle).
+                    # Superseded before the apply. This code bumped gen under
+                    # the same lock hold just above, so this branch is not
+                    # expected. Close the payload here rather than leak a cv2
+                    # capture handle.
                     payload.close()
 
             # Release keys
@@ -247,46 +235,39 @@ class ScreenSaver:
                 key.down_start_time = None
                 key.press_state = False
 
-            # Capture the just-stashed input set for the release below,
-            # still inside the lock so it can't be reassigned by a
-            # coalesced concurrent show() first.
+            # Capture the just-stashed input set for the release below, still
+            # inside the lock, so a coalesced concurrent show() cannot
+            # reassign it first.
             stashed_inputs = self.original_inputs
 
-        # mem-plan P2.6: the previous page's input set -- and whatever media
-        # it was holding (key/dial videos, GIFs, images) -- sits pinned in
-        # self.original_inputs for the screensaver's entire duration and is
-        # then discarded uncleaned by hide() (`original_inputs.clear()`,
-        # never a close/close_resources). That's the design doc's bug 8:
-        # 50-150MB of stashed media memory idle behind the screensaver.
-        # Release it now instead of waiting for hide().
+        # The previous page's input set, and the media it holds (key and dial
+        # videos, GIFs, images), stays pinned in self.original_inputs for the
+        # whole screensaver duration. hide() then discards it with
+        # original_inputs.clear() and never closes it, which idles 50-150 MB
+        # of stashed media memory behind the screensaver. Release it here.
         #
-        # Deliberately NOT self.original_background: it aliases
-        # self.deck_controller.background (the very same object, mutated in
-        # place by apply_prebuilt()/set_video()/set_image() above) -- it is
-        # the screensaver's OWN live background now, not a stashed copy of
-        # the old one. Closing it here would close what's currently on
-        # screen.
+        # Do not release self.original_background: it aliases
+        # self.deck_controller.background, the same object that
+        # apply_prebuilt(), set_video() and set_image() mutate in place above.
+        # It is the screensaver's own live background, not a stashed copy of
+        # the old one, and closing it here closes what is on screen.
         #
-        # Routed through the media player's CONTROL queue (a
-        # ReleaseStashedInputsMsg), not closed inline and not a generic
-        # add_task(): the lock above only guarantees `deck_controller.inputs`
-        # itself was swapped to a fresh dict -- a tick begun just before
-        # that swap can still be mid-render against the OLD input objects
-        # (get_current_image()/get_raw_image() reading key_image/key_video),
-        # so this must be serialized behind the writer, not run inline.
-        # Control messages (unlike add_task's MediaPlayerTask) have no
-        # active-page affinity check, so a hide()-triggered load_page()
-        # landing before this drains can't cause it to be silently dropped
-        # -- see ReleaseStashedInputsMsg's docstring in
-        # DeckManagement/deck_controller/media_writer.py.
+        # Route the release through the media player control queue as a
+        # ReleaseStashedInputsMsg. Do not close it inline and do not use a
+        # generic add_task(). The lock above only guarantees that
+        # deck_controller.inputs points at a fresh dict. A tick that began
+        # just before that swap can still render against the old input
+        # objects, through get_current_image() and get_raw_image() reading
+        # key_image and key_video, so the writer must serialize this. A
+        # control message carries no active-page affinity check, unlike
+        # add_task's MediaPlayerTask, so a load_page() from hide() that lands
+        # before this drains cannot drop it. See ReleaseStashedInputsMsg's
+        # docstring in DeckManagement/deck_controller/media_writer.py.
         if stashed_inputs:
-            # Local import, and not because it has to be: hoisting this to
-            # module level works today -- nothing in the media writer's import
-            # closure reaches back here. It stays at call time by design. The
-            # deck controller package imports this module at module level (each
-            # controller builds a ScreenSaver), so keeping the screen saver's
-            # own dependency on that package lazy is what holds the edge
-            # between them one-directional.
+            # Import at call time. The deck controller package imports this
+            # module at module level, because each controller builds a
+            # ScreenSaver. A lazy dependency on that package here keeps the
+            # edge between the two one-directional.
             from src.backend.DeckManagement.deck_controller.media_writer import (
                 ReleaseStashedInputsMsg,
             )
@@ -295,66 +276,68 @@ class ScreenSaver:
             )
 
     def hide(self):
-        """Serialized hide transition (docs/presenter-migration-plan.md §4 M3).
+        """Serialized hide transition (docs/presenter-migration-plan.md).
 
-        Phase 2 (under _load_page_lock) does the coalesce/flip/restore; phase
-        3 (load_page + set_time) runs AFTER the lock is released. This is the
-        G-B1 fix: _load_page_lock is an RLock, so calling load_page from
-        INSIDE this transition's hold would re-enter it and run
-        initialize_actions/ChangePage -- deliberately kept outside
-        load_page's own hold (DeckController.load_page, see the comment
-        above its `page.initialize_actions()` call) -- under this
-        transition's OUTER hold instead, re-arming the run_on_main/pulsectl
-        deadlock this codebase already froze on once. follow-up work is
-        returned as a closure and must only ever be invoked after the `with`
-        block below has exited.
+        Phase 2 runs under _load_page_lock and does the coalesce, the flip and
+        the restore. Phase 3 runs load_page and set_time after the lock is
+        released.
+
+        _load_page_lock is an RLock. A load_page call from inside this
+        transition's hold re-enters it and runs initialize_actions and
+        ChangePage under this outer hold. load_page keeps those two outside
+        its own hold (see the comment above its page.initialize_actions()
+        call), because that combination arms the run_on_main and pulsectl
+        deadlock this codebase already froze on. The follow-up work returns as
+        a closure, and the caller must invoke it only after the with block
+        below exits.
         """
         if getattr(self.deck_controller, "_closing", False):
-            # The deck is tearing down (plan P1.3): hide()'s phase 3 calls
-            # load_page(), which would resurrect a controller mid-close --
-            # this is the exact bug the _closing gate exists to prevent.
+            # The deck is tearing down. hide()'s phase 3 calls load_page(),
+            # which resurrects a controller mid-close. The _closing gate
+            # exists to stop that.
             return
         log.info("Hiding screen saver")
 
         follow_up = None
         with self.deck_controller._load_page_lock:
-            # Coalesce: a concurrent second hide() (e.g. on_key_change racing
-            # set_enable(False) or LockScreenManager.unlock()) is a no-op
-            # once we're already hidden.
+            # A concurrent second hide() does nothing once the screensaver is
+            # already hidden. That covers on_key_change racing set_enable(False)
+            # and LockScreenManager.unlock().
             if not self.showing:
                 return
 
-            # Same atomic bump-only pattern as show() -- see its comment.
+            # Same atomic bump-only pattern as show(). See its comment.
             with self.deck_controller._page_gen_lock:
                 self.deck_controller._page_load_generation += 1
 
             self.original_inputs.clear()
-            # Ensures that the first image visable is from the page not the
-            # screensaver if the brightness on the saver is 0.
-            # expects_repaint: phase 3's load_page repaints the restored
-            # page, so these blanks are a transition too.
+            # The first visible image must come from the page and not from the
+            # screensaver when the saver brightness is 0.
+            # expects_repaint: phase 3's load_page repaints the restored page,
+            # so these blanks are a transition too.
             self.deck_controller.clear(expects_repaint=True)
             self.showing = False
 
-            # A page change requested while the screensaver was showing sits in
-            # the controller's pending slot (switching immediately would freeze
-            # the screensaver video -- see load_page's guard): load it now,
-            # falling back to whatever page is active. Consumed here under
-            # _load_page_lock but loaded by follow_up after release (phase 3):
-            # a page change landing in that gap is overwritten by this older
-            # load -- the same window the plain active_page reload always had.
+            # A page change requested while the screensaver showed sits in the
+            # controller's pending slot, because an immediate switch freezes
+            # the screensaver video (see load_page's guard). Load it now, and
+            # fall back to the active page. This code takes the pending page
+            # under _load_page_lock, but follow_up loads it after the release
+            # in phase 3. A page change that lands in that gap loses to this
+            # older load, which is the same window the plain active_page
+            # reload always has.
             pending = self.deck_controller.take_pending_screensaver_page()
-            # Taking it ends the only protection it had -- from here until
-            # phase 3 installs it, the page is neither pending nor active, so
-            # cache pressure could tear it down and hand the load a corpse.
-            # Reserve it for that gap; installing it releases the reservation.
+            # Taking the page ends its only protection. From here until phase
+            # 3 installs it, the page is neither pending nor active, so cache
+            # pressure can tear it down and hand the load a corpse. Reserve it
+            # for that gap. Installing it releases the reservation.
             if pending is not None and gl.page_manager is not None:
                 gl.page_manager.pins.reserve_fetch(pending, self.deck_controller)
             active_page = pending if pending is not None else self.deck_controller.active_page
             time_delay = self.time_delay
             follow_up = lambda: self._hide_followup(active_page, time_delay)
 
-        # Phase 3 -- outside the lock. Never move this inside the `with`
+        # Phase 3 runs outside the lock. Never move this inside the with
         # block above (see the docstring).
         follow_up()
 
@@ -367,17 +350,16 @@ class ScreenSaver:
 
     def on_key_change(self):
         if getattr(self.deck_controller, "_closing", False):
-            # The deck is tearing down (plan P1.3): a straggling input event
-            # (already in flight when step 3 stopped the reader thread) must
-            # not re-arm the screensaver timer or trigger hide()'s
-            # load_page().
+            # The deck is tearing down. A straggling input event, already in
+            # flight when the reader thread stopped, must not re-arm the
+            # screensaver timer or trigger hide()'s load_page().
             return
         self.last_key_change_time = time.time()
-        # Deck presses never reach the compositor, so this funnel -- which
-        # every key/dial/touch interaction already passes through -- is the
-        # only thing that can tell the presence monitor a user drumming on
-        # the deck is present. None-guarded: the unit-tier
-        # harness never installs one.
+        # Deck presses never reach the compositor, so this funnel is the only
+        # thing that can tell the presence monitor a user is drumming on the
+        # deck. Every key, dial and touch interaction passes through it. The
+        # None guard is necessary, because the unit-tier harness installs no
+        # presence monitor.
         if gl.presence_monitor is not None:
             gl.presence_monitor.notify_activity()
         if self.showing:

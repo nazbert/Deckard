@@ -14,10 +14,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 from PIL import Image
 
-# GLib/GdkPixbuf are imported lazily inside image2pixbuf: it is their
-# only consumer and every one of its callers lives under src/windows/, so a
-# module-level import would drag the widget stack into the engine's import
-# closure (ImageHelpers is core to the render path).
+# image2pixbuf imports GLib and GdkPixbuf on demand. It is their only
+# consumer, and all its callers live under src/windows/. A module-level
+# import drags the widget stack into the engine's import closure, and
+# ImageHelpers is core to the render path.
 
 
 def is_transparent(img: Image.Image):

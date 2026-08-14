@@ -9,25 +9,23 @@ class BetterDeck():
     def __init__(self, deck: StreamDeck, rotation: int = 0):
         self.deck: StreamDeck = deck
         self.rotation: int = rotation # [0, 90, 180, 270]
-        # Serializes device I/O: hidapi is not thread-safe and the deck is
-        # written from several threads. Reentrant for nested wrapped calls.
+        # Serializes device I/O. hidapi is not thread-safe, and several
+        # threads write to the deck. Reentrant for nested wrapped calls.
         self._lock = threading.RLock()
 
-        # Owner-assertion tooling (single-writer migration, M0): detects any
-        # thread other than the registered writer performing a device write.
-        # LOG-ONLY, never raises -- this is a harness/dev detector, not a
-        # shipping invariant (BetterDeck's RLock remains the real defense).
-        # Env checked once here so the hot path is a single attribute test
-        # when unset.
+        # The owner assertion detects a device write from any thread other
+        # than the registered writer. It only logs and never raises, because it is
+        # a harness and dev detector. The RLock above is the real defense.
+        # The env read happens once, so the hot path is one attribute test.
         self._assert_owner: bool = bool(os.environ.get("DECKARD_ASSERT_DEVICE_OWNER"))
         self._expected_writer: threading.Thread | None = None
         self.owner_violations: list[tuple[str, str, str]] = []
 
     def set_expected_writer(self, thread: threading.Thread | None) -> None:
-        """Registers the thread that is expected to perform all device writes.
+        """Registers the thread that performs all device writes.
 
-        Not wired into DeckController yet (that lands in M1); calling this is
-        purely opt-in instrumentation for the harness/dev tooling.
+        DeckController registers its media player thread. _check_owner logs a
+        warning when another thread writes to the device.
         """
         self._expected_writer = thread
 
@@ -65,22 +63,17 @@ class BetterDeck():
             self.deck.close()
 
     def stop_read_thread(self, timeout: float = 1.0) -> None:
-        """Stops the library's reader thread on the *wrapped* device
-        (plan docs/memory-footprint-impl-plan.md P1.3 step 3).
+        """Stops the library reader thread on the wrapped device.
 
-        BetterDeck has no `__getattr__` passthrough, so a caller writing
-        `self.deck.run_read_thread = False` on a BetterDeck instance (as
-        DeckController.delete() used to) sets a dead attribute on the
-        wrapper -- the library's actual reader thread polls the *wrapped*
-        StreamDeck object's own `run_read_thread` flag
-        (StreamDeck.py:_read_with_resume_from_suspend), so that write was a
-        silent no-op. Left unfixed, the reader's resume-from-suspend loop
-        can keep re-opening the device for up to 10s after our close()
-        thinks it's done (StreamDeck.py:209-262).
+        BetterDeck has no __getattr__ passthrough, so a write of
+        run_read_thread on a BetterDeck instance sets a dead attribute on the
+        wrapper. The library reader polls the wrapped StreamDeck object's own
+        run_read_thread flag (StreamDeck.py:_read_with_resume_from_suspend).
+        Without this stop, the reader's resume-from-suspend loop re-opens the
+        device for up to 10 s after close() returns (StreamDeck.py:209-262).
 
-        No-ops gracefully when the wrapped object has no read thread of its
-        own (FakeDeck, RemoteDeck): both lack `run_read_thread`/`read_thread`
-        entirely, so the hasattr guard below skips straight through.
+        FakeDeck and RemoteDeck have no read thread, and no run_read_thread
+        attribute, so the hasattr guard below returns early for them.
         """
         device = self.deck
         if not hasattr(device, "run_read_thread"):
@@ -100,8 +93,9 @@ class BetterDeck():
         :rtype: bool
         :return: `True` if the deck is open, `False` otherwise.
         """
-        # No BetterDeck lock: status probes must not stall behind a multi-chunk
-        # image write; the transport's per-chunk mutex covers close() races.
+        # This takes no BetterDeck lock. A status probe must not stall behind
+        # a multi-chunk image write, and the transport's per-chunk mutex
+        # covers close() races.
         return self.deck.is_open()
 
     def connected(self):
@@ -112,7 +106,8 @@ class BetterDeck():
         :rtype: bool
         :return: `True` if the deck is still connected, `False` otherwise.
         """
-        # No BetterDeck lock: see is_open(); the transport's mutex covers close() races.
+        # This takes no BetterDeck lock, see is_open(). The transport mutex
+        # covers close() races.
         return self.deck.connected()
 
     def vendor_id(self):
@@ -312,7 +307,7 @@ class BetterDeck():
             logical_key = self.get_logical_index(key)
             await async_callback(deck, logical_key, state)
 
-        # Delegate to the wrapped deck -- calling ourselves recursed forever.
+        # Delegate to the wrapped deck. A self-call recurses forever.
         self.deck.set_key_callback_async(remapper_callback, loop)
 
     def set_dial_callback(self, callback):
@@ -350,7 +345,7 @@ class BetterDeck():
                                         each time a button state changes.
         :param asyncio.loop loop: Asyncio loop to dispatch the callback into
         """
-        # Delegate to the wrapped deck -- calling ourselves recursed forever.
+        # Delegate to the wrapped deck. A self-call recurses forever.
         # Dials need no index remap (see set_dial_callback).
         self.deck.set_dial_callback_async(async_callback, loop)
 
@@ -389,7 +384,7 @@ class BetterDeck():
                                         each time a button state changes.
         :param asyncio.loop loop: Asyncio loop to dispatch the callback into
         """
-        # Delegate to the wrapped deck -- calling ourselves recursed forever.
+        # Delegate to the wrapped deck. A self-call recurses forever.
         # The touchscreen needs no index remap.
         self.deck.set_touchscreen_callback_async(async_callback, loop)
 
@@ -561,13 +556,15 @@ class BetterDeck():
             return None
     
     def reorder_physical_for_rotation(self, original_list):
-        """Maps a PHYSICAL-indexed list (as the device reports it, e.g.
-        key_states()) into LOGICAL indexing under the current rotation:
-        out[get_logical_index(p)] = orig[p]. The old direction
-        (out[p] = orig[get_logical_index(p)]) applied the INVERSE rotation --
-        only self-inverse at 0/180, so key_states() was scrambled under
-        90/270 and ControllerKey.__init__ read the wrong key's press state
-        on rotated decks."""
+        """Maps a physical-indexed list into logical indexing.
+
+        The device reports physical indexes, e.g. key_states(). The mapping
+        under the current rotation is out[get_logical_index(p)] = orig[p]. Do
+        not invert it to out[p] = orig[get_logical_index(p)]: that applies the
+        inverse rotation, which is self-inverse only at 0 and 180. It
+        scrambles key_states() at 90 and 270, and ControllerKey.__init__ then
+        reads the wrong key's press state.
+        """
         pysical_rows, physical_cols = self.deck.key_layout()
         total = pysical_rows * physical_cols
         reordered = [None] * total

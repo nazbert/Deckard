@@ -22,11 +22,11 @@ class BackgroundVideoCache(Mp4FrameCache):
     data is held in RAM beyond the decoder's own buffers. Key tiles and the
     touchscreen strip slice are cropped out of the canvas frame per request.
 
-    Build/promote/decode-ahead discipline lives in `Mp4FrameCache`
-    (mp4_tile_cache.py) -- this class keeps the tiling/strip/saturation-crop
-    logic that is specific to the background path; behavior is unchanged
-    from before the extraction (single instance, build interleaved with
-    playback ticks, same on-disk directory layout/naming).
+    Mp4FrameCache (mp4_tile_cache.py) owns the build, promote and
+    decode-ahead discipline. This class keeps the tiling, strip and
+    saturation-crop logic of the background path: one instance, a build
+    interleaved with playback ticks, and the on-disk directory layout and
+    naming.
     """
 
     def __init__(self, video_path, deck_controller: "DeckController", extend_touchscreen: bool = False) -> None:
@@ -37,12 +37,12 @@ class BackgroundVideoCache(Mp4FrameCache):
         self.key_size = self.deck_controller.deck.key_image_format()['size']
         self.spacing = self.deck_controller.key_spacing
 
-        # When extending onto the touchscreen strip, each frame carries the
+        # When the frame extends onto the touchscreen strip, it carries the
         # strip slice as one extra entry after the key tiles, and the canvas
-        # the frame is fitted to is taller — so extended caches are
-        # incompatible with plain ones and live in their own directory.
+        # is taller. Extended caches are therefore incompatible with plain
+        # ones and live in their own directory.
         self.extend_touchscreen = extend_touchscreen and self.deck_controller.deck.is_touch()
-        # The annotation follows the real value -- a (width, height) pair.
+        # The annotation follows the real value: a (width, height) pair.
         self.strip_size: tuple[int, int] | None = (
             self.deck_controller.get_touchscreen_image_size()
             if self.extend_touchscreen else None)
@@ -57,13 +57,12 @@ class BackgroundVideoCache(Mp4FrameCache):
         saturation = deck_controller.get_display_saturation()
         super().__init__(video_path, out_size=self._canvas_size(), saturation=saturation)
 
-    # --- geometry / cache-path hooks --------------------------------------
+    # Geometry and cache-path hooks.
 
     def _default_cache_path(self) -> str:
-        # entry.split(".")[0] (video_cache_sweeper.py) still resolves this to
-        # video_md5 with the suffix present, since the suffix is appended
-        # after the first dot-delimited component -- verified, sweeper needs
-        # no changes.
+        # entry.split(".")[0] in video_cache_sweeper.py still resolves this to
+        # video_md5 with the suffix present, because the suffix comes after
+        # the first dot-delimited component. The sweeper needs no change.
         cache_dir = os.path.join(VID_CACHE, self.key_layout_str)
         self._legacy_cache_path = os.path.join(cache_dir, f"{self.video_md5}.cache")
         return os.path.join(cache_dir, f"{self.video_md5}{self._sat_suffix}.mp4")
@@ -84,9 +83,9 @@ class BackgroundVideoCache(Mp4FrameCache):
         canvas_width = key_width + total_spacing_x
         canvas_height = key_height + total_spacing_y
 
-        # Extend the canvas below the key grid so the frame continues onto the
-        # touchscreen strip: one bezel gap plus the strip mapped into canvas
-        # coordinates (same geometry as BackgroundImage).
+        # Extend the canvas below the key grid, so the frame continues onto
+        # the touchscreen strip: one bezel gap plus the strip mapped into
+        # canvas coordinates. This matches BackgroundImage geometry.
         if self.extend_touchscreen:
             canvas_height += spacing_y + self._get_strip_canvas_height(canvas_width)
 
@@ -96,15 +95,14 @@ class BackgroundVideoCache(Mp4FrameCache):
         self._remove_legacy_cache()
 
     def _writer_enabled(self) -> bool:
-        # Unlike KeyVideoCache (gated once by its registry's acquire()),
-        # this single self-contained instance decides for itself whether to
-        # build -- same "performance.cache-videos" read/behavior as before
-        # the Mp4FrameCache extraction.
+        # This instance is self-contained and decides for itself whether to
+        # build. KeyVideoCache instead gates once through its registry's
+        # acquire(). Both read the "performance.cache-videos" setting.
         return gl.settings_manager.app().cache_videos
 
     def _remove_legacy_cache(self) -> None:
-        # Pre-rewrite caches were bz2'd pickles of raw frame tiles — large
-        # and no longer readable by this code.
+        # A legacy cache is a bz2 pickle of raw frame tiles. It is large, and
+        # no code here can read it.
         if self._legacy_cache_path and os.path.isfile(self._legacy_cache_path):
             try:
                 os.remove(self._legacy_cache_path)
@@ -112,18 +110,18 @@ class BackgroundVideoCache(Mp4FrameCache):
             except OSError:
                 pass
 
-    # --- frame access ------------------------------------------------------
+    # Frame access.
 
     def _require_strip_size(self) -> tuple[int, int]:
         """The strip size, or a raise.
 
-        `strip_size` is normally set exactly when `extend_touchscreen` is on,
-        which is the only condition under which the strip helpers below run
-        -- but not always: get_touchscreen_image_size() returns None for a
-        deck that is no longer alive, so a cache constructed against a dying
-        deck can legitimately reach here extended and sizeless. Raising keeps
-        that contained at one site instead of surfacing as a None unpack
-        three call sites deep."""
+        strip_size is set when extend_touchscreen is on, which is the only
+        condition under which the strip helpers below run. There is one
+        exception. get_touchscreen_image_size() returns None for a dead deck,
+        so a cache built against a dying deck can reach here extended and
+        sizeless. The raise contains that at one site instead of a None unpack
+        three call sites deep.
+        """
         strip_size = self.strip_size
         if strip_size is None:
             raise RuntimeError(
@@ -139,17 +137,17 @@ class BackgroundVideoCache(Mp4FrameCache):
         return entries
 
     def _fallback_payload(self):
-        # Mp4FrameCache.get_frame already prefers `self.last_payload` (the
-        # last successfully decoded tile list) over calling this; it only
-        # lands here when nothing has ever decoded successfully yet.
+        # Mp4FrameCache.get_frame prefers self.last_payload, the last tile
+        # list it decoded, over this call. It reaches here only when no decode
+        # has succeeded yet.
         return self._generate_alpha_frame()
 
     def get_tiles(self, n: int) -> list[Image.Image]:
         return self.get_frame(n)
 
     def get_tiles_and_index(self, n: int) -> tuple[list[Image.Image], int]:
-        """get_tiles() plus the source frame index those tiles actually come
-        from (None when unknown) -- see Mp4FrameCache.get_frame_and_index."""
+        """get_tiles() plus the source frame index the tiles come from. The
+        index is None when unknown. See Mp4FrameCache.get_frame_and_index."""
         return self.get_frame_and_index(n)
 
     def _payload_from_bgr(self, frame_bgr: np.ndarray) -> list[Image.Image]:
