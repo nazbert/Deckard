@@ -12,23 +12,17 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 
----
+CallbackRegistry is a locked holder for callback subscriptions. See
+docs/memory-footprint-plan.md.
 
-CallbackRegistry: a locked, weak-by-default holder for callback
-subscriptions (docs/memory-footprint-plan.md D2, bug 27/28).
+The registry stores a bound method as a weakref.WeakMethod, so the teardown
+of an action or a controller drops its callback silently. A function, a
+lambda and a functools.partial have no owner to weak-ref, so the registry
+stores them strong. A lambda that captures an action therefore keeps that
+action alive until an explicit remove() or disconnect().
 
-Bound methods are stored as `weakref.WeakMethod`, so a subscriber's death
-(action/controller teardown) silently drops its callback instead of pinning
-the owner forever. Plain functions, lambdas and `functools.partial` objects
-have no "owner" to weak-ref, so they are stored strong -- matching today's
-behavior for that shape of callback. Note this means a closure/lambda that
-captures an action (or any other object we'd want to see collected) still
-keeps it alive; that pattern needs an explicit `remove()`/`disconnect()`
-call, same as before this file existed.
-
-Escape hatch: set `SC_STRONG_CALLBACKS=1` in the environment (read once at
-import) to store everything strong, for bisecting a plugin-ecosystem
-regression against this file without an app rebuild.
+Set SC_STRONG_CALLBACKS=1 in the environment (read once at import) to store
+every callback strong. This isolates a plugin regression to this file.
 """
 import os
 import threading
@@ -37,8 +31,7 @@ from typing import Callable
 
 from loguru import logger as log
 
-# Read once at import -- this is a debugging knob, not something that should
-# change behavior mid-run.
+# Read once at import, so this debugging knob cannot change behavior mid-run.
 _STRONG_CALLBACKS = os.environ.get("SC_STRONG_CALLBACKS") == "1"
 
 # An entry is either the callback itself (strong) or a weakref.WeakMethod
@@ -52,11 +45,10 @@ def _is_bound_method(cb: Callable) -> bool:
 
 
 def describe_callback(cb: Callable) -> str:
-    """A printable identity for a callback, captured while it's still alive.
+    """Give a printable identity for a live callback.
 
-    Public because callers that report on a callback (a synchronous signal
-    fan-out naming the handler that raised) need the same identity string the
-    registry's own prune log uses.
+    Public because the synchronous signal fan-out names a failed handler with
+    the same string the prune log uses.
     """
     qualname = getattr(cb, "__qualname__", None) or repr(cb)
     module = getattr(cb, "__module__", None)
@@ -64,13 +56,11 @@ def describe_callback(cb: Callable) -> str:
 
 
 class _WeakMethodEntry(weakref.WeakMethod):
-    """A WeakMethod that remembers a printable description of the method it
-    wrapped. Once the owner dies the WeakMethod resolves to None and can no
-    longer say what it used to point at -- so the description has to be
-    captured at add() time for snapshot()'s prune log to name
-    what was silently dropped. WeakMethod uses __slots__; this subclass
-    deliberately doesn't, so `description` can live in a normal instance
-    __dict__.
+    """A WeakMethod that keeps a printable description of its method.
+
+    A dead WeakMethod resolves to None and cannot name its target, so __new__
+    captures the description for the prune log. This subclass drops the
+    __slots__ of WeakMethod, so description lives in the instance __dict__.
     """
 
     description: str
@@ -89,17 +79,15 @@ def _resolve_entry(entry: _Entry):
 
 
 class CallbackRegistry:
-    """Thread-safe collection of callables with weak storage for bound methods.
+    """Thread-safe collection of callables. It stores bound methods weakly.
 
-    `add()`/`remove()` mutate under a lock; `snapshot()` returns a plain
-    list of currently-live callables and, as a side effect, drops any
-    bound-method entries whose owner has since been garbage collected.
+    add() and remove() mutate under a lock. snapshot() returns the live
+    callables and drops the entries whose owner the collector took.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        # Order is preserved (list, not set) -- some callers have
-        # historically relied on connect/call ordering.
+        # A list and not a set, because callers depend on the connect order.
         self._entries: list[_Entry] = []
 
     def _make_entry(self, cb: Callable) -> _Entry:
@@ -108,9 +96,10 @@ class CallbackRegistry:
         return cb
 
     def add(self, cb: Callable) -> bool:
-        """Add `cb` unless it (or an equal, still-live entry) is already
-        present. Returns True if it was added, False if it was a dedupe
-        no-op. Also prunes any entries that have died in the meantime.
+        """Add cb unless an equal live entry is already present.
+
+        Returns True after an add and False after a dedupe. Also prunes the
+        entries that died in the meantime.
         """
         with self._lock:
             kept = []
@@ -118,7 +107,7 @@ class CallbackRegistry:
             for entry in self._entries:
                 live = _resolve_entry(entry)
                 if live is None:
-                    continue  # prune: owner is gone
+                    continue  # the owner is gone, so prune it
                 kept.append(entry)
                 if live is cb or live == cb:
                     already_present = True
@@ -128,11 +117,9 @@ class CallbackRegistry:
             try:
                 entry = self._make_entry(cb)
             except TypeError:
-                # WeakMethod refuses bound methods whose owner is not
-                # weak-referenceable (a __slots__ class without __weakref__).
-                # Fall back to strong storage -- the pre-D2 plain list held
-                # these fine, and failing the connect over a storage
-                # optimization is worse than pinning the owner.
+                # WeakMethod refuses an owner that is not weak-referenceable
+                # (a __slots__ class without __weakref__). Store it strong,
+                # because a refused connect costs more than a pinned owner.
                 log.debug(
                     f"CallbackRegistry: owner of {cb!r} is not weak-referenceable "
                     f"(__slots__ without __weakref__); storing a strong reference"
@@ -142,28 +129,23 @@ class CallbackRegistry:
             return True
 
     def remove(self, cb: Callable) -> None:
-        """Remove `cb` if present. Silently a no-op otherwise. Also prunes
-        any entries that have died in the meantime.
-        """
+        """Remove cb if present, else do nothing. Also prunes dead entries."""
         with self._lock:
             kept = []
             for entry in self._entries:
                 live = _resolve_entry(entry)
                 if live is None:
-                    continue  # prune: owner is gone
+                    continue  # the owner is gone, so prune it
                 if live is cb or live == cb:
-                    continue  # this is the entry being removed
+                    continue  # the entry to remove
                 kept.append(entry)
             self._entries = kept
 
     def snapshot(self) -> list[Callable]:
-        """Return a list of currently-live callables, pruning dead entries
-        as a side effect. Each pruned entry is logged at DEBUG:
-        weak-by-default storage means a bound method of an otherwise
-        unreferenced owner silently loses its subscription at the next gc
-        pass -- deliberate (D2), but without a trace it's undiagnosable when
-        a plugin's events "just stop"; SC_STRONG_CALLBACKS=1 remains the
-        bisect hatch.
+        """Return the live callables and prune the dead entries.
+
+        Each prune logs at DEBUG. A bound method whose owner is unreferenced
+        loses its subscription at the next gc pass, with no other trace.
         """
         pruned: list[str] = []
         with self._lock:
@@ -172,23 +154,18 @@ class CallbackRegistry:
             for entry in self._entries:
                 live = _resolve_entry(entry)
                 if live is None:
-                    # prune: owner is gone. Only a dead _WeakMethodEntry can
-                    # resolve to None (strong entries are the callable itself
-                    # and never die out from under us), so `.description` is
-                    # always present here; the getattr fallback is pure
-                    # belt-and-suspenders.
+                    # The owner is gone, so prune it. Only a dead
+                    # _WeakMethodEntry resolves to None, so it has a
+                    # description.
                     pruned.append(getattr(entry, "description", repr(entry)))
                     continue
                 kept.append(entry)
                 live_callbacks.append(live)
             self._entries = kept
-        # Log outside the lock -- a sink must never be able to re-enter the
-        # registry while snapshot() holds it. A given dead entry is pruned
-        # from self._entries in the same pass, so it is logged at most once
-        # across the process; the only way to double-log is two threads
-        # racing snapshot() on the same still-dead entry (benign duplicate
-        # DEBUG line, no state corruption -- the locked _entries reassignment
-        # is last-write-wins).
+        # Log outside the lock, because a sink must not re-enter the registry
+        # while snapshot() holds it. The same pass drops the entry, so one process
+        # logs it once. Two threads that race snapshot() on one dead entry log
+        # it twice and corrupt no state.
         for description in pruned:
             log.debug(
                 f"CallbackRegistry: pruning dead callback {description} "
@@ -197,8 +174,7 @@ class CallbackRegistry:
         return live_callbacks
 
     def __iter__(self):
-        # Callers that iterate a registry directly (`for cb in registry`,
-        # `list(registry)`) get the same live/pruned view as snapshot().
+        # Direct iteration gives the same live and pruned view as snapshot().
         return iter(self.snapshot())
 
     def __len__(self) -> int:

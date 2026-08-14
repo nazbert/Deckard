@@ -13,15 +13,14 @@ from src.Signals.weak_callbacks import CallbackRegistry
 
 class Observer:
     def __init__(self, label: str | None = None):
-        # CallbackRegistry (src/Signals/weak_callbacks.py, design doc bug
-        # 3/27): bound-method observers are held weakly, so a subscriber
-        # that never calls unsubscribe() on teardown doesn't keep this list
-        # (and the objects it points at) growing forever.
+        # A CallbackRegistry (src/Signals/weak_callbacks.py) holds a
+        # bound-method observer weakly. A subscriber that never calls
+        # unsubscribe() on teardown therefore stops growing this list and the
+        # set of objects it points at.
         self.observers = CallbackRegistry()
-        # This notifier's own dispatch lane: its subscribers are
-        # serialized on a thread of their own, so a blocking subscriber
-        # stalls only this asset stream, not plugin events app-wide. `label`
-        # is what the wedge watchdog names the lane by.
+        # This notifier's own dispatch lane. Its subscribers run in order on a
+        # thread of their own, so a blocking subscriber stalls this asset
+        # stream and no other. The wedge watchdog names the lane by label.
         self._lane = event_dispatch.Lane(label=label)
 
     def subscribe(self, observer: Callable[..., Any]):
@@ -31,26 +30,18 @@ class Observer:
         self.observers.remove(observer)
 
     def notify(self, *args, **kwargs):
-        """Fire-and-forget: queues the current subscribers onto this
-        notifier's dispatch lane and returns immediately.
+        """Queue the current subscribers onto the lane and return.
 
-        Returning does NOT mean the subscribers have run -- do not read it as
-        "delivered". They run afterwards, sequentially and in subscription
-        order, on this notifier's own lane (per-lane FIFO), so a subscriber
-        that blocks stalls this asset stream only; no ordering is guaranteed
-        relative to other notifiers' events. See event_dispatch.py.
+        A return does not mean the subscribers ran. They run after it, one at
+        a time in subscription order, on this notifier's lane. A blocking
+        subscriber stalls this asset stream alone. The order against another
+        notifier's events is undefined. See event_dispatch.py.
         """
-        # Previously: pulled/created an asyncio event loop per call (with a
-        # bare `except:` around a call that could legitimately try to close
-        # a *running* loop it does not own -- design doc bug 27) and ran
-        # every observer through asyncio.gather/to_thread. Returning before
-        # the observers run is not new either: a caller racing a *running*
-        # loop already went down the `ensure_future` branch.
         try:
             self._lane.dispatch(self.observers.snapshot(), args, kwargs)
         except event_dispatch.DispatchShutdown:
-            # Same fire-and-forget reasoning as EventHolder.trigger_event:
-            # once on_quit has shut the dispatcher down, an asset mutation
-            # racing teardown must not raise out of a notify() no caller
-            # checks. Any other RuntimeError still propagates.
+            # For the reason EventHolder.trigger_event gives. After on_quit
+            # shuts the dispatcher down, an asset mutation that races the
+            # teardown must not raise out of notify(), which no caller checks.
+            # Any other RuntimeError still propagates.
             log.debug("Asset notification after dispatch shutdown; dropped")

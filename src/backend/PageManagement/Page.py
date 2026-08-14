@@ -16,21 +16,18 @@ import os
 import threading
 import time
 
-# Import globals
 import globals as gl
 
 from loguru import logger as log
 from contextlib import contextmanager
 from copy import copy
 
-# Import globals
 from src.backend.PluginManager.EventAssigner import EventAssigner
 from src.backend.PageManagement import page_document, page_flush
 import globals as gl
 
 from src.backend.PluginManager.ActionCore import ActionCore
 from src.backend.DeckManagement.InputIdentifier import Input, InputEvent, InputIdentifier
-# Import typing
 from typing import Any, Iterator, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.backend.DeckManagement.deck_controller.inputs import ControllerInput, ControllerInputState
@@ -38,8 +35,8 @@ if TYPE_CHECKING:
     from src.backend.PluginManager.ActionHolder import ActionHolder
 
 
-# Inside Page's body the name `dict` is the page-content property, so
-# annotations written there reach the builtin through this alias.
+# Inside the body of Page the name dict is the page-content property, so an
+# annotation there reaches the builtin through this alias.
 _Dict = dict
 
 
@@ -55,38 +52,35 @@ class Page:
         # through it.
         self._document = page_document.document_for(json_path)
 
-        # Dir that contains all actions this allows us to keep them at reload
+        # The action objects, kept so a reload can reuse them.
         self.action_objects = {}
 
-        # Serializes the on_ready_called claim in initialize_actions: it
-        # runs outside _load_page_lock (deliberately -- it can block on a
-        # run_on_main marshal), so two concurrent load_page(samePage) calls
-        # could both read the flag as False and submit a second concurrent
-        # on_ready.
+        # Serializes the on_ready_called claim in initialize_actions. That
+        # method runs outside _load_page_lock, because it can block on a
+        # run_on_main marshal. Two concurrent load_page calls for one page
+        # otherwise both read the flag as False and submit a second on_ready.
         self._ready_claim_lock = threading.Lock()
 
-        self.load(load_from_file=True) #TODO: Later we want to limit the load of action objects to the available inputs
+        self.load(load_from_file=True) #TODO: Limit the load of action objects to the available inputs
 
     @property
     def dict(self) -> _Dict[str, Any]:
         """This page's content, straight from the document that owns it.
 
-        Deliberately without a setter. Every Page on a path holds the one dict
-        the document has, so assigning a new one here would give this Page a
-        copy nobody else can see -- the divergence the document exists to
-        remove, reintroduced silently in whichever call site did it. Mutate
-        what this returns; to replace the whole content, refresh the document.
+        There is no setter. Every Page on a path holds the one dict the
+        document has, so an assignment here gives this Page a copy nobody else
+        sees. Mutate what this returns. To replace the whole content, refresh
+        the document.
         """
         return self._document.data
 
     def rebind_document(self, document: "page_document.PageDocument") -> None:
-        """Read through `document` from now on.
+        """Read through document from now on.
 
-        For a page rename, which is the one thing that changes which file a
-        live Page belongs to: json_path is re-pointed in place, and this
-        follows it, so a Page that was minted under the old name during the
-        rename ends up on the same content as every other Page of the renamed
-        page instead of on a copy of its own.
+        For a page rename, the one operation that changes which file a live
+        Page belongs to. The rename re-points json_path in place and calls
+        this, so a Page minted under the old name during the rename shares the
+        content of every other Page of the renamed page.
         """
         self._document = document
 
@@ -94,13 +88,12 @@ class Page:
         return os.path.splitext(os.path.basename(self.json_path))[0]
 
     def update_dict(self) -> None:
-        """
-        Updates the dict without any updates on the action objects.
-        Do NOT use if you made changes to the action objects
+        """Update the dict and leave the action objects alone.
 
-        The refresh lands in the document, so every deck showing this page
-        gets it -- and so an unsaved edit made through any of them is
-        overwritten, which is why a mutator saves in the same call it mutates.
+        Do not call this after a change to the action objects. The refresh
+        lands in the document, so every deck on this page gets it, and it
+        overwrites an unsaved edit made through any of them. A mutator
+        therefore saves in the call that mutates.
         """
         self._document.refresh_from_disk()
 
@@ -110,71 +103,58 @@ class Page:
             self.update_dict()
         self.load_action_objects()
 
-        # Call on_ready for all actions
         end = time.time()
         log.debug(f"Loaded page {self.get_name()} in {end - start:.2f} seconds")
 
     def save(self) -> None:
-        # Records the edit and arms the write; the flush seam owns the
-        # per-path lock, the write itself and when it happens (a trailing
-        # timer, so a burst of edits costs one write instead of one each).
-        # The in-memory change is already visible to every reader -- what is
-        # deferred is only the disk. Anything that needs the file level
-        # NOW -- a page switch, a deck closing, quit, or any read of the page
-        # file -- asks the seam for it.
+        # Record the edit and arm the write. The flush seam owns the per-path
+        # lock, the write and its time. A trailing timer makes a burst of
+        # edits cost one write. Every reader sees the in-memory change already, so
+        # only the disk waits. A page switch, a deck close, a quit and a read
+        # of the page file each ask the seam to write now.
         page_flush.get().mark_dirty(self)
 
     @contextmanager
     def edit(self) -> Iterator[_Dict[str, Any]]:
-        """Change this page's content as ONE edit, and have it reach the file.
+        """Change this page's content as one edit, and send it to the file.
 
-        The mutation seam for a caller that holds a Page rather than a path
-        (the document's ``edit`` is the same block reached by path). Several
-        changes that only make sense together -- swapping two keys, taking a
-        state out of an input -- go inside one block: they are applied with
-        the file's lock held, so a write in flight cannot snapshot the page
-        halfway through them, and they are marked once on the way out instead
-        of once per step.
-
-        NOTHING INSIDE THE BLOCK MAY TOUCH A PAGE FILE OR THE GTK MAIN LOOP.
-        The lock is the file's only one and it is a leaf: reading a page (the
-        read barrier takes it), reloading one onto a deck, or marshalling to
-        the main thread from in here is a deadlock rather than a slow path.
-        Mutate the content; reload after the block, exactly where the reload
-        used to be.
+        The mutation seam for a caller that holds a Page. Nothing inside the
+        block may touch a page file or the GTK main loop.
         """
+        # Changes that only make sense together, such as a swap of two keys,
+        # go in one block. It holds the file's lock, so a write in flight
+        # cannot snapshot the page halfway, and it marks the page once.
+        #
+        # That lock is the file's only lock and it is a leaf. A read of a page
+        # (the read barrier takes the lock), a reload onto a deck, and a
+        # marshal to the main thread each deadlock from in here. Mutate the
+        # content, and reload after the block.
         with self._document.edit() as data:
             yield data
 
     def flush(self) -> str:
-        """Write this page's file NOW rather than on its debounce timer, and
-        return the path written.
+        """Write this page's file now, and return the path written.
 
-        The counterpart to save(): mutators mark, boundaries flush. A
-        boundary is anything after which the edits may never get another
-        chance -- the deck leaving this page, the deck going away, the app
-        quitting -- or anything about to read the file.
-
-        The path comes back because the boundary that flushes a page almost
-        always has to name the file it just made current (the page switch
-        reports it to plugins and over DBus), and taking one without the
-        other is the mistake worth making impossible.
+        It is the counterpart to save(). A mutator marks and a boundary
+        flushes. A boundary is the last chance the edits get: a deck that
+        leaves this page, a deck that goes away, the app that quits, or a read
+        of the file. It returns the path, because such a boundary names the
+        file it made current, as the page switch does for plugins and DBus.
         """
         page_flush.get().flush_path(self.json_path)
         return self.json_path
 
     def make_backup(self, json_path: str | None = None):
-        # The flush passes the path it holds the save lock for. It is this
-        # page's own path in every case but one: a page move re-points
-        # json_path while a write for the old path may still be pending, and
-        # backing up a file other than the one about to be overwritten would
-        # copy the wrong page over the wrong backup.
+        # The flush passes the path it holds the save lock for. That is this
+        # page's own path except after a page move, which re-points json_path
+        # while a write for the old path is still pending. A backup of any file
+        # but the one about to be overwritten copies the wrong page.
         page_document.back_up_page_file(json_path if json_path is not None else self.json_path)
 
     def move_key_to_end(self, dictionary, key):
-        # Operates on the passed dict (the flush's snapshot). This used to
-        # pop/reinsert on live self.dict instead -- mutating the page
-        # mid-save while never reordering the dict actually being written.
+        # It operates on the passed dict, which is the flush's snapshot. A pop
+        # and reinsert on the live self.dict mutates the page mid-save and
+        # reorders a dict that no write reads.
         page_document.move_key_to_end(dictionary, key)
 
     def set_background(self, file_path):
@@ -183,8 +163,8 @@ class Page:
         self.save()
 
     def load_action_objects(self):
-        # Function-scoped: deck_controller/controller.py imports this module,
-        # so a module-level import here would close an import cycle.
+        # The import is function-scoped, because deck_controller/controller.py
+        # imports this module and a module-level import here closes a cycle.
         from src.backend.DeckManagement.deck_controller.controller import CONTROLLER_CLASSES
 
         new_action_objects = {}
@@ -196,9 +176,9 @@ class Page:
                 input_ident = Input.FromTypeIdentifier(input_type_name, key)
                 for state in input_ident.get_states(self):
                     try:
-                        # action_objects is keyed by int state; the page json
-                        # is keyed by str. A state key that isn't a number
-                        # has no place in either.
+                        # action_objects keys by int state and the page json
+                        # keys by str. A state key that is not a number belongs
+                        # in neither.
                         state = int(state)
                     except ValueError:
                         continue
@@ -226,15 +206,15 @@ class Page:
 
         for old_action in old_actions:
             if old_action not in new_actions:
-                # Framework-owned teardown: notify then unconditionally
-                # clean_up(), so a plugin overriding the hook without
-                # super() can't leak the dropped action (D1).
+                # The framework owns this teardown. It notifies and then
+                # always calls clean_up(), so a plugin that overrides the hook
+                # without super() cannot leak the dropped action.
                 ActionCore.teardown(old_action)
 
         self.action_objects = new_action_objects
 
         if self.deck_controller.active_page == self:
-            # if it's already loaded - this way it only triggers on newly added actions
+            # The page is loaded already, so this covers new actions only.
             self.initialize_actions()
 
     # def load_action_object_sector(self, loaded_action_objects, dict_key: str, state)
@@ -243,7 +223,7 @@ class Page:
         
         plugin_manager = gl.plugin_manager
         if plugin_manager is None:
-            # Only before create_global_objects(): no holder can be resolved.
+            # Only before create_global_objects(), where no holder resolves.
             return NoActionHolderFound(id=action_id, identifier=input_ident, state=state)
 
         action_holder = plugin_manager.get_action_holder_from_id(action_id)
@@ -258,12 +238,12 @@ class Page:
         ## Keep old object if it exists
         old_action = loaded_action_objects.get(input_ident.input_type, {}).get(input_ident.json_identifier, {}).get(state, {}).get(i)
         if old_action is not None:
-            # action_core holds the action CLASS; ActionHolder annotates that
-            # attribute as an instance (root cause owned by the PluginManager
-            # MR), so bind it locally before using it as a class.
+            # action_core holds the action class, but ActionHolder annotates
+            # that attribute as an instance, so bind it locally before this
+            # code uses it as a class.
             action_core_class: Any = action_holder.action_core
             if isinstance(old_action, action_core_class):
-                return old_action #FIXME: gets never used
+                return old_action #FIXME: never used
             
         ## Create new action object            
         action_object = action_holder.init_and_get_action(
@@ -398,10 +378,9 @@ class Page:
         if plugin_obj is None:
             return False
 
-        # Collect first, then delete + tear down. `del action` on the local
-        # variable used to be the only "cleanup" here -- it doesn't do
-        # anything to the actual object, which is why plugin uninstall never
-        # called clean_up() (design-doc bug 7).
+        # Collect first, then delete and tear down. A del of the local variable
+        # does nothing to the object, so a plugin uninstall must call
+        # ActionCore.teardown to reach clean_up().
         to_remove: list[tuple] = []
         for type in list(self.action_objects.keys()):
             for key in list(self.action_objects[type].keys()):
@@ -458,21 +437,18 @@ class Page:
 
     def remove_plugin_actions_from_json(self, plugin_id: str):
         for type in Input.KeyTypes:
-            # A page json doesn't necessarily have every input type present
-            # (e.g. no "touchscreens" section on a non-Plus deck) -- bug 38.
+            # A page json can lack an input type. A non-Plus deck has no
+            # touchscreens section.
             for key in self.dict.get(type, {}):
                 for state in self.dict[type][key].get("states", {}):
                     actions = self.dict[type][key]["states"][state].get("actions", [])
-                    # Collect indices first: deleting from `actions` while
-                    # enumerate() is still walking it skips the entry right
-                    # after each deletion (bug 38).
+                    # Collect the indices first. A delete from actions during
+                    # the enumerate() walk skips the next entry.
                     to_remove = [
                         i for i, action in enumerate(actions)
-                        # Actions are plain dicts here (raw json), not
-                        # ActionCore objects -- `action.id` doesn't exist.
-                        # `or ""` (not a .get default): an explicit
-                        # `"id": null` in the json returns None past the
-                        # default.
+                        # An action here is a plain dict of raw json, so it has
+                        # no id attribute. The or "" catches an explicit
+                        # "id": null, which passes a .get default.
                         if (action.get("id") or "").split("::")[0] == plugin_id
                     ]
                     for i in reversed(to_remove):
@@ -481,9 +457,8 @@ class Page:
         self.save()
 
     def get_without_action_objects(self):
-        # The content and its file shape are the document's, not this
-        # object's: the flush writes pages no deck is showing too, and those
-        # have no Page to ask.
+        # The document owns the content and its file shape. The flush writes
+        # pages that no deck shows, and those have no Page to ask.
         return self._document.get_without_action_objects()
 
     def get_all_actions(self, action_dict: _Dict = None):
@@ -566,9 +541,8 @@ class Page:
         if action_object is None:
             raise ValueError("Could not find action object")
         
-        # NB: the loop variable must not be named `action_dict` -- it used to
-        # shadow the parameter, turning the assignment below into a no-op
-        # self-assignment.
+        # Do not name the loop variable action_dict. It shadows the parameter
+        # and makes the assignment below a self-assignment.
         ident = action_object.input_ident
         for state in ident.get_states(self):
             actions = ident.get_actions(self, state)
@@ -622,31 +596,29 @@ class Page:
     @log.catch
     def initialize_actions(self):
         for action in self.get_all_actions():
-            # Atomic claim: the bare check-then-set let two
-            # concurrent load_page(samePage) calls both see False and both
-            # submit ready callbacks -- a second concurrent on_ready
-            # (duplicate backend processes, the same class already closed for the
-            # on_update path). Only the claim is under the lock; the loads
-            # and the pool submit stay outside it.
+            # Atomic claim. A bare check-then-set lets two concurrent
+            # load_page calls for one page both read False and both submit
+            # ready callbacks, which runs a second on_ready and duplicates the
+            # backend processes. Only the claim is under the lock.
             with self._ready_claim_lock:
                 if action.on_ready_called:
                     continue
                 action.on_ready_called = True
             action.load_event_overrides()
             action.load_initial_generative_ui()
-            # Plugin callbacks can block indefinitely; run them on the
-            # deck's action pool, never on the caller's (often GTK) thread.
+            # A plugin callback can block without end, so it runs on the deck's
+            # action pool and never on the caller's thread, which is often GTK.
             self._submit_ready_callbacks(action)
 
     def _submit_ready_callbacks(self, action: ActionCore):
         executor = getattr(self.deck_controller, "action_executor", None)
         if executor is None:
-            # Deck is being torn down; drop the call.
+            # The deck is in teardown, so drop the call.
             return
         try:
             executor.submit(self._run_ready_callbacks, action)
         except RuntimeError:
-            # Executor already shut down (deck disconnected mid-call)
+            # The executor shut down, because the deck disconnected mid-call.
             pass
 
     @log.catch
@@ -658,8 +630,8 @@ class Page:
                 f"on_ready failed for action {getattr(action, 'action_id', action)}"
             )
         finally:
-            # A raising on_ready must still open the tick/update gates --
-            # otherwise the action is silently dead for the page's lifetime.
+            # A raising on_ready must still open the tick and update gates, or
+            # the action stays dead for the life of the page.
             action.on_ready_finished = True
         action.on_update()
 
@@ -669,10 +641,9 @@ class Page:
                 for state in self.action_objects[input_type][input_identifier]:
                     state_dict = self.action_objects[input_type][input_identifier][state]
                     for action in list(state_dict.values()):
-                        # Notify before detaching: plugin cleanup code may
-                        # still need action.page. clean_up() is unconditional
-                        # regardless of what the hook does (D1) -- teardown()
-                        # is a no-op for non-ActionCore placeholders.
+                        # Notify before the detach, because plugin cleanup
+                        # code can still need action.page. teardown() always calls
+                        # clean_up(), and it is a no-op for a placeholder.
                         ActionCore.teardown(action)
                         if hasattr(action, "page"):
                             action.page = None
@@ -682,10 +653,9 @@ class Page:
     def get_pages_with_same_json(self, get_self: bool = False) -> list:
         pages: list[Page]= []
         for controller in (gl.deck_manager.deck_controller if gl.deck_manager is not None else []):
-            # Snapshot active_page once: it is set to None from another thread
-            # while a controller (dis)connects/closes, so re-reading the field
-            # per check raced a non-None guard against a None deref of
-            # .json_path (same class as update_input's guard).
+            # Snapshot active_page once. Another thread sets it to None while a
+            # controller connects, disconnects or closes, so a re-read per check
+            # races a non-None guard against a None deref of .json_path.
             active_page = controller.active_page
             if active_page is None:
                 continue
@@ -699,14 +669,11 @@ class Page:
                              load_brightness: bool = True, load_screensaver: bool = True, load_background: bool = True, load_inputs: bool = True,
                              load_dials: bool = True, load_touchscreens: bool = True):
 
-        # Not redundant now that the siblings share this page's dict. Callers
-        # that edit the dict and then come straight here (a pasted key, a
-        # pasted dial) have no other save in the call, and the reload below
-        # re-reads the file into the document -- so without this the edit
-        # would be overwritten by the version on disk that never got it. The
-        # save marks the page, the read barrier inside the reload writes the
-        # mark out, and the re-read then returns the edit rather than erasing
-        # it.
+        # A caller that edits the dict and comes straight here, such as a
+        # pasted key or a pasted dial, has no other save in the call, so this
+        # save must stay. It marks the page, the read barrier inside the reload
+        # writes the mark out, and the re-read below then returns the edit
+        # instead of erasing it.
         self.save()
         for page in self.get_pages_with_same_json(get_self=reload_self):
             page.load(load_from_file=True)
@@ -714,9 +681,8 @@ class Page:
             if identifier is not None:
                 page.deck_controller.load_input_from_identifier(identifier, page)
             else:
-                # Each controller gets its OWN Page object -- passing `self`
-                # here loaded THIS controller's Page onto the others
-                # (cross-deck page bleed).
+                # Each controller gets its own Page object. A self here loads
+                # this controller's Page onto the other decks.
                 page.deck_controller.load_page(page)
 
     def get_action_comment(self, index: int, state: int, identifier: InputIdentifier) -> str:
@@ -745,8 +711,8 @@ class Page:
     
     # Configuration
     def _get_dict_value(self, keys: list[str]):
-        # Any, not dict: the walk descends out of the page's mapping into
-        # whatever the leaf holds -- which is the AttributeError caught below.
+        # Any, because the walk descends out of the page's mapping into
+        # whatever the leaf holds. The except below catches that case.
         value: Any = self.dict
         for i, key in enumerate(keys):
             fallback: dict | None = {}
@@ -756,7 +722,7 @@ class Page:
             try:
                 value = value.get(key, fallback)
             except AttributeError:
-                # A shorter path than `keys` bottomed out on a non-dict.
+                # A path shorter than keys ended on a non-dict.
                 return
         return value
     
@@ -775,8 +741,8 @@ class Page:
         #TODO: Make input specific
         coords = self.get_tuple_coords(coords)
         for controller in (gl.deck_manager.deck_controller if gl.deck_manager is not None else []):
-            # active_page is None while a controller is (dis)connecting or
-            # closing -- skip it instead of AttributeError-ing.
+            # active_page is None while a controller connects, disconnects or
+            # closes. Skip it instead of raising AttributeError.
             active_page = controller.active_page
             if active_page is None or active_page.json_path != self.json_path:
                 continue
@@ -795,8 +761,8 @@ class Page:
                 if controller.screen_saver.showing:
                     controller.screen_saver.hide()
 
-            # active_page is None while a controller is (dis)connecting or
-            # closing -- skip it instead of AttributeError-ing.
+            # active_page is None while a controller connects, disconnects or
+            # closes. Skip it instead of raising AttributeError.
             active_page = controller.active_page
             if active_page is None or active_page.json_path != self.json_path:
                 continue
@@ -817,8 +783,8 @@ class Page:
 
         return inputs
 
-    # ControllerInputState, not ControllerKeyState: `states` is declared as the
-    # base on ControllerInput, and every use below (label/layout manager) is a
+    # ControllerInputState, because ControllerInput declares states as the
+    # base, and every use below in the label and layout managers is a
     # base-class member.
     def get_controller_input_states(self, identifier: InputIdentifier, state: int) -> list["ControllerInputState"]:
         matching_states: list["ControllerInputState"] = []
@@ -860,9 +826,9 @@ class Page:
     def set_label_text(self, identifier: InputIdentifier, state: int, label_position: str, text: str, update: bool = True) -> None:
         for input_state in self.get_controller_input_states(identifier, state):
             input_state.label_manager.page_labels[label_position].text = text
-            # In-place mutation bypasses set_page_label's invalidation, so the
-            # scroll caches must be dropped here or a shortened label keeps
-            # scrolling / a lengthened one never starts (review round 1).
+            # An in-place mutation skips set_page_label and its invalidation,
+            # so drop the scroll caches here. A shortened label otherwise keeps
+            # scrolling, and a lengthened one never starts.
             input_state.label_manager.invalidate_scroll_caches()
 
         self._set_dict_value([identifier.input_type, identifier.json_identifier, "states", str(state), "labels", label_position, "text"], text)
@@ -951,10 +917,9 @@ class Page:
         if update:
             self.update_input(identifier, state)
 
-    # outline_width is a scalar stroke width (None = "inherit the font default"),
-    # not a colour tuple -- the list[int] here was copy-pasted from the sibling
-    # outline_color setter. KeyLabel.outline_width is int | None; the only
-    # callers (LabelEditor's spin button and its reset button) pass int and None.
+    # outline_width is a scalar stroke width, and None means the font default.
+    # KeyLabel.outline_width is int | None. The callers are the spin button and
+    # the reset button of LabelEditor, which pass int and None.
     def set_label_outline_width(self, identifier: InputIdentifier, state: int, label_position: str, outline_width: int | None, update: bool = True) -> None:
         for key_state in self.get_controller_input_states(identifier, state):
             key_state.label_manager.page_labels[label_position].outline_width = outline_width
@@ -1072,14 +1037,13 @@ class Page:
         return 30 if value is None else int(value)
 
     def set_media_fps(self, identifier: InputIdentifier, state: int, fps: int, update: bool = True) -> None:
-        # Live-apply to any playing video so the change doesn't wait for a
-        # page reload. GIF media (KeyGIF) has its own timeline and no
-        # set_playback -- only InputVideo-style media takes the cap.
+        # Apply to a playing video at once, so the change waits for no page
+        # reload. GIF media (KeyGIF) keeps its own timeline and has no
+        # set_playback, so only InputVideo media takes the cap.
         for input_state in self.get_controller_input_states(identifier, state):
-            # Only where THIS page is actually showing (the filter
-            # update_input uses): without it, editing one page's FPS row
-            # rebased the playing video timeline on another deck showing a
-            # different page.
+            # Only where this page shows, which is the filter update_input
+            # uses. Without it, an edit of one page's FPS row rebases the video
+            # timeline on a deck that shows another page.
             controller = getattr(input_state, "deck_controller", None)
             active_page = getattr(controller, "active_page", None)
             if active_page is None or active_page.json_path != self.json_path:

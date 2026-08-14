@@ -134,14 +134,11 @@ class ActionBase(ActionCore):
             self.on_key_down()
         elif event == Input.Dial.Events.UP:
             self.on_key_up()
-        # Discrete touchscreen gestures trigger the legacy "activate" hook,
-        # like Dial DOWN does above: without these branches a swipe (or a
-        # strip tap over a dial) dispatched to a plain ActionBase action is a
-        # silent no-op -- the SHORT_TOUCH_PRESS branch existed before the
-        # event-assigner rework and was lost in it, the drag ones never
-        # existed, so SD+ swipes did nothing for every shipped plugin.
-        # Direction-/event-selective behavior stays available through the
-        # per-action event overrides and through overriding event_callback.
+        # A discrete touchscreen gesture triggers the legacy activate hook,
+        # as Dial DOWN does above. Without these branches, a swipe or a strip
+        # tap over a dial that reaches a plain ActionBase action does nothing.
+        # An action that needs one direction or one event uses a per-action
+        # event override, or overrides event_callback.
         elif event == Input.Dial.Events.SHORT_TOUCH_PRESS:
             self.on_key_down()
         elif event in (Input.Touchscreen.Events.DRAG_LEFT, Input.Touchscreen.Events.DRAG_RIGHT):

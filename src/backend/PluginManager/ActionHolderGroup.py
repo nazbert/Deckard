@@ -9,9 +9,7 @@ class ActionHolderGroup:
         """
         Args:
             group_name: The name of the group.
-            action_holders: All Action Holders contained in this group.
-            hide_on_group_support: Hides the Group in the Action Chooser when the Group is not Supported.
-            group_support: The Support types for the various Input Types.
+            action_holders: The action holders in this group.
         """
         self._group_name: str = group_name
         self._action_holders: set[ActionHolder] = set(action_holders)
@@ -55,12 +53,11 @@ class ActionHolderGroup:
     def get_action_holders_with_min_action_input_support(self, action_input_support: ActionInputSupport) -> set[ActionHolder]:
         action_holders: set[ActionHolder] = set()
         for action_holder in self._action_holders:
-            # BUG: passes the holder's action_id (a str) where an
-            # InputIdentifier is required, so get_input_compatibility() always
-            # falls through to UNSUPPORTED. Left as-is here because the honest
-            # fix needs an InputIdentifier this method never receives, i.e. a
-            # signature change on plugin-visible API; the method has no caller
-            # in-tree, so it is left as it stands.
+            # This passes the holder's action_id, a str, where an
+            # InputIdentifier belongs, so get_input_compatibility() always
+            # answers UNSUPPORTED. That is a defect. The correct fix needs an InputIdentifier
+            # that this method never receives, which changes a plugin-visible
+            # signature. No caller in this tree reaches the method.
             if action_holder.get_input_compatibility(action_holder.action_id) >= action_input_support:  # type: ignore[arg-type]  # root cause: get_input_compatibility passed action_id, not an InputIdentifier
                 action_holders.add(action_holder)
 

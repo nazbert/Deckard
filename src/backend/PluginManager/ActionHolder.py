@@ -14,7 +14,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 from copy import deepcopy
 
-# Import own modules
 from src.backend.PluginManager.ActionBase import ActionBase
 from src.backend.PluginManager.ActionInputSupport import ActionInputSupport
 from src.backend.PluginManager.ActionCore import ActionCore
@@ -22,13 +21,11 @@ from src.backend.PageManagement.Page import Page
 from src.backend.DeckManagement.deck_controller.controller import DeckController
 from src.backend.DeckManagement.InputIdentifier import Input, InputIdentifier
 
-# Import typing
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.backend.PluginManager.PluginBase import PluginBase
 
-# Import gtk
 import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk
@@ -40,9 +37,7 @@ import globals as gl
 from loguru import logger as log
 
 class ActionHolder:
-    """
-    Holder for ActionCore containing important information that can be used as long as the ActionCore is not initialized
-    """
+    """Holds an ActionCore and the information available before it starts."""
     def __init__(self,
         plugin_base: "PluginBase",
         action_name: str,
@@ -69,12 +64,11 @@ class ActionHolder:
             raise ValueError("Please specify an action id or an action id suffix")
         
         if icon is None:
-            # ActionHolders are built in plugin __init__, which runs on a
-            # store worker thread on the install path. GTK4 is
-            # main-thread-only -- off-main widget construction is the
-            # segfault/abort class -- so the default icon is marshalled onto
-            # the main loop. Inline (zero-cost) on the normal startup path,
-            # which already runs on main.
+            # An ActionHolder is built in plugin __init__, which runs on a
+            # store worker thread on the install path. GTK4 works on the main
+            # thread alone, and a widget built off it aborts the process, so
+            # this marshals the default icon onto the main loop. The startup
+            # path already runs on main, where the marshal costs nothing.
             from src.backend.main_loop import run_on_main
             icon = run_on_main(lambda: Gtk.Image(icon_name="insert-image-symbolic"))
 
@@ -100,9 +94,9 @@ class ActionHolder:
             return None
 
         if self.action_core is None:
-            # Neither action_core nor action_base was given to __init__; the
-            # call below used to raise TypeError into @log.catch, which
-            # swallowed it and returned None anyway.
+            # __init__ got neither action_core nor action_base. The call below
+            # raises TypeError into @log.catch, which swallows it and returns
+            # None.
             log.error(f"Action holder {self.action_id} has no action class")
             return None
 

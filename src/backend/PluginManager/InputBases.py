@@ -4,13 +4,12 @@ from src.backend.PluginManager.EventAssigner import EventAssigner
 from src.backend.DeckManagement.InputIdentifier import Input
 from src.backend.PluginManager.ActionCore import ActionCore
 
-# Event delivery always passes exactly one positional argument:
-# ActionCore._raw_event_callback(event, data) -> EventAssigner.call(data)
-# -> callback(data). The on_* handlers below are the documented plugin
-# override points and take no argument, so every registration adapts the
-# arity with a data-dropping lambda -- same pattern as ActionBase. The
-# lambdas also dispatch dynamically through self, so subclass overrides of
-# the no-arg handlers keep working unchanged.
+# Event delivery passes one positional argument. The _raw_event_callback of
+# ActionCore calls EventAssigner.call(data), which calls callback(data). The
+# on_ prefixed handlers below are the documented plugin override points and take
+# no argument, so each registration drops the argument in a lambda, as
+# ActionBase does. Each lambda also dispatches through self, so a subclass
+# override of a no-argument handler keeps working.
 
 class InputAction(ABC):
     pass
