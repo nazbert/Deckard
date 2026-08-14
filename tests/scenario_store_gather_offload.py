@@ -1,21 +1,13 @@
 """
-Regression test -- get_last_commit serialized/evaded the store
-fetch path, exercised WITHOUT network:
+Regression test for get_last_commit on the shared store fetch path.
 
-get_last_commit used to issue its requests.get() outside the shared fetch
-machinery: each call serialized the WHOLE page load behind that request's
-latency (up to timeout=30 apiece) and evaded the fetch-limiter semaphore
-that 782a1dac routed every other fetch through. Its requests exceptions
-also raised straight through instead of returning NoConnectionError,
-bypassing the error contract every sibling fetch obeys.
-
-The contract is now (with the sync backend): catalog prepare_* tasks fan
-out on StoreBackend._prepare_pool so per-entry lookups overlap;
-get_last_commit runs under _fetch_limiter like every sibling fetch;
-network failures return NoConnectionError; prepare_plugin and
-download_repo isinstance-check it instead of interpolating an error
-object (or None) into further URLs.
+No network is involved.
 """
+
+# Catalog prepare tasks fan out on StoreBackend._prepare_pool, so per-entry
+# lookups overlap. get_last_commit runs under _fetch_limiter like every sibling
+# fetch, a network failure raises StoreFetchError, and download_repo fails up
+# front on an unresolved sha.
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -38,7 +30,7 @@ class FakeResponse:
 
 
 def _make_backend() -> StoreBackend:
-    sb = StoreBackend.__new__(StoreBackend)  # skip __init__ (spawns a fetch thread)
+    sb = StoreBackend.__new__(StoreBackend)  # skip __init__, which spawns a fetch thread
     from src.backend.Store.StoreCache import StoreCache
     sb.store_cache = StoreCache()
     sb.official_authors = []
@@ -51,8 +43,8 @@ def _make_backend() -> StoreBackend:
 
 
 def test_catalog_fanout_overlaps() -> None:
-    """5 x 0.3s commit lookups through process_store_data's pool must run
-    in ~one round-trip, not serialize (fully serial would be >= 1.5s)."""
+    """Five 0.3s commit lookups through process_store_data's pool must run
+    in about one round-trip. A serial run would take 1.5s or more."""
     def slow_get(url, timeout=30):
         time.sleep(0.3)
         return FakeResponse()
@@ -84,8 +76,8 @@ def test_catalog_fanout_overlaps() -> None:
 
 
 def test_lookup_respects_fetch_limiter() -> None:
-    """get_last_commit must take the shared fetch limiter like every
-    sibling fetch (it used to evade it)."""
+    """get_last_commit must take the shared fetch limiter, like every
+    sibling fetch."""
     in_flight = 0
     peak = 0
     lock = threading.Lock()
@@ -126,10 +118,9 @@ def test_lookup_respects_fetch_limiter() -> None:
 
 
 def test_network_failure_raises_store_fetch_error() -> None:
-    """A requests exception must come back as a StoreFetchError (the raising
-    contract every sibling fetch now obeys), and prepare_plugin must let it
-    propagate -- without fetching a manifest for an unresolved commit -- so the
-    fan-out's per-future collect drops just that entry."""
+    """A requests exception must come back as a StoreFetchError, and
+    prepare_plugin must let it propagate without fetching a manifest for an
+    unresolved commit, so the fan-out drops just that entry."""
     def failing_get(url, timeout=30):
         raise requests.exceptions.ConnectionError("boom: no route to host")
 
@@ -144,13 +135,13 @@ def test_network_failure_raises_store_fetch_error() -> None:
         except StoreFetchError:
             pass
 
-        def manifest_must_not_be_called(url, commit):
+        def forbidden_manifest(url, commit):
             raise AssertionError(
                 "prepare_plugin must not fetch a manifest when the branch's "
                 "commit could not be resolved"
             )
 
-        sb.get_manifest = manifest_must_not_be_called
+        sb.get_manifest = forbidden_manifest
         plugin = {"url": "https://github.com/Example/TestPlugin", "branch": "main"}
         try:
             sb.prepare_plugin(plugin)
@@ -162,16 +153,16 @@ def test_network_failure_raises_store_fetch_error() -> None:
 
 
 def test_download_repo_guards_unresolved_sha() -> None:
-    """download_repo's branch path resolves the sha through get_last_commit;
-    a raised StoreFetchError or a None sha must fail the download up front
-    instead of interpolating the object into the archive URL."""
-    def get_must_not_be_called(*args, **kwargs):
+    """download_repo's branch path resolves the sha through get_last_commit.
+    A raised StoreFetchError or a None sha must fail the download up front,
+    rather than interpolate the object into the archive URL."""
+    def forbidden_get(*args, **kwargs):
         raise AssertionError("no archive fetch may be attempted for an unresolved sha")
 
     real_get = sb_module.http_client.get
     real_is_flatpak = sb_module.is_flatpak
-    sb_module.http_client.get = get_must_not_be_called
-    sb_module.is_flatpak = lambda: True  # force the zip path (argv has --devel)
+    sb_module.http_client.get = forbidden_get
+    sb_module.is_flatpak = lambda: True  # force the zip path, since argv has --devel
     try:
         sb = _make_backend()
 

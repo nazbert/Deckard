@@ -1,27 +1,18 @@
 #!/usr/bin/env python3
 """
-soak_driver.py -- drive a running Deckard over its DBus API
-(src/api.py) for a memory soak run (docs/memory-footprint-plan.md Phase 0
-P0.6; see tests/soak/README.md for the full manual soak procedure this
-script is one part of).
+Drive a running Deckard over its DBus API for a memory soak run.
 
-Cycles every connected controller through the configured pages and drops a
-marker line into mem_telemetry.csv (if SC_MEM_TELEMETRY=1 was set for the
-run) so the switches line up against the RSS/thread/fd timeline the
-sampler is recording.
-
-Degrades gracefully: if the app isn't running (no DBus service reachable),
-this prints why and exits 1 instead of raising.
+Cycles every connected controller through the configured pages and writes a
+marker line into mem_telemetry.csv when SC_MEM_TELEMETRY is set.
 
 Usage:
     .venv/bin/python tests/soak/soak_driver.py [--cycles N] [--interval SECONDS]
-
-Note: brightness and screensaver-force cycling (mentioned alongside page
-switches in the plan) aren't exposed on the DBus API yet -- src/api.py
-currently has only page/icon-pack/window methods. Only page switches are
-driven for now; this script is the obvious place to add the others once
-they land.
 """
+
+# The markers line the switches up against the timeline the sampler records.
+# With no DBus service reachable, the driver prints the reason and exits 1
+# rather than raising. The DBus API carries page, icon-pack and window methods
+# only, so brightness and screensaver cycling are not driven from here yet.
 import argparse
 import os
 import re
@@ -36,7 +27,8 @@ CONTROLLER_BASE_PATH = TOP_PATH + "/controllers"
 
 
 def _serial_to_dbus_path(serial: str) -> str:
-    """Mirrors src/api.py's _serial_to_dbus_path -- DBus paths only allow [A-Za-z0-9_]."""
+    """Mirrors _serial_to_dbus_path in src/api.py. A DBus path allows only
+    the characters [A-Za-z0-9_]."""
     return re.sub(r"[^A-Za-z0-9_]", "_", serial)
 
 
@@ -52,8 +44,8 @@ def connect():
     bus = SessionMessageBus()
     top = bus.get_proxy(SERVICE, TOP_PATH, TOP_IFACE)
     try:
-        # get_proxy() does no I/O by itself -- touch a property to confirm
-        # the service is actually up before committing to a run.
+        # get_proxy() performs no I/O of its own, so read a property to
+        # confirm the service is up before committing to a run.
         _ = top.Controllers
     except Exception as e:
         print(f"Deckard DBus API not reachable ({e}). Is the app running?", file=sys.stderr)
@@ -62,9 +54,11 @@ def connect():
 
 
 def write_marker(data_path: str, text: str) -> None:
-    """Append a '#'-prefixed marker line to mem_telemetry.csv. A no-op if
-    telemetry wasn't enabled for this run (no CSV to mark) -- markers are a
-    correlation aid, not something the rest of this script depends on."""
+    """Append a marker line, prefixed with '#', to mem_telemetry.csv.
+
+    With telemetry off for this run there is no CSV to mark, so this does
+    nothing. A marker is a correlation aid that nothing else here reads.
+    """
     if not data_path:
         return
     csv_path = os.path.join(data_path, "logs", "mem_telemetry.csv")

@@ -1,12 +1,9 @@
 """
-Unit-tier scenario (docs/presenter-migration-plan.md §7 "Straggler
-injection"): a paint enqueued for generation G must be dropped at the
-present boundary once a newer load_page has bumped the generation past G,
-and a paint enqueued against the *current* generation must still land.
+Unit-tier scenario for the straggler drop at the present boundary.
 
-This exercises MediaPlayerThread.perform_media_player_tasks()'s judge
-directly (deck_controller/media_writer.py) without spinning the thread loop, so
-it's deterministic: one call == "one media cycle".
+A paint enqueued for generation G is dropped once a newer load_page bumps the
+generation past G, and a paint against the current generation still lands.
+This drives perform_media_player_tasks directly, so one call is one cycle.
 """
 import fixtures
 
@@ -19,8 +16,8 @@ def main() -> None:
     gen_g = controller._page_load_generation
 
     # Enqueue a frame for gen G, then bump the generation the way load_page
-    # does (under _page_gen_lock) WITHOUT switching pages -- the straggler
-    # case is "same page, superseded content generation".
+    # does, under _page_gen_lock and with no page switch. The straggler case
+    # is the same page with a superseded content generation.
     stale_image = fixtures.make_native_image(fill=1)
     media_player.add_image_task(0, stale_image, page=page, config_gen=gen_g)
 

@@ -1,26 +1,13 @@
 """
 Pins the page state-key type contract.
 
-A page json's ``states`` map is keyed by STRINGS -- Page.save() writes
-self.dict verbatim through atomic_write_json, and JSON has no other option.
-The in-memory ``action_objects`` registry is keyed by INTS. Before the
-InputIdentifier accessors landed, every walk re-derived that boundary by
-hand, and several did it inconsistently in one expression (Page.get_action_dict
-iterated ``str`` state keys but looked the same states up in action_objects
-with ``int(state)``), so a page could round-trip with an int key wedged into
-the json tree.
-
-Checks:
-  (a) The accessors coerce -- get_state_dict/get_actions/get_action_entry
-      return the same live objects for state 0 and "0", and never for a
-      state that doesn't exist.
-  (b) They hand back LIVE dicts (mutating the result is visible in
-      page.dict), and ensure_state_dict creates the chain.
-  (c) get_action_dict / set_action_dict / set_action_settings round-trip
-      against a real Page carrying a real action object.
-  (d) No non-str state key ever appears in page.dict -- or in the json
-      actually written to disk -- after any of those writes.
+A page json's states map is keyed by strings, because Page.save writes
+self.dict through atomic_write_json.
 """
+
+# The in-memory action_objects registry is keyed by ints, and the
+# InputIdentifier accessors are the one coercion point, so no non-str state key
+# ever reaches page.dict or the file.
 import json
 import os
 
@@ -80,14 +67,14 @@ def check_accessor_coercion_and_liveness(page, ident) -> None:
           ident.get_action_entry(page, 0, 5) is None
           and ident.get_action_entry(page, 0, -1) is None)
 
-    # Live, not a copy: a mutation through the accessor is in page.dict.
+    # Live, not a copy. A mutation through the accessor lands in page.dict.
     ident.get_state_dict(page, 0)["harness-probe"] = 1
     check("get_state_dict hands back a live dict",
           page.dict[ident.input_type][ident.json_identifier]["states"]["0"].get("harness-probe") == 1)
     del ident.get_state_dict(page, 0)["harness-probe"]
 
-    # ensure_state_dict builds the chain, with a str key, for a state that
-    # is not there yet -- and is idempotent.
+    # ensure_state_dict builds the chain under a str key for a state that is
+    # not there yet, and is idempotent.
     created = ident.ensure_state_dict(page, 3)
     created["media"] = {"path": None}
     check("ensure_state_dict creates the state under a str key",
@@ -103,7 +90,7 @@ def check_accessor_coercion_and_liveness(page, ident) -> None:
     check("no non-str state key after the accessor writes",
           not bad_state_keys(page.dict), str(bad_state_keys(page.dict)))
 
-    # Leave the page as we found it.
+    # Leave the page as it was.
     del page.dict[ident.input_type][ident.json_identifier]["states"]["3"]
     del page.dict["keys"]["4x4"]
 
@@ -146,9 +133,9 @@ def check_disk_round_trip(page) -> None:
     check("no non-str state key survives to disk",
           not bad_state_keys(on_disk), str(bad_state_keys(on_disk)))
 
-    # An int key smuggled straight into the live dict must be the ONLY way
-    # to get one there -- i.e. the accessors are the coercion point, and a
-    # raw write bypassing them is what this guard would catch.
+    # An int key written straight into the live dict is the only way to get
+    # one there, because the accessors are the coercion point. This guard
+    # catches a raw write that bypasses them.
     page.dict["keys"]["5x5"] = {"states": {0: {"actions": []}}}
     check("the guard actually detects a non-str state key",
           bool(bad_state_keys(page.dict)))

@@ -1,35 +1,12 @@
 """
-Coverage for the destructive filesystem half of the store install path,
-exercised WITHOUT network. Every existing store scenario pins
-result *propagation*; nothing exercised
-download_repo's own extract/cleanup contract or install_plugin's
-delete-only-after-a-good-download behavior.
+Coverage for the destructive filesystem half of the store install path.
 
-download_repo is the single choke point every install_*/download_repo caller
-funnels through. Its contract (transactional):
-
-  1. A network fault mid-stream removes the partial/zero-byte .zip from the
-     cache instead of leaving it to poison the next run.
-  2. A corrupt/truncated archive (unpack raises) returns NoConnectionError
-     and never leaves the extracted temp folder behind.
-  3. An archive with unsafe (path-traversal) member names is refused before
-     anything is unpacked.
-  4. The DESTINATION is replaced only by _swap_into_place, with a fully
-     staged, validated, VERSION-stamped tree; the old install is renamed
-     aside (restorable) and deleted only after the new tree is in place. A
-     failure at ANY point -- download, extraction, expected_id manifest
-     validation, even the swap renames themselves -- leaves the
-     pre-existing install byte-for-byte intact. All four asset types ride
-     on this (B-06's pre-delete flow is gone; pinned in
-     scenario_store_b06_pack_survival.py).
-
-The shared session's `http_client.get` is monkeypatched to serve bytes from
-an in-memory archive (or raise) -- no socket is ever opened. Extraction and
-cleanup run against the real shutil/zipfile machinery in the isolated temp
-DATA_PATH. The archive itself is fetched by
-http_client.download_to_file, which is where contract 1 (no partial/zero-
-byte .zip survives a failed download) is now enforced.
+download_repo is the single choke point every install_* caller funnels through.
 """
+
+# A network fault mid-stream removes the partial archive, a corrupt archive
+# leaves no extracted temp folder, an unsafe member is refused before unpack,
+# and the destination changes only through a staged, validated swap.
 import io
 import os
 import zipfile
@@ -46,11 +23,9 @@ CACHE_DIR = os.path.join(gl.DATA_PATH, "cache")
 
 
 def _force_release_download_path() -> None:
-    """The harness runs with --devel (fixtures.py), which routes download_repo
-    into the git-clone branch. The real store install path on end-user
-    installs is the requests+zip branch (devel off). Pin parse_args().devel to
-    False for this scenario so we exercise the real download_repo code, not the
-    dev-only clone_repo shortcut."""
+    """The harness runs with --devel, which routes download_repo into the
+    git-clone branch. Pinning parse_args().devel to False exercises the
+    requests and zip path an end-user install takes."""
     real_parse = gl.argparser.parse_args
 
     def parse_no_devel(*args, **kwargs):
@@ -62,7 +37,7 @@ def _force_release_download_path() -> None:
 
 
 def _make_backend() -> StoreBackend:
-    sb = StoreBackend.__new__(StoreBackend)  # skip __init__ (spawns a fetch thread)
+    sb = StoreBackend.__new__(StoreBackend)  # skip __init__, which spawns a fetch thread
     from src.backend.Store.StoreCache import StoreCache
     sb.store_cache = StoreCache()
     return sb
@@ -74,8 +49,8 @@ class _FakeResponse:
     def __init__(self, chunks, raise_on_status=False, raise_at_chunk=None):
         self._chunks = chunks
         self._raise_on_status = raise_on_status
-        # Index at which iter_content raises (0 = before any bytes are
-        # written, i.e. a genuine zero-byte file; 1 = a partial file).
+        # Index at which iter_content raises. 0 is before any byte is
+        # written, which gives a zero-byte file, and 1 gives a partial file.
         self._raise_at_chunk = raise_at_chunk
 
     def __enter__(self):
@@ -113,7 +88,7 @@ def _restore_get(prev):
 
 
 def _good_zip_bytes(top_folder="repo-abc", files=None) -> bytes:
-    """A github-shaped archive: one top-level folder, then files under it."""
+    """A github-shaped archive. One top-level folder, then files under it."""
     files = files or {"manifest.json": b"{}", "main.py": b"print(1)\n"}
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
@@ -144,9 +119,8 @@ def _cache_zips() -> list[str]:
 
 def _extract_folder_left(top_folder: str) -> bool:
     """Whether download_repo left its per-archive extraction temp folder
-    (named after the zip's single top-level folder) behind in the cache.
-    Other unrelated cache subdirs (e.g. `videos`) are ignored -- only the
-    extraction residue for THIS archive is the litter under test."""
+    behind in the cache. An unrelated cache subdir is ignored, so only this
+    archive's residue counts."""
     return os.path.isdir(os.path.join(CACHE_DIR, top_folder))
 
 
@@ -154,7 +128,7 @@ REPO_URL = "https://github.com/test/Repo"
 SHA = "a" * 40
 
 
-def test_successful_install_cleans_cache_and_writes_version() -> None:
+def test_install_cleans_cache_writes_version() -> None:
     sb = _make_backend()
     dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_Good")
 
@@ -169,14 +143,14 @@ def test_successful_install_cleans_cache_and_writes_version() -> None:
     assert os.path.isfile(os.path.join(dest, "VERSION")), "VERSION file not written"
     with open(os.path.join(dest, "VERSION")) as f:
         assert f.read() == SHA
-    # The origin stamp is written in the staging tree alongside VERSION, so
-    # the swap publishes the install and the repository it came from
-    # together -- the update check identifies the install by this file.
+    # The origin stamp is written in the staging tree beside VERSION, so the
+    # swap publishes the install and its repository together. The update
+    # check identifies the install by this file.
     origin_path = os.path.join(dest, store_mod.StoreBackend.ORIGIN_FILE)
     assert os.path.isfile(origin_path), "ORIGIN stamp not written"
     with open(origin_path) as f:
         assert f.read().strip() == REPO_URL, "ORIGIN must name the repository installed from"
-    # No temp zip / extracted folder litter left in the cache.
+    # No temp zip and no extracted folder are left in the cache.
     assert _cache_zips() == [], f"downloaded zip left in cache: {_cache_zips()}"
     assert not _extract_folder_left("repo-abc"), "extracted temp folder left in cache"
     print("PASS: successful install writes VERSION and leaves no cache litter")
@@ -186,8 +160,8 @@ def test_network_fault_midstream_removes_partial_zip() -> None:
     sb = _make_backend()
     dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_Partial")
 
-    # Two chunks; the fake raises when the second is requested -- a partial
-    # .zip is already on disk at that point.
+    # Two chunks. The fake raises on the second, so a partial .zip is already
+    # on disk at that point.
     prev = _install_fake_get(_chunk(_good_zip_bytes(), n=64), raise_at_chunk=1)
     try:
         result = sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA)
@@ -211,7 +185,7 @@ def test_http_error_before_open_creates_no_archive() -> None:
     sb = _make_backend()
     dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_404")
 
-    # raise_for_status fires before open("wb"): no file is created at all.
+    # raise_for_status fires before open("wb"), so no file is created.
     prev = _install_fake_get(_chunk(_good_zip_bytes()), raise_on_status=True)
     try:
         result = sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA)
@@ -223,12 +197,12 @@ def test_http_error_before_open_creates_no_archive() -> None:
     print("PASS: an HTTP error before the body opens no archive")
 
 
-def test_fault_before_first_chunk_removes_zero_byte_archive() -> None:
+def test_fault_before_chunk_removes_archive() -> None:
     sb = _make_backend()
     dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_ZeroByte")
 
-    # The file is open()'d, then iter_content raises before yielding any bytes
-    # -- a genuine zero-byte archive on disk that the except-branch must reap.
+    # The file is opened, then iter_content raises before it yields a byte.
+    # The except branch must reap that zero-byte archive.
     prev = _install_fake_get(_chunk(_good_zip_bytes()), raise_at_chunk=0)
     try:
         result = sb.download_repo(repo_url=REPO_URL, directory=dest, commit_sha=SHA)
@@ -243,7 +217,7 @@ def test_fault_before_first_chunk_removes_zero_byte_archive() -> None:
     print("PASS: a fault before the first chunk removes the zero-byte archive")
 
 
-def test_corrupt_archive_returns_error_and_cleans_up() -> None:
+def test_corrupt_archive_cleans_up() -> None:
     sb = _make_backend()
     dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_Corrupt")
 
@@ -290,12 +264,10 @@ def test_traversal_member_is_refused() -> None:
 
 
 def test_download_fault_leaves_existing_install_intact() -> None:
-    """download_repo touches the destination only at swap time, AFTER a good
-    download + extract + validation (the transactional install). A
-    fault before that must leave a pre-existing install byte-for-byte
-    intact. The icon/wallpaper/sd_plus install_* wrappers ride
-    on this same safety instead of pre-deleting (B-06, pinned in
-    scenario_store_b06_pack_survival.py)."""
+    """download_repo touches the destination only at swap time, after a good
+    download, extract and validation. A fault before that leaves a
+    pre-existing install byte-for-byte intact, and the pack install_*
+    wrappers ride on the same safety."""
     sb = _make_backend()
     dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_Existing")
     os.makedirs(dest, exist_ok=True)
@@ -320,7 +292,7 @@ def test_download_fault_leaves_existing_install_intact() -> None:
 
 
 def _hidden_swap_siblings(parent: str) -> list[str]:
-    """Transient swap trees (_swap_into_place) left behind in `parent`."""
+    """Transient swap trees that _swap_into_place left behind in parent."""
     if not os.path.isdir(parent):
         return []
     return [e for e in os.listdir(parent) if ".deckard-new" in e or ".deckard-old" in e]
@@ -345,8 +317,8 @@ def test_swap_failure_restores_existing_install() -> None:
     real_replace = store_mod.os.replace
 
     def failing_replace(src, dst):
-        # Fail exactly the swap-in of the staged tree; the aside-rename of
-        # the old install and the restore rename must still work.
+        # Fail only the swap-in of the staged tree. The aside-rename of the
+        # old install and the restore rename must still work.
         if src.endswith(".deckard-new"):
             raise OSError("simulated rename failure")
         return real_replace(src, dst)
@@ -373,11 +345,10 @@ def test_swap_failure_restores_existing_install() -> None:
     print("PASS: a failed swap-in restores the old install")
 
 
-def test_manifest_id_mismatch_refused_old_install_intact() -> None:
-    """expected_id is the staged-tree choke point: a downloaded tree whose
-    manifest.json id disagrees with the id the catalog promised (which also
-    names the install dir) must be refused with 400 before it can replace
-    the installed pack."""
+def test_manifest_id_mismatch_refused() -> None:
+    """expected_id is the staged-tree choke point. A downloaded tree whose
+    manifest.json id disagrees with the catalog id, which also names the
+    install dir, is refused with 400 before it replaces the pack."""
     sb = _make_backend()
     dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_IdMismatch")
     sentinel = _seed_install(dest)
@@ -402,11 +373,10 @@ def test_manifest_id_mismatch_refused_old_install_intact() -> None:
     print("PASS: a manifest-id mismatch is refused and the old install survives")
 
 
-def test_update_replaces_pack_and_stamps_version_in_staging() -> None:
-    """The happy-path update: the staged tree must already carry VERSION when
-    it reaches the swap (a swapped-in tree without VERSION reads as 'not
-    installed' and is never retried), the old content must be fully replaced,
-    and no transient trees may remain."""
+def test_update_replaces_pack_and_stamps() -> None:
+    """A successful update. The staged tree carries VERSION before the swap,
+    because a tree without it reads as not installed and is never retried,
+    the old content is fully replaced, and no transient tree remains."""
     sb = _make_backend()
     dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_Replace")
     sentinel = _seed_install(dest, content="old version file")
@@ -450,16 +420,16 @@ def test_update_replaces_pack_and_stamps_version_in_staging() -> None:
 def main() -> None:
     fixtures.start_watchdog(30, label="scenario_store_install_fs")
     _force_release_download_path()
-    test_successful_install_cleans_cache_and_writes_version()
+    test_install_cleans_cache_writes_version()
     test_network_fault_midstream_removes_partial_zip()
     test_http_error_before_open_creates_no_archive()
-    test_fault_before_first_chunk_removes_zero_byte_archive()
-    test_corrupt_archive_returns_error_and_cleans_up()
+    test_fault_before_chunk_removes_archive()
+    test_corrupt_archive_cleans_up()
     test_traversal_member_is_refused()
     test_download_fault_leaves_existing_install_intact()
     test_swap_failure_restores_existing_install()
-    test_manifest_id_mismatch_refused_old_install_intact()
-    test_update_replaces_pack_and_stamps_version_in_staging()
+    test_manifest_id_mismatch_refused()
+    test_update_replaces_pack_and_stamps()
     print("PASS: scenario_store_install_fs")
 
 

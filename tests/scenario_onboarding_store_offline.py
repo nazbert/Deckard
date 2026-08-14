@@ -1,23 +1,13 @@
 """
-Regression test for the fresh-install mode: a first launch behind a
-dead/rate-limited store must not silently strand the user with zero plugins.
+Regression test for a first launch behind a dead or rate-limited store.
 
-Two legs, both driven unbound with duck-typed selves (real onboarding
-widgets need a display; the control flow and the GLib marshalling are real):
-
-1. PluginRecommendations.load(): StoreBackend.get_all_plugins() returns a
-   NoConnectionError SENTINEL when every store is unreachable (offline,
-   GitHub rate limit). load() iterated it -> TypeError killed the loader
-   thread -> the onboarding Plugins page span forever; the user paged past,
-   installed nothing, and landed in the main window with an empty Add-Action
-   list (as reported upstream). Now: the error state is shown (spinner
-   stopped), and a raising fetch gets the same treatment. A fetch returning
-   a normal list still completes the load.
-
-2. OnboardingScreen5._on_start_button_click(): install failures only flashed
-   on the progress bar of a window that closes moments later. Now failures
-   aggregate into an error toast on the surviving main window.
+StoreBackend.get_all_plugins answers an Err when every store is unreachable.
+Both legs run unbound over duck-typed selves.
 """
+
+# PluginRecommendations.load shows the error state instead of iterating that
+# Err, and an onboarding install failure reaches an error toast on the
+# surviving main window.
 import types
 
 import fixtures  # noqa: F401  (isolates DATA_PATH before src imports)
@@ -62,9 +52,8 @@ def check_recommendations_offline() -> None:
     from src.backend.Store.store_result import Err, ErrReason, Ok
     from src.windows.Onboarding.PluginRecommendations import PluginRecommendations
 
-    # Leg 1a: an Err from the read boundary -- must show the error state, not
-    # die. (Pre-fix get_all_plugins returned a NoConnectionError sentinel and
-    # load() iterated it -> TypeError killed the loader thread.)
+    # Leg 1a. An Err from the read boundary shows the error state. Iterating
+    # the Err instead raises TypeError and kills the loader thread.
     gl.store_backend = types.SimpleNamespace(get_all_plugins=lambda: Err(ErrReason.NO_CONNECTION))
     fake, calls = make_recommendations_self()
     PluginRecommendations.load(fake)
@@ -75,7 +64,7 @@ def check_recommendations_offline() -> None:
     )
     assert not fake.group.rows, "no rows may be built on a failed fetch"
 
-    # Leg 1b: raising fetch -- same treatment.
+    # Leg 1b. A raising fetch gets the same treatment.
     def boom():
         raise RuntimeError("store exploded")
 
@@ -84,9 +73,8 @@ def check_recommendations_offline() -> None:
     PluginRecommendations.load(fake)
     assert calls["error"] == 1, "a raising fetch must also show the error state"
 
-    # Leg 1c: a normal Ok (here carrying an all-falsy list, so no widgets get
-    # built) still completes the load -- the idle-marshalled build_rows must
-    # run and stop the spinner.
+    # Leg 1c. An Ok still completes the load. The list holds only falsy
+    # entries, so no widgets get built, and build_rows stops the spinner.
     gl.store_backend = types.SimpleNamespace(get_all_plugins=lambda: Ok([None, None]))
     fake, calls = make_recommendations_self()
     PluginRecommendations.load(fake)
@@ -100,17 +88,14 @@ def check_recommendations_offline() -> None:
     print("PASS: recommendations page survives an unreachable store")
 
 
-def check_get_plugin_for_id_offline_returns_none() -> None:
-    """Headless, pure backend: an unreachable store makes get_all_plugins
-    answer an Err, and get_plugin_for_id must narrow it to None -- not iterate
-    it. On the pre-fix backend get_all_plugins answered a NoConnectionError
-    sentinel and this method iterated it, raising TypeError; under the
-    @log.catch of every caller that TypeError was swallowed and the caller
-    stranded."""
+def check_get_plugin_for_id_offline() -> None:
+    """A headless backend check over an unreachable store. get_all_plugins
+    answers an Err, and get_plugin_for_id narrows it to None. Iterating that
+    Err raises TypeError, which each caller's @log.catch swallows."""
     from src.backend.Store.StoreBackend import StoreBackend
     from src.backend.Store.store_result import Err, ErrReason
 
-    backend = StoreBackend.__new__(StoreBackend)  # skip __init__ (spawns a fetch thread)
+    backend = StoreBackend.__new__(StoreBackend)  # skip __init__, which spawns a fetch thread
     backend.get_all_plugins = lambda include_images=True: Err(ErrReason.NO_CONNECTION, "offline")
 
     assert backend.get_plugin_for_id("com_any_Plugin") is None, (
@@ -144,16 +129,11 @@ class _SpinnerRecorder:
 
 
 def check_missing_row_spinner_recovers() -> None:
-    """The real MissingRow.install driven over a backend whose store is
-    unreachable. Install failure must reach the failed-label + error-styling
-    state instead of leaving the spinner up on the "installing" text forever.
+    """The real MissingRow.install over a backend whose store is unreachable.
 
-    Pre-fix: get_plugin_for_id iterated the offline sentinel and raised
-    TypeError, which install's @log.catch swallowed -- show_install_error never
-    ran, so the label stayed on installing_label and the spinner kept
-    spinning. The fix is in get_plugin_for_id (Err -> None), so this drives it
-    through the real MissingRow method to prove the stuck-spinner site is
-    healed."""
+    The failure must reach the failed label and the error styling. A raise
+    inside install lands in its @log.catch, which leaves the label on the
+    installing text and the spinner turning."""
     import types as _types
 
     from src.backend import timer_wheel
@@ -165,8 +145,8 @@ def check_missing_row_spinner_recovers() -> None:
     backend.get_all_plugins = lambda include_images=True: Err(ErrReason.NO_CONNECTION, "offline")
     gl.store_backend = backend
 
-    # The 3s auto-hide would leave a live timer past the test; the recovery
-    # state it hides is exactly what this asserts before it fires.
+    # The 3s auto-hide would leave a live timer past this check, and it hides
+    # the recovery state the assertions read.
     real_schedule = timer_wheel.schedule
     timer_wheel.schedule = lambda *a, **k: None
 
@@ -184,13 +164,13 @@ def check_missing_row_spinner_recovers() -> None:
         set_sensitive=lambda sensitive: None,
         main_button=_types.SimpleNamespace(set_sensitive=lambda sensitive: None),
     )
-    # show_install_error / hide_install_error are the real methods, bound to the
-    # duck-typed self -- the GLib marshalling they do is real and pumped below.
+    # show_install_error and hide_install_error are the real methods, bound
+    # to the stub self. Their GLib marshalling is real and pumped below.
     fake.show_install_error = _types.MethodType(MissingRow.show_install_error, fake)
     fake.hide_install_error = _types.MethodType(MissingRow.hide_install_error, fake)
 
     try:
-        MissingRow.install(fake)  # @log.catch wrapper -- must NOT swallow into a stuck spinner
+        MissingRow.install(fake)  # the @log.catch wrapper must not swallow into a stuck spinner
         pump_main_context()
     finally:
         timer_wheel.schedule = real_schedule
@@ -218,12 +198,12 @@ def check_install_failures_toast() -> None:
             show_error_toast=lambda body: toasts.append(body),
         )
     )
-    # The real facade, not a stub: the onboarding path reports through
-    # gl.notify now, and its main-thread routing is part of what's under test.
+    # The real facade runs here. The onboarding path reports through
+    # gl.notify, and its main-thread routing is under test.
     gl.notify = Notify()
 
     def get_plugin_for_id(plugin_id):
-        return None  # unresolvable -> install failure
+        return None  # unresolvable, so the install fails
 
     gl.store_backend = types.SimpleNamespace(get_plugin_for_id=get_plugin_for_id)
 
@@ -246,8 +226,8 @@ def check_install_failures_toast() -> None:
     )
     fake_self = types.SimpleNamespace(onboarding_window=onboarding_window)
 
-    # Called on the main thread: run_on_main runs inline, the idle_adds queue
-    # onto the default context and are pumped below.
+    # Called on the main thread, where run_on_main runs inline. The idle_adds
+    # queue on the default context and are pumped below.
     OnboardingScreen5._on_start_button_click(fake_self)
     pump_main_context()
 
@@ -266,7 +246,7 @@ def check_install_failures_toast() -> None:
 def main() -> None:
     fixtures.start_watchdog(WATCHDOG_SECONDS, label="scenario_onboarding_store_offline")
     check_recommendations_offline()
-    check_get_plugin_for_id_offline_returns_none()
+    check_get_plugin_for_id_offline()
     check_missing_row_spinner_recovers()
     check_install_failures_toast()
     print("PASS: scenario_onboarding_store_offline")

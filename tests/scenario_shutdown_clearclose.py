@@ -1,17 +1,12 @@
 """
-Integration scenario (docs/presenter-migration-plan.md §7 "Shutdown during
-active video (both quit paths)", M1): DeckManager.close_all() now submits a
-terminal ClearAndClose control message per controller and joins each media
-thread with a bounded (2s) timeout (plan §2.4), instead of writing clear+
-close directly from the calling thread.
+Integration scenario for the terminal clear-and-close on shutdown.
 
-Checks:
-  * the journal ends with the blank writes (every key + touchscreen)
-    followed immediately by close(), nothing landing after;
-  * the media thread actually exits within the bound;
-  * delete() called afterwards returns fast -- media_player.stop()'s poll on
-    an already-exited thread is a no-op, not a fresh wait.
+DeckManager.close_all submits a ClearAndClose control message per controller
+and joins each media thread with a 2s bound.
 """
+
+# The journal ends with the blank writes and one close(), the thread exits
+# inside the bound, and a later delete() returns fast.
 import time
 
 import fixtures
@@ -62,17 +57,15 @@ def main() -> None:
     )
     assert journal[-1][2] == "close", "nothing may land after close()"
 
-    # delete() afterwards must return fast: media_player.stop() polls
-    # `running`, which is already False (plan §2.4) -- not a fresh 2s wait.
+    # A later delete() must return fast. media_player.stop() polls running,
+    # which is already False, so no fresh 2s wait happens.
     t0 = time.monotonic()
     controller.keep_actions_ticking = False
     controller.delete()
     delete_elapsed = time.monotonic() - t0
-    # Liveness ceiling: media_player.stop() polls `running`, already False after
-    # close_all() above, so delete() must NOT incur a fresh 2s stop wait -- it
-    # returns fast (~ms). 1.5s stays cleanly below the 2s stop timeout (so it
-    # still catches "it took a full fresh stop wait") while giving a loaded CI
-    # runner 50% more headroom than the original 1.0s (flake hardening).
+    # A liveness ceiling. 1.5s stays below the 2s stop timeout, so it still
+    # catches a full fresh stop wait, and it leaves headroom for a loaded
+    # runner.
     assert delete_elapsed < 1.5, f"delete() took too long after shutdown: {delete_elapsed:.2f}s"
 
     if controller in gl.deck_manager.deck_controller:

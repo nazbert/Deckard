@@ -1,23 +1,16 @@
 """
-Pins MediaConfig.from_dict against the old inline media defaults.
+Pins MediaConfig.from_dict defaults and key mapping.
 
-The two state-load blocks in DeckController (ControllerKey and
-ControllerDial) used to spell the "media" section defaults inline at every
-read (``state_dict.get("media", {}).get("loop", True)`` and friends), so the
-same key could drift between call sites. MediaConfig.from_dict is now their
-single extraction point (ActionCore.set_media's kwarg defaults are the plugin
-API's own contract and deliberately stay where they are); this scenario locks
-its defaults and key mapping to the
-values those inline reads used, so a transcription slip fails here instead
-of silently changing which media a page loads.
+MediaConfig.from_dict is the single extraction point for the media section of
+a key or dial state. ActionCore.set_media keeps its own kwarg defaults, which
+are plugin API contract. A transcription slip fails here.
 """
 import fixtures  # noqa: F401  (isolates gl.DATA_PATH before anything reads it)
 
 from src.backend.DeckManagement.Media.MediaConfig import MediaConfig  # noqa: E402
 
-# The default each inline call site used before the conversion, by field.
-# Kept as a literal second copy on purpose: a typo in MediaConfig has to
-# disagree with something.
+# Expected default per field. A literal second copy, so a typo in MediaConfig
+# disagrees with something.
 EXPECTED_DEFAULTS = {
     "path": None,
     "loop": True,
@@ -51,8 +44,8 @@ SAMPLE = {
 }
 
 
-def check_empty_dict_reads_as_defaults() -> None:
-    """An empty media section must produce exactly the old inline defaults."""
+def check_empty_dict_defaults() -> None:
+    """An empty media section produces the pinned defaults."""
     for cfg in (MediaConfig.from_dict({}), MediaConfig()):
         for field, expected in EXPECTED_DEFAULTS.items():
             got = getattr(cfg, field)
@@ -64,9 +57,9 @@ def check_empty_dict_reads_as_defaults() -> None:
     print("PASS: empty media dict reads back as the pinned defaults")
 
 
-def check_field_set_matches_key_map() -> None:
-    """Every page-dict media key maps to exactly one field -- a renamed or
-    added field must show up here."""
+def check_fields_match_key_map() -> None:
+    """Every page-dict media key maps to one field. A renamed or added field
+    fails here."""
     fields = set(MediaConfig.__dataclass_fields__)
     assert fields == set(KEY_MAP), (
         f"MediaConfig fields drifted -- only in class: "
@@ -77,9 +70,9 @@ def check_field_set_matches_key_map() -> None:
     print("PASS: field set matches the pinned key map")
 
 
-def check_populated_dict_round_trips() -> None:
-    """A fully-populated media section must land on the matching fields --
-    including the kebab-case fill-mode -> fill_mode mapping."""
+def check_populated_dict_roundtrip() -> None:
+    """A populated media section lands on the matching fields, including the
+    kebab-case fill-mode key."""
     cfg = MediaConfig.from_dict(SAMPLE)
     for field, key in KEY_MAP.items():
         got = getattr(cfg, field)
@@ -90,9 +83,9 @@ def check_populated_dict_round_trips() -> None:
     print("PASS: populated media dict round-trips through from_dict")
 
 
-def check_snake_case_fill_mode_is_not_read() -> None:
-    """The JSON key is "fill-mode"; a snake_case "fill_mode" entry is not a
-    page-dict key and must not leak into the config."""
+def check_snake_case_key_ignored() -> None:
+    """The JSON key is fill-mode. A snake_case fill_mode entry is not a
+    page-dict key and must not reach the config."""
     cfg = MediaConfig.from_dict({"fill_mode": "cover"})
     assert cfg.fill_mode is None, (
         f"snake_case fill_mode was read: {cfg.fill_mode!r}"
@@ -101,9 +94,8 @@ def check_snake_case_fill_mode_is_not_read() -> None:
 
 
 def check_explicit_none_survives() -> None:
-    """dict.get only falls back on MISSING keys, so the old inline reads
-    returned a stored null as-is -- even for loop/fps, whose defaults are
-    non-None. from_dict must not 'repair' it."""
+    """dict.get falls back only on a missing key, so a stored null reads back
+    as None. from_dict must not repair it, not even for loop and fps."""
     cfg = MediaConfig.from_dict({"loop": None, "fps": None, "path": None})
     assert cfg.loop is None, f"stored loop=None read back as {cfg.loop!r}"
     assert cfg.fps is None, f"stored fps=None read back as {cfg.fps!r}"
@@ -113,9 +105,9 @@ def check_explicit_none_survives() -> None:
 
 if __name__ == "__main__":
     fixtures.start_watchdog(30, label="scenario_media_config")
-    check_empty_dict_reads_as_defaults()
-    check_field_set_matches_key_map()
-    check_populated_dict_round_trips()
-    check_snake_case_fill_mode_is_not_read()
+    check_empty_dict_defaults()
+    check_fields_match_key_map()
+    check_populated_dict_roundtrip()
+    check_snake_case_key_ignored()
     check_explicit_none_survives()
     print("\nALL PASS: scenario_media_config")

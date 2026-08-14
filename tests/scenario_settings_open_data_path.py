@@ -1,22 +1,13 @@
 """
-Settings "Data path" Open button opens via Gio, not a subprocess.
+The settings Data path Open button opens through Gio, not a subprocess.
 
-The old handler ran a BLOCKING subprocess.check_output(["xdg-open", ...])
-on the GTK main loop (frozen UI until the file manager exited on some
-setups), used `flatpak-spawn --host` instead of the OpenURI portal, and
-never expanduser'd the entry -- a literal "~/..." text was handed to
-xdg-open verbatim.
-
-Contract under test (DataPathGroup.on_open_data_path_button_clicked):
-  * the entry text is expanduser'd and launched as a file:// URI via
-    Gio.AppInfo.launch_default_for_uri (portal-routed under flatpak,
-    non-blocking, cannot become a command);
-  * a raising launcher (GLib.Error) is contained inside the handler --
-    nothing escapes into the GTK signal dispatch.
-
-Same display-needing pattern as scenario_data_path_commit: builds the real
-Adw widgets, prints SKIP and exits 0 when GTK can't initialize.
+DataPathGroup.on_open_data_path_button_clicked expanduser's the entry text and
+launches it as a file:// URI through Gio.AppInfo.launch_default_for_uri, which
+the portal routes under flatpak.
 """
+
+# A raising launcher stays inside the handler, and a missing display makes this
+# scenario skip.
 import os
 
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
@@ -62,12 +53,12 @@ def main() -> None:
             return True
 
     class FakeGio:
-        File = real_gio.File  # real: the handler builds the URI through it
+        File = real_gio.File  # real, because the handler builds the URI through it
         AppInfo = FakeAppInfo
 
     settings_mod.Gio = FakeGio
     try:
-        # --- 1. ~ expansion + file:// scheme --------------------------------
+        # 1. The tilde expands and the scheme is file://.
         group.data_path.set_text("~/deckard-open-probe")
         group.on_open_data_path_button_clicked()
 
@@ -81,7 +72,7 @@ def main() -> None:
         assert "~" not in launched[-1], "the ~ must be expanded before launching"
         print("PASS: Open launches the expanduser'd path as a file:// URI")
 
-        # --- 2. a raising launcher is contained -----------------------------
+        # 2. A raising launcher stays contained.
         def raising_launch(uri, ctx=None):
             raise GLib.Error("simulated: no handler for the URI")
 

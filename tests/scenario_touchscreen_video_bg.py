@@ -1,24 +1,13 @@
 """
 Regression test for the per-touchscreen background video path.
 
-A video assigned as the SD+ touchscreen background must PLAY: the state holds
-an InputVideo over a strip-sized shared frame cache (mp4_tile_cache), the
-media tick re-composites the strip while it is set
-(ControllerTouchScreen.on_media_player_tick + MediaPlayerThread's tick
-predicate), and the existing dual-hash dedup gates the device writes.
-
-Asserts, over a REAL DeckController (live MediaPlayerThread) on a fake SD+:
-  1. assigning a .mp4 as the touchscreen background raises nowhere and the
-     composite contains a frame of the video (pixel probe),
-  2. PLAYBACK: with no other animated content, the media tick alone pushes
-     multiple DISTINCT strip writes to the device (journal payload hashes),
-  3. a decodable video produces zero background error logs,
-  4. plain image backgrounds still render (no regression) and the video's
-     cache reader is released on the switch away from a video,
-  5. a corrupt "video" logs at most once across many composites,
-  6. the sidebar preview helper resolves videos to a thumbnail pixbuf and
-     images to None (Gtk.Picture.set_filename handles those directly).
+A video assigned as the SD+ touchscreen background must play. A real
+DeckController over a fake SD+ drives it.
 """
+
+# The state holds an InputVideo over a strip-sized shared frame cache, the
+# media tick re-composites the strip while it is set, and the dual-hash dedup
+# gates the device writes.
 import os
 import time
 
@@ -53,7 +42,7 @@ def main() -> None:
         state = touch.get_active_state()
         deck = fixtures.raw_deck(controller)
 
-        # 1: video assignment composites a frame of the video
+        # 1. A video assignment composites a frame of the video.
         page.set_background_image(identifier=ident, state=0, path=video_path, update=True)
         img = None
         for _ in range(3):
@@ -63,9 +52,9 @@ def main() -> None:
             f"video frame not painted: center pixel {px}, expected R~128 G~64"
         )
 
-        # 2: playback -- the media tick alone must keep pushing NEW strip
-        # frames to the device (distinct payload hashes; identical frames
-        # would be dedup-skipped, a static background would write ~once).
+        # 2. Playback. The media tick alone must keep pushing new strip
+        # frames, with distinct payload hashes. An identical frame is
+        # dedup-skipped, and a static background writes about once.
         seq_before = deck.current_seq()
         got = fixtures.wait_until(
             lambda: len({op[4] for op in deck.ops_after(seq_before)
@@ -79,11 +68,11 @@ def main() -> None:
             f"{len(distinct)} -- the background video is not playing"
         )
 
-        # 3: no error logs for a decodable video
+        # 3. A decodable video produces no error log.
         assert len(error_logs) == 0, f"unexpected background errors: {error_logs}"
 
-        # 3b: loop/fps page settings reach the playing video (sidebar rows
-        # persist through these setters; defaults are loop=True, fps=30)
+        # 3b. The loop and fps page settings reach the playing video. The
+        # sidebar rows persist through these setters.
         assert page.get_background_loop(identifier=ident, state=0) is True
         assert page.get_background_fps(identifier=ident, state=0) == 30
         assert state.background_video.fps == 30
@@ -96,12 +85,10 @@ def main() -> None:
         assert state.background_video.loop is False
         page.set_background_loop(identifier=ident, state=0, loop=True, update=True)
 
-        # 3c: the fps setting is a RENDER cap, not a playback rate. The test
-        # video is 30 frames at native 15fps (one loop every 2s), blue channel
-        # == frame*8. With fps capped at 5, natural-speed playback still
-        # traverses most of the cycle within ~1.8s (blue span >= 120); if fps
-        # were the playback rate, 1.8s at 5fps would cover only ~9 frames
-        # (span ~72).
+        # 3c. The fps setting is a render cap rather than a playback rate.
+        # The video runs 30 frames at a native 15fps, with the blue channel
+        # at frame times eight. Capped at 5, natural-speed playback still
+        # covers most of the cycle in 1.8s, which a playback rate would not.
         page.set_background_fps(identifier=ident, state=0, fps=5, update=True)
         assert fixtures.wait_until(
             lambda: state.background_video is not None
@@ -120,10 +107,10 @@ def main() -> None:
             f"playback speed appears tied to the fps cap: blue span {span} over "
             f"1.8s at cap=5 (natural 15fps should traverse most of 0..232)"
         )
-        # The cap must hold even though THIS loop drives composites directly
-        # (standing in for a deck bg video / dial animation re-triggering the
-        # strip): the quantized picker may hand out at most ~cap*1.8 distinct
-        # frames. Uncapped native 15fps sampled at 10Hz would give ~18.
+        # The cap must hold even though this loop drives composites directly,
+        # standing in for a deck background video that re-triggers the strip.
+        # The quantized picker hands out at most cap times 1.8 distinct
+        # frames, where an uncapped 15fps sampled at 10Hz would give about 18.
         distinct = len(set(blues))
         assert distinct <= 14, (
             f"fps cap not applied at the picker: {distinct} distinct frames "
@@ -131,7 +118,7 @@ def main() -> None:
         )
         page.set_background_fps(identifier=ident, state=0, fps=30, update=True)
 
-        # 4: switching to a plain image still renders and detaches the video
+        # 4. A switch to a plain image still renders and detaches the video.
         page.set_background_image(identifier=ident, state=0, path=image_path, update=True)
         for _ in range(3):
             img = state.get_current_image()
@@ -144,7 +131,7 @@ def main() -> None:
             "video cache reader must be released when the background is no longer a video"
         )
 
-        # 5: a corrupt file logs at most once, not once per composite
+        # 5. A corrupt file logs at most once, not once per composite.
         error_logs.clear()
         page.set_background_image(identifier=ident, state=0, path=corrupt_path, update=True)
         for _ in range(10):
@@ -154,7 +141,7 @@ def main() -> None:
             f"corrupt background must log at most once, got {len(error_logs)}"
         )
 
-        # 6: the sidebar preview helper (no widgets involved -- safe headless)
+        # 6. The sidebar preview helper, which builds no widget.
         from src.backend.MediaManager import MediaManager
         gl.media_manager = MediaManager()
         from src.windows.mainWindow.elements.Sidebar.elements.BackgroundEditor import build_preview_pixbuf

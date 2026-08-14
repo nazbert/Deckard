@@ -1,31 +1,13 @@
 """
-Integration scenario: run_on_main's timeout path must CANCEL
-the queued GLib idle source, not abandon it.
+run_on_main's timeout path cancels the queued GLib idle source.
 
-Pre-fix, a worker that timed out waiting for a stalled main loop raised and
-moved on -- but the idle callback stayed queued and ran func anyway once the
-loop resumed. Combined with GenerativeUI._ensure_built's deliberate
-retry-on-failure (GenerativeUI.py:112-119) that produced two build()
-executions: duplicate widgets, doubly-connected signals. The fix's contract:
-exactly one of {caller timeout path, idle callback} proceeds.
-
-Follows scenario_genui_lazy.py's conventions: no GTK main loop runs; the
-default GLib.MainContext is pumped manually, which doubles as the "stalled
-main loop" control -- the context simply isn't pumped while a timeout is
-being provoked.
-
-  (a) Timeout cancels the idle: a worker times out against an unpumped
-      context; pumping the context afterwards must run func ZERO times
-      (pre-fix: once).
-  (b) Timeout-then-retry runs once: after a timeout, a retry (the
-      _ensure_built shape) against a pumped context executes func exactly
-      once in total (pre-fix: twice) and returns its result.
-  (c) Normal marshalling still works: a worker's call runs on the main
-      thread and returns the result.
-  (d) Exceptions still propagate to the calling worker.
-  (e) Inline fast-path: on the main thread func runs synchronously, no
-      pumping required.
+Exactly one of the caller's timeout path and the idle callback proceeds.
+Otherwise a retry above it, such as GenerativeUI._ensure_built, builds twice
+and leaves duplicate widgets.
 """
+
+# No GTK main loop runs here, and leaving the default GLib.MainContext unpumped
+# is what stalls the loop for a timeout.
 import threading
 import time
 
@@ -39,9 +21,9 @@ from gi.repository import GLib
 import src.backend.main_loop as main_loop
 from src.backend.main_loop import run_on_main
 
-# Shrink the marshalling bound so provoking a timeout is fast. Read at call
-# time by run_on_main. The knob's home is main_loop: GtkHelper only
-# re-exports the functions, so patching a copy there would be a dead write.
+# Shrink the marshalling bound so a timeout arrives fast. run_on_main reads
+# it at call time. The knob lives in main_loop, and GtkHelper only re-exports
+# the functions, so a patch there would be a dead write.
 main_loop.RUN_ON_MAIN_TIMEOUT_S = 0.4
 
 
@@ -88,7 +70,7 @@ def check_timeout_cancels_idle() -> None:
     def record():
         runs.append(threading.current_thread())
 
-    # Stalled main loop: nothing pumps the context while the worker waits.
+    # A stalled main loop. Nothing pumps the context while the worker waits.
     worker, box = _call_in_thread(lambda: run_on_main(record))
     worker.join(timeout=5.0)
     assert not worker.is_alive(), "worker never returned from run_on_main"
@@ -97,7 +79,7 @@ def check_timeout_cancels_idle() -> None:
     )
     assert runs == [], "func ran before the context was ever pumped"
 
-    # The loop "resumes": the abandoned idle must NOT fire.
+    # The loop resumes, and the abandoned idle must not fire.
     _pump(0.3)
     assert runs == [], (
         f"cancelled idle still executed func ({len(runs)} run(s)) after the "
@@ -113,13 +95,13 @@ def check_timeout_then_retry_runs_once() -> None:
         runs.append(threading.current_thread())
         return "built"
 
-    # First attempt: times out against the unpumped context (as in a stalled
-    # main loop during _ensure_built).
+    # The first attempt times out against the unpumped context, as it would
+    # in a stalled main loop.
     worker, box = _call_in_thread(lambda: run_on_main(record))
     worker.join(timeout=5.0)
     assert isinstance(box.get("exc"), RuntimeError)
 
-    # Retry (what _ensure_built's un-latching enables) with the loop alive.
+    # The retry runs with the loop alive.
     worker, box = _call_in_thread(lambda: run_on_main(record))
     _pump_until_dead(worker)
     assert box.get("result") == "built", f"retry did not return the result: {box!r}"

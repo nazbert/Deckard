@@ -1,18 +1,13 @@
 """
-Regression test for the native-only var-app -> XDG data-dir migration
-(rebrand_migration.migrate_native_var_app_to_xdg): pre-XDG native builds stored
-data at ~/.var/app/<id>; this relocates it to $XDG_DATA_HOME/deckard with a
-compat symlink.
+Regression test for rebrand_migration.migrate_native_var_app_to_xdg.
 
-Same-filesystem uses migrate()'s atomic-rename core (exhaustively exercised by
-scenario_rebrand_migration.py); here we cover the XDG-specific wiring (flatpak
-no-op, own marker, --data skip, native_data_root fallback) and the
-cross-filesystem copy+atomic-publish path with its crash-safety states: resume
-after publish with the old tree still present or already deleted, non-fatal copy
-failure, and stale-staging cleanup.
-
-Stdlib-only, like the module under test; globals must never be imported.
+Pre-XDG native builds stored data at ~/.var/app/<id>. The migration moves it to
+$XDG_DATA_HOME/deckard and leaves a compat symlink. Stdlib only, so globals
+stay unimported.
 """
+
+# The same-filesystem path reuses migrate()'s atomic rename, so the cases below
+# cover the XDG wiring and the cross-filesystem copy.
 import os
 import shutil
 import sys
@@ -30,7 +25,7 @@ import rebrand_migration as rm  # noqa: E402
 
 assert "globals" not in sys.modules, "rebrand_migration must not pull in globals"
 
-rm._is_flatpak = lambda: False  # default: native
+rm._is_flatpak = lambda: False  # native by default
 
 
 def fresh_roots():
@@ -55,7 +50,7 @@ def marker_state(root, name):
         return None
 
 
-# --- 1. flatpak -> no-op (the ~/.var/app dir IS correct there) ----------
+# 1. Flatpak changes nothing. The ~/.var/app dir is correct there.
 old, new = fresh_roots()
 make_tree(old)
 rm._is_flatpak = lambda: True
@@ -65,13 +60,13 @@ assert not os.path.lexists(new)
 rm._is_flatpak = lambda: False
 print("1. flatpak no-op: OK")
 
-# --- 2. fresh native (no var-app tree) -> no-op -------------------------
+# 2. A fresh native install with no var-app tree changes nothing.
 old, new = fresh_roots()
 rm.migrate_native_var_app_to_xdg(old_root=old, xdg_root=new, argv=["main.py"])
 assert not os.path.lexists(old) and not os.path.lexists(new)
 print("2. fresh native no-op: OK")
 
-# --- 3. normal native move ----------------------------------------------
+# 3. Normal native move.
 old, new = fresh_roots()
 make_tree(old)
 rm.migrate_native_var_app_to_xdg(old_root=old, xdg_root=new, argv=["main.py"])
@@ -82,30 +77,27 @@ assert marker_state(new, rm.XDG_MARKER_NAME) == rm._STATE_COMPLETE
 assert marker_state(new, rm.MARKER_NAME) is None, "used the StreamController marker instead of the XDG one"
 print("3. normal native move: OK")
 
-# --- 4. idempotent re-run ------------------------------------------------
+# 4. Idempotent re-run.
 rm.migrate_native_var_app_to_xdg(old_root=old, xdg_root=new, argv=["main.py"])
 assert os.path.islink(old) and marker_state(new, rm.XDG_MARKER_NAME) == rm._STATE_COMPLETE
 print("4. idempotent re-run: OK")
 
-# --- 5. --data override skips everything --------------------------------
+# 5. A --data override skips everything.
 old, new = fresh_roots()
 make_tree(old)
 rm.migrate_native_var_app_to_xdg(old_root=old, xdg_root=new, argv=["main.py", "--data", "/tmp/custom"])
 assert os.path.isdir(old) and not os.path.islink(old) and not os.path.lexists(new), "--data run touched the roots"
 print("5. --data override skip: OK")
 
-# --- 6. default XDG root: $XDG_DATA_HOME, else ~/.local/share -----------
+# 6. Default XDG root: $XDG_DATA_HOME, else ~/.local/share.
 assert rm._xdg_root() == os.path.join(HOME, ".local", "share", "deckard")
 os.environ["XDG_DATA_HOME"] = os.path.join(HOME, "custom-xdg")
 assert rm._xdg_root() == os.path.join(HOME, "custom-xdg", "deckard")
 os.environ.pop("XDG_DATA_HOME", None)
 print("6. XDG root resolution: OK")
 
-# ======================================================================
-# Cross-filesystem: copy + atomic-publish path. Forced by pretending the
-# roots differ (rm._same_filesystem -> False); the copy logic itself runs
-# identically on the single temp filesystem the harness uses.
-# ======================================================================
+# Cross-filesystem copy and atomic publish. _same_filesystem is forced to
+# False. The copy logic runs the same on the harness's single temp filesystem.
 import contextlib  # noqa: E402
 _STAGING_SUFFIX = ".xdg-migrating"
 
@@ -124,12 +116,12 @@ def _boom(*a, **k):
     raise OSError("disk full")
 
 
-# --- 7. cross-fs copy: content preserved, symlink kept, old->symlink -----
+# 7. A cross-filesystem copy keeps the content and makes old a symlink.
 old, new = fresh_roots()
 make_tree(old)
 with open(os.path.join(old, "data", "pages", "Main.json"), "w") as f:
     f.write('{"page": "main"}')
-os.symlink("/nonexistent/target", os.path.join(old, "data", "reloc"))  # internal symlink: must be preserved, not followed
+os.symlink("/nonexistent/target", os.path.join(old, "data", "reloc"))  # internal symlink, preserved and not followed
 with force_cross_fs():
     rm.migrate_native_var_app_to_xdg(old_root=old, xdg_root=new, argv=["main.py"])
 with open(os.path.join(new, "data", "pages", "Main.json")) as f:
@@ -140,25 +132,25 @@ assert marker_state(new, rm.XDG_MARKER_NAME) == rm._STATE_COMPLETE
 assert not os.path.lexists(new + _STAGING_SUFFIX), "staging dir left behind"
 print("7. cross-fs copy (content preserved, symlinked, cleaned): OK")
 
-# --- 8. idempotent re-run ------------------------------------------------
+# 8. Idempotent re-run across filesystems.
 with force_cross_fs():
     rm.migrate_native_var_app_to_xdg(old_root=old, xdg_root=new, argv=["main.py"])
 assert os.path.islink(old) and marker_state(new, rm.XDG_MARKER_NAME) == rm._STATE_COMPLETE
 print("8. cross-fs idempotent: OK")
 
-# --- 9. resume: published (new=PENDING), old still a real dir -----------
+# 9. Resume after publish, with the marker PENDING and old still a real dir.
 old, new = fresh_roots()
 make_tree(old)
-shutil.copytree(old, new)  # copy already published on a prior run...
+shutil.copytree(old, new)  # a prior run already published the copy
 with open(os.path.join(new, rm.XDG_MARKER_NAME), "w") as f:
-    f.write(rm._STATE_PENDING + "\n")  # ...marker PENDING, old NOT yet removed
+    f.write(rm._STATE_PENDING + "\n")  # marker PENDING, old not yet removed
 with force_cross_fs():
     rm.migrate_native_var_app_to_xdg(old_root=old, xdg_root=new, argv=["main.py"])
 assert os.path.islink(old) and os.path.realpath(old) == os.path.realpath(new), "old not finalized to symlink"
 assert marker_state(new, rm.XDG_MARKER_NAME) == rm._STATE_COMPLETE
 print("9. resume after publish (old still real): OK")
 
-# --- 10. resume: published (new=PENDING), old already deleted -----------
+# 10. Resume after publish, with the marker PENDING and old already deleted.
 old, new = fresh_roots()
 os.makedirs(os.path.dirname(new), exist_ok=True)
 make_tree(new)  # copy published, old removed, symlink not yet made
@@ -169,7 +161,7 @@ with force_cross_fs():
 assert os.path.islink(old) and marker_state(new, rm.XDG_MARKER_NAME) == rm._STATE_COMPLETE
 print("10. resume after publish (old already deleted): OK")
 
-# --- 11. copy failure is non-fatal: old intact, no partial new ----------
+# 11. A copy failure is non-fatal. Old stays intact and no new tree lands.
 old, new = fresh_roots()
 make_tree(old)
 _orig_copytree = shutil.copytree
@@ -184,7 +176,7 @@ assert not os.path.lexists(new), "new left behind on copy failure"
 assert not os.path.lexists(new + _STAGING_SUFFIX), "staging left behind on copy failure"
 print("11. copy failure non-fatal: OK")
 
-# --- 12. stale staging from a prior crash is cleaned + rebuilt ----------
+# 12. Stale staging from a crash is cleaned and rebuilt.
 old, new = fresh_roots()
 make_tree(old)
 os.makedirs(new + _STAGING_SUFFIX)  # leftover partial staging
@@ -197,7 +189,7 @@ assert not os.path.exists(os.path.join(new, "junk")), "stale staging leaked into
 assert not os.path.lexists(new + _STAGING_SUFFIX)
 print("12. stale staging cleaned + rebuilt: OK")
 
-# --- 13. --data override skips the copy path too ------------------------
+# 13. A --data override skips the copy path too.
 old, new = fresh_roots()
 make_tree(old)
 with force_cross_fs():
@@ -205,7 +197,7 @@ with force_cross_fs():
 assert os.path.isdir(old) and not os.path.islink(old) and not os.path.lexists(new), "--data run touched the roots"
 print("13. --data override skip (copy path): OK")
 
-# --- 14. native_data_root fallback picks the working tree ---------------
+# 14. native_data_root fallback picks the working tree.
 base = tempfile.mkdtemp(prefix="root_pick_", dir=HOME)
 legacy = os.path.join(base, "legacy")
 xdg = os.path.join(base, "xdg")

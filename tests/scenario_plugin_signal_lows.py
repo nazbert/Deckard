@@ -1,26 +1,13 @@
 """
-Unit-tier scenario for the grouped plugin/signal/GtkHelper LOWs.
+Unit-tier scenario for grouped plugin, signal and GtkHelper fixes.
 
-Covers the behavioral fixes:
-  (a) SignalManager.trigger_signal forwards **kwargs to handlers and a
-      truthy-returning handler runs exactly once (GLib must not re-schedule
-      the idle source forever)
-  (b) EventHolder.add_listener's dedupe-warning path survives a
-      functools.partial listener (no `.__name__` AttributeError)
-  (c) CallbackRegistry.add / SignalManager.connect_signal accept a bound
-      method whose owner uses __slots__ (not weak-referenceable): stored as
-      a strong ref instead of raising TypeError at connect time
-  (d) ActionCore.launch_backend raises ValueError for a None or nonexistent
-      backend_path instead of feeding None into os.path.exists
-  (e) ActionCore.get_own_key resolves through get_input(self.input_ident)
-      (the attributes the old body read never existed)
-  (f) Page.remove_plugin_actions_from_json tolerates an action carrying an
-      explicit `"id": null` (or no id) -- the old `.get("id", "")` returned
-      None past the default and `.split()` on it raised AttributeError
-
-All checks drive the units directly -- no deck, no GTK widgets; (a) pumps
-the default GLib main context by hand.
+SignalManager.trigger_signal forwards kwargs and runs a truthy handler once. No
+deck, no widgets.
 """
+
+# EventHolder dedupes a functools.partial listener, CallbackRegistry accepts a
+# __slots__ owner, launch_backend validates its path, get_own_key resolves
+# through get_input, and a null action id survives removal.
 import functools
 import threading
 import weakref
@@ -35,9 +22,9 @@ from src.Signals.weak_callbacks import CallbackRegistry
 
 
 def pump_main_context(max_iterations: int = 25) -> int:
-    """Dispatch pending sources on the default main context, bounded so a
-    forever-rescheduling idle (the pre-fix bug) can't hang the scenario.
-    Returns the number of iterations that dispatched something."""
+    """Dispatch pending sources on the default main context. The bound stops
+    a forever-rescheduling idle from hanging the scenario. Returns the number
+    of iterations that dispatched something."""
     ctx = GLib.MainContext.default()
     dispatched = 0
     for _ in range(max_iterations):
@@ -48,13 +35,13 @@ def pump_main_context(max_iterations: int = 25) -> int:
     return dispatched
 
 
-def check_trigger_signal_kwargs_and_single_shot():
+def check_trigger_signal_kwargs_single_shot():
     sm = SignalManager()
     received = []
 
     def handler(*args, **kwargs):
         received.append((args, kwargs))
-        return True  # truthy: GLib would re-schedule a raw idle handler
+        return True  # truthy, so GLib would re-schedule a raw idle handler
 
     sm.connect_signal(Signals.PageRename, handler)
     sm.trigger_signal(Signals.PageRename, "old.json", new_path="new.json")
@@ -87,14 +74,14 @@ def check_eventholder_partial_dedupe_no_crash():
     holder = EventHolder(plugin_base=None, event_id="test_plugin::TestEvent")
     cb = functools.partial(target, "a")
     holder.add_listener(cb)
-    # Second add of the same partial hits the dedupe-warning path, which
-    # used to do `callback.__name__` -- partials don't have one.
+    # A second add of the same partial hits the dedupe-warning path. A
+    # partial carries no __name__.
     holder.add_listener(cb)
     assert len(holder.observers.snapshot()) == 1
 
 
 class _SlottedOwner:
-    """Bound methods of this class can't be WeakMethod'd: __slots__ without
+    """A bound method of this class cannot be WeakMethod'd. __slots__ without
     __weakref__ makes the instance non-weak-referenceable."""
     __slots__ = ("calls",)
 
@@ -105,10 +92,10 @@ class _SlottedOwner:
         self.calls += 1
 
 
-def check_slots_owner_connect_falls_back_strong():
+def check_slots_owner_falls_back_strong():
     owner = _SlottedOwner()
 
-    # Fixture sanity: this owner really is non-weak-referenceable.
+    # The owner really is non-weak-referenceable.
     try:
         weakref.WeakMethod(owner.method)
     except TypeError:
@@ -136,8 +123,8 @@ class _LaunchStubServer:
 
 
 class _LaunchStub:
-    """Bare object exposing exactly what launch_backend touches before the
-    path checks (start_server + server.port)."""
+    """Bare object exposing what launch_backend touches before the path
+    checks, start_server and server.port."""
     server = _LaunchStubServer()
 
     def start_server(self):
@@ -153,7 +140,7 @@ def check_launch_backend_path_validation():
         try:
             ActionCore.launch_backend(stub, backend_path=bad_path)
         except ValueError:
-            pass  # expected: clean validation error before any Popen
+            pass  # expected, a clean validation error before any Popen
         except TypeError as e:
             raise AssertionError(
                 f"launch_backend({bad_path!r}) fed a bad value into os.path.exists: {e}"
@@ -164,7 +151,7 @@ def check_launch_backend_path_validation():
             )
 
 
-def check_get_own_key_resolves_via_get_input():
+def check_get_own_key_via_get_input():
     from src.backend.DeckManagement.InputIdentifier import Input
     from src.backend.PluginManager.ActionCore import ActionCore
 
@@ -196,13 +183,12 @@ def check_get_own_key_resolves_via_get_input():
     assert action.deck_controller.asked is None
 
 
-def check_remove_plugin_actions_survives_null_id():
+def check_remove_actions_survives_null_id():
     from src.backend.PageManagement.Page import Page
 
-    # An action with an explicit `"id": null`, one with no id at all, and a
-    # normal one belonging to the plugin being removed. Pre-fix, the null-id
-    # action's `.get("id", "")` returned None and `.split("::")` raised
-    # AttributeError, aborting the whole removal.
+    # An action with an explicit null id, one with no id at all, and a normal
+    # one belonging to the plugin being removed. A None id that reaches
+    # .split("::") raises AttributeError and aborts the whole removal.
     page_dict = {
         "keys": {
             "0x0": {
@@ -228,26 +214,26 @@ def check_remove_plugin_actions_survives_null_id():
             pass  # no disk I/O in the unit tier
 
     stub = _PageStub(page_dict)
-    # Must not raise (pre-fix: AttributeError on the None id).
+    # Must not raise on the None id.
     Page.remove_plugin_actions_from_json(stub, "victim_plugin")
 
     remaining = stub.dict["keys"]["0x0"]["states"]["0"]["actions"]
     ids = [a.get("id") for a in remaining]
     assert "victim_plugin::SomeAction" not in ids, f"victim action not removed: {ids!r}"
     assert "other_plugin::KeepMe" in ids, f"unrelated action wrongly removed: {ids!r}"
-    # The null-id / no-id actions are left untouched (they belong to no plugin).
+    # The null-id and no-id actions belong to no plugin and stay untouched.
     assert len(remaining) == 3, f"expected 3 survivors, got {remaining!r}"
 
 
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_plugin_signal_lows")
     assert threading.current_thread() is threading.main_thread()
-    check_trigger_signal_kwargs_and_single_shot()
+    check_trigger_signal_kwargs_single_shot()
     check_eventholder_partial_dedupe_no_crash()
-    check_slots_owner_connect_falls_back_strong()
+    check_slots_owner_falls_back_strong()
     check_launch_backend_path_validation()
-    check_get_own_key_resolves_via_get_input()
-    check_remove_plugin_actions_survives_null_id()
+    check_get_own_key_via_get_input()
+    check_remove_actions_survives_null_id()
     print("PASS: scenario_plugin_signal_lows")
 
 

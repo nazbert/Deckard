@@ -1,27 +1,13 @@
 """
-Scenario: page-cache eviction BUDGET arithmetic and the active_page=None
-budget-distortion strand.
+Page-cache eviction budget arithmetic.
 
-The evict-vs-activate interleave, screensaver-pending survival, the
-gut-then-pop window and the ready_to_clear re-point/strand all have
-deterministic coverage already (scenario_eviction_revalidate.py legs 1-3,
-scenario_small_guards.py ready_to_clear_*). What had ZERO direct coverage is
-the plain arithmetic of clear_old_cached_pages:
-
-  * how many pages `excess = total - max_pages` actually removes,
-  * that it removes the OLDEST (lowest page_number) first,
-  * that set_pages_to_cache(n) shrinking the budget triggers a pass, and
-  * the row-5 distortion: a controller with active_page is None has its
-    cached pages counted toward `total` (:227) but skipped from the
-    evictable list (:236), so it inflates `excess` for OTHER controllers --
-    over-evicting live controllers while its own pages are never reclaimed
-    (the tracked fix is a pin-count page-cache ownership redesign; leg 4 is its
-    tripwire).
-
-Unit tier: lightweight stub controllers + the REAL PageManagerBackend over
-gl (same pattern as scenario_eviction_revalidate.py). Pages are seeded
-action-free; get_page mints one distinct Page per (controller, path).
+clear_old_cached_pages removes exactly (total - max_pages) pages, oldest
+page_number first, and a shrink through set_pages_to_cache runs a pass. This
+unit tier runs stub controllers over the real PageManagerBackend.
 """
+
+# A controller with active_page None inflates total but never gives up its own
+# pages.
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
 import globals as gl
@@ -29,8 +15,8 @@ from fixtures import FaultyFakeDeck, seed_page, start_watchdog
 
 
 class StubController:
-    """The minimal surface clear_old_cached_pages dereferences: a serial,
-    an active_page, and a _screensaver_pending_page slot (via getattr)."""
+    """The minimal surface clear_old_cached_pages dereferences, namely a
+    serial, an active_page and a _screensaver_pending_page slot."""
 
     def __init__(self, serial: str):
         self.deck = FaultyFakeDeck(serial_number=serial)
@@ -42,10 +28,10 @@ class StubController:
 
 
 def reset_world() -> None:
-    """Isolate a leg: clear the shared controller list and the page cache so
-    `total` (summed across ALL controllers in gl.page_manager.pages) reflects
-    only this leg's controllers. Legs share the singleton gl.page_manager and
-    gl.deck_manager, so without this a prior leg's cached pages inflate the
+    """Isolate a leg by clearing the controller list and the page cache.
+
+    total sums across every controller in gl.page_manager.pages, and the legs
+    share one gl.page_manager, so a prior leg's cached pages would inflate the
     budget and displace evictions."""
     gl.deck_manager.deck_controller.clear()
     gl.page_manager.pages.clear()
@@ -59,8 +45,8 @@ def fresh_controller(serial: str) -> StubController:
 
 
 def cache_page(controller, name: str):
-    """Load a fresh page into the cache for `controller`. Every seeded page
-    is born ready_to_clear=True (Page.__init__), so all are evictable unless
+    """Load a fresh page into the cache for controller. Page.__init__ sets
+    ready_to_clear True, so every seeded page is evictable unless it is
     active. Returns the Page object."""
     return gl.page_manager.get_page(seed_page(name), controller)
 
@@ -73,20 +59,16 @@ def cached_count(controller):
     return len(gl.page_manager.pages.get(controller, {}))
 
 
-# ---------------------------------------------------------------------------
-# Leg 1: excess arithmetic -- clear_old_cached_pages removes exactly
-# (total - max_pages) pages, no more, no fewer.
-# ---------------------------------------------------------------------------
+# Leg 1. clear_old_cached_pages removes exactly (total - max_pages) pages.
 def leg_excess_count() -> int:
     reset_world()
     controller = fresh_controller("budget-excess")
-    # Enormous budget during setup so get_page's own internal
-    # clear_old_cached_pages (fired after every load) never evicts our
-    # candidates before we've built the full set.
+    # A large budget during setup, so the clear_old_cached_pages that get_page
+    # runs after each load evicts no candidate before the set is complete.
     gl.page_manager.max_pages = 100
 
     pages = [cache_page(controller, f"Excess{i}") for i in range(8)]
-    controller.active_page = pages[-1]  # one page is active -> never evictable
+    controller.active_page = pages[-1]  # one page is active, so never evictable
 
     if cached_count(controller) != 8:
         print(f"FAIL(1-setup): expected 8 cached, got {cached_count(controller)}")
@@ -111,11 +93,8 @@ def leg_excess_count() -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Leg 2: oldest-first -- eviction removes the lowest page_number entries.
-# get_page bumps page_number on every access, so a page re-touched after
-# loading becomes "newer" and must survive over an untouched older sibling.
-# ---------------------------------------------------------------------------
+# Leg 2. Eviction removes the lowest page_number entries first. get_page bumps
+# page_number on every access, so a re-touched page outlives an older sibling.
 def leg_oldest_first() -> int:
     reset_world()
     controller = fresh_controller("budget-oldest")
@@ -126,16 +105,17 @@ def leg_oldest_first() -> int:
     for name in ("A", "B", "C", "D"):
         gl.page_manager.get_page(paths[name], controller)
 
-    # Re-touch A: get_page bumps its page_number to the newest. Now the
+    # Re-touch A. get_page bumps its page_number to the newest. Now the
     # oldest-by-page_number order is B < C < D < A.
     gl.page_manager.get_page(paths["A"], controller)
 
-    # Make D active so it is exempt regardless of number; the eviction
-    # decision among the rest must be purely oldest-first.
+    # Make D active, so it is exempt whatever its number. The decision among
+    # the rest must be oldest-first.
     controller.active_page = gl.page_manager.pages[controller][paths["D"]]["page"]
 
-    # Budget 2: total 4, excess 2. Oldest two evictable (B, C) must go;
-    # A (re-touched -> newest) and D (active) must survive.
+    # With budget 2 the total is 4 and the excess is 2. The oldest two
+    # evictable pages, B and C, go. A is newest after the re-touch and D is
+    # active, so both survive.
     gl.page_manager.max_pages = 2
     gl.page_manager.clear_old_cached_pages()
 
@@ -156,10 +136,8 @@ def leg_oldest_first() -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Leg 3: set_pages_to_cache(n) shrinking the budget triggers an eviction
-# pass; growing it does NOT evict.
-# ---------------------------------------------------------------------------
+# Leg 3. A shrink through set_pages_to_cache runs an eviction pass. A grow
+# evicts nothing.
 def leg_set_pages_to_cache_shrink() -> int:
     reset_world()
     controller = fresh_controller("budget-shrink")
@@ -171,15 +149,15 @@ def leg_set_pages_to_cache_shrink() -> int:
         print(f"FAIL(3-setup): expected 6 cached, got {cached_count(controller)}")
         return 1
 
-    # Growing the budget must NOT evict (old_max_pages <= new max_pages).
+    # Growing the budget must evict nothing.
     gl.page_manager.set_pages_to_cache(200)
     if cached_count(controller) != 6:
         print(f"FAIL(3): growing the cache budget evicted pages "
               f"({cached_count(controller)} left, expected 6)")
         return 1
 
-    # Shrinking must trigger clear_old_cached_pages. set_pages_to_cache(n)
-    # sets max_pages = n + 1, so n=1 -> max_pages 2 -> total 6, excess 4.
+    # A shrink must run clear_old_cached_pages. set_pages_to_cache(n) sets
+    # max_pages to n + 1, so n=1 gives max_pages 2, total 6 and excess 4.
     gl.page_manager.set_pages_to_cache(1)
     remaining = cached_count(controller)
     if remaining != 2:
@@ -194,21 +172,14 @@ def leg_set_pages_to_cache_shrink() -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Leg 4: active_page=None controller distorts the budget (audit row 5).
-# Its cached pages count toward `total` (:227) but are skipped from the
-# evictable list (:236). So they inflate `excess` -- over-evicting a LIVE
-# controller -- while never being reclaimed themselves.
-#
-# The tracked fix is a pin-count page-cache ownership redesign;
-# this leg asserts CURRENT behavior and is a deliberate tripwire: when that
-# (or any change to the total/:236 contract) lands, it fails loudly so the
-# leg gets rewritten to the new contract instead of silently passing.
-# ---------------------------------------------------------------------------
+# Leg 4. A controller with active_page None distorts the budget. Its cached
+# pages count toward total but never enter the evictable list, so they inflate
+# excess and displace evictions onto live controllers. This leg asserts the
+# current behavior and fails loudly when the ownership contract changes.
 def leg_active_none_distorts_budget() -> int:
     reset_world()
-    # A controller mid-init / torn-down but not yet discarded: active_page
-    # is None, yet it holds cached pages.
+    # A controller mid-init or torn down but not discarded has active_page
+    # None and still holds cached pages.
     ghost = fresh_controller("budget-ghost")
     live = fresh_controller("budget-live")
     gl.page_manager.max_pages = 100
@@ -227,29 +198,24 @@ def leg_active_none_distorts_budget() -> int:
         print(f"FAIL(4-setup): ghost={cached_count(ghost)} live={cached_count(live)}")
         return 1
 
-    # total = 8. Budget 5 -> excess 3. WITHOUT the ghost's 4 pages the live
-    # controller (4 cached, 1 active -> 3 evictable) would sit comfortably
-    # within a 5-page budget for its own pages. But the ghost's 4 pages count
-    # toward total, inflating excess to 3, and since the ghost's pages are
-    # never in the evictable list, all 3 evictions land on the live
-    # controller instead. This documents the distortion: it is the CURRENT
-    # behavior, and the point the audit flags.
+    # total is 8 and the budget is 5, so excess is 3. The ghost's 4 pages
+    # count toward total but never enter the evictable list, so all 3
+    # evictions land on the live controller.
     gl.page_manager.max_pages = 5
     gl.page_manager.clear_old_cached_pages()
 
     ghost_left = cached_count(ghost)
     live_left = cached_count(live)
 
-    # The distortion, asserted precisely as current behavior:
-    #  - the ghost's pages are NEVER reclaimed (active_page None skips them),
+    # The ghost's pages are never reclaimed, because active_page None skips
+    # them.
     if ghost_left != 4:
         print(f"FAIL(4): an active_page=None controller's pages were evicted "
               f"({ghost_left}/4 left) -- if this changed, the :236 guard was "
               f"altered (a pin-count redesign landing?); rewrite this "
               f"leg to the new budget contract")
         return 1
-    #  - and the live controller is over-evicted BECAUSE the ghost's dead
-    #    weight inflated `total`. excess=3 all lands on live (4 -> 1).
+    # The live controller takes all 3 evictions, from 4 pages down to 1.
     if live_left != 1:
         print(f"FAIL(4): expected the live controller over-evicted to 1 page "
               f"(all 3 excess evictions displaced onto it by the ghost's "

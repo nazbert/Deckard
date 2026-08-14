@@ -1,12 +1,9 @@
 """
-Integration scenario (docs/presenter-migration-plan.md §7 "Switch storm
-x200"): 200 alternating load_page() calls between two visually distinct
-pages must settle with every key painted for the FINAL page and no
-cross-page frame surviving as the last thing written to any key.
+Integration scenario for 200 alternating load_page calls between two pages.
 
-Two pages, each overwriting the deck background with a distinct solid-color
-PNG, make cross-page bleed detectable by comparing per-key write hashes
-rather than needing device pixel readback.
+The deck must settle with every key painted for the final page and no
+cross-page frame left as the last write on any key. Each page carries a
+distinct solid-color background, so a bleed shows up in the per-key hash.
 """
 import os
 import time
@@ -16,8 +13,8 @@ import globals as gl
 
 
 def _paint_signature(controller, deck, page, key_count: int) -> dict:
-    """Loads `page` alone, waits for every key to repaint, and returns
-    {key_index: last_write_hash} -- this page's distinguishing signature."""
+    """Loads page alone, waits for every key to repaint, and returns the map
+    of key index to last write hash, which is this page's signature."""
     deck.clear_journal()
     controller.load_page(page, allow_reload=True)
 
@@ -55,15 +52,10 @@ def main() -> None:
             f"test fixture isn't actually distinguishing the two pages"
         )
 
-    # Reset to a neutral (background-less) page before storming. Without
-    # this, the storm's very last write could be a no-op: the media thread's
-    # dedup guard (_last_enqueued_hash/_last_img_hash, DeckController.py
-    # ~2444-2449) correctly skips re-painting a key with the image it
-    # already shows, and the signature-learning pass above already painted
-    # page B's exact content once. That's real, correct product behavior --
-    # not something to defeat by re-checking with a fresh deck, since the
-    # scenario should still observe genuine device writes for the storm
-    # itself.
+    # Reset to a neutral, background-less page before the storm. Otherwise
+    # the storm's last write can be a no-op, because the media thread's dedup
+    # guard skips a key that already shows that image and the signature pass
+    # above already painted page B's content once.
     neutral_path = fixtures.seed_page("Neutral")
     neutral_page = gl.page_manager.get_page(neutral_path, controller)
     _paint_signature(controller, deck, neutral_page, key_count)
@@ -82,8 +74,8 @@ def main() -> None:
 
     ok = fixtures.wait_until(settled, timeout=15)
     assert ok, "switch storm did not settle within timeout"
-    # A further quiescence window: if a straggler were going to land late, it
-    # would show up here as a change to the last-write hash.
+    # A further quiescence window. A straggler landing late shows up here as
+    # a change to the last-write hash.
     time.sleep(0.5)
 
     for k in range(key_count):

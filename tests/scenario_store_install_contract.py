@@ -1,26 +1,13 @@
 """
-Regression test -- install/update results ignored across the store
-backend, exercised WITHOUT network:
+Regression test for install and update results across the store backend.
 
-- install_plugin's failure returns were discarded by the UI and by
-  update_all_plugins, which deregistered the old version BEFORE the fallible
-  download and returned len(plugins_to_update) -- failures counted as
-  successes in the "assets updated" toast, and a failed update left the
-  (still on-disk) plugin unregistered until restart.
-- update_everything checked only the plugins/icons legs for the failure
-  sentinel; a wallpapers-leg failure raised TypeError on the sum.
-
-The contract is now uniform: install_plugin / install_icon / install_wallpaper
-/ install_sd_plus_bar_wallpaper answer a StoreResult -- Ok(None) on success, an
-Err naming the failure otherwise. update_all_* count only real successes
-(narrowing on Ok, never truthiness -- an Err is truthy) and return Ok(count) or
-propagate the Err. update_everything returns Ok(sum) or the first leg's Err --
-which is exactly the failure the app-action's toast path reads. Since the
-transactional-install redesign, update_all_plugins never deregisters anything
-itself: install_plugin deregisters the old version only AFTER its download
-succeeded, so a failed update leaves the old version on disk AND registered and
-no recovery reload exists.
+The four install_* entry points answer a StoreResult, Ok(None) on success and
+an Err naming the failure otherwise. No network is involved.
 """
+
+# Each update_all_* narrows on Ok, never on truthiness, and returns Ok(count)
+# or propagates the Err. update_everything returns Ok(sum) or the first leg's
+# Err.
 
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl  # noqa: F401
@@ -41,13 +28,13 @@ class RecordingPluginManager:
 
 
 def _make_backend() -> StoreBackend:
-    sb = StoreBackend.__new__(StoreBackend)  # skip __init__ (spawns a fetch thread)
+    sb = StoreBackend.__new__(StoreBackend)  # skip __init__, which spawns a fetch thread
     from src.backend.Store.StoreCache import StoreCache
     sb.store_cache = StoreCache()
     return sb
 
 
-def test_install_plugin_failure_propagates_and_skips_reload() -> None:
+def test_install_plugin_failure_skips_reload() -> None:
     fixtures.install_stub_globals()
     plugin_manager = RecordingPluginManager()
     gl.plugin_manager = plugin_manager
@@ -80,7 +67,7 @@ def test_install_plugin_failure_propagates_and_skips_reload() -> None:
     )
 
 
-def test_update_all_plugins_counts_only_successes_and_never_predeletes() -> None:
+def test_update_all_plugins_counts_never_predeletes() -> None:
     fixtures.install_stub_globals()
     sb = _make_backend()
 
@@ -120,9 +107,8 @@ def test_update_all_plugins_counts_only_successes_and_never_predeletes() -> None
 def test_update_everything_checks_all_four_legs() -> None:
     sb = _make_backend()
 
-    # The app-action (_update_all_assets) toasts success only on an Ok and
-    # failure on anything else; mirror that discriminant here so this pins the
-    # exact result the toast path branches on.
+    # The _update_all_assets app-action toasts success only on an Ok. This
+    # mirrors that discriminant, so the check pins what the toast reads.
     def app_reads_failure(result) -> bool:
         return not isinstance(result, Ok)
 
@@ -155,8 +141,7 @@ def test_update_everything_checks_all_four_legs() -> None:
         "all legs Ok must read as the success-toast path"
     )
 
-    # An SD+-only failure must surface too -- the leg simply
-    # did not exist, so SD+ bar packs were never auto-updated at all.
+    # An SD+ failure must surface too, through its own leg.
     def sd_plus_fail(): return Err(ErrReason.NO_CONNECTION, "offline")
     sb.update_all_sd_plus_bar_wallpapers = sd_plus_fail
     result = sb.update_everything()
@@ -165,7 +150,7 @@ def test_update_everything_checks_all_four_legs() -> None:
     )
 
 
-def test_update_all_sd_plus_bar_wallpapers_counts_only_successes() -> None:
+def test_update_all_sd_plus_successes() -> None:
     sb = _make_backend()
 
     wp_ok = SDPlusBarWallpaperData(github="https://github.com/a/sdplus", id="com_a_SDPlus",
@@ -251,10 +236,10 @@ def test_install_icon_propagates_download_result() -> None:
 
 def main() -> None:
     fixtures.start_watchdog(30, label="scenario_store_install_contract")
-    test_install_plugin_failure_propagates_and_skips_reload()
-    test_update_all_plugins_counts_only_successes_and_never_predeletes()
+    test_install_plugin_failure_skips_reload()
+    test_update_all_plugins_counts_never_predeletes()
     test_update_everything_checks_all_four_legs()
-    test_update_all_sd_plus_bar_wallpapers_counts_only_successes()
+    test_update_all_sd_plus_successes()
     test_update_all_icons_counts_only_successes()
     test_install_icon_propagates_download_result()
     print("scenario_store_install_contract: PASS")

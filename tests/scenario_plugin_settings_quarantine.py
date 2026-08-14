@@ -1,59 +1,12 @@
 """
-Regression test: corrupt-JSON quarantine on the PLUGIN file
-set (settings.json / manifest.json / about.json), plus the ``.corrupt``
-sidecar retention policy.
+Corrupt-JSON quarantine on the plugin file set, with sidecar retention.
 
-Pages and app/page settings already had quarantine-on-corrupt-read; the
-plugin files were explicitly deferred and fell back to ``{}``
-silently and left the bad file in place, so a corrupt plugin settings file
-was indistinguishable from "this plugin has no settings" -- and the next
-set_settings() overwrote the only surviving copy of the user's config.
-
-Pins, all against the real load path (no GTK, no hardware):
-
-1. QUARANTINE + FALLBACK + CLEAN NEXT LOAD -- a corrupt settings.json is
-   moved to <path>.corrupt (byte-for-byte), get_settings() still returns {},
-   and the plugin can save and read back normally afterwards.
-2. WRITE PATH -- set_settings() on a corrupt file preserves it BEFORE the
-   atomic write replaces it: the sidecar holds the corrupt bytes and the
-   primary holds the new settings.
-3. MANIFEST DEGRADES EXACTLY LIKE A MISSING MANIFEST -- the plugin lands in
-   PluginManager.load_errors with the identical "did not register (invalid or
-   incomplete manifest?)" reason a manifest-less plugin gets. Never
-   registered, never disabled, and the scan continues (a healthy neighbor
-   still loads). The corrupt manifest is NOT quarantined: it is a plugin
-   SOURCE file, which the app never writes, so there is no save to protect it
-   from -- and moving it would mutate the developer's git working tree.
-4. ABOUT -- a corrupt about.json degrades to the missing-file result ({})
-   instead of raising into the plugin-about window, and a valid-but-non-object
-   one no longer raises AttributeError downstream. Source file: left in place.
-5. A PRIOR .corrupt IS NEVER CLOBBERED -- a second corruption takes the next
-   free slot (.corrupt.1); the first forensic copy survives intact.
-6. RETENTION, ONCE PER WIRED QUARANTINE CALL SITE (the plugin loader, the
-   SettingsManager loader reached through PageManagerBackend's page read,
-   and the Migrator's pre-SettingsManager loader) -- five successive
-   corruptions leave exactly three sidecars, the OLDEST pruned (contents pin
-   which three survived). Names are deliberately not asserted as an age
-   order: quarantine_corrupt_file reuses a pruned slot.
-7. OSError IS NOT CORRUPTION -- an unreadable (EACCES) settings file keeps
-   the old behavior: {} returned, file left exactly where it is, no sidecar.
-   Quarantining there would move a perfectly healthy file out of the way.
-8. THE FRESH SIDECAR IS NEVER PRUNED BY ITS OWN RETENTION CALL -- a corrupt
-   primary with an OLD mtime (backup restore, settings-dir rename) hands that
-   mtime to the sidecar os.replace creates, which made the prune delete the
-   forensic copy the loader had just logged as "preserved at".
-9. UNDECODABLE BYTES ARE CORRUPTION -- garbage raises UnicodeDecodeError,
-   a ValueError but not a JSONDecodeError, so it bypassed quarantine at every
-   site and still aborted startup in the Migrator (the exact failure that
-   loader's comment claims to have fixed).
-10. THE MIGRATOR DOES NOT QUARANTINE ON OSError -- it used to catch it in the
-   same tuple as the decode error, renaming a healthy but momentarily
-   unreadable migrations.json away and re-running every migrator.
-11. THE ASSET MANAGER READS AND REWRITES THE SAME settings.json -- load_assets
-   is the earliest reader of all (PluginBase.__init__, before register()) and
-   save_assets replaced a corrupt file wholesale from five live UI call
-   sites. Both now quarantine exactly like PluginBase does.
+A corrupt settings.json moves to a .corrupt sidecar and the read falls back to
+{}, so a later set_settings cannot overwrite the last copy. Retention keeps
+three sidecars per file and prunes the oldest. An OSError is not corruption.
 """
+
+# A plugin source file, a manifest or an about.json, is never moved.
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 
 import json
@@ -97,8 +50,8 @@ def write_plugin(folder: str, class_name: str, manifest_text: str | None) -> str
 
 
 def corrupt(path: str, marker: str) -> bytes:
-    """Truncated mid-token, but identifiable -- the sidecar's content is what
-    proves WHICH corruption was preserved."""
+    """Truncated mid-token but identifiable. The sidecar's content proves
+    which corruption was preserved."""
     payload = f'{{"file-version": "2.0", "marker": "{marker}", "settings": {{"a'
     with open(path, "w") as f:
         f.write(payload)
@@ -106,7 +59,7 @@ def corrupt(path: str, marker: str) -> bytes:
 
 
 def sidecars(path: str) -> list[str]:
-    """Every quarantine sidecar of `path`, by name."""
+    """Every quarantine sidecar of path, by name."""
     directory = os.path.dirname(path)
     base = os.path.basename(path) + ".corrupt"
     return sorted(
@@ -140,7 +93,7 @@ def check_settings_quarantine(plugin) -> None:
     dest = os.path.join(os.path.dirname(path), quarantined[0])
     assert read(dest).encode() == bad, "the sidecar is not the corrupt file, byte for byte"
 
-    # Clean afterwards: the plugin is usable again, no stale corruption.
+    # The plugin is usable again afterwards, with no stale corruption.
     plugin.set_settings({"marker": "after-corruption"})
     assert plugin.get_settings() == {"marker": "after-corruption"}, (
         f"plugin could not save/read after quarantine: {plugin.get_settings()}"
@@ -148,11 +101,11 @@ def check_settings_quarantine(plugin) -> None:
     print("PASS(1): corrupt plugin settings quarantined, fallback returned, next load clean")
 
 
-def check_set_settings_preserves_before_overwrite(plugin) -> None:
+def check_set_settings_preserves_corrupt(plugin) -> None:
     path = plugin.settings_path
     bad = corrupt(path, "second")
 
-    # THE data-loss moment: this write replaces the file wholesale.
+    # The data-loss moment. This write replaces the file wholesale.
     plugin.set_settings({"marker": "written-over-corruption"})
 
     assert plugin.get_settings() == {"marker": "written-over-corruption"}
@@ -179,16 +132,16 @@ def check_prior_sidecar_not_clobbered(plugin) -> None:
 
 
 def check_retention(path: str, corrupting_read, label: str) -> None:
-    """Five successive corruptions of `path` must leave exactly three
-    sidecars, the oldest pruned. `corrupting_read` is the loader call that
-    quarantines -- one per wired call site."""
+    """Five successive corruptions of path must leave exactly three sidecars,
+    with the oldest pruned. corrupting_read is the loader call that
+    quarantines, one per wired call site."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     for n in range(1, 6):
         corrupt(path, f"gen{n}")
         got = corrupting_read()
         assert got == {}, f"{label}: corrupt read must fall back to empty, got {got}"
-        # Distinct mtimes: the sidecar inherits the corrupt primary's mtime,
-        # which is what the oldest-first prune orders by.
+        # Distinct mtimes. The sidecar inherits the corrupt primary's mtime,
+        # and the oldest-first prune orders by that.
         time.sleep(0.01)
 
     names = sidecars(path)
@@ -202,23 +155,21 @@ def check_retention(path: str, corrupting_read, label: str) -> None:
 
 
 def check_fresh_sidecar_survives_prune(plugin) -> None:
-    """os.replace carries the PRIMARY's mtime onto the new sidecar, so a
-    corrupt file that is OLD on disk (mtime-preserving restore, the settings
-    dir os.rename in _resolve_settings_path) produces a brand-new forensic
-    copy that looks older than every sidecar already there. Un-protected, the
-    prune deleted it one line after the loader logged "preserved at"."""
+    """os.replace carries the primary's mtime onto the new sidecar, so a
+    corrupt file that is old on disk produces a fresh forensic copy that looks
+    older than every sidecar already there. The prune must keep it."""
     path = plugin.settings_path
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
-    # Three sidecars with recent mtimes: the retention budget is already full.
+    # Three sidecars with recent mtimes fill the retention budget.
     for n in range(1, 4):
         corrupt(path, f"existing{n}")
         assert plugin.get_settings() == {}
         time.sleep(0.01)
     assert len(sidecars(path)) == 3, "precondition: retention budget full"
 
-    # The fourth corruption is OLD on disk -- e.g. restored from a backup that
-    # preserved timestamps.
+    # The fourth corruption is old on disk, as a timestamp-preserving restore
+    # leaves it.
     corrupt(path, "old-but-fresh-copy")
     old = time.time() - 365 * 24 * 3600
     os.utime(path, (old, old))
@@ -239,22 +190,21 @@ def check_fresh_sidecar_survives_prune(plugin) -> None:
 
 
 def check_garbage_bytes_are_corruption(plugin, migrator) -> None:
-    """Undecodable BYTES raise UnicodeDecodeError -- a ValueError, but not a
-    JSONDecodeError. Handlers that named the JSON error let the crudest
-    corruption of all straight through."""
+    """Undecodable bytes raise UnicodeDecodeError, which is a ValueError but
+    not a JSONDecodeError. A handler that names the JSON error lets the
+    crudest corruption of all straight through."""
     path = plugin.settings_path
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as f:
         f.write(b"\xff\xfe\x00\x80garbage\xc3\x28")
 
-    got = plugin.get_settings()  # used to raise UnicodeDecodeError out of register()
+    got = plugin.get_settings()  # a UnicodeDecodeError here would escape register()
     assert got == {}, f"garbage bytes must fall back to empty, got {got}"
     assert len(sidecars(path)) == 1, (
         f"garbage bytes are corruption and must be quarantined, got {sidecars(path)}"
     )
 
-    # Same class of file, the startup-critical reader: this is precisely what
-    # the Migrator's own comment claims it fixed.
+    # The same class of file, read by the startup-critical Migrator loader.
     with open(migrator.SETTINGS_DIR, "wb") as f:
         f.write(b"\xff\xfe\x00\x80garbage\xc3\x28")
     try:
@@ -265,10 +215,10 @@ def check_garbage_bytes_are_corruption(plugin, migrator) -> None:
     print("PASS(9): undecodable bytes are treated as corruption, not raised")
 
 
-def check_migrator_oserror_is_not_corruption(migrator) -> None:
-    """The Migrator quarantined on OSError too -- renaming away a HEALTHY but
-    momentarily unreadable migrations.json, which then reports every migrator
-    as pending and re-runs the lot."""
+def check_migrator_oserror_not_corruption(migrator) -> None:
+    """The Migrator must not quarantine on OSError. Renaming away a healthy
+    but momentarily unreadable migrations.json reports every migrator as
+    pending and re-runs the lot."""
     path = migrator.SETTINGS_DIR
     migrator.set_migrated(True)
     before = read(path)
@@ -294,22 +244,21 @@ def check_migrator_oserror_is_not_corruption(migrator) -> None:
 
 
 def check_asset_manager_quarantines(plugin) -> None:
-    """The asset manager reads and REWRITES the same settings.json, with no
-    quarantine of its own: load_assets is the earliest reader (PluginBase
-    __init__, before register()), and save_assets -- reachable from five live
-    UI call sites -- replaced a corrupt file wholesale."""
+    """The asset manager reads and rewrites the same settings.json.
+    load_assets is the earliest reader of all, inside PluginBase.__init__, and
+    save_assets replaces the file wholesale from five live UI call sites."""
     path = plugin.settings_path
     am = plugin.asset_manager
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
     bad = corrupt(path, "asset-load")
-    am.load_assets()  # must not raise; must quarantine
+    am.load_assets()  # must not raise, and must quarantine
     assert not os.path.exists(path), "load_assets left the corrupt file in place"
     names = sidecars(path)
     assert len(names) == 1, f"load_assets did not quarantine, got {names}"
     assert read(os.path.join(os.path.dirname(path), names[0])).encode() == bad
 
-    # save_assets: the write below replaces the file wholesale.
+    # The save_assets write below replaces the file wholesale.
     bad2 = corrupt(path, "asset-save")
     am.save_assets()
 
@@ -320,7 +269,7 @@ def check_asset_manager_quarantines(plugin) -> None:
     with open(path) as f:
         assert "assets" in json.load(f), "save_assets did not write the new content"
 
-    # Valid JSON that is not an object used to raise TypeError on assignment.
+    # Valid JSON that is not an object must not raise on assignment.
     with open(path, "w") as f:
         f.write('["not", "an", "object"]')
     am.save_assets()
@@ -329,7 +278,7 @@ def check_asset_manager_quarantines(plugin) -> None:
     print("PASS(11): the asset manager quarantines the same file the same way")
 
 
-def check_oserror_is_not_corruption(plugin) -> None:
+def check_oserror_not_corruption(plugin) -> None:
     path = plugin.settings_path
     plugin.set_settings({"marker": "healthy"})
     before = read(path)
@@ -375,11 +324,10 @@ def check_manifest_degrades_like_missing(pm, PluginBase, corrupt_dir, missing_di
         f"{sorted(PluginBase.plugins)}, errors={pm.load_errors}"
     )
 
-    # The manifest lives in the plugin's SOURCE tree, which the app never
-    # writes -- so it must be left exactly where it is. Renaming it aside
-    # would mutate the developer's git working tree (dev plugins are symlinks
-    # into ~/dev): a manifest corrupt mid-rebase would show up as a DELETED
-    # file. Nothing overwrites it either, so there is nothing to protect.
+    # The manifest lives in the plugin's source tree, which the app never
+    # writes, so it must stay exactly where it is. A rename would mutate the
+    # developer's git working tree, because dev plugins are symlinks into
+    # ~/dev. Nothing overwrites it either, so nothing needs protection.
     manifest_path = os.path.join(corrupt_dir, "manifest.json")
     assert os.path.isfile(manifest_path), (
         "the corrupt manifest was moved out of the plugin's source tree"
@@ -397,16 +345,16 @@ def check_about_degrades_to_empty(plugin) -> None:
     with open(about_path, "w") as f:
         f.write('{"copyright": "me"')  # truncated
 
-    got = plugin.get_about()  # used to raise straight into the about window
+    got = plugin.get_about()  # a raise here would reach the about window
 
     assert got == {}, f"a corrupt about.json must degrade to the missing-file result, got {got}"
-    # Source file again: log, do not touch.
+    # A source file again. Log it and leave it alone.
     assert os.path.isfile(about_path) and read(about_path) == '{"copyright": "me"'
     assert sidecars(about_path) == [], (
         f"a plugin SOURCE file must never be quarantined: {os.listdir(plugin.PATH)}"
     )
 
-    # Valid JSON that is not an object used to reach PluginAbout and raise
+    # Valid JSON that is not an object must not reach PluginAbout and raise
     # AttributeError on .get().
     with open(about_path, "w") as f:
         f.write('["not", "an", "object"]')
@@ -421,9 +369,9 @@ def main() -> None:
     from src.backend.PluginManager.PluginBase import PluginBase
     from src.backend.PluginManager.PluginManager import PluginManager
 
-    # Real SettingsManager + PageManagerBackend: the page loader delegates its
-    # corrupt-read handling to SettingsManager, so this is how the second
-    # wired call site gets exercised end to end.
+    # Real SettingsManager and PageManagerBackend. The page loader delegates
+    # its corrupt-read handling to SettingsManager, which drives the second
+    # wired call site end to end.
     fixtures._install_integration_globals()
 
     write_plugin("com_test_q_settings", "QSettingsPlugin", manifest_json("com_test_q_settings"))
@@ -432,7 +380,7 @@ def main() -> None:
     write_plugin("com_test_q_prune", "QPrunePlugin", manifest_json("com_test_q_prune"))
     write_plugin("com_test_q_garbage", "QGarbagePlugin", manifest_json("com_test_q_garbage"))
     write_plugin("com_test_q_assets", "QAssetsPlugin", manifest_json("com_test_q_assets"))
-    # Corrupt manifest vs. no manifest at all -- the two must be indistinguishable.
+    # A corrupt manifest and no manifest at all must be indistinguishable.
     corrupt_dir = write_plugin("com_test_q_manifest_corrupt", "QCorruptManifestPlugin",
                                '{"name": "x", "id": ')
     missing_dir = write_plugin("com_test_q_manifest_missing", "QMissingManifestPlugin", None)
@@ -445,11 +393,11 @@ def main() -> None:
 
     settings_plugin = PluginBase.plugins["com_test_q_settings"]["object"]
     check_settings_quarantine(settings_plugin)
-    check_set_settings_preserves_before_overwrite(settings_plugin)
+    check_set_settings_preserves_corrupt(settings_plugin)
     check_prior_sidecar_not_clobbered(settings_plugin)
     check_about_degrades_to_empty(settings_plugin)
 
-    check_oserror_is_not_corruption(PluginBase.plugins["com_test_q_oserror"]["object"])
+    check_oserror_not_corruption(PluginBase.plugins["com_test_q_oserror"]["object"])
     check_fresh_sidecar_survives_prune(PluginBase.plugins["com_test_q_prune"]["object"])
 
     # Retention, once per wired quarantine call site.
@@ -467,7 +415,7 @@ def main() -> None:
 
     check_garbage_bytes_are_corruption(
         PluginBase.plugins["com_test_q_garbage"]["object"], migrator)
-    check_migrator_oserror_is_not_corruption(migrator)
+    check_migrator_oserror_not_corruption(migrator)
     check_asset_manager_quarantines(PluginBase.plugins["com_test_q_assets"]["object"])
 
     print("PASS: scenario_plugin_settings_quarantine")

@@ -1,19 +1,11 @@
 """App._destroy_main_window must not abort on an unrealized window.
 
-GTK 4.22 segfaults on the dispose path of a window that was never realized.
-In background mode (-b) on_activate builds main_win but never presents it, so
-`main_win.destroy()` in on_quit killed the process *before*
-terminate_all_backends() -- orphaning every plugin backend on every quit.
-
-Red-check: with the guard removed, check 2 does not fail, it takes the whole
-interpreter down (SIGSEGV), which run_all.py reports as a failed scenario.
-That is the point -- a Python-level try/except cannot catch a native abort,
-so the only honest assertion is "the process is still here afterwards".
-
-Needs a display: GTK windows cannot be constructed headless. Skips cleanly
-(exit 0, SKIP in the output) when no display is available, since the harness
-has no CI lane with one.
+GTK 4.22 segfaults on the dispose path of a window that was never realized. In
+background mode on_activate builds main_win but never presents it, so a
+destroy() in on_quit kills the process before terminate_all_backends runs.
 """
+
+# GTK windows need a display, so this scenario skips cleanly without one.
 
 import os
 import sys
@@ -44,7 +36,7 @@ class _Stub:
         self.main_win = main_win
 
 
-def check_1_missing_window_is_a_noop():
+def check_missing_window_noop():
     class _NoWin:
         pass
 
@@ -53,13 +45,11 @@ def check_1_missing_window_is_a_noop():
 
 
 def _run_in_app(body, app_id):
-    """Drive `body(app)` from inside a running GtkApplication.
+    """Drive body(app) from inside a running GtkApplication.
 
-    The conditions matter: a bare Gtk.ApplicationWindow() with no application
-    and no main loop does NOT reproduce the abort (verified -- an earlier version
-    of this scenario passed with the guard removed, i.e. it was a false
-    green). The abort needs a window bound to a running GtkApplication, which
-    is what on_activate actually builds.
+    A bare Gtk.ApplicationWindow with no application and no main loop does not
+    reproduce the abort. The abort needs a window bound to a running
+    GtkApplication, which is what on_activate builds.
     """
     app = Adw.Application(application_id=app_id)
     result = {}
@@ -73,10 +63,10 @@ def _run_in_app(body, app_id):
     return result
 
 
-def check_2_unrealized_window_survives():
-    """The regression itself. Pre-fix this SIGSEGVs the whole interpreter,
-    which run_all.py reports as a failed scenario -- there is no Python-level
-    exception to assert on, so surviving to the print IS the assertion."""
+def check_unrealized_window_survives():
+    """Without the guard this SIGSEGVs the whole interpreter, which
+    run_all.py reports as a failed scenario. No Python-level exception exists
+    to assert on, so reaching the print is the assertion."""
     for cls, label in ((Gtk.ApplicationWindow, "Gtk"), (Adw.ApplicationWindow, "Adw")):
         def body(app, result, cls=cls):
             win = cls(application=app)  # built exactly as on_activate does
@@ -90,7 +80,7 @@ def check_2_unrealized_window_survives():
               f"{label}.ApplicationWindow -> survived teardown")
 
 
-def check_3_realized_window_is_still_destroyed():
+def check_realized_window_destroyed():
     """The guard must not turn the normal (windowed) path into a no-op."""
     app = Adw.Application(application_id="dev.deckard.scenario.quitteardown")
     result = {}
@@ -113,9 +103,9 @@ def check_3_realized_window_is_still_destroyed():
 
 
 def main():
-    check_1_missing_window_is_a_noop()
-    check_2_unrealized_window_survives()
-    check_3_realized_window_is_still_destroyed()
+    check_missing_window_noop()
+    check_unrealized_window_survives()
+    check_realized_window_destroyed()
     print("ALL PASS: scenario_quit_window_teardown")
 
 

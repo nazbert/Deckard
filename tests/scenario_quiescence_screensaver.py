@@ -1,21 +1,13 @@
 """
-The quiescence gate must never touch the deck screensaver, and must
-repaint the page it restores.
+The quiescence gate never touches the deck screensaver.
 
-The physical deck is visible even when the monitor is locked, so while the
-screensaver owns the deck its animation IS the intended visible content --
-`DeckController.animations_gated()` carries a `not screen_saver.showing`
-term precisely for that. Pinned here over a REAL MediaPlayerThread:
-
-  1. quiescent WITH the screensaver showing: the gate stays off and the
-     screensaver's video keeps writing distinct frames to the device,
-  2. hide() while still quiescent: the restored page paints once -- every
-     key, including the transparent ones whose device paint update_all_inputs()
-     delegates to the video loop -- and only then does the loop go quiet.
-     A bare "the journal quiets" assertion here would have been satisfied by
-     the deck freezing on the SCREENSAVER's last frame, which is the exact
-     tear the page-generation watch exists to prevent.
+The physical deck stays visible while the monitor is locked, so the
+screensaver's animation is the intended content and animations_gated carries a
+not screen_saver.showing term.
 """
+
+# On hide() the restored page must paint every key once, transparent ones
+# included, and only then go quiet.
 import os
 import time
 
@@ -35,12 +27,12 @@ def distinct_key_frames(deck) -> set:
 
 
 def wait_until_quiet(deck, quiet_for: float = 0.5, timeout: float = 10.0) -> bool:
-    """Waits until no device write has landed for `quiet_for` seconds.
+    """Waits until no device write has landed for quiet_for seconds.
 
-    Deliberately not a fixed sleep: the settle window's length depends on how
-    fast the page-load tasks drain, which under a loaded machine is not a
-    constant. The invariant being pinned is "it goes quiet", not "it goes
-    quiet in exactly N milliseconds"."""
+    The settle window's length depends on how fast the page-load tasks drain,
+    which is not a constant on a loaded machine."""
+    # The invariant is that the loop goes quiet, not that it goes quiet within
+    # a fixed number of milliseconds.
     deadline = time.monotonic() + timeout
     seen = len(deck.journal())
     stable_since = time.monotonic()
@@ -96,7 +88,7 @@ def main() -> None:
             "the gate must exempt a deck whose screensaver is showing"
         )
 
-        # 1. the screensaver keeps animating while the user is away.
+        # The screensaver keeps animating while the user is away.
         deck.clear_journal()
         gated_before = media_player.gated_ticks
         assert fixtures.wait_until(
@@ -113,7 +105,7 @@ def main() -> None:
         print(f"PASS: screensaver keeps animating while quiescent "
               f"({len(saver_frames)} distinct frames, 0 gated ticks)")
 
-        # 2. hide() while STILL quiescent: the restored page must paint.
+        # On hide() while still quiescent, the restored page must paint.
         saver_signature = {k: deck.last_op_for(f"key:{k}") for k in range(key_count)}
         assert all(saver_signature.values()), "fixture sanity: screensaver painted every key"
         deck.clear_journal()
@@ -146,7 +138,7 @@ def main() -> None:
                 f"key {k} still shows the SCREENSAVER's frame after hide()"
             )
 
-        # ... and only THEN does the loop quiet down again.
+        # Only then does the loop quiet down again.
         settled = len(deck.journal())
         gated_before = media_player.gated_ticks
         time.sleep(OBSERVE_S)

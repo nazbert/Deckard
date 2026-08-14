@@ -1,43 +1,12 @@
 """
-Regression test: every `Page.set_label_*` styling setter must
-reach the UI port and still repaint the input afterwards.
+Every Page.set_label_* styling setter reaches the UI port, then repaints.
 
-The engine->UI port refactor deleted `LabelManager.update_label_editor`, but
-`PageManagement/Page.py` still calls it from eight label setters
-(set_label_font_family / _font_size / _font_weight / _font_color /
-_outline_width / _outline_color / _font_style / _alignment). Without the
-forwarder every one of those raised AttributeError *before* its trailing
-`self.update_input(identifier, state)` -- so changing a label's font in the
-UI silently stopped repainting the key, and the label editor never
-refreshed.
-
-What this pins, end-to-end on a real headless DeckController:
-  1. no exception escapes any of the eight setters,
-  2. each one reaches the port as on_input_visuals_changed(..., "labels")
-     with the right controller/identifier/state,
-  3. the port call happens BEFORE the trailing update_input repaint (order
-     matters: an AttributeError in the forwarder aborts the repaint), and
-  4. the setter still works with no UI attached (null port).
-
-Delete `LabelManager.update_label_editor` again and this fails on the first
-setter.
-
-Second regression: `set_label_font_family` wrote the family to
-`page_labels[pos].font_family`, a field `KeyLabel` does not have -- on a
-plain dataclass that silently grows a stray attribute instead of raising,
-and the intended `font_name` keeps its old value. The setter's own
-controller was covered by the second (`get_label_manager`) block, which
-writes `font_name` correctly, so the drop only showed on the OTHER
-controllers the first block exists for. NOTE the honest scope:
-`get_controller_inputs()` iterates EVERY controller with no page
-filter -- the two controllers in the check below do not share a Page
-object, and the write reaching deck B regardless of which page it shows is
-the (pre-existing, all-8-setters) unscoped-broadcast behavior tracked by
-its own issue, NOT page-scoped semantics this scenario pins.
-`check_font_family_reaches_every_controller` below drives the
-every-controller write, plus the state-switch leg (a family set on a
-non-active state must survive switching to it).
+Each of the eight setters forwards to on_input_visuals_changed with the aspect
+"labels", then runs its trailing update_input. The port call must come first,
+because a raise in the forwarder would abort the repaint.
 """
+
+# Each setter must also work with no UI attached.
 import fixtures
 
 from src.backend import ui_port
@@ -45,7 +14,7 @@ from src.backend.DeckManagement.InputIdentifier import Input
 
 LABEL_POSITION = "center"
 
-# (setter name, value) -- every Page.set_label_* that calls the forwarder.
+# (setter name, value) for every Page.set_label_* that calls the forwarder.
 SETTERS = [
     ("set_label_font_family", "Fake Sans"),
     ("set_label_font_size", 17),
@@ -68,11 +37,15 @@ class RecordingPort(ui_port.UIPort):
         self.journal.append(("port", controller, identifier, state, aspect))
 
 
-def check_font_family_reaches_every_controller(page, identifier, state) -> None:
-    """The family must land on every controller showing the page, and
-    must survive a state switch."""
+def check_font_family_every_controller(page, identifier, state) -> None:
+    """The family must land on every controller the page covers and survive a
+    state switch. The setter writes KeyLabel.font_name; a write to font_family
+    grows a stray attribute instead of raising."""
     second = fixtures.make_headless_controller(serial="label-setters-2")
     try:
+        # get_controller_input_states iterates every controller with no page
+        # filter. That unscoped broadcast is existing behavior, not a
+        # page-scoped guarantee this scenario pins.
         covered = page.get_controller_input_states(identifier, state)
         serials = [s.controller_input.deck_controller.serial_number() for s in covered]
         assert "label-setters-2" in serials, (
@@ -98,8 +71,8 @@ def check_font_family_reaches_every_controller(page, identifier, state) -> None:
                 "attribute -- the setter is writing the wrong field name"
             )
 
-        # State switch: a family set while state 1 is NOT active must be what
-        # state 1 renders once it becomes active.
+        # A family set while state 1 is inactive must be what state 1 renders
+        # once it becomes active.
         c_input = second.get_input(identifier)
         c_input.add_new_state(switch=False)
         assert 1 in c_input.states, "could not create a second input state"
@@ -129,9 +102,8 @@ def main() -> None:
         identifier = Input.Key("0x0")
         state = 0
 
-        # The label manager must actually exist, or the setters would skip
-        # their `if label_manager is not None:` block and this whole scenario
-        # would pass vacuously.
+        # The label manager must exist. Otherwise the setters skip their
+        # guarded block and this scenario passes vacuously.
         assert page.get_label_manager(identifier, state) is not None, (
             "no LabelManager for 0x0 state 0 -- the setters' guarded block "
             "would be skipped and this test would prove nothing"
@@ -150,8 +122,8 @@ def main() -> None:
         for name, value in SETTERS:
             journal.clear()
             setter = getattr(page, name)
-            # Pre-fix this raised AttributeError: 'LabelManager' object has
-            # no attribute 'update_label_editor'.
+            # A missing LabelManager.update_label_editor raises
+            # AttributeError here.
             setter(identifier, state, LABEL_POSITION, value)
 
             kinds = [entry[0] for entry in journal]
@@ -180,12 +152,12 @@ def main() -> None:
                 f"{name} reported aspect {aspect!r}, expected 'labels'"
             )
 
-        # The value actually landed (the setters are not no-ops under the
-        # recording port).
+        # The value landed. The setters are not no-ops under the recording
+        # port.
         assert page.get_label_font_size(identifier, state, LABEL_POSITION) == 17
 
-        # 4. Null port (headless / pre-window): same setters, no UI, no raise,
-        # repaint still happens.
+        # With a null port the same setters must not raise, and the repaint
+        # must still happen.
         ui_port.install(None)
         journal.clear()
         page.set_label_font_size(identifier, state, LABEL_POSITION, 21)
@@ -196,7 +168,7 @@ def main() -> None:
 
         print(f"PASS: {len(SETTERS)} label setters reach the port then repaint")
 
-        check_font_family_reaches_every_controller(page, identifier, state)
+        check_font_family_every_controller(page, identifier, state)
     finally:
         ui_port.install(None)
         fixtures.teardown(controller)

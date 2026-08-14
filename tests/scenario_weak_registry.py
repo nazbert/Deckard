@@ -1,23 +1,12 @@
 """
-Unit-tier scenario (docs/memory-footprint-impl-plan.md P1.4): CallbackRegistry
-(src/Signals/weak_callbacks.py) is the registry backing SignalManager,
-EventHolder and the plugin-settings Observer. Its correctness properties --
-weak storage for bound methods, dedupe-on-add, thread safety, and the
-SC_STRONG_CALLBACKS escape hatch -- are independent of which subsystem is
-using it, so this exercises the registry directly rather than through any
-of those higher-level classes.
+Unit-tier scenario for CallbackRegistry in src/Signals/weak_callbacks.py.
 
-Covers:
-  (a) a bound method dies with its owner after gc -> snapshot() drops it
-  (b) a lambda (no owner to weak-ref) survives
-  (c) dedupe: the same bound method added twice -> one entry
-  (d) concurrent add/remove/snapshot from 4 threads for 2s -> no exception,
-      no live entry lost
-  (e) SC_STRONG_CALLBACKS=1 keeps a bound method alive past its owner's
-      death (checked in a subprocess, since the flag is read once at import)
-  (f) snapshot() logs a DEBUG record naming each dead entry it prunes
-      (the silent-drop shape must at least leave a trace)
+The registry backs SignalManager, EventHolder and the plugin-settings Observer,
+and its properties hold whichever subsystem uses it.
 """
+
+# A bound method dies with its owner, a lambda survives, an add dedupes,
+# concurrent use is safe, and SC_STRONG_CALLBACKS keeps a bound method alive.
 import gc
 import os
 import subprocess
@@ -80,9 +69,9 @@ def check_dedupe_same_bound_method():
     registry = CallbackRegistry()
     owner = _Owner()
     assert registry.add(owner.method) is True
-    # `owner.method` creates a brand new bound-method wrapper object every
-    # time it's accessed -- dedupe must be on (obj, func) equality, not the
-    # identity of that wrapper.
+    # An access of owner.method creates a new bound-method wrapper every
+    # time, so the dedupe must compare (obj, func) rather than the identity
+    # of that wrapper.
     assert registry.add(owner.method) is False
     assert len(registry) == 1
     snap = registry.snapshot()
@@ -94,7 +83,7 @@ def check_dedupe_same_bound_method():
 def check_concurrent_add_remove_snapshot():
     registry = CallbackRegistry()
 
-    # Canaries: added once, up-front, never touched again by the hammering
+    # Canaries. Added once, up-front, never touched again by the hammering
     # threads below. If concurrent add/remove/snapshot corrupts the
     # registry's internal list, a canary going missing from the final
     # snapshot is the tell.
@@ -120,8 +109,8 @@ def check_concurrent_add_remove_snapshot():
                 errors.append(e)
 
     def hammer_remove():
-        # Repeatedly remove a callable that was never added -- pure lock
-        # contention, must never raise or corrupt state.
+        # Repeatedly remove a callable that was never added. This is pure
+        # lock contention, and must never raise or corrupt state.
         ghost = _Owner()
         while not stop.is_set():
             try:
@@ -196,10 +185,9 @@ def check_strong_callbacks_env_escape_hatch():
 
 
 def check_prune_logs_debug():
-    # Dropping a subscription because its owner died is a
-    # deliberate D2 tradeoff, but it must leave a trace -- a DEBUG record
-    # naming the pruned callback -- or ecosystem regressions ("my plugin's
-    # events just stopped") are undiagnosable.
+    # A subscription dropped because its owner died is the price of weak
+    # storage, and it must leave a trace. Without a DEBUG record naming the
+    # pruned callback, a plugin whose events stop cannot be diagnosed.
     records: list[str] = []
     handle = log.add(lambda message: records.append(str(message)), level="DEBUG")
     try:
@@ -219,7 +207,7 @@ def check_prune_logs_debug():
     finally:
         log.remove(handle)
 
-    # A live registry must not spam the prune log: a snapshot with only
+    # A live registry must not spam the prune log. A snapshot with only
     # live entries logs nothing.
     records2: list[str] = []
     handle2 = log.add(lambda message: records2.append(str(message)), level="DEBUG")

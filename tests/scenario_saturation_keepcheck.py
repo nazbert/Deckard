@@ -1,45 +1,13 @@
 """
-Unit-tier scenario for the latent touchscreen bg-video keep-check bug
-(surfaced by a test-coverage audit): the per-touchscreen
-background VIDEO reuse "keep-check" must invalidate on a display-saturation
-change.
+Unit-tier scenario for the touchscreen background-video keep-check.
 
-ControllerTouchScreenState._get_background_video_frame()
-(deck_controller/inputs.py, the `if video is None or video.video_path != path:`
-guard) decides
-whether to REUSE the existing InputVideo or build a fresh one. It keys the
-decision on the source path ONLY. But an InputVideo bakes the current
-display-saturation into its shared tile-cache at CONSTRUCTION
-(KeyVideo.py: mp4_tile_cache.acquire(..., get_display_saturation())), and
-set_playback() only updates fps/loop -- never saturation. So when the
-saturation factor changes while the same video stays configured as the strip
-background, the reuse branch keeps serving frames baked at the OLD factor:
-the SD+ strip video desaturates relative to the (correctly re-enhanced) keys.
-
-This is the cross-commit latent defect the audit flags
-(docs/deep-audit-2026-07-10.md §5a, commit 4b2a3dbd LOW / e314a086 :4230):
-"the touchscreen bg-video reuse check compares only path, not saturation --
-masked today because a slider change reloads the page." The masking makes it
-unreachable in production RIGHT NOW (set_display_saturation ->
-load_page(allow_reload=True) rebuilds the touch state, dropping the reused
-video). But the invalidation logic itself is absent, so if the reload is ever
-removed/deferred (e.g. the settings font-row debounce pattern applied here,
-or a targeted repaint), the strip goes stale silently. This leg pins that
-missing invalidation.
-
-Always-on regression net since the fix (formerly registered in
-run_all.EXPECTED_FAIL_UNTIL_M1 as a latent-bug pin while the keep-check
-lacked the saturation dimension): the keep-check now tracks the factor the
-strip video was constructed at (_background_video_saturation) and rebuilds
-when it diverges, so a saturation change re-acquires the video at the new
-factor.
-
-Drives the REAL ControllerTouchScreenState._get_background_video_frame via
-__new__ + the exact attributes it reads, with a spy InputVideo -- patched on
-deck_controller.inputs, the namespace _get_background_video_frame resolves
-the name from -- that records the saturation each constructed instance
-acquired.
+An InputVideo bakes the display saturation into its shared tile cache at
+construction, and set_playback updates only fps and loop.
 """
+
+# The keep-check therefore tracks the factor the strip video was built at and
+# rebuilds when that factor diverges, so the strip never serves frames baked at
+# the old one.
 import os
 import threading
 import types
@@ -56,10 +24,11 @@ WATCHDOG_SECONDS = 30
 
 
 class _SpyInputVideo:
-    """Stands in for InputVideo at deck_controller.inputs module scope. Records the
-    display-saturation it would bake into its tile cache (read the same way
-    the real InputVideo.__init__ does: controller_input.deck_controller
-    .get_display_saturation()), and tracks reuse via set_playback()."""
+    """Stands in for InputVideo at deck_controller.inputs module scope.
+
+    Records the display saturation it would bake into its tile cache, read
+    the way the real InputVideo.__init__ reads it, and tracks reuse through
+    set_playback."""
 
     instances: list = []
 
@@ -68,8 +37,8 @@ class _SpyInputVideo:
         self.fps = fps
         self.loop = loop
         self.natural_speed = natural_speed
-        # This is the crux: the real InputVideo freezes the current factor
-        # into its shared cache here and never revisits it.
+        # The real InputVideo freezes the current factor into its shared
+        # cache here and never revisits it.
         self.baked_saturation = controller_input.deck_controller.get_display_saturation()
         self.closed = False
         self.set_playback_calls: list = []
@@ -91,10 +60,9 @@ class _SpyInputVideo:
 
 
 def _make_touch_state(saturation_holder) -> ControllerTouchScreenState:
-    """__new__ + exactly the attributes _get_background_video_frame reads.
-    controller_touch.deck_controller.get_display_saturation() is live: it
-    reflects the current value in `saturation_holder` so flipping the factor
-    between calls is visible to a freshly constructed InputVideo."""
+    """Build the state through __new__ with only the attributes
+    _get_background_video_frame reads. get_display_saturation stays live on
+    saturation_holder, so a flip between calls reaches a fresh InputVideo."""
     deck_controller = types.SimpleNamespace(
         get_display_saturation=lambda: saturation_holder["value"]
     )
@@ -108,10 +76,10 @@ def _make_touch_state(saturation_holder) -> ControllerTouchScreenState:
     return state
 
 
-def check_keepcheck_reacquires_on_saturation_change() -> None:
+def check_keepcheck_reacquires_on_sat_change() -> None:
     fixtures.install_stub_globals()
-    # A path only: the spy InputVideo never opens it, but the method builds a
-    # real one, so give it something on disk to be faithful.
+    # A path only. The spy InputVideo never opens it, but the method builds a
+    # real one, so something must exist on disk.
     video_path = os.path.join(gl.DATA_PATH, "strip_bg.mp4")
     with open(video_path, "wb") as f:
         f.write(b"placeholder")
@@ -123,23 +91,22 @@ def check_keepcheck_reacquires_on_saturation_change() -> None:
     real_input_video = inputs_mod.InputVideo
     inputs_mod.InputVideo = _SpyInputVideo
     try:
-        # 1) First composite at factor 1.0: constructs the strip video, which
-        #    bakes saturation 1.0 into its cache.
+        # The first composite at factor 1.0 constructs the strip video, which
+        # bakes saturation 1.0 into its cache.
         state._get_background_video_frame(video_path, fps=30, loop=True)
         assert len(_SpyInputVideo.instances) == 1, "first call must construct one InputVideo"
         v1 = _SpyInputVideo.instances[0]
         assert v1.baked_saturation == 1.0, f"first video should bake 1.0, got {v1.baked_saturation}"
 
-        # 2) Same path, SATURATION CHANGED to 1.3 (the slider moved). A repeat
-        #    composite must not keep serving the 1.0-baked video.
+        # The same path with the saturation changed to 1.3, as a slider move
+        # does. A repeat composite must not keep serving the 1.0-baked video.
         saturation_holder["value"] = 1.3
         state._get_background_video_frame(video_path, fps=30, loop=True)
 
         current = state.background_video
-        # DESIRED behaviour: the strip video now reflects factor 1.3, either by
-        # a rebuild (a second _SpyInputVideo baking 1.3) or an in-place
-        # re-acquire. Today the reuse branch keeps v1 (path unchanged) and only
-        # calls set_playback (fps/loop), so current is still v1 @ 1.0.
+        # The strip video must now reflect factor 1.3, through a rebuild or
+        # an in-place re-acquire. A reuse branch that compares the path alone
+        # keeps the 1.0-baked video and calls set_playback only.
         assert current.baked_saturation == 1.3, (
             f"after a saturation change the reused strip video still bakes "
             f"{current.baked_saturation} (expected 1.3): the keep-check at "
@@ -157,7 +124,7 @@ def check_keepcheck_reacquires_on_saturation_change() -> None:
 
 def main() -> None:
     fixtures.start_watchdog(WATCHDOG_SECONDS, label="scenario_saturation_keepcheck")
-    check_keepcheck_reacquires_on_saturation_change()
+    check_keepcheck_reacquires_on_sat_change()
     print("PASS: scenario_saturation_keepcheck")
 
 

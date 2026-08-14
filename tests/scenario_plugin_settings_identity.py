@@ -1,27 +1,13 @@
 """
-Regression test for the settings-identity half of "config not
-fully applied on restart" -- the custom-repo-plugins leg): plugin settings
-must be keyed by the MANIFEST id (the identity used by registration and the
-store), not by the folder name under PLUGIN_DIR.
+Plugin settings are keyed by the manifest id, not by the folder name.
 
-Before the fix, PluginBase.settings_path was derived from the folder name
-(the PluginBase.py:64 TODO) while everything else keys the plugin by its
-manifest id -- so a plugin whose folder name differs from its id (git clone
-of "MyPlugin-main", store install under a new name) silently lost its
-settings on every reinstall/rename: another "settings reset after restart"
-vector.
-
-Covers:
-1. MIGRATION: a plugin whose folder name diverges from its manifest id, with
-   settings saved by an earlier app version under the folder-name path, gets
-   the whole settings dir moved to the id path once -- content preserved.
-2. FRESH: a diverging plugin with no legacy settings uses the id path from
-   the start, and set_settings() persists there.
-3. BOTH EXIST: the id path wins; the folder-name dir is left in place (never
-   deleted/overwritten) and a warning is logged.
-4. PLAIN: folder name == id (the normal case) -- path unchanged, no
-   migration side effects.
+PluginBase.settings_path uses the manifest id, which registration and the store
+also use.
 """
+
+# A plugin whose folder name differs from its id keeps its settings across a
+# rename or a reinstall, and an existing id path always wins over a legacy
+# folder-name path.
 import json
 import os
 import textwrap
@@ -79,18 +65,18 @@ def main() -> None:
     # 2. Diverging folder, no legacy settings.
     write_plugin("com_test_fresh_main", "FreshPlugin", "com_test_fresh")
 
-    # 3. Settings exist under BOTH the id and the folder-name path.
+    # 3. Settings exist under both the id and the folder-name path.
     write_plugin("com_test_both_main", "BothPlugin", "com_test_both")
     seed_settings("com_test_both", "id-value")
     seed_settings("com_test_both_main", "folder-value")
 
-    # 4. The normal case: folder name == manifest id.
+    # 4. The normal case, where the folder name matches the manifest id.
     write_plugin("com_test_plain", "PlainPlugin", "com_test_plain")
 
-    # 5. The id DIRECTORY exists but is EMPTY (no settings.json) while the
-    #    legacy folder-name path holds the real settings. Keying the "id wins"
-    #    decision on the directory (rather than the settings file) would orphan
-    #    the user's data and start empty -- the file must be migrated across.
+    # 5. The id directory exists but holds no settings.json, while the legacy
+    #    folder-name path holds the real settings. A decision keyed on the
+    #    directory rather than the file would orphan the user's data, so the
+    #    file must move across.
     write_plugin("com_test_empty_main", "EmptyIdPlugin", "com_test_empty")
     seed_settings("com_test_empty_main", "recovered-value")
     os.makedirs(os.path.join(plugins_root, "com_test_empty"), exist_ok=True)
@@ -109,7 +95,7 @@ def main() -> None:
     def plugin(plugin_id: str) -> PluginBase:
         return PluginBase.plugins[plugin_id]["object"]
 
-    # --- 1: migration moved the folder-name dir to the id dir, content intact.
+    # 1. The migration moved the folder-name dir to the id dir, content intact.
     migrate = plugin("com_test_migrate")
     expected = os.path.join(plugins_root, "com_test_migrate", "settings.json")
     assert migrate.settings_path == expected, (
@@ -123,7 +109,7 @@ def main() -> None:
         f"migrated settings content lost: {migrate.get_settings()}"
     )
 
-    # --- 2: fresh diverging plugin reads/writes the id path.
+    # 2. A fresh diverging plugin reads and writes the id path.
     fresh = plugin("com_test_fresh")
     assert fresh.settings_path == os.path.join(plugins_root, "com_test_fresh", "settings.json")
     fresh.set_settings({"written": True})
@@ -133,7 +119,7 @@ def main() -> None:
         "no folder-name settings dir may appear for a fresh plugin"
     )
 
-    # --- 3: id path wins; the folder-name dir is left untouched.
+    # 3. The id path wins and the folder-name dir stays untouched.
     both = plugin("com_test_both")
     assert both.settings_path == os.path.join(plugins_root, "com_test_both", "settings.json")
     assert both.get_settings().get("marker") == "id-value", (
@@ -146,11 +132,11 @@ def main() -> None:
             "the losing folder-name settings must not be modified"
         )
 
-    # --- 4: the normal case is byte-for-byte the old behavior.
+    # 4. The normal case leaves the path unchanged.
     plain = plugin("com_test_plain")
     assert plain.settings_path == os.path.join(plugins_root, "com_test_plain", "settings.json")
 
-    # --- 5: empty id dir + legacy folder settings -> data migrated, not orphaned.
+    # 5. An empty id dir with legacy folder settings migrates the data.
     empty = plugin("com_test_empty")
     assert empty.settings_path == os.path.join(plugins_root, "com_test_empty", "settings.json")
     assert os.path.isfile(empty.settings_path), (

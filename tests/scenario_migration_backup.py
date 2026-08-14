@@ -1,22 +1,9 @@
 """
-Regression scenario for the create_backup fixes.
+Regression scenario for Migrator.create_backup.
 
-Two defects in Migrator.create_backup (base class, so every migrator):
-
-  (a) Clobbered backups: base_name was keyed on gl.app_version, which is
-      shared by every migrator in a chained upgrade -- so beta_5 and 1_5_0
-      both wrote before_<app_version>_migration.zip and the second
-      overwrote the first, losing the earlier pre-migration snapshot.
-      Fix: namespace by the MIGRATOR's own version (self.app_version).
-
-  (b) Plugin settings had no recovery path: only pages/ was archived, but
-      Migrator_1_5_0_beta_5.migrate_plugin_settings moves-then-deletes each
-      plugin's settings.json. A failed/partial migration left those with no
-      backup. Fix: archive settings/plugins/ too.
-
-Covers a full chained run through MigrationManager and asserts: two
-distinctly-named backup zips exist (no clobber), and the plugin settings
-file is present inside at least one archive.
+create_backup names each archive after the migrator's own version, so a
+chained upgrade keeps one archive per migrator. It archives settings/plugins/
+as well as pages/, so a failed plugin-settings migration stays recoverable.
 """
 import json
 import os
@@ -43,7 +30,7 @@ def _reset() -> None:
         os.remove(migrations_json)
 
 
-def check_chained_backups_namespaced_and_include_plugins() -> None:
+def check_chained_backups_per_migrator() -> None:
     _reset()
 
     os.makedirs(os.path.join(gl.DATA_PATH, "pages"), exist_ok=True)
@@ -66,7 +53,7 @@ def check_chained_backups_namespaced_and_include_plugins() -> None:
         gl.app_version = original_app_version
 
     backups = sorted(os.listdir(BACKUPS_DIR))
-    # (a) one distinct archive PER migrator version -- not one shared, clobbered file.
+    # One distinct archive per migrator version.
     assert "before_1.5.0-beta.5_migration.zip" in backups, (
         f"beta.5 backup missing/clobbered: {backups}"
     )
@@ -76,7 +63,7 @@ def check_chained_backups_namespaced_and_include_plugins() -> None:
         "app-version-keyed names would collapse to one"
     )
 
-    # (b) plugin settings must be recoverable from a backup archive.
+    # Plugin settings must be recoverable from a backup archive.
     found = False
     for name in backups:
         with zipfile.ZipFile(os.path.join(BACKUPS_DIR, name)) as z:
@@ -91,7 +78,7 @@ def check_chained_backups_namespaced_and_include_plugins() -> None:
 
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_migration_backup")
-    check_chained_backups_namespaced_and_include_plugins()
+    check_chained_backups_per_migrator()
     print("PASS: scenario_migration_backup")
 
 

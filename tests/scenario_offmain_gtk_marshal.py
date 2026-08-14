@@ -1,39 +1,15 @@
 """
-Integration scenario: the framework-owned GTK construction
-that runs during plugin registration must land on the main thread even when
-registration happens on a worker -- the store-install path runs the plugin's
-whole __init__ on the installer thread (StoreBackend.install_plugin ->
-load_plugins -> init_plugins -> subclass()).
+Integration scenario for framework GTK construction at plugin registration.
 
-The GenerativeUI row layer is already marshalled (67b0e5a1); the remaining
-in-framework construction sites reachable from plugin code are:
-
-  * ActionHolder's default icon -- Gtk.Image(icon_name=...) built whenever a
-    plugin registers an action holder without passing its own icon
-    (ActionHolder.py);
-  * PluginBase.add_css_stylesheet -- Gtk.CssProvider construction plus
-    Gtk.StyleContext.add_provider_for_display on the default display;
-  * PluginBase.get_selector_icon -- Gtk.Image(icon_name="view-paged"); its
-    only in-tree caller is on main, but a plugin override reachable
-    off-main would build a widget off-main, so the framework marshals it
-    uniformly with the other two.
-
-Both must construct on the main thread (GTK4 is main-thread-only; off-main
-construction is the segfault/abort class). Observed via thread-recording
-shims swapped in for the modules' Gtk/Gdk names -- the code under test looks
-those up at call time, so the shim records exactly which thread ran the
-construction. Follows scenario_genui_lazy.py's conventions: no GTK main loop
-runs; the default GLib.MainContext is pumped manually.
-
-  (a) ActionHolder default-icon construction from a worker thread runs on
-      the main thread (red pre-fix: runs on the worker).
-  (b) add_css_stylesheet's provider/style-context work from a worker thread
-      runs on the main thread (red pre-fix: runs on the worker).
-  (c) get_selector_icon's Gtk.Image from a worker thread runs on the main
-      thread (red pre-fix: runs on the worker).
-  (d) All three stay inline on the main thread: no pumping needed, so the
-      normal startup load path (which runs on main) is unchanged.
+The store-install path runs a plugin's whole __init__ on the installer thread.
 """
+
+# GTK4 is main-thread-only, so the ActionHolder default icon,
+# add_css_stylesheet and get_selector_icon all construct on the main thread,
+# and stay inline when the caller already runs on main.
+
+# No GTK main loop runs here, so the scenario pumps the default
+# GLib.MainContext itself.
 import threading
 import time
 import types
@@ -52,7 +28,7 @@ from src.backend.PluginManager.PluginBase import PluginBase
 
 
 def _pump_until_dead(thread: threading.Thread, timeout: float = 5.0) -> None:
-    """Pumps the default context (servicing run_on_main's queued idles)
+    """Pumps the default context, which serves run_on_main's queued idles,
     until the worker thread finishes."""
     ctx = GLib.MainContext.default()
     deadline = time.monotonic() + timeout
@@ -106,17 +82,17 @@ _gdk_shim = types.SimpleNamespace(
 
 
 def _install_shims() -> None:
-    # The code under test resolves Gtk/Gdk through its module globals at
-    # call time, so swapping the names is enough to observe the
-    # construction thread without real widgets.
+    # The code under test resolves Gtk and Gdk through its module globals at
+    # call time, so swapping the names records the construction thread
+    # without real widgets.
     action_holder_module.Gtk = _gtk_shim
     plugin_base_module.Gtk = _gtk_shim
     plugin_base_module.Gdk = _gdk_shim
 
 
 def _make_holder() -> ActionHolder:
-    # action_id given explicitly so plugin_base is never dereferenced --
-    # the holder under test only exercises the default-icon branch.
+    # action_id is explicit, so plugin_base is never dereferenced. Only the
+    # default-icon branch matters here.
     return ActionHolder(
         plugin_base=None,
         action_name="Probe",
@@ -155,9 +131,8 @@ def check_add_css_stylesheet_marshals() -> None:
     _RecordingCssProvider.threads.clear()
     _RecordingStyleContext.add_threads.clear()
 
-    # __init__ bypassed deliberately: it needs a real plugin directory
-    # (locales, manifest, assets) irrelevant to the marshalling under test,
-    # and add_css_stylesheet touches no instance state.
+    # __init__ is bypassed because it needs a real plugin directory, and
+    # add_css_stylesheet touches no instance state.
     plugin = PluginBase.__new__(PluginBase)
     box: dict = {}
 
@@ -185,7 +160,7 @@ def check_add_css_stylesheet_marshals() -> None:
 def check_get_selector_icon_marshals() -> None:
     _RecordingImage.threads.clear()
 
-    # __init__ bypassed: get_selector_icon touches no instance state.
+    # __init__ is bypassed because get_selector_icon touches no state.
     plugin = PluginBase.__new__(PluginBase)
     box: dict = {}
 
@@ -212,8 +187,8 @@ def check_inline_on_main_thread() -> None:
     _RecordingImage.threads.clear()
     _RecordingCssProvider.threads.clear()
 
-    # No pumping here on purpose: on the main thread all three must run inline
-    # (run_on_main's fast path), exactly as the startup load path does.
+    # No pumping here. On the main thread all three run inline through
+    # run_on_main's fast path, as the startup load path does.
     holder = _make_holder()
     assert _RecordingImage.threads == [threading.main_thread()]
     assert isinstance(holder.icon, _RecordingImage)

@@ -1,31 +1,13 @@
 """
-clone_repo must never install a tree it did not actually move onto
-(for pinned refs and for pinned commit shas).
+clone_repo must never install a tree it did not move onto.
 
-clone_repo used `git switch <ref>` to move the staged clone onto the
-configured ref. `switch` refuses tags (and any other detachable ref)
-without --detach -- and since subp_call's return code is ignored there,
-the clone silently stayed on the default-branch tip and THAT tree was
-swapped into place: a custom plugin configured with `branch: "v1"` (a tag,
-the natural way to pin a release) installed the wrong code with no error.
-`git checkout <ref>` handles branches and tags alike.
-
-Exercised WITHOUT network: the "remote" is a local fixture repository
-(git clone accepts a path), same offline pattern as the other store
-scenarios. The harness runs with --devel (fixtures.py), so download_repo
-dispatches straight into clone_repo -- the exact path a custom-plugin
-prepare/install takes on a devel setup.
-
-The commit-sha branch (`git reset --hard <sha>`) had the identical hole
-until the rc check: a catalog sha that is unreachable (upstream force-push, GC'd
-commit) left staging on the default tip, which then passed the tree
-validation and was VERSION-stamped with the sha it is not.
-
-Assertions are on the CONTENT of the installed tree, not just the return
-code -- with the old `switch`/unchecked `reset` the install still
-"succeeded" (200), just with the wrong tree, so only content catches the
-bug.
+git checkout handles a branch and a tag alike, and the return codes of the
+checkout and of the reset --hard are both checked, so an unreachable ref or sha
+fails the install rather than staging the default tip.
 """
+
+# The remote is a local fixture repository, and the assertions read the
+# installed content.
 import os
 import subprocess
 
@@ -41,10 +23,9 @@ FIXTURE_REPO = os.path.join(gl.DATA_PATH, "fixture-repo")
 
 
 def _isolate_git_config() -> None:
-    """clone_repo appends safe.directory entries with `git config --global`.
-    Point the global config at a file inside the harness temp dir so the
-    scenario never touches the real ~/.gitconfig, and pin identity/system
-    config for the fixture commits."""
+    """clone_repo appends safe.directory entries with git config --global.
+    The global config points at a file in the harness temp dir, so the
+    scenario never touches the real ~/.gitconfig."""
     os.environ["GIT_CONFIG_GLOBAL"] = os.path.join(gl.DATA_PATH, "gitconfig")
     os.environ["GIT_CONFIG_SYSTEM"] = os.devnull
     os.environ["GIT_AUTHOR_NAME"] = "harness"
@@ -64,9 +45,9 @@ def _write(name: str, content: str) -> None:
 
 
 def make_fixture_repo() -> None:
-    """History:  commit1 (tag v1, "tagged content")
-                 -> commit2 on main ("main content", the default tip)
-                 -> branch feature off main ("feature content")."""
+    """The fixture history. commit1 carries tag v1 and "tagged content",
+    commit2 on main is the default tip with "main content", and branch
+    feature carries "feature content"."""
     os.makedirs(FIXTURE_REPO)
     subprocess.run(["git", "init", "-b", "main", FIXTURE_REPO], check=True,
                    capture_output=True, text=True)
@@ -106,9 +87,9 @@ def _staging_leftovers() -> list[str]:
 def test_tag_ref_installs_tagged_tree(sb: StoreBackend) -> None:
     dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_TagPlugin")
 
-    # Through download_repo: --devel (harness default) routes to clone_repo,
-    # like a real custom-plugin install on a devel setup. expected_id proves
-    # the manifest gate reads the TAG's staged tree.
+    # Through download_repo. The harness default of --devel routes to
+    # clone_repo, like a real custom-plugin install. expected_id proves the
+    # manifest gate reads the tag's staged tree.
     result = sb.download_repo(repo_url=FIXTURE_REPO, directory=dest,
                               branch_name="v1", expected_id="com_test_TagPlugin")
 
@@ -125,8 +106,8 @@ def test_tag_ref_installs_tagged_tree(sb: StoreBackend) -> None:
     print("PASS: a custom plugin pinned to a tag installs the tagged tree")
 
 
-def test_branch_ref_still_installs_branch_tip(sb: StoreBackend) -> None:
-    # Regression guard: checkout must keep handling plain branches.
+def test_branch_ref_installs_branch_tip(sb: StoreBackend) -> None:
+    # checkout must keep handling a plain branch.
     dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_BranchPlugin")
 
     result = sb.clone_repo(repo_url=FIXTURE_REPO, local_path=dest,
@@ -142,9 +123,9 @@ def test_branch_ref_still_installs_branch_tip(sb: StoreBackend) -> None:
 
 
 def test_nonexistent_ref_fails_install(sb: StoreBackend) -> None:
-    # A typo'd pinned ref must FAIL the install: with the rc of the
-    # checkout ignored, the clone silently stayed on the default tip and
-    # the wrong tree was installed, stamped with the typo'd ref.
+    # A mistyped pinned ref must fail the install. With the checkout return
+    # code ignored, the clone stays on the default tip and the wrong tree
+    # installs under the mistyped ref.
     dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_TypoPlugin")
 
     result = sb.clone_repo(repo_url=FIXTURE_REPO, local_path=dest,
@@ -164,9 +145,8 @@ def test_nonexistent_ref_fails_install(sb: StoreBackend) -> None:
 
 
 def test_commit_sha_installs_that_commit(sb: StoreBackend) -> None:
-    # Regression guard for the rc check: a REACHABLE catalog sha must
-    # still install, and must install that commit's tree rather than the
-    # default tip it was cloned at.
+    # A reachable catalog sha must still install, and must install that
+    # commit's tree rather than the default tip it was cloned at.
     dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_ShaPlugin")
     sha = _rev("v1")
 
@@ -182,11 +162,10 @@ def test_commit_sha_installs_that_commit(sb: StoreBackend) -> None:
 
 
 def test_unreachable_commit_sha_fails_install(sb: StoreBackend) -> None:
-    # A well-formed but unreachable catalog sha (upstream force-push,
-    # GC'd commit) passed is_safe_commit_sha, so it reached `git reset
-    # --hard`. With that rc ignored the reset failed, staging stayed on the
-    # default-branch tip, and THAT tree was validated, stamped with the
-    # unreachable sha and installed as a success.
+    # A well-formed but unreachable catalog sha passes is_safe_commit_sha
+    # and reaches git reset --hard. With that return code ignored the reset
+    # fails, staging stays on the default tip, and that tree installs as a
+    # success under the unreachable sha.
     dest = os.path.join(gl.DATA_PATH, "plugins", "com_test_GoneShaPlugin")
     gone_sha = "deadbeef" * 5  # 40 lowercase hex, not an object in the repo
 
@@ -211,10 +190,10 @@ def main() -> None:
     _isolate_git_config()
     make_fixture_repo()
 
-    sb = StoreBackend.__new__(StoreBackend)  # skip __init__ (spawns a fetch thread)
+    sb = StoreBackend.__new__(StoreBackend)  # skip __init__, which spawns a fetch thread
 
     test_tag_ref_installs_tagged_tree(sb)
-    test_branch_ref_still_installs_branch_tip(sb)
+    test_branch_ref_installs_branch_tip(sb)
     test_nonexistent_ref_fails_install(sb)
     test_commit_sha_installs_that_commit(sb)
     test_unreachable_commit_sha_fails_install(sb)

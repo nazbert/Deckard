@@ -1,26 +1,13 @@
 """
-Regression test: the page-change UI sync must actually refresh
-the sidebar.
+The page-change UI sync refreshes the sidebar.
 
-The original body resolved `...page_settings.settings_page` -- an attribute
-that never existed after the settings restructure -- so it raised
-AttributeError on EVERY page change, a blanket except mislabeled it as
-first-deck noise, and the sidebar update (the only still-meaningful piece)
-never ran.
-
-The logic lives in `GtkUIAdapter.on_page_changed`, not in
-DeckController: the engine just calls the port. The assertions are unchanged
-in substance -- the visible-deck guard, the sub-view guard, the coalescer --
-and the fake DeckStackChild still deliberately has NO settings_page anywhere
-(the real PageSettingsPage shape), so any revival of the dead accessor chain
-fails this test.
-
-Headless tier: gl.app / the "window" are plain namespaces and no widget is
-ever constructed, so importing the adapter (and hence Gtk) without a display
-is fine. The adapter wraps its work in GLib idles and this harness runs no
-main loop, so the default MainContext is pumped manually -- which keeps the
-coalescer observable (the precedent is scenario_offmain_ui_construction.py).
+GtkUIAdapter.on_page_changed holds the logic and the engine calls the port. The
+fake DeckStackChild carries no settings_page, which is the real
+PageSettingsPage shape.
 """
+
+# No widget is constructed here, and the harness pumps the default MainContext
+# by hand so the coalescer stays observable.
 import time
 from types import SimpleNamespace
 
@@ -72,9 +59,10 @@ def main() -> None:
     adapter = GtkUIAdapter()
     ui_port.install(adapter)
     try:
-        # Real PageSettingsPage shape: page_settings WITHOUT settings_page.
-        # low_fps_banner: the media thread's FPS-warning path pokes whatever
-        # child is bound -- give it a sink so background ticks stay quiet.
+        # The real PageSettingsPage shape has page_settings and no
+        # settings_page.
+        # The media thread's FPS-warning path pokes the bound child, so
+        # low_fps_banner needs a sink to keep background ticks quiet.
         own_child = SimpleNamespace(
             deck_controller=controller,
             page_settings=SimpleNamespace(deck_config=SimpleNamespace(grid=object())),
@@ -82,14 +70,13 @@ def main() -> None:
         )
         adapter.bind(controller, own_child)
 
-        # The fixture's own initial page load already queued one sync through
-        # the port. Drain it while no window is attached so the counts below
-        # are ours alone.
+        # The fixture's initial page load queued one sync through the port.
+        # Drain it while no window is attached, so the counts below start at
+        # zero.
         assert adapter._window is None
         _pump()
 
-        # 1. Visible deck's page changed -> sidebar refreshes. This is the
-        # regression: the pre-fix body died on the dead accessor chain first.
+        # 1. The visible deck changed page, so the sidebar refreshes.
         update = _Recorder()
         adapter._window = _fake_window(visible_child=own_child, sidebar_update=update)
         ui_port.get().on_page_changed(controller)
@@ -99,8 +86,8 @@ def main() -> None:
             "page-change UI sync is dead again"
         )
 
-        # 2. Another deck is visible -> the sidebar (which mirrors the
-        # visible deck's selection) must NOT be reloaded.
+        # 2. Another deck is visible. The sidebar mirrors the visible deck's
+        # selection, so it must not reload.
         update = _Recorder()
         adapter._window = _fake_window(visible_child=SimpleNamespace(),
                                        sidebar_update=update)
@@ -110,8 +97,8 @@ def main() -> None:
             "sidebar.update ran for a background deck's page change"
         )
 
-        # 3. A sidebar sub-view (ActionChooser/ActionConfigurator) is up ->
-        # the refresh must not yank the user out of it.
+        # 3. A sidebar sub-view is up. The refresh must not pull the user
+        # out of it.
         update = _Recorder()
         adapter._window = _fake_window(visible_child=own_child, sidebar_update=update,
                                        subview_active=True)
@@ -122,8 +109,7 @@ def main() -> None:
             "change would snap the user out of mid-edit"
         )
 
-        # 4. Coalescing: N completion triggers -> one pending idle -> one
-        # refresh when it runs.
+        # 4. Many coalesced triggers arm one idle and give one refresh.
         update = _Recorder()
         adapter._window = _fake_window(visible_child=own_child, sidebar_update=update)
         ui_port.get().on_page_changed(controller)
@@ -135,13 +121,13 @@ def main() -> None:
             f"3 queued triggers produced {update.calls} refreshes, expected "
             "1 -- coalescing broken"
         )
-        # Cleared means "not set": the flag is POPPED, not written back to
-        # False -- re-inserting the key after an interleaved unbind() would
-        # pin the whole DeckController graph of an unplugged deck.
+        # The flag is popped, not written back as False. Re-inserting the key
+        # after an interleaved unbind() pins the whole DeckController graph of
+        # an unplugged deck.
         assert not adapter._page_sync_queued.get(controller), "queue flag not cleared"
 
-        # 5. An unbound controller (window gone / deck detached) -> no refresh,
-        # no crash. The None-child must not match a None visible child.
+        # 5. An unbound controller gets no refresh and no crash. A None child
+        # must not match a None visible child.
         update = _Recorder()
         adapter._window = _fake_window(visible_child=None, sidebar_update=update)
         adapter.unbind(controller)
@@ -149,8 +135,8 @@ def main() -> None:
         _pump()
         assert update.calls == 0, "refresh ran for a controller with no bound child"
 
-        # 6. No UI at all (headless / early boot) -> silent no-op, and the
-        # engine's own call path stays exercised through the null port.
+        # 6. With no UI the call is a no-op, and the engine's call path still
+        # runs through the null port.
         ui_port.install(None)
         ui_port.get().on_page_changed(controller)
         _pump()

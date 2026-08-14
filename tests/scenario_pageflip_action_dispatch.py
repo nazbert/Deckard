@@ -1,35 +1,13 @@
 """
-Regression test: with "Change Page" +
-"Run Command" on one button, the command fired only once.
+Regression test for Change Page and Run Command on one button.
 
-Mechanism (all verified against the real code paths): ControllerKey used to
-resolve its target actions at *dispatch* time -- get_active_state() taken
-fresh at the UP event, and ControllerInputState.get_own_actions() reading
-deck_controller.active_page when the action-pool worker actually runs.
-ChangePage's on_key_down calls load_page() synchronously on that pool, which
-swaps active_page immediately -- so the gesture's SHORT_UP/UP always resolved
-against the NEW page's action objects. Two consequences:
-
-  * the old page's actions never received the release for a DOWN they DID
-    receive (RunCommand's `registered_down` latch -- the plugin's own
-    workaround, set on DOWN and cleared only on UP -- jammed shut, so every
-    later DOWN returned early: "runs only once");
-  * the new page's same-position actions received a spurious SHORT_UP/UP for
-    a press that was never theirs (the very defect that workaround was
-    written against).
-
-The fix snapshots the state + resolved action objects at key DOWN and
-dispatches every event of the gesture (DOWN, HOLD_START, HOLD_STOP/SHORT_UP,
-UP) to that snapshot, regardless of page swaps in between.
-
-This scenario reproduces the exact upstream setup with stub ActionCore
-objects injected into two real Pages on a fake deck: a ChangePage-alike
-(loads page B on DOWN, from the action pool, like the real plugin) and a
-RunCommand-alike (the plugin's literal latch semantics) side by side on one
-key of page A, plus a recorder on page B's same key to catch bleed. Without
-the fix the gesture tail lands on page B's recorder, the latch never clears,
-and the second press runs nothing.
+ControllerKey snapshots the state and the resolved action objects at key DOWN,
+then dispatches every event of the gesture to that snapshot, whatever page
+swaps happen in between.
 """
+
+# Stub actions sit on two real Pages over a fake deck, with a recorder on page
+# B's same key to catch bleed.
 import os
 
 import fixtures
@@ -61,7 +39,7 @@ class RecordingAction(ActionCore):
 
 
 class ChangePageAction(RecordingAction):
-    """Mirrors com_core447_DeckPlugin's ChangePage: on_key_down loads the
+    """Mirrors ChangePage from com_core447_DeckPlugin. on_key_down loads the
     target page synchronously on the action pool."""
 
     def __init__(self, target_page, **kwargs):
@@ -75,8 +53,8 @@ class ChangePageAction(RecordingAction):
 
 
 class RaisingAction(RecordingAction):
-    """Records, then raises on SHORT_UP/UP -- exercises per-action isolation
-    in the dispatch loop (one raiser must not starve its siblings)."""
+    """Records, then raises on SHORT_UP and UP. One raiser must not starve
+    its siblings in the dispatch loop."""
 
     def _raw_event_callback(self, event, data=None):
         super()._raw_event_callback(event, data)
@@ -85,8 +63,8 @@ class RaisingAction(RecordingAction):
 
 
 class RunCommandLikeAction(RecordingAction):
-    """Mirrors com_core447_OSPlugin's RunCommand latch verbatim: DOWN is
-    swallowed while registered_down is set; only UP clears it."""
+    """Mirrors the RunCommand latch from com_core447_OSPlugin. DOWN is
+    swallowed while registered_down is set, and only UP clears it."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -105,8 +83,8 @@ class RunCommandLikeAction(RecordingAction):
 
 
 def inject(page, ident: Input.Key, actions: list) -> None:
-    """Places stub action objects where get_all_actions_for_input reads:
-    action_objects[input_type][json_identifier][state][index]."""
+    """Places stub action objects where get_all_actions_for_input reads them,
+    at action_objects[input_type][json_identifier][state][index]."""
     per_state = page.action_objects.setdefault(ident.input_type, {}).setdefault(ident.json_identifier, {})
     per_state[0] = {i: a for i, a in enumerate(actions)}
 
@@ -140,7 +118,7 @@ def main() -> None:
         inject(page_a, ident, [change_action, run_action])
         inject(page_b, ident, [bleed_recorder])
 
-        # ---- Press 1: DOWN flips the page mid-gesture ---- #
+        # Press 1. DOWN flips the page mid-gesture.
         deck.fire_key_event(0, True)
         assert fixtures.wait_until(lambda: DOWN in run_action.received), \
             "DOWN never reached the old page's RunCommand-alike"
@@ -165,7 +143,7 @@ def main() -> None:
             f"on the old page: {bleed_recorder.received}"
         )
 
-        # ---- Back to page A, press 2: the command must run again ---- #
+        # Back to page A. On press 2 the command must run again.
         controller.load_page(page_a)
         assert fixtures.wait_until(lambda: controller.active_page is page_a)
 
@@ -183,17 +161,12 @@ def main() -> None:
         assert bleed_recorder.received == [], \
             f"gesture bleed onto page B on press 2: {bleed_recorder.received}"
 
-        # ---- Press 3: origin page evicted MID-GESTURE ---- #
-        # The key handler holds the pressed page only for the length of the
-        # callback, not to gesture end, so the origin page is genuinely
-        # evictable while the key is still down. The snapshot pins the action
-        # objects across
-        # ActionCore.teardown (clean_up: _cleaned_up=True, page=None) -- the
-        # dispatch loop must skip the corpses, and still serve any healthy
-        # snapshot member. `sentinel` stands in for the healthy member: it
-        # is in the DOWN-time snapshot but detached from page A's
-        # action_objects before the eviction, so clear_action_objects never
-        # tears it down.
+        # Press 3. The origin page is evicted mid-gesture. The key handler
+        # holds the pressed page only for the length of the callback, so the
+        # origin page is evictable while the key is down. The dispatch loop
+        # must skip the torn-down snapshot members and still serve a healthy
+        # one. sentinel is detached from page A before the eviction, so
+        # clear_action_objects never tears it down.
         sentinel = RecordingAction(
             tag="snapshot_sentinel",
             deck_controller=controller, page=page_a, input_ident=ident)
@@ -207,10 +180,10 @@ def main() -> None:
         assert run_action.run_count == 3
         assert fixtures.wait_until(lambda: controller.active_page is page_b)
 
-        # Evict page A through the real path (cache-budget eviction).
+        # Evict page A through the real cache-budget path.
         old_max_pages = gl.page_manager.max_pages
         gl.page_manager.max_pages = 0
-        # The sentinel leaves the page before eviction (see above).
+        # The sentinel leaves the page before the eviction.
         page_a.action_objects[ident.input_type][ident.json_identifier][0].pop(2)
         gl.page_manager.clear_old_cached_pages()
         gl.page_manager.max_pages = old_max_pages
@@ -229,7 +202,7 @@ def main() -> None:
         assert change_action.received.count(UP) == 2, \
             f"UP was dispatched into a torn-down action: {change_action.received}"
 
-        # ---- Per-action isolation: a raiser must not starve siblings ---- #
+        # Per-action isolation. A raiser must not starve its siblings.
         ident_iso = Input.Key("1x0")
         raiser = RaisingAction(
             tag="raiser",
@@ -239,7 +212,7 @@ def main() -> None:
             deck_controller=controller, page=page_b, input_ident=ident_iso)
         inject(page_b, ident_iso, [raiser, survivor])
 
-        deck.fire_key_event(1, True)  # physical 1 -> "1x0" on the 2x4 layout
+        deck.fire_key_event(1, True)  # physical key 1 is "1x0" on the 2x4 layout
         assert fixtures.wait_until(lambda: DOWN in survivor.received)
         deck.fire_key_event(1, False)
         assert fixtures.wait_until(lambda: UP in survivor.received), (
@@ -249,11 +222,11 @@ def main() -> None:
         assert SHORT_UP in survivor.received
         assert UP in raiser.received  # the raiser itself was still dispatched
 
-        # ---- Screensaver engages MID-HOLD: the gesture dies with the stash ---- #
-        # show() confiscates the whole input set (stash + init_inputs), so
-        # the physical release lands on the REPLACEMENT key and is swallowed
-        # -- the stashed key's hold timer must not stay armed and fire
-        # HOLD_START into its pinned snapshot after the finger already left.
+        # The screensaver engages mid-hold and the gesture dies with the
+        # stash. show() confiscates the whole input set, so the physical
+        # release lands on the replacement key and is swallowed. The stashed
+        # key's hold timer must not stay armed and fire HOLD_START into its
+        # pinned snapshot after the finger left.
         controller.hold_time = 0.5
         ident_ss = Input.Key("2x0")
         ss_recorder = RecordingAction(
@@ -262,7 +235,7 @@ def main() -> None:
         inject(page_b, ident_ss, [ss_recorder])
 
         key_held = controller.get_input(ident_ss)
-        deck.fire_key_event(2, True)  # physical 2 -> "2x0" on the 2x4 layout
+        deck.fire_key_event(2, True)  # physical key 2 is "2x0" on the 2x4 layout
         assert fixtures.wait_until(lambda: DOWN in ss_recorder.received)
         assert key_held.hold_start_timer is not None
 

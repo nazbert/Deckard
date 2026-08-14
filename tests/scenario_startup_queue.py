@@ -1,40 +1,13 @@
 """
-Pins the app-ready startup queue (src/backend/startup_queue.py) -- the
-deferral protocol the notification facade, the plugin manager's
-disabled-plugins report and App.on_activate's drain all share.
+Pins the app-ready startup queue in src/backend/startup_queue.py.
 
-The protocol is a race protocol, so most of these guards are about ownership:
-a task queued before `gl.app` exists must be delivered exactly once, by
-exactly one of the two sides that can claim it (the caller, via the
-post-append reclaim, or the drain).
-
-Guards:
-  1. Before gl.app exists, when_app_ready() queues the task and answers False
-     (the caller does NOT deliver); the drain then runs the queued tasks FIFO,
-     on the drain caller's thread -- appends may come from any thread, the
-     delivery happens where App.on_activate runs.
-  2. A task that appends further tasks while the drain runs gets those drained
-     too (the iterate-then-clear drain silently discarded them).
-  3. Non-callable entries are skipped, not raised on: the list is reachable
-     from plugin code, and an append of `f()` where `f` was meant must not
-     strand the tasks queued behind it. (A task that RAISES does strand them,
-     deliberately -- the drain does not swallow exceptions.)
-  4. The append-vs-drain race, both interleavings: gl.app flips between the
-     None-check and the append. Whichever side owns the task, it runs exactly
-     once -- the reclaim path answers True and leaves nothing queued, the
-     drain-wins path answers False and the drain has already delivered.
-  5. Readiness is `gl.app`, not an internal flag: it is re-read on every call,
-     including after a drain has already run (a "ready" flag would make every
-     later call answer True even with gl.app back to None).
-  6. The gl slot is read per call and never cached: swapping
-     gl.app_loading_finished_tasks for another list must move both the
-     appends and the drain onto the new list.
-  7. The module stays engine-closure-safe and lock-free: its runtime imports
-     are `globals` plus stdlib, and no threading primitive among them --
-     GIL-atomic list ops plus the operation order ARE the synchronization.
-
-No GTK: the queue knows nothing about GLib, and neither does this scenario.
+The protocol is a race protocol, so most checks are about ownership. A task
+queued before gl.app exists must be delivered exactly once, by the caller
+through its post-append reclaim or by the drain.
 """
+
+# The module stays lock-free and engine-closure-safe, and knows nothing about
+# GLib.
 import fixtures  # noqa: F401  (isolates DATA_PATH before src imports)
 
 import ast
@@ -56,8 +29,8 @@ class FakeApp:
 
 
 def call_from_worker(fn, *args):
-    """Run fn on a worker thread and hand back its return value -- appends
-    come from background threads in production (gl.notify)."""
+    """Run fn on a worker thread and hand back its return value. In
+    production the appends come from background threads."""
     result: list = []
     errors: list[BaseException] = []
 
@@ -94,7 +67,7 @@ def check_defer_then_drain_fifo(queue) -> None:
     )
     assert ran == [], f"a queued task must not run at call time: {ran}"
 
-    # What App.on_activate does: publish, then drain.
+    # What App.on_activate does. Publish, then drain.
     gl.app = FakeApp()
     queue.drain_app_ready()
 
@@ -151,9 +124,9 @@ def check_non_callable_entries_skipped(queue) -> None:
 
 
 class _FlipOnAppend(list):
-    """Drives the append-vs-drain interleaving deterministically: the moment
-    the queue appends, on_activate has already published gl.app (and, in the
-    drain_first variant, drained before the reclaim can go through)."""
+    """Makes the append-and-drain interleaving deterministic. When the queue
+    appends, on_activate already published gl.app, and with drain_first the
+    drain also runs before the reclaim can go through."""
 
     def __init__(self, app, queue, drain_first: bool = False):
         super().__init__()
@@ -167,8 +140,8 @@ class _FlipOnAppend(list):
 
     def remove(self, task):
         if self._drain_first:
-            # The drain wins the race to the task: the real drain pops and
-            # runs everything before the reclaim attempt goes through.
+            # The drain wins the race. It pops and runs everything before
+            # the reclaim attempt goes through.
             self._queue.drain_app_ready()
         super().remove(task)
 
@@ -176,8 +149,8 @@ class _FlipOnAppend(list):
 def check_reclaim_race_both_ways(queue) -> None:
     original = gl.app_loading_finished_tasks
 
-    # A: the drain has already finished when the append lands. The queue must
-    # notice, take the task back, and hand ownership to the caller.
+    # In interleaving A the drain finished before the append lands. The queue
+    # notices, takes the task back, and hands ownership to the caller.
     ran: list[str] = []
     gl.app = None
     gl.app_loading_finished_tasks = _FlipOnAppend(FakeApp(), queue)
@@ -196,8 +169,8 @@ def check_reclaim_race_both_ways(queue) -> None:
             f"delivers, however it likes: {ran}"
         )
 
-        # B: the drain pops and runs the task before the reclaim. The queue
-        # must back off -- exactly one delivery, not two, and not zero.
+        # In interleaving B the drain pops and runs the task before the
+        # reclaim. The queue backs off, so exactly one delivery happens.
         ran.clear()
         gl.app = None
         gl.app_loading_finished_tasks = _FlipOnAppend(FakeApp(), queue, drain_first=True)
@@ -227,11 +200,9 @@ def check_readiness_is_gl_app(queue) -> None:
         f"nothing may be queued once gl.app exists: {gl.app_loading_finished_tasks}"
     )
 
-    # A drain has now run at least once in this process. Readiness must still
-    # be re-read from gl.app: an internal ready-flag would answer True here
-    # and skip the queue for calls the app has not come up for. The window is
-    # real -- gl.app is published in Main.__init__ before app.run(), so the
-    # slot is the only thing that tracks reality across the boot phase.
+    # A drain has run at least once in this process. Readiness must still
+    # come from gl.app. An internal ready flag would answer True here and skip
+    # the queue for calls the app has not come up for.
     queue.drain_app_ready()
     gl.app = None
     assert queue.when_app_ready(lambda: None) is False, (
@@ -258,8 +229,8 @@ def check_slot_is_read_per_call(queue) -> None:
             f"the append must land on the list gl points at now: {first}"
         )
 
-        # Plugins append to the slot directly and tests swap it wholesale; a
-        # queue holding the list it found once would silently diverge.
+        # Plugins append to the slot directly and checks swap it wholesale,
+        # so a queue holding the list it found once would diverge.
         ran: list[str] = []
         second.append(lambda: ran.append("second-list"))
         gl.app_loading_finished_tasks = second
@@ -283,11 +254,11 @@ def check_slot_is_read_per_call(queue) -> None:
     print("PASS: the gl slot is read per call, never cached")
 
 
-def check_runtime_imports_are_lock_free_and_engine_safe() -> None:
-    """The module must stay importable from the render engine's closure (no
-    first-party runtime import but globals) and must not synchronize with a
-    lock -- the GIL-atomic list ops plus the append/re-check/remove order are
-    the whole protocol, and a lock would change the ownership story."""
+def check_runtime_imports_lock_free() -> None:
+    """The module must stay importable from the render engine's closure, so
+    its runtime imports are globals plus stdlib. It must not synchronize with
+    a lock, because the GIL-atomic list ops and the append, re-check and
+    remove order are the whole protocol."""
     tree = ast.parse(open(MODULE_PATH, encoding="utf-8").read(), MODULE_PATH)
 
     type_checking_bodies: set[int] = set()
@@ -296,10 +267,9 @@ def check_runtime_imports_are_lock_free_and_engine_safe() -> None:
             test = node.test
             name = getattr(test, "id", None) or getattr(test, "attr", None)
             if name == "TYPE_CHECKING":
-                # Only the BODY is compile-time. The orelse of an
-                # `if TYPE_CHECKING:` runs at runtime like any other code, so
-                # walking the whole If node would make an import hidden there
-                # invisible to every check below.
+                # Only the body is compile-time. The orelse of an
+                # if TYPE_CHECKING runs at runtime like any other code, so
+                # walking the whole If node would hide an import there.
                 for stmt in node.body:
                     for child in ast.walk(stmt):
                         type_checking_bodies.add(id(child))
@@ -312,9 +282,9 @@ def check_runtime_imports_are_lock_free_and_engine_safe() -> None:
             roots.update(a.name.split(".")[0] for a in node.names)
         elif isinstance(node, ast.ImportFrom):
             if node.level:
-                # A relative import has no root to resolve and can only reach
-                # first-party code: record it verbatim so it FAILS the check
-                # below rather than slipping past it.
+                # A relative import has no root to resolve and can only
+                # reach first-party code, so record it verbatim and let the
+                # check below fail.
                 roots.add("." * node.level + (node.module or ""))
             elif node.module:
                 roots.add(node.module.split(".")[0])
@@ -350,7 +320,7 @@ def main() -> None:
         check_reclaim_race_both_ways(queue)
         check_readiness_is_gl_app(queue)
         check_slot_is_read_per_call(queue)
-        check_runtime_imports_are_lock_free_and_engine_safe()
+        check_runtime_imports_lock_free()
     finally:
         gl.app = None
         gl.app_loading_finished_tasks.clear()

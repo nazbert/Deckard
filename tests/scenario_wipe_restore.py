@@ -1,40 +1,13 @@
 """
-Scenario (half 2 of 2): the no-blank contract.
+The no-blank contract, the second half of the wipe-restore behavior.
 
-Pins the FIXED wipe-without-restore bug as an always-on
-regression net (formerly in EXPECTED_FAIL_UNTIL_M1 in run_all.py while the
-bug was open).
-
-The bug was: ControllerKey.load_from_input_dict -> create_n_states
-unconditionally destroyed+recreated every state on each (re)load, closing
-every state's key_image. The action-owned image is not persisted in the page
-JSON (it is set at runtime via set_media, not written to "media.path"), so
-the ONLY thing that could re-establish it after the wipe was
-own_actions_update() -> the action's on_update(). A LatchAction that dedups
-in on_update without resetting never repaints -> the key settled BLANK.
-
-Why trials, not a single synchronous seam: the blank only manifests through
-the REAL async load pipeline, where the action-executor thread's on_ready
-paint races create_n_states running on the load thread. A purely synchronous
-reproduction (forcing the paint, then calling load_from_input_dict directly)
-does NOT lose the race and so does not exhibit the bug -- the defect is
-inherently timing-dependent. The per-trial blank rate on current code is ~0.93
-(measured), so a handful of trials pins it with overwhelming probability
-(P(no blank in TRIALS) ~= 0.07**TRIALS); the assertion fires on the first
-blank. Trials are bounded and each uses a wait_until seam (not a fixed sleep).
-
-The fix: stash-and-restore gated on action identity in
-load_from_input_dict -- set_media stamps the painting action on the state
-(media_owner_action); the load detaches owned media before create_n_states
-and restores it iff that exact action object still drives the recreated
-state (identity matches -> restore -> no blank); a cross-page load builds a
-different action (identity mismatch -> close, no restore -> no bleed, see
-scenario_wipe_no_bleed.py).
-
-Drives the REAL DeckController/Page/ControllerKey/ActionCore machinery with a
-LatchAction injected via a stub plugin_manager (fixtures helpers). Graduated
-from the untracked diag_wipe_contract.py.
+set_media stamps the painting action on the state, and load_from_input_dict
+detaches owned media before create_n_states and restores it when that same
+action still drives the recreated state.
 """
+
+# The blank only appears through the async load pipeline, so the check runs
+# bounded trials with a wait_until seam.
 import os
 
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
@@ -44,6 +17,8 @@ from fixtures import start_watchdog, wait_until, teardown
 from src.backend.DeckManagement.InputIdentifier import Input
 
 WATCHDOG_SECONDS = 60
+# The measured per-trial blank rate is about 0.93, so P(no blank) is about
+# 0.07 ** TRIALS. Eight trials put a miss below one in ten million.
 TRIALS = 8
 
 
@@ -71,16 +46,15 @@ def main() -> None:
             action_page = gl.page_manager.get_page(
                 fixtures.seed_action_page(f"LatchR{i}", key_ident), controller)
             controller.load_page(action_page, allow_reload=True)
-            # Wait (deterministic seam, not a fixed sleep) for either the
-            # image to appear OR the load to fully settle -- on the FIXED
-            # version the image is present after settling; on today's code it
-            # never appears because the wiped image was never restored by the
-            # deduping on_update.
+            # Wait on a deterministic seam, not a fixed sleep, for either the
+            # image to appear or the load to settle. With the restore in
+            # place the image is present after settling. Without it the image
+            # never appears, because the deduping on_update never repaints.
             painted = wait_until(lambda: active_image() is not None, timeout=3)
             if not painted:
                 blanks.append(i)
 
-        # The pinned assertion: with the identity-gated stash-and-restore
+        # The pinned assertion. With the identity-gated stash-and-restore
         # in place, no trial may settle blank.
         assert not blanks, (
             f"the action-control key settled BLANK on {len(blanks)}/{TRIALS} "

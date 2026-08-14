@@ -1,24 +1,12 @@
 """
-Screensaver media must LOOP when the config has no explicit `loop` key.
+Screensaver media must loop when the config carries no explicit loop key.
 
-`load_screensaver` used to apply `config.get("loop", False)` while every
-media-layer default (ScreenSaver.loop, Background.set_from_path /
-prebuild_from_path, BackgroundVideo/GifBackground) says True, so any
-screensaver config written before the loop toggle existed -- or by a
-programmatic writer that omitted the key -- played exactly one pass and
-then held its last frame on the device for the whole idle window. Field
-evidence: a hardware run captured one 1.2s pass followed by
-hash-skip-only frozen ticks.
-
-Covers:
-  * page-level screensaver config with no `loop` key -> ScreenSaver.loop True;
-  * deck-level screensaver config with no `loop` key -> same (the other
-    branch of load_screensaver's config selection);
-  * an EXPLICIT `"loop": false` still wins -- the default change must not
-    make the toggle unclickable;
-  * the defaulted value is threaded all the way into the live background
-    provider (GifBackground.loop), not just parked on the ScreenSaver.
+Every media-layer default says True, so a screensaver config written before the
+loop toggle existed loops as well, at page level and at deck level.
 """
+
+# An explicit "loop": false still wins, and the defaulted value reaches the
+# live background provider rather than parking on the ScreenSaver.
 import json
 import os
 
@@ -45,8 +33,8 @@ def _make_gif(path: str, n_frames: int = 4) -> str:
 
 
 def _seed_screensaver_page(page_name: str, media_path: str, loop=None) -> str:
-    """Page JSON whose screensaver block omits `loop` entirely unless one is
-    passed -- the whole point of the scenario is the ABSENT key."""
+    """Page JSON whose screensaver block omits loop unless one is passed.
+    The absent key is what this scenario covers."""
     screensaver = {
         "overwrite": True,
         "enable": True,
@@ -75,7 +63,7 @@ def main() -> None:
 
     controller = fixtures.make_headless_controller(serial="ss-loop-1")
     try:
-        # --- page config, no `loop` key ---------------------------------
+        # A page config with no loop key.
         no_key_path = _seed_screensaver_page("SaverNoLoopKey", gif)
         page = gl.page_manager.get_page(no_key_path, controller)
         controller.load_page(page, allow_reload=True)
@@ -89,7 +77,7 @@ def main() -> None:
             "fixture sanity: the page's screensaver config was not applied"
         )
 
-        # --- the value reaches the live provider ------------------------
+        # The value reaches the live provider.
         controller.screen_saver.show()
         assert wait_until(lambda: controller.background.video is not None, timeout=5), (
             "the screensaver's GIF background never landed"
@@ -102,7 +90,7 @@ def main() -> None:
         controller.screen_saver.hide()
         assert wait_until(lambda: not controller.screen_saver.showing, timeout=5)
 
-        # --- explicit False still wins ----------------------------------
+        # An explicit False still wins.
         off_path = _seed_screensaver_page("SaverLoopOff", gif, loop=False)
         off_page = gl.page_manager.get_page(off_path, controller)
         controller.load_page(off_page, allow_reload=True)
@@ -112,10 +100,9 @@ def main() -> None:
             "the default must not override a persisted toggle"
         )
 
-        # --- deck config, no `loop` key ---------------------------------
-        # The deck branch is chosen when deck settings enable the screensaver
-        # and the page does NOT overwrite it, so the page seeded here is a
-        # plain one.
+        # A deck config with no loop key. The deck branch runs when deck
+        # settings enable the screensaver and the page does not overwrite it,
+        # so the page seeded here is a plain one.
         deck_settings = controller.get_deck_settings()
         deck_settings["screensaver"] = {
             "enable": True,

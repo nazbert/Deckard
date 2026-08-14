@@ -1,10 +1,12 @@
 """
-Integration scenario (docs/presenter-migration-plan.md §7 "Two fake decks,
-storm both"): two independent headless controllers, each over its own
-FaultyFakeDeck, switched concurrently from separate threads. Each deck's
-journal must reflect only its own controller's pages -- no shared state
-(sequence counters, journals, dedup) leaking across controller instances.
+Integration scenario for two fake decks stormed at once.
+
+Two independent headless controllers, each over its own FaultyFakeDeck, are
+switched concurrently from separate threads.
 """
+
+# Each deck's journal must reflect only its own controller's pages, with no
+# sequence counter, journal or dedup state leaking across controller instances.
 import os
 import threading
 import time
@@ -14,7 +16,7 @@ import globals as gl
 
 
 def _settle_on(controller, deck, page, key_count):
-    """Loads `page` alone, waits for every key to repaint, returns the
+    """Loads one page alone, waits for every key to repaint, returns the
     per-key hash signature (see scenario_switch_storm's helper of the same
     shape)."""
     deck.clear_journal()
@@ -60,7 +62,7 @@ def main() -> None:
     sig2_a = _settle_on(controller2, deck2, d2_page_a, key_count2)
     sig2_b = _settle_on(controller2, deck2, d2_page_b, key_count2)
 
-    # Cross-controller signatures must never collide (sanity: proves the two
+    # Cross-controller signatures must never collide (sanity. Proves the two
     # decks are genuinely independent fixtures, not sharing a journal).
     for k in range(min(key_count1, key_count2)):
         others = {sig2_a[k], sig2_b[k]}
@@ -69,7 +71,7 @@ def main() -> None:
         )
 
     # Reset each to a neutral page before storming (see scenario_switch_storm
-    # for why: the dedup guard would otherwise no-op a repeat of already-
+    # for why. The dedup guard would otherwise no-op a repeat of already-
     # displayed content).
     d1_neutral = gl.page_manager.get_page(fixtures.seed_page("D1Neutral"), controller1)
     d2_neutral = gl.page_manager.get_page(fixtures.seed_page("D2Neutral"), controller2)

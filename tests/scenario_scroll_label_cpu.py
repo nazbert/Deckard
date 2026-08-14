@@ -1,38 +1,12 @@
 """
-Regression test for the scroll-label CPU fix.
+Regression test for the scroll-label CPU cost.
 
-Root cause: `_needs_key_ticks()` flipped the media loop from the idle
-throttle (2 FPS) to full 30 FPS whenever ANY label measured wider than its
-key, and every tick then re-rendered every such key (full composite +
-draw.text with stroke), even when
-
-  * rolling labels were DISABLED in the app settings (detection ignored the
-    setting entirely -- the reporter's exact configuration),
-  * the measured overflow was a getbbox artifact ('\n' counted toward the
-    width), so the render path never actually scrolled, or
-  * the scroll offset had not moved this tick (odd half-ticks, and the
-    scroll_wait hold plateaus), so the composite was discarded by the hash
-    de-dup after the cost was already paid.
-
-The fix: get_has_scroll_labels() honors the rolling-labels setting and
-measures with the same multiline-aware textbbox the render uses; scroll
-state advances in LabelManager.tick_scroll_labels() on the media tick
-(wall-clock cadence, 1px/(2/30)s as before) and keys re-render ONLY when an
-offset moved; the scrolling text itself is rasterized once into a cached
-strip and each frame composites a window of it.
-
-Asserted here:
-  (a) rolling disabled + over-wide labels -> no scroll detection, loop stays
-      at the idle rate, zero per-tick renders.
-  (b) a multiline label whose LINES fit does not phantom-scroll, even though
-      single-line getbbox (the old detector) measures it over-wide.
-  (c) rolling enabled + over-wide labels -> renders stay within the scroll
-      cadence budget (~15/s per scrolling key, ~0 during the leading hold),
-      static keys on the same page never re-render, and the animation
-      genuinely advances.
-  (d) the strip composite is pixel-equivalent to a direct draw.text of the
-      same frame.
+get_has_scroll_labels honors the rolling-labels setting and measures with the
+multiline-aware textbbox the render uses.
 """
+
+# A key re-renders only when its own offset moved, and the scrolling text
+# rasterizes once into a cached strip, which is capped by width.
 import time
 
 import fixtures
@@ -44,9 +18,9 @@ WIDE_TEXT = "m" * 24
 
 
 def _make_controller(serial: str, rolling: bool):
-    """App settings must be in place before labels are composed (the scroll
-    caches read them lazily); the controller's async page load must settle
-    before the scenario sets labels, or load_all_inputs can wipe them."""
+    """App settings must be in place before labels are composed, because the
+    scroll caches read them lazily. The page load must settle before the
+    scenario sets labels, or load_all_inputs wipes them."""
     fixtures._install_integration_globals()
     settings = gl.settings_manager.get_app_settings()
     settings.setdefault("general", {})["rolling-labels"] = rolling
@@ -123,9 +97,9 @@ def check_multiline_no_phantom_scroll() -> None:
         lm = key.get_active_state().label_manager
         available = lm.get_available_width()
 
-        # Build a two-line label whose LINES fit but whose single-line
-        # getbbox measurement (the old detector: '\n' counts toward the
-        # width) overflows -- the phantom-scroll shape.
+        # Build a two-line label whose lines fit but whose single-line
+        # getbbox measurement overflows, because the newline counts toward
+        # the width. That is the phantom-scroll shape.
         from src.backend.DeckManagement.Subclasses.KeyLabel import KeyLabel
         probe = KeyLabel(controller_input=key, text="m", font_size=15)
         font = lm.get_composed_label("center").get_font()
@@ -134,10 +108,9 @@ def check_multiline_no_phantom_scroll() -> None:
         while measure.textbbox((0, 0), line + "m", font=font)[2] <= available * 0.9:
             line += "m"
         text = f"{line}\n{line}"
-        # Measure the premise with the BASIC layout engine: raqm >= 0.11
-        # refuses control characters (raqm_layout() fails on '\n'), while
-        # BASIC still counts the newline glyph toward the width like the old
-        # detector did -- and the harness must not depend on the host
+        # Measure the premise with the BASIC layout engine. raqm 0.11 and
+        # later refuse a control character, while BASIC counts the newline
+        # glyph toward the width, and the harness must not depend on the host
         # shaping stack.
         basic_font = ImageFont.truetype(
             font.path, font.size, layout_engine=ImageFont.Layout.BASIC)
@@ -188,15 +161,14 @@ def check_scroll_render_budget() -> None:
             counts[self.index] = counts.get(self.index, 0) + 1
             return orig_update(self, *a, **k)
 
-        # Window 1: the leading hold (scroll_wait -> ~1.67s). The offset
-        # doesn't move, so scrolling keys must not re-render even though the
-        # loop ticks at full FPS.
+        # Window 1 is the leading hold, about 1.67s. The offset does not
+        # move, so scrolling keys must not re-render even at full-FPS ticks.
         ControllerKey.update = counting_update
         try:
             time.sleep(1.2)
             hold_counts = dict(counts)
-            # Window 2: the sweep. Budget: cadence is 1px per 2/30s => <=15
-            # renders/s per scrolling key, plus slack for the window edges.
+            # Window 2 is the sweep. A cadence of 1px per 2/30s allows at
+            # most 15 renders per second per scrolling key, plus edge slack.
             window = 3.0
             counts.clear()
             t0 = controller.media_player.media_ticks
@@ -276,13 +248,11 @@ def check_strip_matches_direct_draw() -> None:
         fixtures.teardown(controller)
 
 
-def check_editor_label_edit_invalidates_detection() -> None:
-    """A label edit through Page.set_label_* (the sidebar editor's path)
-    mutates the KeyLabel in place, bypassing set_page_label's cache
-    invalidation. Without an explicit invalidate the scroll-detection cache
-    goes stale: a shortened label keeps scrolling forever (loop pinned at
-    full FPS, fitting text drawn mid-sweep) and a lengthened one never starts
-    scrolling until a page reload (review round 1, both directions)."""
+def check_label_edit_invalidates_detection() -> None:
+    """A label edit through Page.set_label_* mutates the KeyLabel in place
+    and bypasses set_page_label's cache invalidation. Without an explicit
+    invalidate a shortened label keeps scrolling and a lengthened one never
+    starts until a page reload."""
     from src.backend.DeckManagement.InputIdentifier import Input
 
     controller = _make_controller("scrolllbl-e", rolling=True)
@@ -290,9 +260,10 @@ def check_editor_label_edit_invalidates_detection() -> None:
         key = controller.inputs[Input.Key][0]
         lm = key.get_active_state().label_manager
 
-        # long -> short: was scrolling, must fall back to idle + static draw.
+        # From long to short. A scrolling label must fall back to the idle
+        # rate and a static draw.
         _set_center_label(key, WIDE_TEXT)
-        time.sleep(2.0)  # past the leading hold: genuinely sweeping
+        time.sleep(2.0)  # past the leading hold, so it is genuinely sweeping
         assert lm.get_has_scroll_labels(), "wide label not scrolling before edit"
 
         controller.active_page.set_label_text(key.identifier, 0, "center", "ok", update=True)
@@ -305,7 +276,7 @@ def check_editor_label_edit_invalidates_detection() -> None:
         assert rate < 8, (
             f"loop at {rate:.1f} t/s after shortening a scrolling label -- stale "
             f"detection is still forcing full-FPS ticks on now-static text")
-        # And it must draw statically (no leftover sweep offset applied).
+        # It must also draw statically, with no leftover sweep offset.
         size = key.get_image_size()
         composed = lm.get_composed_label("center")
         w, h = lm._measure_text("center", composed)
@@ -322,7 +293,7 @@ def check_editor_label_edit_invalidates_detection() -> None:
             f"shortened label drawn {dev:.2%} off a centered static draw -- it is "
             f"still being composited at a scroll offset")
 
-        # short -> long: must START scrolling with no page reload.
+        # From short to long. It must start scrolling with no page reload.
         controller.active_page.set_label_text(key.identifier, 0, "center", WIDE_TEXT, update=True)
         time.sleep(0.3)
         assert lm.get_has_scroll_labels(), (
@@ -339,12 +310,10 @@ def check_editor_label_edit_invalidates_detection() -> None:
 
 
 def check_pathological_label_strip_capped() -> None:
-    """The precomposed strip is width x keyheight x 4 bytes RGBA, retained per
-    label. Strip width scales with TEXT length, so an uncapped strip on a
-    pasted 50k-char label retains ~95 MB and stalls the sole-writer media
-    thread rasterizing it (review round 1). Past the width cap the render
-    falls back to the pre-MR direct draw: nothing retained, pixels still
-    correct."""
+    """The precomposed strip is width by key height by 4 bytes of RGBA,
+    retained per label, and its width scales with the text length. Past the
+    width cap the render falls back to a direct draw, which retains nothing
+    and still produces the right pixels."""
     from src.backend.DeckManagement.InputIdentifier import Input
     from src.backend.DeckManagement.DeckController import LabelManager
 
@@ -355,7 +324,7 @@ def check_pathological_label_strip_capped() -> None:
         size = key.get_image_size()
         cap = LabelManager._MAX_STRIP_WIDTH
 
-        # A normal wide label still uses (and retains) a strip.
+        # A normal wide label still uses and retains a strip.
         _set_center_label(key, WIDE_TEXT)
         time.sleep(0.3)
         lm.frames["center"]["position"] = 10
@@ -363,8 +332,8 @@ def check_pathological_label_strip_capped() -> None:
         assert lm._scroll_strips.get("center") is not None, (
             "normal wide label should still use the precomposed strip")
 
-        # A pathological label must NOT retain a strip, and must render
-        # correctly (pixel-equivalent to a direct draw at the same offset).
+        # A pathological label must retain no strip, and must render the
+        # same pixels as a direct draw at the same offset.
         pathological = "m" * 20000
         _set_center_label(key, pathological)
         time.sleep(0.3)
@@ -402,7 +371,7 @@ def main() -> None:
     check_multiline_no_phantom_scroll()
     check_scroll_render_budget()
     check_strip_matches_direct_draw()
-    check_editor_label_edit_invalidates_detection()
+    check_label_edit_invalidates_detection()
     check_pathological_label_strip_capped()
     print("PASS: scenario_scroll_label_cpu")
 

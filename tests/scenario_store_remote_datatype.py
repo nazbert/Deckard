@@ -1,20 +1,11 @@
 """
-Regression test for StoreBackend.get_remote_file / get_web_image:
-
-  1. get_remote_file never forwarded `data_type` to the StoreCache calls,
-     so BINARY fetches (data_type="content", e.g. thumbnails) were keyed
-     under the default "text" cache string. A text fetch and a binary
-     fetch of the same repo/path collided on one cache file -- opened with
-     conflicting modes ("r" vs "rb") -- and the index could never tell the
-     two apart. Now the cache key carries the data type end to end
-     (is_cached / open_cache_file / get_fetched_date / the write).
-  2. get_web_image wrapped the fetch in a bare `except:`, which also
-     swallowed BaseExceptions -- the guard must be `except Exception`, so
-     a KeyboardInterrupt/SystemExit escapes while ordinary decode/fetch
-     errors are still contained.
-
-All network-free: request_from_url is stubbed.
+Regression test for StoreBackend.get_remote_file and get_web_image.
 """
+
+# The cache key carries the data type end to end, so a text fetch and a binary
+# fetch of one repo path never collide on one cache file. get_web_image guards
+# with except Exception, so a KeyboardInterrupt escapes while an ordinary
+# decode or fetch error stays contained. request_from_url is stubbed.
 
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl  # noqa: F401
@@ -26,7 +17,7 @@ REPO = "https://github.com/StreamController/StreamController-Store"
 
 
 def make_backend() -> StoreBackend:
-    sb = StoreBackend.__new__(StoreBackend)  # skip __init__ (spawns a fetch thread)
+    sb = StoreBackend.__new__(StoreBackend)  # skip __init__, which spawns a fetch thread
     sb.store_cache = StoreCache()
     return sb
 
@@ -52,8 +43,8 @@ def test_binary_fetch_cached_under_content_key() -> None:
         "a binary fetch must NOT be cached under the text key"
     )
 
-    # And the cached copy must be served back under the same key with no
-    # second fetch.
+    # The cached copy must come back under the same key, with no second
+    # fetch.
     def must_not_fetch(url):
         raise AssertionError("cached binary fetch must not hit the network")
 

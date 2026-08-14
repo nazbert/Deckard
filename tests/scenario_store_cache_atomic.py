@@ -1,17 +1,13 @@
 """
-Regression test -- StoreCache stamped entry["fetched"]=now and
-persisted the index BEFORE the caller wrote a byte of content, and wrote
-in-place with no per-file lock. A crash mid-write left a truncated file the
-index swore was fresh, and get_remote_file's stale-fallback (782a1dac) then
-served that poison for up to 3 days.
+Regression test for StoreCache write atomicity.
 
-Now writes go to a sibling temp file, os.replace()d over the real path on
-successful close, and "fetched" is stamped only after that commit; an
-exception inside the caller's `with` block discards the temp file entirely.
-Writers on the same cache key serialize on a per-file lock. Legacy entries
-without "fetched" fall back to the cache file's mtime instead of the
-ever-renewed "date" (the circular clock). All network-free.
+A write goes to a sibling temp file and os.replace's it over the real path on a
+successful close, stamping "fetched" only after that commit.
 """
+
+# Writers on one cache key serialize on a per-file lock, and a legacy entry
+# with no "fetched" falls back to the file mtime rather than the ever-renewed
+# "date".
 import os
 import threading
 import time
@@ -32,7 +28,7 @@ def _tmp_leftovers(cache: StoreCache) -> list:
     return [n for n in os.listdir(cache.files_dir) if n.endswith(".tmp")]
 
 
-def test_crash_mid_write_preserves_previous_content() -> None:
+def test_crash_mid_write_preserves_content() -> None:
     cache = StoreCache()
 
     with cache.open_cache_file(url=REPO, path="Plugins.json", mode="w") as f:
@@ -44,7 +40,7 @@ def test_crash_mid_write_preserves_previous_content() -> None:
 
     try:
         with cache.open_cache_file(url=REPO, path="Plugins.json", mode="w") as f:
-            f.write("TRUNC")  # partial write...
+            f.write("TRUNC")  # a partial write
             raise RuntimeError("simulated crash mid-write")
     except RuntimeError:
         pass
@@ -107,10 +103,10 @@ def test_concurrent_writers_serialize() -> None:
     assert _tmp_leftovers(cache) == []
 
 
-def test_stale_fallback_serves_last_good_content() -> None:
-    """End-to-end with get_remote_file: after a crashed refetch-write, a
-    failing fetch must still fall back to the LAST GOOD copy."""
-    sb = StoreBackend.__new__(StoreBackend)  # skip __init__ (spawns a fetch thread)
+def test_stale_fallback_serves_last_good() -> None:
+    """End to end with get_remote_file. After a crashed refetch-write, a
+    failing fetch must still fall back to the last good copy."""
+    sb = StoreBackend.__new__(StoreBackend)  # skip __init__, which spawns a fetch thread
     sb.store_cache = StoreCache()
 
     def fetch_ok(url):
@@ -126,8 +122,8 @@ def test_stale_fallback_serves_last_good_content() -> None:
     first = sb.get_remote_file(REPO, "Wallpapers.json", "main", force_refetch=True)
     assert first == '[{"good": "catalog"}]'
 
-    # Crash a rewrite of the same key mid-write (bypassing get_remote_file,
-    # which has no injectable seam mid-write): previous content must survive.
+    # Crash a rewrite of the same key mid-write. get_remote_file has no
+    # injectable seam there, so the previous content must survive.
     try:
         with sb.store_cache.open_cache_file(url=REPO, path="Wallpapers.json", mode="w") as f:
             f.write('[{"trunc')
@@ -142,7 +138,7 @@ def test_stale_fallback_serves_last_good_content() -> None:
     )
 
 
-def test_legacy_entry_uses_mtime_not_renewed_date() -> None:
+def test_legacy_entry_uses_mtime() -> None:
     cache = StoreCache()
 
     with cache.open_cache_file(url=REPO, path="Legacy.json", mode="w") as f:
@@ -168,11 +164,11 @@ def test_legacy_entry_uses_mtime_not_renewed_date() -> None:
 
 def main() -> None:
     fixtures.start_watchdog(30, label="scenario_store_cache_atomic")
-    test_crash_mid_write_preserves_previous_content()
+    test_crash_mid_write_preserves_content()
     test_fetched_stamped_only_after_close()
     test_concurrent_writers_serialize()
-    test_stale_fallback_serves_last_good_content()
-    test_legacy_entry_uses_mtime_not_renewed_date()
+    test_stale_fallback_serves_last_good()
+    test_legacy_entry_uses_mtime()
     print("scenario_store_cache_atomic: PASS")
 
 

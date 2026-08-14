@@ -1,47 +1,13 @@
 """
-Unit-tier scenario for the two media paths the per-deck display-saturation
-factor used to skip silently:
+Unit-tier scenario for the display-saturation factor on two media paths.
 
-  * KeyGIF.__init__ (src/backend/DeckManagement/deck_controller/gif_pipeline.py)
-    -- the animated key/dial GIF path. Frames are decoded+fitted once at
-    construction and get_next_frame only indexes the retained list, so the
-    enhancement must be baked in there (one enhance per frame at load, not
-    per media tick). A GIF used as a *background* already routed through the
-    saturated video path; a GIF on a key/dial sat visibly duller than the
-    PNG/mp4 next to it.
-  * ControllerTouchScreenState._get_fitted_background_image
-    (src/backend/DeckManagement/DeckController.py) -- the per-touchscreen
-    (SD+ strip) background image. The fitted result is
-    memoized under a (path, mtime, size) key that must also gain the
-    saturation dimension, or a factor change would keep serving the stale
-    enhancement.
-
-Both are exercised through the REAL production classes with small stubs
-exposing exactly the surface each reads (get_key_image_size(),
-get_display_saturation()) -- same house pattern as
-scenario_display_saturation.py, which covers the background-image and
-background-video application points.
-
-Covers:
-  (a) KeyGIF at factor 1.3 retains measurably more saturated frames than at
-      1.0, for EVERY frame (the bake happens in the per-frame decode loop).
-  (b) KeyGIF at factor 1.0 is a strict no-op: frames are byte-identical to
-      a pre-fix decode (no enhance, no extra conversion).
-  (c) KeyGIF alpha survives the enhancement (frames stay RGBA and the
-      transparent background stays transparent) -- the reason the GIF path
-      exists at all is cv2's demuxer dropping alpha, so the fix must not
-      flatten it either.
-  (d) _get_fitted_background_image at 1.3 returns a measurably more
-      saturated strip image than at 1.0.
-  (e) the fitted-image cache key includes the factor: flipping the
-      controller's saturation between calls (same path/mtime/size) must
-      return a differently-enhanced image, not the cached previous one.
-  (f) _read_display_saturation validates the persisted factor: a non-finite
-      value ("nan"/"inf", which float() accepts without raising) or an
-      out-of-range value must not reach an ImageEnhance factor / cache key --
-      non-finite falls back to the default, out-of-range clamps to the UI
-      range.
+KeyGIF decodes and fits every frame at construction, so it bakes the factor
+into each frame there. The touchscreen fitted-background memo keys on the
+factor. _read_display_saturation validates the persisted value.
 """
+
+# Both paths run through the production classes with stubs for the surface each
+# one reads.
 import os
 
 import fixtures  # noqa: F401  (isolated data dir + sys.path, house convention)
@@ -62,13 +28,11 @@ def _mean_hsv_saturation(image: Image.Image) -> float:
     return sum(data) / len(data)
 
 
-# ===================================================================== #
-# (a)-(c): KeyGIF
-# ===================================================================== #
+# KeyGIF frames
 
 class _StubGifDeckController:
-    """Exposes exactly what KeyGIF.__init__ reads: get_key_image_size() and
-    get_display_saturation()."""
+    """Exposes the two calls KeyGIF.__init__ makes, get_key_image_size and
+    get_display_saturation."""
 
     def __init__(self, key_size: tuple[int, int], saturation: float):
         self._key_size = key_size
@@ -89,9 +53,8 @@ class _StubControllerKey:
 
 
 def _make_test_gif(path: str, size=(96, 96), n_frames: int = 4) -> None:
-    """Animated GIF with a transparent background and a vivid opaque disc
-    per frame -- vivid enough that a 1.3 boost is unambiguous, transparent
-    enough that alpha loss is too."""
+    """Animated GIF with a transparent background and a vivid opaque disc per
+    frame. The colors make a 1.3 boost and any alpha loss both measurable."""
     frames = []
     colors = [(220, 30, 30, 255), (30, 200, 40, 255), (40, 60, 220, 255), (230, 210, 20, 255)]
     for i in range(n_frames):
@@ -121,8 +84,7 @@ def check_keygif_saturation() -> None:
     try:
         assert len(gif_default.frames) == len(gif_boosted.frames) == 4
 
-        # (a) every retained frame carries the boost (the GIF key
-        # sat visibly duller than the saturated stills around it).
+        # Every retained frame carries the boost.
         for i, (plain, boosted) in enumerate(zip(gif_default.frames, gif_boosted.frames)):
             sat_plain = _mean_hsv_saturation(plain)
             sat_boosted = _mean_hsv_saturation(boosted)
@@ -131,16 +93,15 @@ def check_keygif_saturation() -> None:
                 f"measurably: default={sat_plain:.2f} boosted={sat_boosted:.2f}"
             )
 
-            # (c) alpha survives: mode stays RGBA and the transparent corner
-            # stays fully transparent after the enhancement.
+            # Alpha survives. The mode stays RGBA and the transparent corner
+            # stays clear.
             assert boosted.mode == "RGBA", f"frame {i}: mode {boosted.mode!r} != RGBA"
             assert boosted.getpixel((0, 0))[3] == 0, (
                 f"frame {i}: transparent background lost through the enhancement"
             )
 
-        # (b) factor 1.0 must be a strict no-op: a second default-factor
-        # decode of the same file produces byte-identical frames (no enhance
-        # call, no mode conversion sneaking in at the default).
+        # Factor 1.0 is a no-op. A second decode at the default gives
+        # identical bytes, with no enhance call and no mode conversion.
         gif_default_again = build(1.0)
         try:
             for i, (a, b) in enumerate(zip(gif_default.frames, gif_default_again.frames)):
@@ -154,9 +115,7 @@ def check_keygif_saturation() -> None:
     print("PASS: KeyGIF frames carry the saturation boost (alpha preserved, 1.0 no-op)")
 
 
-# ===================================================================== #
-# (d)+(e): ControllerTouchScreenState._get_fitted_background_image
-# ===================================================================== #
+# ControllerTouchScreenState._get_fitted_background_image
 
 class _StubTouchDeckController:
     def __init__(self, saturation: float):
@@ -172,9 +131,9 @@ class _StubControllerTouch:
 
 
 def _make_touch_state(saturation: float) -> ControllerTouchScreenState:
-    """__new__ + exactly the attributes _get_fitted_background_image reads
-    (controller_touch.deck_controller, _fitted_background_cache) -- the full
-    __init__ needs a real ControllerTouchScreen/deck graph."""
+    """Build the state through __new__ with only the attributes
+    _get_fitted_background_image reads. The full __init__ needs a real deck
+    graph."""
     state = ControllerTouchScreenState.__new__(ControllerTouchScreenState)
     state.controller_touch = _StubControllerTouch(saturation)
     state._fitted_background_cache = (None, None)
@@ -198,8 +157,7 @@ def check_touchscreen_background_saturation() -> None:
 
     strip_size = (800, 100)
 
-    # (d) factor 1.3 must measurably boost the fitted strip image
-    # (keys boosted, strip didn't).
+    # Factor 1.3 boosts the fitted strip image measurably.
     plain = _make_touch_state(1.0)._get_fitted_background_image(bg_path, strip_size)
     boosted = _make_touch_state(1.3)._get_fitted_background_image(bg_path, strip_size)
     assert plain is not None and boosted is not None
@@ -211,9 +169,9 @@ def check_touchscreen_background_saturation() -> None:
         f"saturation measurably: default={sat_plain:.2f} boosted={sat_boosted:.2f}"
     )
 
-    # (e) the memo key carries the factor: same state, same file, factor
-    # flipped between calls -- the second call must NOT serve the first
-    # call's cached enhancement (path/mtime/size alone would).
+    # The memo key carries the factor. With the factor flipped between calls,
+    # the second call must not serve the first call's cached enhancement. A
+    # key of path, mtime and size alone would serve it.
     state = _make_touch_state(1.0)
     first = state._get_fitted_background_image(bg_path, strip_size)
     state.controller_touch.deck_controller.saturation = 1.3
@@ -226,8 +184,7 @@ def check_touchscreen_background_saturation() -> None:
         "post-change fitted image should match a fresh 1.3 enhancement"
     )
 
-    # And the cache still works within one factor: a repeat call is a hit
-    # returning an equal (copied) image.
+    # Within one factor the cache still hits and returns a copy.
     third = state._get_fitted_background_image(bg_path, strip_size)
     assert third.tobytes() == second.tobytes()
     assert third is not second, "cache must hand out copies, not the cached object"
@@ -235,15 +192,11 @@ def check_touchscreen_background_saturation() -> None:
     print("PASS: touchscreen background image carries the saturation boost (cache keyed on factor)")
 
 
-# ===================================================================== #
-# (f): _read_display_saturation validates the persisted factor
-# ===================================================================== #
+# _read_display_saturation validates the persisted factor
 
 class _StubSettingsController:
-    """Exactly what DeckController._read_display_saturation reads:
-    get_deck_settings() plus the DEFAULT/MIN/MAX_DISPLAY_SATURATION class
-    constants it references through self (unbound-method call, house
-    pattern)."""
+    """DeckController._read_display_saturation reads get_deck_settings and
+    the three saturation constants it reaches through self."""
 
     DEFAULT_DISPLAY_SATURATION = DeckController.DEFAULT_DISPLAY_SATURATION
     MIN_DISPLAY_SATURATION = DeckController.MIN_DISPLAY_SATURATION
@@ -265,18 +218,18 @@ def check_read_saturation_validates() -> None:
     lo = DeckController.MIN_DISPLAY_SATURATION
     hi = DeckController.MAX_DISPLAY_SATURATION
 
-    # A "nan"/"inf" string parses through float() without raising -- it must
-    # NOT reach an ImageEnhance factor or a cache key (a non-finite key never
-    # matches -> a cache that never hits and re-enhances every composite).
+    # float() accepts "nan" and "inf" without raising. A non-finite factor
+    # must not reach ImageEnhance or a cache key. Such a key never matches,
+    # so the cache re-enhances every composite.
     for poison in ("nan", "inf", "-inf"):
         got = _read_sat({"display": {"saturation": poison}})
         assert got == default, f"{poison!r} setting must fall back to default {default}, got {got}"
 
-    # Garbage / missing -> default (existing contract, still holds).
+    # A garbage or missing value falls back to the default.
     assert _read_sat({"display": {"saturation": "not-a-number"}}) == default
     assert _read_sat({}) == default
 
-    # Out-of-range persisted values are clamped to the UI range, not trusted.
+    # Out-of-range stored values clamp to the UI range.
     assert _read_sat({"display": {"saturation": 9.0}}) == hi
     assert _read_sat({"display": {"saturation": 0.0}}) == lo
     assert _read_sat({"display": {"saturation": -5.0}}) == lo
@@ -288,10 +241,8 @@ def check_read_saturation_validates() -> None:
 
 
 def main() -> None:
-    # KeyGIF reads performance.cache-videos at construction.
-    # This fixture renders alpha, so it keeps the frame list these
-    # assertions read either way -- the stub tier just has to exist for the
-    # setting to be readable.
+    # KeyGIF reads performance.cache-videos at construction, so the stub
+    # settings tier must exist. Either value keeps the frame list.
     fixtures.install_stub_globals({"performance": {"cache-videos": True}})
     fixtures.start_watchdog(60, label="scenario_media_saturation")
     check_keygif_saturation()

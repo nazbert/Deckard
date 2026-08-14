@@ -1,50 +1,12 @@
 """
-Pins the typed gl accessors (src/backend/services.py) -- the named reads that
-stand in for `gl.lm.get`, `gl.app`, `gl.app.main_win`, `gl.settings_manager`
-and `gl.page_manager`.
+Pins the typed gl accessors in src/backend/services.py.
 
-Nothing here is clever, and that is the point: an accessor is a one-line
-forward, so the way it breaks is by forwarding slightly less than the raw
-expression did -- an argument dropped, a slot cached, a None branch quietly
-"improved" into a crash. Every guard below is aimed at one of those.
-
-Guards:
-  1. tr() forwards to gl.lm.get in both shapes. With no fallback and with one,
-     the result matches the raw call byte for byte AND matches the value the
-     locale data says it should be -- equality with gl.lm.get alone would be
-     near-vacuous, since tr calls it. The fallback guard is the sharp one: a
-     dropped `fallback` argument still passes an equality-only check on every
-     ordinary key.
-  2. tr() before the locale manager exists raises a RuntimeError that names the
-     slot and the construction step, instead of an AttributeError on None.
-     This is the accessors' one intentional behaviour change, and it is on a
-     path that already crashed.
-  3. main_window() is None for BOTH ways the window can be missing: gl.app is
-     None, and gl.app exists without a `main_win` attribute bound yet (the raw
-     `gl.app.main_win` raises AttributeError there -- there is no class-body
-     declaration, on_activate binds it). It returns the window once bound, and
-     it keeps returning it after teardown, because App._destroy_main_window
-     destroys the widget and leaves the attribute bound -- the documented
-     asymmetry, pinned here so the docstring cannot drift back to claiming a
-     post-quit None.
-  4. require_main_window() raises a named error for both of those absences and
-     hands back the concrete window otherwise -- the conversion the raw
-     dereferences want, since none of them has a None branch to keep.
-  5. app() is the honest raw read, identity-preserving, None included;
-     require_app() returns the same object post-publish and raises a
-     boot-phase RuntimeError before it.
-  6. settings(), app_settings() and deck_settings() pass straight through to
-     the settings manager -- the same object, the same shared dict, no copy of
-     its own.
-  7. page_manager() stays honestly Optional; require_page_manager() is the
-     opt-in that turns absence into a named error.
-  8. Every accessor re-reads its gl slot per call, so rebinding a slot (which
-     is exactly what the harness and future tests do) is honoured.
-  9. The module's runtime imports are `globals` plus stdlib -- the claim that
-     lets any layer, engine closure included, import it without a cycle.
-
-No GTK: the accessors know nothing about the toolkit, and neither does this.
+An accessor is a one-line forward, so it breaks by forwarding less than the raw
+expression did. A dropped argument, a cached slot or a None branch turned into
+a crash are the shapes, and every check below aims at one of them.
 """
+
+# The accessors know nothing about GTK, and neither does this scenario.
 import fixtures  # noqa: F401  (isolates DATA_PATH before src imports)
 
 import ast
@@ -73,28 +35,25 @@ LOCALE_CSV = (
 
 
 def build_locale_manager() -> LocaleManager:
-    """A real LocaleManager over a two-locale CSV written into the harness's
-    temp data dir -- the point is to compare tr() against the production
-    get(), so a stub with a recording get() would prove nothing."""
+    """A real LocaleManager over a two-locale CSV in the harness temp data
+    dir. The checks compare tr() against the production get(), so a stub with
+    a recording get() would prove nothing."""
     path = os.path.join(gl.DATA_PATH, "services_accessors_locales.csv")
     with open(path, "w", encoding="utf-8") as f:
         f.write(LOCALE_CSV)
     lm = LocaleManager(csv_path=path)
     lm.set_language("de_DE")
     lm.set_fallback_language("en_US")
-    # No CSV row can produce a key whose fallback-locale value is None -- the
-    # reader stores strings -- so the `fallback` parameter is unreachable
-    # through real locale data. It is still part of get()'s signature and of
-    # every tr() call site that passes one, so the only way to keep the
-    # threading honest is to build the entry the reader cannot.
+    # No CSV row can produce a key whose fallback-locale value is None,
+    # because the reader stores strings, so real locale data never reaches
+    # the fallback parameter. Building the entry by hand is the only cover.
     lm.locale_data["fallback-only"] = {"de_DE": None, "en_US": None}
     return lm
 
 
 class FakeApp:
-    """Stands in for gl.app. Deliberately WITHOUT `main_win`: that attribute is
-    bound by App.on_activate and by nothing earlier, which is the case guard 3
-    is about."""
+    """Stands in for gl.app, with no main_win. App.on_activate binds that
+    attribute and nothing earlier does."""
 
 
 class FakeWindow:
@@ -113,31 +72,30 @@ def check_tr_forwards_both_shapes() -> None:
     assert services.tr("go-back") == "Zurück", services.tr("go-back")
     assert services.tr("go-back") == lm.get("go-back")
 
-    # A miss: get() resolves to the key itself, and does so BEFORE the
-    # fallback parameter is consulted -- so a fallback must not change it.
+    # On a miss get() resolves to the key itself, before it consults the
+    # fallback parameter, so a fallback must not change the result.
     assert services.tr("no-such-key") == "no-such-key"
     assert services.tr("no-such-key", "FALLBACK") == "no-such-key"
     assert services.tr("no-such-key", "FALLBACK") == lm.get("no-such-key", "FALLBACK")
 
     # An empty value in the active language falls through to the fallback
-    # locale, which is empty too here: the empty string comes back, not the key.
+    # locale, which is empty here too, so the empty string comes back.
     assert services.tr("german-only") == "Nur Deutsch"
     lm.set_language("en_US")
     assert services.tr("german-only") == "" == lm.get("german-only")
     lm.set_language("de_DE")
 
-    # The fallback parameter, on the only path that reaches it. Dropping the
-    # argument inside tr() is invisible to every assertion above and shows up
-    # right here.
+    # The fallback parameter, on the only path that reaches it. A dropped
+    # argument inside tr() is invisible above and shows up right here.
     assert services.tr("fallback-only", "FALLBACK") == "FALLBACK"
     assert services.tr("fallback-only", "FALLBACK") == lm.get("fallback-only", "FALLBACK")
     assert services.tr("fallback-only") == "fallback-only"
     assert services.tr("fallback-only") == lm.get("fallback-only")
 
-    # get() escapes for GTK markup; tr() must not add or remove a layer.
+    # get() escapes for GTK markup, and tr() must not add or remove a layer.
     assert services.tr("amp-key") == "A &amp; B" == lm.get("amp-key")
 
-    # Per-call slot read: a rebound gl.lm is the one that answers.
+    # A per-call slot read means a rebound gl.lm is the one that answers.
     other = build_locale_manager()
     other.locale_data["go-back"] = {"de_DE": "Anders", "en_US": "Other"}
     gl.lm = other
@@ -147,7 +105,7 @@ def check_tr_forwards_both_shapes() -> None:
     print("PASS: tr() forwards to gl.lm.get in both shapes, fallback included")
 
 
-def check_tr_before_the_locale_manager_exists() -> None:
+def check_tr_before_locale_manager() -> None:
     gl.lm = None  # the real pre-boot value
     try:
         services.tr("go-back")
@@ -198,11 +156,9 @@ def check_main_window_covers_both_absences() -> None:
     running.main_win = window
     assert services.main_window() is window
 
-    # Teardown does NOT null the attribute -- App._destroy_main_window destroys
-    # the widget and leaves it bound, and nothing else clears it -- so a
-    # destroyed window still reads as present. Pinned because the accessor's
-    # docstring warns callers about exactly this, and a future slot-clearing
-    # fix must land as a deliberate change to both.
+    # Teardown does not null the attribute. App._destroy_main_window destroys
+    # the widget and leaves it bound, so a destroyed window still reads as
+    # present. A slot-clearing fix must change the accessor docstring too.
     window.destroyed = True
     assert services.main_window() is window, (
         "a destroyed-but-bound main_win still comes back: nothing unbinds it"
@@ -297,10 +253,9 @@ def check_page_manager_pair() -> None:
 
 
 def check_runtime_imports_are_globals_only() -> None:
-    """The module's whole portability claim: any layer can import it. That
-    holds only while its runtime imports are globals plus stdlib -- a
-    first-party import here is a cycle risk and, for the engine closure, a
-    toolkit risk."""
+    """Any layer can import this module. That holds only while its runtime
+    imports are globals plus stdlib, because a first-party import is a cycle
+    risk and, for the engine closure, a toolkit risk."""
     tree = ast.parse(open(MODULE_PATH, encoding="utf-8").read(), MODULE_PATH)
 
     type_checking_bodies: set[int] = set()
@@ -322,8 +277,8 @@ def check_runtime_imports_are_globals_only() -> None:
             roots.update(a.name.split(".")[0] for a in node.names)
         elif isinstance(node, ast.ImportFrom):
             if node.level:
-                # A relative import can only reach first-party code and has no
-                # root to resolve: record it verbatim so it FAILS below.
+                # A relative import can only reach first-party code and has
+                # no root to resolve, so record it verbatim and fail below.
                 roots.add("." * node.level + (node.module or ""))
             elif node.module:
                 roots.add(node.module.split(".")[0])
@@ -344,7 +299,7 @@ def main() -> None:
     saved = (gl.lm, gl.app, gl.settings_manager, gl.page_manager)
     try:
         check_tr_forwards_both_shapes()
-        check_tr_before_the_locale_manager_exists()
+        check_tr_before_locale_manager()
         check_app_and_require_app()
         check_main_window_covers_both_absences()
         check_require_main_window()

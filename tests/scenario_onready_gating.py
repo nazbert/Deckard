@@ -1,33 +1,12 @@
 """
-Scenario: the default on_update no longer re-enters on_ready.
+The default on_update does not re-enter on_ready.
 
-The lifecycle split landed on_ready_finished and gated tick/update
-DISPATCH on it (ControllerInputState.own_actions_{tick,update}), but the
-hole stayed open inside ActionCore itself: the default on_update ran
-`self.on_ready()` unconditionally, so any caller reaching on_update while
-the initial on_ready was still in flight ran a SECOND on_ready body
-concurrently with it -- the duplicate-ready class the issue exists to kill
-(real plugins allocate, subscribe and spawn backend processes in on_ready).
-The dispatch-side gate only covers the app's own path; nothing covered a
-plugin calling on_update() on itself, or any other caller.
-
-The compat call is now skipped with a debug log, never deferred: the
-in-flight ready sequence ends with its own on_update
-(Page._run_ready_callbacks), so the redraw is not lost, and a queued
-duplicate is exactly the re-entry being removed. After a completed ready the
-path is unchanged.
-
-Legs:
-  a. re-entry: on_update() called by hand while on_ready blocks in the pool
-     runs NO second on_ready body. The DeckController gate is bypassed on
-     purpose -- this pins the ActionCore-level guard on its own.
-  b. steady state: once on_ready_finished is set, on_update() runs the
-     compat on_ready per call, exactly as it did before.
-  c. an action that OVERRIDES on_update is untouched -- its body runs
-     mid-ready and the guard never injects an on_ready into it.
-  d. mutation-proof: putting the pre-fix body back on ActionCore flips (a)
-     to the old, broken observation, so the leg is not vacuous.
+ActionCore's default on_update calls on_ready for compatibility. It skips that
+call, and logs a debug line, while the initial on_ready is still in flight.
+After on_ready_finished is set, the compat call runs on every on_update again.
 """
+
+# An action that overrides on_update keeps its own body.
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
 import threading
@@ -43,9 +22,9 @@ COMPAT_SKIP_MARKER = "on_update compat on_ready skipped"
 
 
 class _LogCapture:
-    """Attaches a capturing loguru sink for the duration of a `with` block,
-    so the "skipped" debug line can be asserted on: a silent skip is
-    indistinguishable from a hung on_ready when a plugin author debugs it."""
+    """Adds a capturing loguru sink for the with block, so the assertions can
+    read the skip line. A silent skip looks like a hung on_ready to a plugin
+    author."""
 
     def __init__(self, level: str = "DEBUG"):
         self._level = level
@@ -64,8 +43,8 @@ class _LogCapture:
 
 
 class CompatAction(ActionCore):
-    """Deliberately does NOT override on_update -- the compat default IS the
-    code under test. on_ready blocks on a gate and records entries plus peak
+    """Does not override on_update, so the compat default is the code under
+    test. on_ready blocks on a gate and records entries and peak
     concurrency."""
 
     def __init__(self, *args, **kwargs):
@@ -89,8 +68,8 @@ class CompatAction(ActionCore):
 
 
 class OverridingAction(CompatAction):
-    """Overrides on_update without chaining to the compat default -- the
-    shape the guard must never touch."""
+    """Overrides on_update without a chain to the compat default. The guard
+    must never touch this shape."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -116,7 +95,7 @@ def make_action(cls, controller, page, ident):
 
 def start_gated_action(controller, cls):
     """Schedules the ready callbacks and returns the action parked inside
-    on_ready (on_ready_called set, on_ready_finished not) -- the window."""
+    on_ready, with on_ready_called set and on_ready_finished clear."""
     page = controller.active_page
     ident = Input.Key("0x0")
     action = make_action(cls, controller, page, ident)
@@ -126,7 +105,7 @@ def start_gated_action(controller, cls):
     return action
 
 
-def check_compat_call_is_gated() -> int:
+def check_compat_call_gated() -> int:
     controller = make_headless_controller(serial="onready-gating-1")
     try:
         action = start_gated_action(controller, CompatAction)
@@ -134,7 +113,7 @@ def check_compat_call_is_gated() -> int:
             print("FAIL: on_ready never started")
             return 1
 
-        # --- (a) inside the in-flight window -----------------------------
+        # Inside the in-flight window.
         with _LogCapture(level="DEBUG") as capture:
             action.on_update()
             log_text = capture.text()
@@ -153,14 +132,13 @@ def check_compat_call_is_gated() -> int:
             action.ready_gate.set()  # unblock the pool thread before teardown
             return 1
 
-        # --- let the initial ready sequence complete ---------------------
+        # Let the initial ready sequence complete.
         action.ready_gate.set()
         if not wait_until(lambda: action.on_ready_finished, timeout=5):
             print("FAIL: on_ready_finished never set")
             return 1
-        # Page._run_ready_callbacks ends the sequence with its own
-        # on_update, which for a non-overriding action IS the compat
-        # on_ready -- the steady-state path, unchanged by the guard.
+        # Page._run_ready_callbacks ends the sequence with its own on_update,
+        # which for a non-overriding action is the compat on_ready.
         if not wait_until(lambda: action.ready_entries >= 2, timeout=5):
             print(f"FAIL(b): the trailing on_update never ran its compat on_ready ({action.ready_entries})")
             return 1
@@ -168,9 +146,9 @@ def check_compat_call_is_gated() -> int:
             print(f"FAIL(a): {action.ready_concurrent_max} concurrent on_ready bodies across the whole sequence")
             return 1
 
-        # --- (b) the compat path is unchanged once the ready completed ----
-        # >= not ==: the controller's background dispatch can land its own
-        # updates here, which is exactly the steady-state path being pinned.
+        # The compat path runs per call once the ready completed. The
+        # comparison allows extra calls, because the controller's background
+        # dispatch lands its own updates here.
         before = action.ready_entries
         action.on_update()
         action.on_update()
@@ -228,14 +206,14 @@ def check_overriding_action_untouched() -> int:
 
 
 def _prefix_on_update(self):
-    """ActionCore.on_update as it stood before the fix."""
+    """The ungated on_update body, which calls on_ready with no gate."""
     self.on_ready()
 
 
 def check_mutation_proof() -> int:
-    """Puts the pre-fix body back on the REAL class and re-runs the same
-    mid-ready probe: it must flip to the old, broken observation. A leg that
-    survives its own mutation is pinning nothing."""
+    """Puts the ungated body back on the real class and repeats the mid-ready
+    probe. The observation must flip; a leg that survives its own mutation
+    pins nothing."""
     saved_on_update = ActionCore.on_update
     ActionCore.on_update = _prefix_on_update
 
@@ -246,7 +224,7 @@ def check_mutation_proof() -> int:
             print("FAIL(d): on_ready never started")
             return 1
 
-        # The pre-fix on_update blocks inside the re-entered on_ready until
+        # The ungated on_update blocks inside the re-entered on_ready until
         # the gate opens, so drive it off-thread and watch the counter.
         prober = threading.Thread(target=action.on_update, name="prefix-on_update", daemon=True)
         prober.start()
@@ -272,7 +250,7 @@ def check_mutation_proof() -> int:
 def main() -> int:
     start_watchdog(90, "onready_gating")
     fixtures._install_integration_globals()
-    rc = check_compat_call_is_gated()
+    rc = check_compat_call_gated()
     if rc:
         return rc
     rc = check_overriding_action_untouched()

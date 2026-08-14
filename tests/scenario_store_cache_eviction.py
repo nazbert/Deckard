@@ -1,23 +1,13 @@
 """
-Regression test for StoreCache.remove_old_cache_files -- the
-startup eviction pass had three holes:
+Regression test for StoreCache.remove_old_cache_files.
 
-  1. A legacy index entry with no "date" field removed the file, popped the
-     entry, and then still fell through into `time.time() - None` -->
-     TypeError, killing StoreCache.__init__ (and with it the whole store
-     backend) at startup.
-  2. An entry whose cache file is already gone was `continue`d over -- the
-     index entry itself was never dropped, so it survived every future
-     eviction pass (immortal).
-  3. `os.remove` was unguarded: a file deleted between the exists() check
-     and the remove (or an EPERM) raised out of __init__.
-
-Now: missing-path entries are purged from the index; legacy entries fall
-back to the content clocks ("fetched", then file mtime -- same semantics as
-get_fetched_date) instead of dying, so a fresh legacy file SURVIVES the
-pass; and a failed remove is logged and retried on the next pass instead of
-raising. All network-free.
+A missing-path entry is purged from the index. A legacy entry with no "date"
+falls back to the content clocks, "fetched" and then file mtime, so a fresh
+legacy file survives the pass.
 """
+
+# A failed os.remove is logged and retried on the next pass instead of raising
+# out of StoreCache.__init__.
 import json
 import os
 import time
@@ -40,27 +30,27 @@ def _fresh_cache_with_entry(path_name: str, content: str = "x") -> tuple[StoreCa
     return cache, key, cache.files[key]["path"]
 
 
-def test_legacy_entry_without_date_survives_startup() -> None:
-    """A pre-"date" index entry over a FRESH file must neither crash the
+def test_legacy_without_date_survives() -> None:
+    """A pre-"date" index entry over a fresh file must neither crash the
     eviction pass nor be evicted."""
     cache, key, cache_path = _fresh_cache_with_entry("Legacy.json", "legacy content")
 
-    # Manufacture a legacy entry: no "date", no "fetched".
+    # Manufacture a legacy entry with no "date" and no "fetched".
     del cache.files[key]["date"]
     cache.files[key].pop("fetched", None)
     cache.set_files(cache.files)
 
-    cache.remove_old_cache_files()  # used to raise TypeError
+    cache.remove_old_cache_files()  # an unguarded None date raises TypeError
 
     assert key in cache.files, "fresh legacy entry must survive the eviction pass"
     assert os.path.exists(cache_path), "fresh legacy entry's file must survive"
 
-    # And a re-init (the actual startup path) must not raise either.
+    # A re-init, which is the real startup path, must not raise either.
     reloaded = StoreCache()
     assert key in reloaded.files
 
 
-def test_legacy_entry_with_old_mtime_is_evicted() -> None:
+def test_legacy_old_mtime_evicted() -> None:
     """The mtime fallback must still EVICT a genuinely old legacy file."""
     cache, key, cache_path = _fresh_cache_with_entry("OldLegacy.json")
 
@@ -75,7 +65,7 @@ def test_legacy_entry_with_old_mtime_is_evicted() -> None:
     assert not os.path.exists(cache_path), "stale legacy entry's file must be removed"
 
 
-def test_missing_path_entry_is_purged_not_immortal() -> None:
+def test_missing_path_entry_purged() -> None:
     cache, key, cache_path = _fresh_cache_with_entry("Ghost.json")
     os.remove(cache_path)
 
@@ -89,18 +79,18 @@ def test_missing_path_entry_is_purged_not_immortal() -> None:
         assert key not in json.load(f)
 
 
-def test_null_path_entry_is_purged() -> None:
+def test_null_path_entry_purged() -> None:
     cache = StoreCache()
     cache.files["corrupt::entry"] = {"path": None, "date": time.time()}
     cache.set_files(cache.files)
 
-    cache.remove_old_cache_files()  # used to raise from os.path.exists(None)
+    cache.remove_old_cache_files()  # a None path raises from os.path.exists
 
     assert "corrupt::entry" not in cache.files
 
 
-def test_failed_remove_is_survived_and_retried() -> None:
-    """os.remove raising must not kill the pass; the entry stays so the
+def test_failed_remove_is_retried() -> None:
+    """A raising os.remove must not kill the pass. The entry stays, so the
     next pass retries the eviction."""
     cache, key, cache_path = _fresh_cache_with_entry("Stubborn.json")
     cache.files[key]["date"] = time.time() - (StoreCache.DAYS_TO_KEEP + 7) * DAY
@@ -127,7 +117,7 @@ def test_failed_remove_is_survived_and_retried() -> None:
 
 
 def test_ordinary_old_entry_still_evicted() -> None:
-    """The pass's original job still works after the hardening."""
+    """The pass still evicts an ordinary old entry."""
     cache, key, cache_path = _fresh_cache_with_entry("Plain.json")
     cache.files[key]["date"] = time.time() - (StoreCache.DAYS_TO_KEEP + 1) * DAY
     cache.set_files(cache.files)
@@ -140,11 +130,11 @@ def test_ordinary_old_entry_still_evicted() -> None:
 
 def main() -> None:
     fixtures.start_watchdog(30, label="scenario_store_cache_eviction")
-    test_legacy_entry_without_date_survives_startup()
-    test_legacy_entry_with_old_mtime_is_evicted()
-    test_missing_path_entry_is_purged_not_immortal()
-    test_null_path_entry_is_purged()
-    test_failed_remove_is_survived_and_retried()
+    test_legacy_without_date_survives()
+    test_legacy_old_mtime_evicted()
+    test_missing_path_entry_purged()
+    test_null_path_entry_purged()
+    test_failed_remove_is_retried()
     test_ordinary_old_entry_still_evicted()
     print("scenario_store_cache_eviction: PASS")
 

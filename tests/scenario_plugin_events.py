@@ -1,25 +1,12 @@
 """
-Unit-tier scenario for the plugin event/callback layer: the pieces
-between an EventHolder/InputEvent firing and a plugin
-callback actually running are deck-independent, so this exercises them
-directly -- no FakeDeck, no controller.
+Unit-tier scenario for the plugin event and callback layer.
 
-Covers:
-  (a) a raising observer (sync AND `async def`) dispatched through
-      event_dispatch produces a logged ERROR that carries the exception
-      type, message and a traceback, not just the bare one-liner.
-  (b) InputBases (KeyAction/DialAction/TouchScreenAction) default
-      event assigners survive real delivery: _raw_event_callback forwards
-      one positional data arg and the documented no-arg on_* handlers
-      (including subclass overrides) run instead of TypeError-ing.
-  (c) the cross-plugin event APIs work: connect_to_event_directly
-      attaches to the TARGET plugin's holder (and the callback really
-      receives a trigger_event), suffix-based connect_to_event no longer
-      KeyErrors on None, disconnect_from_event accepts the same
-      event_id_suffix as connect_to_event (symmetric, no leaked
-      subscription), and disconnect_from_event_directly detaches from the
-      target plugin -- not from the calling one.
+The pieces between an EventHolder firing and a plugin callback running are
+deck-independent, so this drives them with no deck and no controller.
 """
+
+# It covers observer error logging, InputBases delivery to the no-arg handlers,
+# and the cross-plugin connect and disconnect APIs.
 import fixtures  # noqa: F401  (isolated data dir + sys.path, house convention)
 
 from loguru import logger as log
@@ -34,10 +21,11 @@ from src.backend.PluginManager.PluginBase import PluginBase
 
 
 class _LogCapture:
-    """Attaches a capturing loguru sink for the duration of a `with` block.
-    Loguru hands text sinks the fully formatted message -- including the
-    formatted traceback whenever the record carries exception info -- so
-    asserting on the joined text is enough to prove a traceback was logged.
+    """Adds a capturing loguru sink for the with block.
+
+    Loguru hands a text sink the fully formatted message, and that includes
+    the formatted traceback when the record carries exception info. The
+    joined text is therefore enough to prove a traceback was logged.
     """
 
     def __init__(self, level: str = "DEBUG"):
@@ -56,9 +44,7 @@ class _LogCapture:
         return "".join(self.records)
 
 
-# ===================================================================== #
-# (a) dispatch logs the observer's traceback
-# ===================================================================== #
+# Dispatch logs the observer's traceback.
 
 def check_raising_sync_observer_logs_traceback():
     def exploding_observer(*args, **kwargs):
@@ -69,9 +55,9 @@ def check_raising_sync_observer_logs_traceback():
         assert wait_until(lambda: "could not be called" in capture.text(), timeout=5.0), (
             "dispatch never logged the failing sync observer"
         )
-        # The batch runs on the shared dispatcher thread; the one-liner and
-        # its exception block arrive as a single record, so once the marker
-        # text is visible the assertion set below is race-free.
+        # The batch runs on the shared dispatcher thread. The one-liner and
+        # its exception block arrive as one record, so the assertions below
+        # are safe once the marker text appears.
         text = capture.text()
 
     assert "exploding_observer" in text, text
@@ -83,7 +69,7 @@ def check_raising_sync_observer_logs_traceback():
 
 def check_raising_async_observer_logs_traceback():
     # Every real EventHolder observer in the plugin ecosystem is an
-    # `async def` -- this is the branch that mattered most.
+    # async def, so this branch carries the ecosystem.
     async def exploding_coroutine_observer(*args, **kwargs):
         raise ValueError("async-boom-marker")
 
@@ -100,10 +86,8 @@ def check_raising_async_observer_logs_traceback():
     assert "Traceback" in text, f"no traceback in log -- observer exceptions must log one: {text!r}"
 
 
-def check_raising_observer_does_not_stop_batch():
-    # Exception isolation was already there -- make sure adding the
-    # traceback didn't disturb it: the observer after the raising one still
-    # runs.
+def check_raising_observer_isolation():
+    # The observer after a raising one still runs.
     ran = []
 
     def exploding(*args, **kwargs):
@@ -119,9 +103,7 @@ def check_raising_observer_does_not_stop_batch():
         )
 
 
-# ===================================================================== #
-# (b) InputBases event delivery reaches the no-arg handlers
-# ===================================================================== #
+# InputBases event delivery reaches the no-arg handlers.
 
 _ACTION_KWARGS = dict(
     action_id="test::InputBases",
@@ -135,8 +117,8 @@ _ACTION_KWARGS = dict(
 
 
 class _RecordingKeyAction(KeyAction):
-    """Subclass with the documented no-arg override signatures -- delivery
-    must keep working for exactly this shape."""
+    """Subclass with the documented no-arg override signatures. Delivery
+    must keep working for this shape."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -181,9 +163,9 @@ class _RecordingTouchScreenAction(TouchScreenAction):
 
 def check_key_action_event_delivery():
     action = _RecordingKeyAction(**_ACTION_KWARGS)
-    # Drive the exact production delivery path -- _raw_event_callback is
-    # what ControllerInput invokes, and unlike the real call site there is
-    # no @log.catch here, so a TypeError fails the scenario loudly.
+    # Drive the production delivery path. ControllerInput invokes
+    # _raw_event_callback, and no @log.catch guards it here, so a TypeError
+    # fails the scenario loudly.
     action._raw_event_callback(Input.Key.Events.DOWN, {"coords": (1, 2)})
     action._raw_event_callback(Input.Key.Events.UP, None)
     action._raw_event_callback(Input.Key.Events.HOLD_START, {"coords": (1, 2)})
@@ -200,16 +182,16 @@ def check_dial_action_event_delivery():
 
 def check_touchscreen_action_event_delivery():
     action = _RecordingTouchScreenAction(**_ACTION_KWARGS)
-    # DRAG_LEFT was doubly broken: wrong arity AND wired to on_trigger
-    # instead of on_touchscreen_drag_left.
+    # DRAG_LEFT must reach on_touchscreen_drag_left with the documented
+    # arity.
     action._raw_event_callback(Input.Touchscreen.Events.DRAG_LEFT, {"x": 10})
     action._raw_event_callback(Input.Touchscreen.Events.DRAG_RIGHT, {"x": 90})
     assert action.calls == ["drag_left", "drag_right"], action.calls
 
 
-def check_base_handlers_are_callable_noops():
-    # The unsubclassed bases must also survive delivery -- their handlers
-    # are documented no-ops, not crash sites.
+def check_base_handlers_are_noops():
+    # The unsubclassed bases must survive delivery. Their handlers are
+    # documented no-ops.
     for cls, event in (
         (KeyAction, Input.Key.Events.SHORT_UP),
         (DialAction, Input.Dial.Events.HOLD_STOP),
@@ -219,9 +201,7 @@ def check_base_handlers_are_callable_noops():
         action._raw_event_callback(event, {"some": "data"})
 
 
-# ===================================================================== #
-# (c) cross-plugin connect/disconnect target the right plugin
-# ===================================================================== #
+# Cross-plugin connect and disconnect target the right plugin.
 
 PROVIDER_ID = "com_test_provider"
 CONSUMER_ID = "com_test_consumer"
@@ -230,8 +210,7 @@ EVENT_ID = f"{PROVIDER_ID}::{EVENT_SUFFIX}"
 
 
 class _StubPluginManager:
-    """Only get_plugin_by_id is dereferenced on the paths under test
-    (PluginBase.get_plugin -> gl.plugin_manager.get_plugin_by_id)."""
+    """Only get_plugin_by_id is dereferenced on the paths under test."""
 
     def __init__(self, plugins: dict):
         self._plugins = plugins
@@ -241,9 +220,9 @@ class _StubPluginManager:
 
 
 def make_plugin(plugin_id: str) -> PluginBase:
-    """A PluginBase carrying exactly the state the event API reads --
-    PluginBase.__init__ needs a manifest/locales/assets on disk, none of
-    which the connect/disconnect paths touch."""
+    """A PluginBase carrying only the state the event API reads.
+    PluginBase.__init__ needs a manifest and assets on disk, which the
+    connect and disconnect paths never touch."""
     plugin = PluginBase.__new__(PluginBase)
     plugin.event_holders = {}
     plugin.plugin_name = plugin_id
@@ -262,7 +241,7 @@ def make_provider_and_consumer():
     return provider, consumer, holder
 
 
-def check_connect_to_event_directly_reaches_target_plugin():
+def check_connect_directly_reaches_target():
     provider, consumer, holder = make_provider_and_consumer()
 
     received = []
@@ -277,20 +256,19 @@ def check_connect_to_event_directly_reaches_target_plugin():
         "connect_to_event_directly grew state on the CALLING plugin"
     )
 
-    # The connection must be live end-to-end, not just present in the
-    # registry: trigger_event dispatches (event_id, *args) asynchronously.
+    # The connection must be live end to end, not only present in the
+    # registry. trigger_event dispatches (event_id, *args) asynchronously.
     holder.trigger_event(42)
     assert wait_until(lambda: received == [(EVENT_ID, 42)], timeout=5.0), (
         f"connected callback never received the trigger: {received!r}"
     )
 
 
-def check_connect_to_event_suffix_path():
+def check_connect_suffix_path():
     provider, consumer, holder = make_provider_and_consumer()
 
-    # Pre-fix this was the Known 6.26 shape: `full_id in self.event_holders`
-    # passed, then `self.event_holders[event_id]` indexed with None ->
-    # KeyError: None.
+    # A suffix connect must resolve the full id before it indexes
+    # event_holders, or the lookup runs with None.
     suffix_callback = lambda *args, **kwargs: None  # noqa: E731
     provider.connect_to_event(callback=suffix_callback, event_id_suffix=EVENT_SUFFIX)
     assert suffix_callback in holder.observers.snapshot(), (
@@ -298,13 +276,10 @@ def check_connect_to_event_suffix_path():
     )
 
 
-def check_disconnect_from_event_suffix_symmetry():
-    # connect_to_event grew an event_id_suffix path; disconnect_from_event
-    # must accept the same suffix so a plugin that suffix-connected to its
-    # own "<plugin_id>::<suffix>" event can symmetrically suffix-disconnect
-    # instead of leaking the subscription. Pre-fix disconnect_from_event took
-    # only event_id, so passing event_id_suffix landed full_id=None -> the
-    # holder was never found and the listener was never removed.
+def check_disconnect_suffix_symmetry():
+    # disconnect_from_event accepts the same event_id_suffix as
+    # connect_to_event, so a plugin that suffix-connected can also
+    # suffix-disconnect instead of leaking the subscription.
     provider, consumer, holder = make_provider_and_consumer()
 
     suffix_callback = lambda *args, **kwargs: None  # noqa: E731
@@ -317,7 +292,7 @@ def check_disconnect_from_event_suffix_symmetry():
         "-- suffix connect/disconnect are asymmetric (subscription leaks)"
     )
 
-    # The pre-existing full-id positional call must keep working unchanged.
+    # The full-id positional call must keep working unchanged.
     provider.connect_to_event(callback=suffix_callback, event_id=EVENT_ID)
     assert suffix_callback in holder.observers.snapshot()
     provider.disconnect_from_event(EVENT_ID, suffix_callback)
@@ -326,12 +301,11 @@ def check_disconnect_from_event_suffix_symmetry():
     )
 
 
-def check_disconnect_from_event_directly_targets_right_plugin():
+def check_disconnect_directly_hits_target():
     provider, consumer, holder = make_provider_and_consumer()
 
-    # Give the CONSUMER its own holder under the identical event id, with
-    # its own listener: the old bug detached from the calling plugin, so
-    # this decoy is exactly what a regression would (wrongly) touch.
+    # Give the consumer its own holder under the same event id, with its own
+    # listener. A detach from the calling plugin would touch this decoy.
     consumer_holder = EventHolder(plugin_base=consumer, event_id=EVENT_ID)
     consumer.add_event_holder(consumer_holder)
     decoy_callback = lambda *args, **kwargs: None  # noqa: E731
@@ -355,15 +329,15 @@ def main() -> None:
     fixtures.start_watchdog(60, label="scenario_plugin_events")
     check_raising_sync_observer_logs_traceback()
     check_raising_async_observer_logs_traceback()
-    check_raising_observer_does_not_stop_batch()
+    check_raising_observer_isolation()
     check_key_action_event_delivery()
     check_dial_action_event_delivery()
     check_touchscreen_action_event_delivery()
-    check_base_handlers_are_callable_noops()
-    check_connect_to_event_directly_reaches_target_plugin()
-    check_connect_to_event_suffix_path()
-    check_disconnect_from_event_suffix_symmetry()
-    check_disconnect_from_event_directly_targets_right_plugin()
+    check_base_handlers_are_noops()
+    check_connect_directly_reaches_target()
+    check_connect_suffix_path()
+    check_disconnect_suffix_symmetry()
+    check_disconnect_directly_hits_target()
     print("PASS: scenario_plugin_events")
 
 

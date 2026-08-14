@@ -1,24 +1,12 @@
 """
-Persistence round-trip: edit a NON-active page's settings, ACTIVATE
-that page, then save -- the edit must survive.
+Persistence round-trip for a page edited, then activated, then saved.
 
-scenario_page_settings_sync.py already pins the "edit a cached non-active page
--> save it (still non-active) -> settings survive" leg. This scenario
-names a distinct sequence that one does NOT walk: the
-page is *promoted to active* between the settings edit and the save. If
-set_page_settings failed to refresh the cached Page object (the pre-f386da73
-behavior, which only refreshed pages already active), activation adopts the
-SAME stale cached Page object -- so the first ordinary Page.save() after
-activation (a plugin set_settings, a key/state edit, anything) rewrites the
-file from the stale dict and silently erases the just-saved settings section.
-
-This is the direct regression net for the revert-on-save data loss.
-Red-proved by reverting f386da73's set_page_settings body (only-refresh-active)
--- see the scenario report.
-
-Runs on a REAL DeckController over the FaultyFakeDeck (no GTK), so activation
-goes through the real controller.load_page path, not a stub.
+set_page_settings must refresh the cached Page object, not only the pages
+already active. Activation adopts the same cached object, so a stale dict makes
+the first ordinary save erase the settings section.
 """
+
+# A real DeckController over the FaultyFakeDeck drives the activation.
 import json
 
 import fixtures
@@ -27,17 +15,16 @@ from src.backend.PageManagement import page_flush
 
 
 def read_settings(path: str) -> dict:
-    # Through the read barrier, like every reader of a page file: a settings
-    # write and a Page.save() are both edits of the page now, marked with the
-    # flush seam and written on its timer, so reading the bytes without
-    # asking for the write reads the page as it was before them.
+    # Read through the barrier, like every reader of a page file. A settings
+    # write and a Page.save are both page edits, marked on the flush seam and
+    # written on its timer, so a raw read shows the page before them.
     page_flush.get().flush_path(path)
     with open(path) as f:
         return json.load(f).get("settings", {})
 
 
 def check_edit_survives_activation_then_save(controller) -> None:
-    # A second page, cached for this controller but NOT active yet.
+    # A second page, cached for this controller but not active yet.
     target_path = fixtures.seed_page("ActivateTarget")
     cached_page = gl.page_manager.get_page(target_path, controller)
     assert controller.active_page is not None
@@ -45,7 +32,7 @@ def check_edit_survives_activation_then_save(controller) -> None:
         "test premise broken: target page must start non-active"
     )
 
-    # Edit the NON-active page's settings section (the Page Editor path).
+    # Edit the non-active page's settings section, on the Page Editor path.
     new_settings = {
         "auto-change": {"enable": True, "wm-class": "firefox"},
         "brightness": {"value": 42},
@@ -53,15 +40,15 @@ def check_edit_survives_activation_then_save(controller) -> None:
     }
     gl.page_manager.set_page_settings(target_path, new_settings)
 
-    # Sanity: the edit reached disk.
+    # The edit reached disk.
     on_disk = read_settings(target_path)
     assert on_disk.get("auto-change", {}).get("wm-class") == "firefox", (
         f"set_page_settings never wrote the settings: {on_disk}"
     )
 
-    # Now ACTIVATE the page. get_page returns the same cached object; load_page
-    # promotes it to active_page. If set_page_settings did NOT refresh that
-    # cached object, it is now the active page carrying a STALE dict.
+    # Activate the page. get_page returns the same cached object and load_page
+    # promotes it to active_page. Without a refresh in set_page_settings, the
+    # active page now carries a stale dict.
     page_to_activate = gl.page_manager.get_page(target_path, controller)
     controller.load_page(page_to_activate)
     assert fixtures.wait_until(
@@ -70,16 +57,16 @@ def check_edit_survives_activation_then_save(controller) -> None:
         timeout=5,
     ), "page never became active"
 
-    # The cached/active Page.dict must already carry the edit (not a stale
-    # pre-edit copy) -- otherwise the save below reverts the file.
+    # The active Page.dict must already carry the edit. Otherwise the save
+    # below reverts the file.
     active_settings = controller.active_page.dict.get("settings", {})
     assert active_settings.get("auto-change", {}).get("wm-class") == "firefox", (
         f"the activated page carries a STALE settings dict: {active_settings} -- "
         f"the next save() will erase the freshly saved settings"
     )
 
-    # A routine save() (what a plugin set_settings / key edit triggers) must
-    # NOT revert the settings section.
+    # A routine save, from a plugin set_settings or a key edit, must not
+    # revert the settings section.
     controller.active_page.save()
     after = read_settings(target_path)
     assert after.get("auto-change", {}).get("wm-class") == "firefox", (
@@ -95,11 +82,10 @@ def check_edit_survives_activation_then_save(controller) -> None:
     print("PASS: a non-active edit survives activation + a subsequent save()")
 
 
-def check_edit_then_activate_then_second_edit(controller) -> None:
-    """A stricter round-trip: edit while non-active, activate, edit AGAIN
-    through the same page-settings path while now active, save. Both keys must
-    coexist -- the activation must not have stranded a stale baseline that the
-    second write merges on top of."""
+def check_edit_activate_second_edit(controller) -> None:
+    """A stricter round-trip. Edit while non-active, activate, edit again
+    through the page-settings path, then save. Both keys must coexist,
+    because a stranded stale baseline would swallow the second write."""
     target_path = fixtures.seed_page("ActivateTarget2")
     cached = gl.page_manager.get_page(target_path, controller)
     assert controller.active_page.json_path != target_path
@@ -128,7 +114,7 @@ def main() -> None:
     controller = fixtures.make_headless_controller(serial="activate-roundtrip-1")
     try:
         check_edit_survives_activation_then_save(controller)
-        check_edit_then_activate_then_second_edit(controller)
+        check_edit_activate_second_edit(controller)
     finally:
         fixtures.teardown(controller)
 

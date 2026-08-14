@@ -1,44 +1,24 @@
 """
 Regression test for mutable default arguments.
 
-A `def f(x=[])` / `def f(x={})` default is evaluated once, at function
-definition time, and then shared by every call that omits the argument.
-Mutating it leaks state across unrelated callers for the lifetime of the
-process. Eight sites carried one, two of them on the plugin-facing API
-(`ActionHolder.action_support`, `ActionCore.set_background_color`), where a
-misbehaving plugin could have corrupted the default for every other plugin.
-
-All eight now take a `None` sentinel and materialize the default inside the
-body, and `Media` became a dataclass with `field(default_factory=list)`.
-
-Two checks:
-
-  1. A repo-wide AST scan for any *new* mutable default (list/dict/set
-     literal or a comprehension) in `src/`, `GtkHelper/` and `main.py`.
-  2. A behavioral spot-check that two default-constructed `Media` objects
-     do not share their `layers` list, and that `Media` kept its identity
-     `==` / hashability (the dataclass conversion uses `eq=False`
-     precisely because the generated `__eq__` would switch `==` from
-     identity to field-equality AND make instances unhashable -- a silent
-     break for plugins that put Media in a set/dict or compare with `==`).
-
-SUPERSEDED-BY: ruff rule B006 (flake8-bugbear), now enabled in
-pyproject.toml -- this scenario's AST scan is redundant with the linter
-and can be dropped, keeping only the Media behavioral check.
+Python evaluates a list or dict default once, at definition time, and shares it
+with every caller that omits the argument. Media declares layers with
+field(default_factory=list), so two instances hold separate lists.
 """
+
+# Media also sets eq=False, which keeps identity == and hashability.
 import ast
 import os
 
-import fixtures  # must be first: isolates DATA_PATH
+import fixtures  # must be first, to isolate DATA_PATH
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 SCAN_ROOTS = ["src", "GtkHelper"]
 SCAN_FILES = ["main.py"]
 
-# Pruned from the walk below. Only directory *names* under the scan roots --
-# never matched against the absolute path, which may itself contain e.g.
-# ".claude" when the harness runs inside an agent worktree.
+# Pruned from the walk below. Directory names only, never the absolute path,
+# because the checkout path itself can contain ".claude" inside a worktree.
 SKIP_PARTS = (".venv", ".claude", "__pycache__")
 
 MUTABLE_NODES = (
@@ -95,10 +75,10 @@ def find_offenders() -> tuple[list[tuple[str, int, str]], int]:
     return offenders, scanned
 
 
-# Tripwire against a vacuous pass: the scan once silently degraded to
-# main.py-only when path filtering matched a segment of the checkout's own
-# absolute path (agent worktrees live under .claude/). The tree has ~220
-# scannable files; well under that means the walk broke, not the tree shrank.
+# Tripwire against a vacuous pass. Path filtering that matches a segment of
+# the checkout's own absolute path degrades the scan to main.py alone. The
+# tree holds about 220 scannable files; a much lower count means the walk
+# broke.
 MIN_SCANNED = 100
 
 

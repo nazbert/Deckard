@@ -1,11 +1,9 @@
 """
-Scenario: concurrent get_page() cache misses must construct exactly one Page
-(cache-miss double construction built twin Pages whose actions
-hold live event/signal registrations).
+Concurrent get_page cache misses must construct exactly one Page.
 
-Also covers the guard's failure path: a load for a nonexistent path must not
-strand concurrent waiters (the in-flight entry is popped and its event set in
-a `finally`, so waiters re-check and become the builder themselves).
+Twin Pages carry actions that hold live event and signal registrations. A
+load for a nonexistent path must strand no waiter. The in-flight entry is
+popped and its event set in a finally, so a waiter re-checks and builds.
 """
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
 
@@ -89,8 +87,8 @@ def main() -> int:
     finally:
         pmb.Page = real_page
 
-    # Failure path: nonexistent page. Two racing callers must both get None
-    # and neither may hang on the other's in-flight entry.
+    # The failure path uses a nonexistent page. Two racing callers must both
+    # get None, and neither may hang on the other's in-flight entry.
     missing = path + ".does-not-exist.json"
     barrier = threading.Barrier(2)
     missing_results = [object(), object()]

@@ -1,24 +1,13 @@
 """
-Regression test: main.py's update_assets failure path called a
-non-existent MainWindow.show_error_toast (every store-update failure died
-as AttributeError inside @log.catch, invisible to the user), and its
-success path called show_info_toast directly from the update_assets worker
-thread -- constructing an Adw.Toast and calling add_toast off the GTK main
-thread.
+Regression test for the main-window toast methods.
 
-Guards:
-  1. show_error_toast exists, and is defined exactly ONCE (a second
-     definition shadowed the first, so whichever copy lost was dead code
-     and the surviving behaviour depended on definition order).
-  2. Both toast methods, called from a worker thread (as update_assets
-     does), touch the toast overlay ONLY via the GLib main context -- no
-     off-main add_toast, and the marshalled work lands with the right
-     title/priority/timeout once the main thread drains the context.
-
-The methods are driven unbound with a duck-typed `self` (a real MainWindow
-needs a display); the marshalling path itself -- GLib.idle_add into the
-default main context -- is real.
+MainWindow.show_error_toast exists and is defined exactly once, because a
+second definition would shadow the first. The methods run unbound over a duck-
+typed self.
 """
+
+# Both toast methods, called from a worker thread as update_assets does, touch
+# the overlay only through the GLib main context.
 import ast
 import os
 import threading
@@ -52,14 +41,14 @@ def main() -> None:
 
     from src.windows.mainWindow.mainWindow import MainWindow
 
-    # 1. The method main.py's store-update error path calls must exist.
+    # 1. The method the store-update error path calls must exist.
     assert hasattr(MainWindow, "show_error_toast"), (
         "MainWindow.show_error_toast is missing -- main.py update_assets' "
         "error path raises AttributeError and the user never sees the failure"
     )
 
-    # 1b. Duplicate definitions are invisible at runtime -- the last
-    # one silently wins -- so pin the count in the source instead.
+    # 1b. A duplicate definition is invisible at runtime, because the last
+    # one wins, so the count is pinned in the source instead.
     source_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                "src", "windows", "mainWindow", "mainWindow.py")
     with open(source_path) as f:
@@ -78,8 +67,8 @@ def main() -> None:
         )
 
     fake_win = FakeWindowSelf()
-    # Bind the real toast internals onto the duck-typed window so the
-    # unbound public methods can reach them through `self`.
+    # Bind the real toast internals onto the duck-typed window, so the
+    # unbound public methods reach them through self.
     fake_win._add_toast = types.MethodType(MainWindow._add_toast, fake_win)
 
     # 2. Call both from a worker thread, exactly like update_assets does.
@@ -98,15 +87,15 @@ def main() -> None:
     assert not t.is_alive(), "toast call hung in the worker thread"
     assert not worker_errors, f"toast call raised in the worker thread: {worker_errors}"
 
-    # The worker must not have touched the overlay itself -- the whole point
-    # is that GTK work is deferred to the main context.
+    # The worker must not touch the overlay itself. The GTK work is deferred
+    # to the main context.
     assert fake_win.toast_overlay.toasts == [], (
         f"toast overlay was touched directly from the worker thread: "
         f"{fake_win.toast_overlay.calling_threads}"
     )
 
-    # 3. Drain the default main context on this ("main") thread; the
-    # marshalled toasts must land here, with the right content.
+    # 3. Drain the default main context on the main thread. The marshalled
+    # toasts must land here, with the right content.
     ctx = GLib.MainContext.default()
     for _ in range(100):
         if len(fake_win.toast_overlay.toasts) >= 2:
@@ -125,8 +114,7 @@ def main() -> None:
     assert "3 assets updated" in by_title, f"info toast missing: {list(by_title)}"
     assert by_title["Failed to update store assets"].get_priority() == Adw.ToastPriority.HIGH
     assert by_title["3 assets updated"].get_priority() == Adw.ToastPriority.NORMAL
-    # The error toast's longer dwell was the behaviour of the surviving
-    # duplicate; folding the two definitions together must keep it.
+    # The error toast keeps its longer dwell time.
     assert by_title["Failed to update store assets"].get_timeout() == 7, (
         "error toasts must linger 7s -- they explain missing functionality"
     )
