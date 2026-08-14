@@ -30,8 +30,8 @@ class FakeDeck:
         self._is_touch = True
         self._dial_count = 4
 
-        # Stable per-instance identity: real decks return the same physical
-        # id() across calls; a fresh uuid per call broke callers that compare
+        # Keep a stable per-instance identity. A real deck returns the same
+        # physical id() on every call. A fresh uuid per call breaks callers that compare
         # ids to de-dup already-loaded decks (DeckManager.connect_new_decks).
         self._id = str(uuid.uuid4())
 

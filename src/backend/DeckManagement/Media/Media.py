@@ -35,19 +35,17 @@ class Media:
         Returns:
             Media: A new Media object with the added image layer.
         """
-        # from_image_path returns None for a path that is neither an image
-        # nor an SVG. A [None] layer list crashed get_final_media on
-        # `self.layers[0].image` -- before its own `if not layer` guard ever
-        # ran -- so an unusable path died inside the composite, on whatever
-        # worker thread got there first. An empty layer list instead makes
-        # get_final_media return None, which is the documented empty-media
-        # result.
+        # from_image_path returns None for a path that is neither an image nor
+        # an SVG. Do not build a [None] layer list. get_final_media reads
+        # self.layers[0].image before its own layer guard runs, so an unusable
+        # path dies inside the composite on an arbitrary worker thread. An
+        # empty layer list makes get_final_media return None, which is the
+        # documented empty-media result.
         #
-        # NOT because the consumers handle it: neither does today
-        # (PluginSettingsWindow feeds the result straight into image2pixbuf,
-        # PluginSettings/Asset stores it as _rendered). This moves the
-        # failure out of the plugin worker thread and onto a caller that can
-        # be guarded; guarding them is separate follow-up work.
+        # The consumers still do not handle None. PluginSettingsWindow feeds
+        # the result into image2pixbuf, and PluginSettings and Asset store it
+        # as _rendered. This moves the failure onto a caller that a guard can
+        # reach.
         layer = ImageLayer.from_image_path(path)
         layers = [layer] if layer is not None else []
         return cls(size=size, halign=halign, valign=valign, layers=layers)

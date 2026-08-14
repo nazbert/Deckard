@@ -31,10 +31,10 @@ from PIL import Image
 import gi
 from gi.repository import Gio, GLib
 
-# Gdk and Pango are imported lazily inside the four colour/font helpers below:
-# they are the only consumers, their only callers live under
-# src/windows/, and a module-level import would drag the widget stack into
-# every engine import closure that touches HelperMethods.
+# The four colour and font helpers below import Gdk and Pango on demand.
+# They are the only consumers, and their callers all live under src/windows/.
+# A module-level import drags the widget stack into every engine import
+# closure that touches HelperMethods.
 if TYPE_CHECKING:
     from gi.repository import Gdk, Pango
 
@@ -75,9 +75,9 @@ def file_in_dir(file_path, directory) -> bool | None:
 
     Returns:
         bool: True if the file is present in the directory, False otherwise;
-            None if `directory` names something that is not a directory
-            (callers use the result in a boolean context, where that reads
-            as "not present").
+            None if directory names something that is not a directory.
+            Callers use the result in a boolean context, where that reads
+            as "not present".
     """
     if not os.path.isdir(directory) and directory is not None:
         return None
@@ -138,11 +138,13 @@ def get_sys_param_value(param_name: str) -> str | None:
 
 
 def get_sys_args_without_param(param_name: str) -> list:
-    """sys.argv minus every argument starting with `param_name` and the
-    value following it. Returns a new list -- sys.argv itself is never
-    modified (the old in-place version corrupted it for later readers and
-    popped past the end when the matched parameter was argv's last
-    element)."""
+    """sys.argv minus every argument starting with param_name, and the value
+    after it.
+
+    Returns a new list and never modifies sys.argv. An in-place version
+    corrupts sys.argv for later readers, and pops past the end when the
+    matched parameter is the last element of argv.
+    """
     args = []
     skip_next = False
     for arg in sys.argv:
@@ -218,12 +220,12 @@ def download_file(url: str, path: str = "", file_name: str = None) -> str:
         path (str): The path of the downloaded file.
 
     Raises:
-        requests.RequestException: on a network failure OR an HTTP error
+        requests.RequestException: on a network failure or an HTTP error
             status. Nothing is left on disk in either case.
     """
 
-    # Lazy import: this module is pulled in by nearly everything at startup,
-    # and http_client imports requests.
+    # Import lazily. Nearly everything imports this module at startup, and
+    # http_client imports requests.
     from src.backend import http_client
 
     if file_name is None:
@@ -231,12 +233,10 @@ def download_file(url: str, path: str = "", file_name: str = None) -> str:
 
     path = os.path.join(path, file_name)
 
-    # Streamed through the shared session. timeout: never block indefinitely
-    # on a black-holed/hung connection (same anti-pattern the About-dialog
-    # fetch had -- a timeout-less network call that could hang the caller
-    # forever). An HTTP error status raises instead of writing the error page
-    # into the asset cache under the requested file name, where the
-    # extension-based is_image() check would happily accept it as an asset.
+    # Stream through the shared session. The timeout stops an indefinite block
+    # on a black-holed or hung connection. An HTTP error status raises instead
+    # of writing the error page into the asset cache under the requested file
+    # name, where the extension-based is_image() check accepts it as an asset.
     http_client.download_to_file(url, path, timeout=10)
 
     return path
@@ -271,9 +271,12 @@ def add_default_keys(d: dict, keys: list):
 
 
 def instance_cache(func):
-    """Per-instance method memoization: results live in the instance __dict__
-    (freed with the instance), keyed by the positional args, which must be
-    hashable. Not thread-safe (no lock around the check-then-set)."""
+    """Per-instance method memoization.
+
+    Results live in the instance __dict__ and die with the instance. The key
+    is the positional args, which must be hashable. The check-then-set has no
+    lock, so this is not thread-safe.
+    """
     attr = f"_instance_cache_{func.__name__}"
 
     @wraps(func)
@@ -289,37 +292,36 @@ def instance_cache(func):
 
 
 def _load_gdk():
-    """Import Gdk on demand -- see the TYPE_CHECKING note at the top."""
+    """Imports Gdk on demand. See the TYPE_CHECKING note at the top."""
     gi.require_version("Gdk", "4.0")
     from gi.repository import Gdk
     return Gdk
 
 
 def _load_pango():
-    """Import Pango on demand -- see the TYPE_CHECKING note at the top."""
+    """Imports Pango on demand. See the TYPE_CHECKING note at the top."""
     from gi.repository import Pango
     return Pango
 
 
 def color_values_to_gdk(color_values: Sequence[int]) -> "Gdk.RGBA":
-    # Sequence, not a tuple union: the persisted label/font colors are JSON
-    # lists, and that is what most callers hand over -- the body already
-    # copies into a list and works off the length, so any 3- or 4-element
-    # sequence of channel values is accepted (scenario_helper_methods pins
-    # exactly that contract).
+    # The annotation is Sequence and not a tuple union. The persisted label
+    # and font colors are JSON lists, and that is what most callers hand over.
+    # The body copies into a list and works off the length, so it accepts any
+    # 3- or 4-element sequence of channel values (scenario_helper_methods pins
+    # that contract).
     Gdk = _load_gdk()
-    # Copy before normalizing: callers pass tuples (which .append would
-    # crash on) and reuse the sequence they passed in afterwards.
+    # Copy before normalizing. Callers pass tuples, which .append rejects,
+    # and they reuse the sequence they passed in.
     values = list(color_values)
     if len(values) == 3:
         values.append(255)
     color = Gdk.RGBA()
-    # Every caller works in 0-255 on all four channels (that is what
-    # gdk_color_to_values hands back, and what the label/font settings
-    # persist). CSS rgba() takes the channels in 0-255 but the ALPHA in
-    # 0-1, so the raw value has to be scaled -- feeding it 0-255 clamped
-    # every alpha >= 1 to fully opaque, and a semi-transparent label colour
-    # came back out of the colour chooser as opaque.
+    # Every caller works in 0-255 on all four channels. gdk_color_to_values
+    # hands back that range, and the label and font settings persist it. CSS
+    # rgba() takes the channels in 0-255 but the alpha in 0-1, so this scales
+    # the raw value. An unscaled alpha clamps every alpha at or above 1 to
+    # fully opaque, and a semi-transparent label colour comes back opaque.
     color.parse(f"rgba({values[0]}, {values[1]}, {values[2]}, {values[3] / 255})")
 
     return color
@@ -353,10 +355,10 @@ def get_pango_font_description(font_family: str, font_size: int, font_weight: in
 
 
 def get_values_from_pango_font_description(desc: "Pango.FontDescription") -> tuple[str | None, float, int, str]:
-    # The size really is fractional (Pango sizes are in 1024ths and the
-    # division keeps the remainder) and the family really can be unset --
-    # both values go straight into the persisted font settings, so the
-    # annotation follows the data rather than the other way round.
+    # The size really is fractional, because Pango sizes are in 1024ths and
+    # the division keeps the remainder. The family really can be unset. Both
+    # values go into the persisted font settings, so the annotation follows
+    # the data.
     Pango = _load_pango()
     font_family = desc.get_family()
     font_size = desc.get_size() / Pango.SCALE
@@ -394,22 +396,16 @@ def sort_times(time_list):
 
 
 def run_command(command):
-    """Detach a shell command line and forget about it.
+    """Detaches a shell command line and forgets about it.
 
-    `command` is a COMMAND LINE, not an argv list: callers (including
-    plugins -- this is de-facto plugin API surface) rely on shell syntax
-    such as pipes, `&&` and variable expansion, and the flatpak prefix is
-    spliced in as a string. Do not "fix" this to shlex.split/argv; build
-    the argv yourself and call subprocess directly if you need that.
+    command is a command line, not an argv list. Callers, plugins included,
+    rely on shell syntax such as pipes, && and variable expansion, and the
+    flatpak prefix splices in as a string. This is de-facto plugin API
+    surface. Do not change it to shlex.split and argv. Build the argv
+    yourself and call subprocess directly if you need that.
 
-    The command gets its own session, its stdio pointed at /dev/null and
-    ~ as its cwd, so it outlives us cleanly.
-
-    Fire-and-forget: spawn failures are logged, never raised. The fork
-    wrapper this replaced ran the Popen in the child, so an OSError (no
-    /bin/sh, a HOME that no longer exists, fork refused under load) never
-    reached the caller -- and callers are plugin action callbacks that have
-    no way to handle one.
+    The command gets its own session, its stdio pointed at /dev/null and ~ as
+    its cwd, so it outlives the app cleanly.
     """
     if command is None:
         return
@@ -422,29 +418,31 @@ def run_command(command):
                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, cwd=os.path.expanduser("~"))
     except OSError as e:
+        # Log a spawn failure and never raise it. Callers are plugin action
+        # callbacks, and they cannot handle an OSError from a missing /bin/sh,
+        # a missing HOME, or a fork refused under load.
         log.error(f"Failed to run command {command!r}: {e}")
         return
-    # This used to be a multiprocessing.Process wrapping the Popen -- a fork
-    # of the whole interpreter (GTK, plugins, deck threads and all) whose
-    # only job was to orphan the grandchild so nobody had to reap it. The
-    # direct child needs reaping instead, or it lingers as a zombie for the
-    # life of the app; one throwaway daemon thread per spawn does that.
+    # Reap the direct child, or it stays a zombie for the life of the app.
+    # One throwaway daemon thread per spawn does that. A
+    # multiprocessing.Process wrapper instead forks the whole interpreter
+    # (GTK, plugins and deck threads) only to orphan the grandchild.
     threading.Thread(target=process.wait, name="run_command_reaper", daemon=True).start()
 
 def open_web(url):
-    """Open a URL in the user's default browser.
+    """Opens a URL in the user's default browser.
 
-    Uses Gio rather than shelling out to xdg-open: GLib routes the call
-    through the OpenURI portal when sandboxed, so this works in the flatpak
-    without `flatpak-spawn --host`, and a URL containing shell metacharacters
-    can no longer become a command.
+    Uses Gio instead of a shell call to xdg-open. GLib routes the call through
+    the OpenURI portal when sandboxed, so this works in the flatpak without
+    flatpak-spawn --host, and a URL with shell metacharacters cannot become a
+    command.
     """
     if not url.startswith("http"):
         url = f"https://{url}"
     try:
         Gio.AppInfo.launch_default_for_uri(url, None)
     except GLib.Error as e:
-        # The shell path failed silently; Gio raises, so say so.
+        # Gio raises on failure. Log it.
         log.error(f"Failed to open URL {url}: {e}")
 
 def svg_string_to_pil(svg_string, width: int = 96, height: int = 96):

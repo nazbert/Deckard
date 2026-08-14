@@ -4,12 +4,12 @@ from dataclasses import dataclass
 @dataclass(slots=True)
 class MediaConfig:
     """
-    The "media" section of a page/state dict, extracted once.
+    The "media" section of a page or state dict, extracted once.
 
-    Distinct from Media (a composed stack of image layers): MediaConfig is
-    plain configuration -- what the page JSON says about a state's media --
-    read out of ``state_dict.get("media", {})`` in one place instead of a
-    chained ``.get().get()`` per field.
+    Media is a composed stack of image layers. MediaConfig is plain
+    configuration: what the page JSON says about a state's media. It reads
+    state_dict.get("media", {}) in one place instead of a chained .get().get()
+    per field.
 
     Args:
         path (str, optional): The path to the media file. Defaults to None.
@@ -35,7 +35,7 @@ class MediaConfig:
         stored in the page JSON).
 
         Args:
-            d (dict): The raw media section, e.g. ``state_dict.get("media", {})``.
+            d (dict): The raw media section, e.g. state_dict.get("media", {}).
 
         Returns:
             MediaConfig: A new MediaConfig with missing keys at their defaults.

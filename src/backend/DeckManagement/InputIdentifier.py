@@ -8,8 +8,8 @@ if TYPE_CHECKING:
 
 
 # Shape of one entry under an input's "states" map in a page json.
-# Annotation only -- the accessors below hand back the live dicts. Written
-# with the functional syntax because the control keys are hyphenated.
+# This is an annotation only. The accessors below hand back the live dicts.
+# The functional syntax is necessary, because the control keys are hyphenated.
 StateDict = TypedDict("StateDict", {
     "actions": list[dict],
     "media": dict,
@@ -22,11 +22,11 @@ StateDict = TypedDict("StateDict", {
 
 
 class InputIdentifier:
-    # Every concrete input below (Input.Key/Dial/Touchscreen) defines its own
-    # nested Events enum, so code holding the base type can reach it.
-    # Annotation only -- like InputEvent.string_name, this declares the
-    # attribute without creating one, so `hasattr(InputIdentifier, "Events")`
-    # stays False exactly as before.
+    # Every concrete input below (Input.Key, Dial, Touchscreen) defines its
+    # own nested Events enum, so code holding the base type can reach it.
+    # This is an annotation only, like InputEvent.string_name. It declares
+    # the attribute without creating one, so hasattr(InputIdentifier,
+    # "Events") stays False.
     Events: "type[InputEvent]"
 
     def __init__(self, input_type: str, json_identifier: str, controller_class_name: str):
@@ -40,14 +40,13 @@ class InputIdentifier:
     def get_dict(self, d):
         return d.get(self.input_type, {}).get(self.json_identifier)
 
-    # -- page state accessors ------------------------------------------
-    #
-    # State keys in a page json are strings (Page.save writes self.dict
-    # verbatim); int keys are legitimate only in the in-memory
-    # action_objects registry. str(state) below is the single place that
-    # coercion happens, so callers can pass either. Every one of these
-    # returns the LIVE nested dict/list -- callers mutate in place and
-    # page.save() writes self.dict wholesale.
+    # Page state accessors.
+    # State keys in a page json are strings, because Page.save writes
+    # self.dict verbatim. Int keys are legitimate only in the in-memory
+    # action_objects registry. str(state) below is the one place that coerces
+    # them, so callers can pass either. Each accessor returns the live nested
+    # dict or list. Callers mutate in place, and page.save() writes self.dict
+    # wholesale.
 
     def get_states(self, page: "Page") -> dict:
         return self.get_config(page).get("states", {})
@@ -65,14 +64,14 @@ class InputIdentifier:
         return None
 
     def ensure_state_dict(self, page: "Page", state) -> dict:
-        """Like get_state_dict, but creates the input/states/state chain so
-        the returned dict is actually part of the page."""
+        """Like get_state_dict, but creates the input, states and state chain,
+        so the returned dict is part of the page."""
         input_dict = page.dict.setdefault(self.input_type, {}).setdefault(self.json_identifier, {})
         return input_dict.setdefault("states", {}).setdefault(str(state), {})
 
     # DeckController.get_input answers None when this identifier is not among
-    # the controller's inputs (wrong deck model, stale identifier), so the
-    # optional is honest rather than a lie the callers have to unlearn.
+    # the controller's inputs, e.g. a wrong deck model or a stale identifier.
+    # The optional return type states that.
     def get_controller_input(self, controller: "DeckController") -> "ControllerInput | None":
         return controller.get_input(self)
     
@@ -90,9 +89,9 @@ class InputIdentifier:
         return hash((self.input_type, self.json_identifier))
 
 class InputEvent(Enum):
-    # Annotation only -- an Enum body turns *assignments* into members, so
-    # this declares the per-member attribute __new__ sets below without
-    # creating a member of its own.
+    # This is an annotation only. An Enum body turns assignments into
+    # members, so it declares the per-member attribute that __new__ sets below
+    # without creating a member of its own.
     string_name: str
 
     def __new__(cls, string_name):

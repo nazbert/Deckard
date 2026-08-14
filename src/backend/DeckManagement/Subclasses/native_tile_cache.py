@@ -23,23 +23,23 @@ DEFAULT_MAX_MB = 64
 
 
 def native_tile_cache_max_bytes() -> int:
-    """Byte cap for a deck's NativeTileCache, from
-    DECKARD_NATIVE_TILE_CACHE_MB (0 disables the whole frame-identity path,
-    falling playback back to the pixel-hash encode memo). A malformed value
-    degrades to the default with a warning -- it must never raise out of
-    DeckController.__init__, where DeckManager would swallow it as "Failed to
-    initialize deck" and silently skip the whole device.
+    """Byte cap for a deck's NativeTileCache, read from
+    DECKARD_NATIVE_TILE_CACHE_MB.
 
-    "Malformed" has to include the values float() ACCEPTS but int() cannot
-    take: "nan", "inf", and any overflowing literal ("1e400"). They parse,
-    survive the sign test (every nan comparison is False), and then raise
-    from the int() below -- ValueError for nan, OverflowError for inf -- i.e.
-    exactly the lost-deck failure this function exists to prevent."""
+    0 disables the frame-identity path and falls playback back to the
+    pixel-hash encode memo. A malformed value degrades to the default.
+    """
     raw = os.environ.get("DECKARD_NATIVE_TILE_CACHE_MB")
     if raw is None:
         return DEFAULT_MAX_MB * 1024 * 1024
     try:
         mb = float(raw)
+        # isfinite, not just float(): "nan", "inf" and an overflowing literal
+        # such as "1e400" parse and pass the sign test below, because every
+        # nan comparison is False, and then int() raises ValueError for nan
+        # and OverflowError for inf. This function must never raise out of
+        # DeckController.__init__, where DeckManager reports it as "Failed to
+        # initialize deck" and skips the whole device.
         usable = math.isfinite(mb)
     except ValueError:
         usable = False
@@ -55,31 +55,23 @@ def native_tile_cache_max_bytes() -> int:
 
 
 class NativeTileCache(ByteLRUCache):
-    """LRU of encoded (device-native) background key tiles, keyed by FRAME
-    IDENTITY -- (video md5, frame index, key index, rotation, quality,
-    native format) -- instead of by composited pixels. Capped by total byte
-    size; thread-safe; values must be immutable bytes.
+    """LRU of encoded, device-native background key tiles.
 
-    A bare key over a video background composites to exactly the shared
-    background tile, so its native bytes are a pure function of that tuple:
-    the tile never has to be serialized or hashed to know which encoded
-    frame belongs on the device. A looping video therefore pays its encodes
-    once, on the first playthrough, and every later loop is a dict lookup.
+    The key is the frame identity: video md5, frame index, key index,
+    rotation, quality and native format. It is not the composited pixels. A
+    bare key over a video background composites to the shared background tile,
+    so its native bytes are a pure function of that tuple, and the tile needs
+    no serialization and no hash. A looping video pays its encodes on the
+    first playthrough, and every later loop is a dict lookup.
 
-    Deliberately WITHOUT EncodedImageCache's doorkeeper: that admits a key
-    only on its second sighting, which protects a pixel-hash namespace where
-    high-entropy content produces keys that never repeat. Identity keys are
-    drawn from a finite, guaranteed-repeating space ((frames x keys) for the
-    loaded video), so admitting on first sighting is exactly what makes the
-    second loop encode-free, and the byte cap is what bounds it.
+    This class keeps ByteLRUCache's default first-sighting admission and adds
+    no doorkeeper. EncodedImageCache's doorkeeper protects a pixel-hash
+    namespace where high-entropy content produces keys that never repeat.
+    Identity keys come from a finite, repeating space, the frames times the
+    keys of the loaded video, so first-sighting admission is what makes the
+    second loop encode-free, and the byte cap bounds it.
 
-    Kept separate from `encode_memo` rather than sharing its namespace:
-    identity keys and pixel-hash keys would otherwise collide in one key
-    space, and the two want independent sizing.
-
-    Everything else -- byte accounting, LRU order, `clear()`, the `<= 0`
-    kill switch, and the budget-participant surface -- is `ByteLRUCache`
-    exactly; this class is that core with the default (first-sighting)
-    admission policy and no extra teardown bookkeeping.
+    Keep this separate from encode_memo. In one shared key space the two kinds
+    of key collide, and the two need independent sizing.
     """
 

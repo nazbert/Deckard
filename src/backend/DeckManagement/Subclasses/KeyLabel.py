@@ -24,20 +24,19 @@ import globals as gl
 @lru_cache(maxsize=128)
 def _load_font(font_path: str, font_size: int, encoding: str) -> ImageFont.FreeTypeFont:
     # ImageFont.truetype re-reads the file and re-parses the FreeType face on
-    # every call. The label rasterization itself is now cached per
-    # composed label (LabelManager._draw_static_label), so this is no longer
-    # on the per-frame path -- but get_font() is still called per label per
-    # composite to build that cache's key, and the scroll path measures
-    # through it too.
+    # every call. LabelManager._draw_static_label caches the rasterized label
+    # per composed label, so this is off the per-frame path. get_font() still
+    # runs per label per composite to build that cache key, and the scroll
+    # path measures through it.
     return ImageFont.truetype(font_path, font_size, encoding=encoding)
 
 
 @lru_cache(maxsize=128)
 def _is_symbol_font(font_path: str) -> bool:
     """Check if font uses symbol encoding (e.g., Webdings, Wingdings).
-    
-    Symbol fonts have a cmap table with platformID=3 (Windows) and 
-    platEncID=0 (Symbol encoding). Results are cached.
+
+    A symbol font has a cmap table with platformID=3 (Windows) and
+    platEncID=0 (Symbol encoding). The lru_cache holds the results.
     """
     try:
         font = TTFont(font_path)
@@ -50,9 +49,9 @@ def _is_symbol_font(font_path: str) -> bool:
 
 
 def _find_font_path(font_name: str | None, font_weight: int | None, style: str | None) -> str | None:
-    # font_resolver.resolve() is itself lru_cache'd on these same attributes
-    # (size doesn't affect which file is picked, so it isn't part of the key).
-    # None comes back only when fontconfig is unreachable entirely.
+    # font_resolver.resolve() carries its own lru_cache on these attributes.
+    # Size does not affect which file it picks, so size is not part of the
+    # key. It returns None only when fontconfig is unreachable.
     return font_resolver.resolve(font_name, font_weight, style)
 
 
@@ -62,10 +61,10 @@ if TYPE_CHECKING:
 
 @dataclass
 class KeyLabel:
-    # The owning input, whatever kind it is: dial labels pass a
-    # ControllerDial and LabelManager itself is typed on the base, so the
-    # honest declaration is the shared base rather than ControllerKey.
-    # Nothing in this class touches it -- it is carried, not used.
+    # The owning input, of any kind. Dial labels pass a ControllerDial, and
+    # LabelManager is typed on the base, so the declaration names the shared
+    # base and not ControllerKey. This class carries the value and never
+    # reads it.
     controller_input: "ControllerInput"
     text: str | None = None
     font_size: int | None = None
@@ -99,12 +98,11 @@ class KeyLabel:
         font_path = self.get_font_path()
         font_size = self.font_size
         if font_path is None or font_size is None:
-            # Rasterizing needs both a resolved file and a size. font_size is
-            # filled in by DeckController.inject_defaults before anything
-            # renders; a missing path means fontconfig could not be reached at
-            # all (no libfontconfig AND no fc-match binary). Either way there
-            # is nothing to load -- say so here rather than failing inside
-            # PIL's truetype loader.
+            # Rasterizing needs a resolved file and a size.
+            # DeckController.inject_defaults fills in font_size before
+            # anything renders. A missing path means fontconfig is
+            # unreachable, with no libfontconfig and no fc-match binary. Raise
+            # here instead of failing inside PIL's truetype loader.
             raise RuntimeError(
                 f"cannot load a font for this label (path={font_path!r}, size={font_size!r})")
         encoding = "symb" if _is_symbol_font(font_path) else "unic"

@@ -17,10 +17,8 @@ def create_handler(remote_deck_manager: "RemoteDeckManager"):
     class RemoteDecksLocalServerHandler(BaseHTTPRequestHandler):
         """Handle HTTP requests from the Next.js client."""
         
-        # Store the manager as a class variable
         manager = remote_deck_manager
-        
-        # Dictionary to store button images
+
         # {button_id: {"data": <data: URI>, "timestamp": <epoch seconds>}}
         button_images: dict[int, dict[str, str | int]] = {}
 
@@ -53,7 +51,6 @@ def create_handler(remote_deck_manager: "RemoteDeckManager"):
             img_bytes = buffered.getvalue()
             img_base64 = base64.b64encode(img_bytes).decode('utf-8')
             
-            # Store the image data
             cls.button_images[button_id] = {
                 'data': f"data:image/jpeg;base64,{img_base64}",
                 'timestamp': int(time.time())
@@ -77,7 +74,6 @@ def create_handler(remote_deck_manager: "RemoteDeckManager"):
                 self._send_json_response(200, response_data)
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] Status check received")
             elif self.path == '/images':
-                # Return all button images
                 response_data = {
                     'status': 'ok',
                     'images': self.button_images,
@@ -86,7 +82,6 @@ def create_handler(remote_deck_manager: "RemoteDeckManager"):
                 self._send_json_response(200, response_data)
             elif self.path.startswith('/images/'):
                 print("/images/")
-                # Return a specific button image
                 try:
                     button_id = int(self.path.split('/')[-1])
                     if button_id in self.button_images:
@@ -150,10 +145,9 @@ def create_handler(remote_deck_manager: "RemoteDeckManager"):
                         self._send_json_response(400, {'error': '"row" and "col" must be integers'})
                         return
 
-                    # Compute a stable button id for convenience (5 columns layout)
+                    # Stable button id. The layout has 5 columns.
                     button_id = row * 5 + col
 
-                    # Log the event to the server console
                     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Button event: type={event_type} row={row} col={col} id={button_id}")
 
                     self.manager.on_key_event(button_id, event_type == "down")

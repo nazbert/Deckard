@@ -16,48 +16,45 @@ import threading
 import time
 from typing import Literal
 
-# FIFO ticket lock, used as the Stream Deck per-device transport mutex.
-# CPython's threading.Lock is unfair: a thread that releases
-# and immediately re-acquires usually wins against a waiter that has been
-# parked for milliseconds. The transport serializes every read and write of
-# one device on ONE mutex, so an unpaced write burst can repeatedly out-race
-# the library's HID read poll -- input events then arrive coalesced and
-# dials lag. Ordering acquisitions by arrival bounds the reader's wait at
-# the chunk in flight plus whatever was already queued ahead of it (the
-# writer only ever queues one chunk at a time), i.e. single-digit ms.
+# FIFO ticket lock. It serves as the Stream Deck per-device transport mutex.
+# CPython's threading.Lock is unfair. A thread that releases and immediately
+# re-acquires beats a waiter parked for milliseconds, so an unpaced write
+# burst out-races the library's HID read poll on this shared per-device
+# mutex. Input events then arrive coalesced and dials lag. Ticket order
+# bounds the reader's wait at the chunk in flight plus the chunks queued
+# ahead of it. The writer queues one chunk at a time, so that bound is
+# single-digit milliseconds.
 #
-# Deliberately NOT reentrant: it stands in for a threading.Lock, and the
-# transport takes it for exactly one chunk operation at a time. Reentrancy
-# would also break the ticket invariant -- a re-entering holder queues
-# behind itself -- so a recursive acquisition deadlocks here exactly as it
-# does on the lock this replaces.
+# This lock is not reentrant, because the transport takes it for one chunk
+# operation at a time. A re-entering holder queues behind itself and
+# deadlocks, as it does on the threading.Lock this stands in for.
 
 
 class FairLock:
     """A mutex that grants ownership in acquisition order.
 
-    Drop-in for `threading.Lock` in its blocking, non-blocking and
-    context-manager forms. `acquire()` takes a ticket and waits until it is
-    served; `release()` serves the next ticket.
+    Replaces threading.Lock in its blocking, non-blocking and context-manager
+    forms. acquire() takes a ticket and waits for it. release() serves the
+    next ticket.
     """
 
     __slots__ = ("_cond", "_next_ticket", "_serving", "_abandoned")
 
     def __init__(self):
         self._cond = threading.Condition(threading.Lock())
-        # Tickets are handed out from _next_ticket and served in order.
-        # _serving != _next_ticket means the lock is owned.
+        # acquire() hands out tickets from _next_ticket and serves them in
+        # order. _serving != _next_ticket means a thread owns the lock.
         self._next_ticket = 0
         self._serving = 0
-        # Tickets whose waiter timed out; release() steps over them so the
-        # queue can never stall behind a ticket nobody is waiting on.
+        # Tickets whose waiter timed out. release() steps over them, so the
+        # queue never stalls behind a ticket with no waiter.
         self._abandoned = set()
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
         with self._cond:
             if not blocking:
-                # Must not take a ticket that may go unclaimed: succeed only
-                # when nothing is owned or queued.
+                # Do not take a ticket that can go unclaimed. Succeed only
+                # when no thread owns or queues for the lock.
                 if self._serving != self._next_ticket:
                     return False
                 self._next_ticket += 1
@@ -79,7 +76,7 @@ class FairLock:
                 self._cond.wait(remaining)
 
             if self._serving == ticket:
-                # Served, if only at the deadline -- the caller owns it.
+                # Served at or before the deadline. The caller owns the lock.
                 return True
             self._abandoned.add(ticket)
             return False
@@ -100,10 +97,10 @@ class FairLock:
         while self._serving in self._abandoned:
             self._abandoned.discard(self._serving)
             self._serving += 1
-        # notify_all, not notify: the waiters here are the transport reader
-        # plus whichever thread is writing -- two or three at a time, so the
-        # wasted wakeups are noise next to a USB chunk, and each waiter
-        # re-checks its own ticket, which cannot lose a wakeup.
+        # Use notify_all and not notify. The waiters are the transport reader
+        # and the writing thread, two or three at a time. The wasted wakeups
+        # cost less than a USB chunk, and each waiter re-checks its own
+        # ticket, so no wakeup is lost.
         self._cond.notify_all()
 
     def __enter__(self) -> bool:
