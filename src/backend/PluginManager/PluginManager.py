@@ -17,10 +17,9 @@ from src.backend import startup_queue
 def terminate_backend_process(process, escalate: bool = True) -> None:
     """Send SIGTERM to the process group of a launched backend.
 
-    The backend leads its own session. With escalate, this waits a moment,
-    sends SIGKILL to a process that stays, and reaps it, so no zombie stays
-    behind. Pass escalate=False at app quit, where os._exit reaps the whole
-    tree and a wait per backend costs time."""
+    The backend leads its own session. With escalate, this waits, sends SIGKILL
+    to a process that stays, and reaps it. Pass escalate=False at app quit,
+    where os._exit reaps the whole tree."""
     if process is None:
         return
     try:
@@ -57,26 +56,13 @@ def build_backend_launch_command(backend_path: str, venv_path: str | None, port:
     ActionCore.launch_backend and PluginBase.launch_backend share this, so the
     path validation covers both and the two cannot drift.
 
-    It returns an argv list and never a shell string. The shell splits a
-    backend or venv path that holds a space, such as a plugin under
-    "My Plugins/" or a home directory with a space, into separate words, and it
-    executes the metacharacters in that path.
-
-    The interpreter is the venv's own python, or this app's interpreter when
-    the plugin has no venv. A python3 from PATH is the system python on a
-    native install, which carries no rpyc, so the backend dies at import. In
-    flatpak, python3 and sys.executable name the same interpreter. A run of
-    {venv}/bin/python resolves the imports as a source of {venv}/bin/activate
-    does, because venv.create() builds a plugin venv without the system site
-    packages, so the python3 of that activation is this same binary. The
-    activation also exports VIRTUAL_ENV and prepends {venv}/bin to PATH, which
-    this omits. Only a backend that runs a console script of its own venv
-    notices the difference.
-
     Raises:
         ValueError: When a given venv_path is absent or has no usable
             interpreter, or when backend_path is None or absent.
     """
+    # It returns an argv list and never a shell string. The shell splits a
+    # backend or venv path that holds a space into separate words, and it
+    # executes the metacharacters in that path.
     if venv_path is not None:
         if not os.path.exists(venv_path):
             raise ValueError(f"Venv path does not exist: {venv_path}")
@@ -87,6 +73,14 @@ def build_backend_launch_command(backend_path: str, venv_path: str | None, port:
         raise ValueError(f"Backend path does not exist: {backend_path}")
 
     if venv_path is not None:
+        # The interpreter is the venv's own python. A python3 from PATH is the
+        # system python on a native install, which carries no rpyc, so the
+        # backend dies at import. A run of {venv}/bin/python resolves the
+        # imports as a source of {venv}/bin/activate does, because venv.create()
+        # builds a plugin venv without the system site packages. The activation
+        # also exports VIRTUAL_ENV and prepends {venv}/bin to PATH, which this
+        # omits, and only a backend that runs a console script of its own venv
+        # notices that.
         interpreter = os.path.join(venv_path, "bin", "python")
         # bin/python is a symlink to the interpreter the venv was built
         # against, and a python upgrade under a native install leaves that
@@ -111,9 +105,9 @@ def build_backend_launch_command(backend_path: str, venv_path: str | None, port:
     # gnome-terminal and its family take --, konsole, alacritty, xterm and
     # xfce4-terminal take -e, and kitty takes the command as a bare positional.
     # A split of the whole variable expresses each of those, such as
-    # "konsole -e", "alacritty -e" and "kitty". A hardcoded -- after the binary
-    # works for one family, and for the rest the terminal prints its usage and
-    # exits, so the backend never registers.
+    # "konsole -e", "alacritty -e" and "kitty". A hardcoded double dash after
+    # the binary works for one family, and for the rest the terminal prints its
+    # usage and exits, so the backend never registers.
     terminal = shlex.split(os.environ.get("DECKARD_TERMINAL", "")) or ["gnome-terminal", "--"]
     return [*terminal, "bash", "-c", '"$1" "$2" --port="$3"; exec $SHELL',
             "deckard-backend", interpreter, backend_path, str(port)]
@@ -160,21 +154,15 @@ class PluginManager:
         """Initialize the plugin backends early, without a block on the caller.
 
         It calls the on_app_ready() hook of every registered plugin that has
-        not fired one yet. The calls run on one background daemon thread, one
-        plugin at a time, each isolated from the exceptions of the rest. A
-        fired marker per instance keeps each hook to one call per process.
-
-        This is the supported point for an early backend launch. Background
-        mode with -b opens no config UI, and without an enumerable deck at
-        startup no page load fires an action on_ready. A lazily launched
-        backend would therefore stay down until some user interaction forces
-        it, and the first hardware presses would do nothing. A backend launch
-        spawns a subprocess, so this must never run on the GTK main thread or
-        block it.
-
-        App.on_activate calls this at startup, and load_plugins() calls it
-        again for a plugin installed after the activation.
+        not fired one yet, on one background daemon thread, one plugin at a
+        time, each isolated from the exceptions of the rest.
         """
+        # This is the supported point for an early backend launch. Background
+        # mode with -b opens no config UI, and without an enumerable deck at
+        # startup no page load fires an action on_ready, so a lazily launched
+        # backend would stay down until some user interaction forces it. A
+        # backend launch spawns a subprocess, so this must never run on the GTK
+        # main thread or block it.
         self._app_ready = True
         threading.Thread(
             target=self._warm_up_plugins,

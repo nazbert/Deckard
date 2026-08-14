@@ -165,16 +165,15 @@ class PageManagerBackend:
 
         The active_page of a dead controller is unevictable, and it distorts
         the budget of clear_old_cached_pages() for every live controller.
-
-        The pending edits go to disk first. The deck is going away, unplugged
-        or with the app, so every page it showed reached a boundary and its
-        entry goes too. Eviction never writes, because it reclaims memory on a
-        running deck, and the flush seam keeps an evicted page with outstanding
-        edits alive.
-
-        It tolerates a failure per page, like every other teardown step. An
-        unserializable page must not abort the deregistration and leave the
-        controller in the cache forever."""
+        """
+        # The pending edits go to disk first. The deck is going away, unplugged
+        # or with the app, so every page it showed reached a boundary and its
+        # entry goes too. Eviction writes nothing, because it reclaims memory on
+        # a running deck, and the flush seam keeps an evicted page alive.
+        #
+        # It tolerates a failure per page, like every other teardown step. An
+        # unserializable page must not abort the deregistration and leave the
+        # controller in the cache forever.
         flush = page_flush.get()
         with self._pages_lock:
             paths = list(self.pages.get(deck_controller, {}))
@@ -308,16 +307,16 @@ class PageManagerBackend:
     def _page_is_live(self, page_obj) -> bool:
         """Answer True when a controller depends on this Page object.
 
-        A controller depends on a page it shows, and on the page it stashed as
-        its screensaver-pending page. A controller holds that stash for the
-        whole screensaver duration, and the snapshot guards cannot see it. An
-        eviction there makes ScreenSaver.hide() load a page whose actions are
-        all dead.
-
-        This lives beside the pins instead of inside them, because it derives
-        from what the controllers hold. It is exact, and it needs no release.
-        The pins cover the complement, which is every window where no
-        controller field names the page while work on it continues."""
+        A controller depends on the page it shows and on the page it stashed as
+        its screensaver-pending page.
+        """
+        # A controller holds that stash for the whole screensaver duration, and
+        # the snapshot guards cannot see it. An eviction there makes
+        # ScreenSaver.hide() load a page whose actions are all dead.
+        #
+        # This lives beside the pins, because it derives from what the
+        # controllers hold, so it is exact and needs no release. The pins cover
+        # every window where no controller field names the page.
         for controller in (gl.deck_manager.deck_controller if gl.deck_manager is not None else []):
             if controller.active_page is page_obj:
                 return True
@@ -655,10 +654,9 @@ class PageManagerBackend:
     def existing_document(self, path: str) -> PageDocument | None:
         """Give the document that holds path, or None. It mints nothing.
 
-        For a caller that speaks to a page only while this process holds it:
-        the asset sweep, which reads and writes the file otherwise, and the
-        refresh below. A mint here keeps a whole page dict alive for every
-        page file the sweep walks past.
+        For the asset sweep and the refresh below, which speak to a page only
+        while this process holds it. A mint here would keep a whole page dict
+        alive for every page file the sweep walks past.
         """
         with self._documents_guard:
             return self._documents.get(canonical_path(path))
@@ -667,13 +665,8 @@ class PageManagerBackend:
         """Re-read path into the document that holds it, if one exists.
 
         For a writer that puts bytes in a page file without the page that owns
-        it: an import, or a page created under a name whose document still
-        holds a deleted page's content. Every Page on that path reads the
-        document, so one re-read propagates the change.
-
-        A path this process never held stays untouched. There is no in-memory
-        content to correct, and the load that mints its first Page reads the
-        file.
+        it. Every Page on that path reads the document, so one re-read
+        propagates the change. A path this process never held stays untouched.
         """
         document = self.existing_document(path)
         if document is None:
@@ -684,30 +677,21 @@ class PageManagerBackend:
         """Re-file the content of old_path under new_path and return it.
 
         A page move re-points the json_path of every Page in place, so the
-        document those Pages read through must follow the same file. The next
-        page created under the freed old name otherwise gets the moved page's
-        content.
-
-        This carries the document object over and does not reload it, because
-        the document can hold edits that no disk has. A save inside the move's
-        window leaves the pending map, because a timer that fires after the
-        move writes the moved-from file back into existence. That save stays in
-        memory for the next save to carry to the new name, and a reload here
-        loses it.
-
-        There are three reachable outcomes:
-
-        * A document at the old name, which moves. That is the usual case.
-        * A document stands at the destination and another moves onto it. The
-          mover takes the key, and the standing document goes to the Pages that
-          hold it. Their content and their json_path stay theirs, so they write
-          it as before, and nothing refreshes them again. Only a rename onto a
-          page name another deck shows reaches this.
-        * A document stands at the destination and nothing moves onto it,
-          because no Page in this process held the moved-from page. The
-          standing document is the destination, and it re-reads, because the
-          move replaced the file under it.
+        document those Pages read through must follow the same file.
         """
+        # This carries the document object over and does not reload it, because
+        # the document can hold edits that no disk has. A save inside the move's
+        # window leaves the pending map, because a timer after the move would
+        # write the moved-from file back into existence. That save stays in
+        # memory for the next save to carry to the new name.
+        #
+        # Three outcomes are reachable. A document at the old name moves, which
+        # is the usual case. A document that stands at the destination while
+        # another moves onto it loses the key to the mover and stays with the
+        # Pages that hold it, which keep their content and their json_path and
+        # get no further refresh. Only a rename onto a page another deck shows
+        # reaches that. A document that stands at the destination with nothing
+        # moving onto it is the destination, and it re-reads.
         old_key = canonical_path(old_path)
         new_key = canonical_path(new_path)
         with self._documents_guard:
@@ -953,17 +937,15 @@ class PageManagerBackend:
     def edit_page_settings(self, path: str) -> Iterator[dict[str, Any]]:
         """Change the settings section of one page, in the page itself.
 
-        Every override row comes through this funnel. A read of the whole file,
-        a change to the settings dict, and a write of the whole file lose a
-        page edit that lands in between, such as a plugin call to set_settings
-        or a key edit. Here the settings are the page's settings. The mutation
-        happens in the content every deck on this page reads, under the file's
-        lock, and the file catches up through the flush seam.
-
-        The read and the write share one block. An override is a partial edit,
-        such as the brightness value alone, over a section that must survive.
-        One hold for the read and the write leaves no gap to lose the rest in.
+        Every override row comes through this funnel. The mutation happens in
+        the content every deck on this page reads, under the file's lock, and
+        the file catches up through the flush seam.
         """
+        # A read of the whole file, a change to the settings dict and a write
+        # of the whole file lose a page edit that lands in between, such as a
+        # plugin call to set_settings or a key edit. The read and the write
+        # share one block here, because an override is a partial edit over a
+        # section that must survive.
         with self.get_document(path).edit() as data:
             settings = data.get("settings")
             if not isinstance(settings, dict):
@@ -990,16 +972,14 @@ class PageManagerBackend:
         Gates the active-window watcher, which is otherwise a permanent
         background poll for every user who never touches the feature.
 
-        Reads through the same per-page accessor the matcher itself uses, so
-        the gate and the matcher can never disagree about what counts as a
-        rule, and stops at the first hit. Pages are the only place these
-        rules live -- there is no index to consult instead -- but they are
-        small (a fully populated deck's page is ~16 KB) and boot already
-        reads every one of them for the startup backup. The worst case is
-        therefore no rule anywhere, which parses the lot. That stays well under
-        a millisecond for a normal handful of pages, and near two milliseconds
-        for fifty of them, on a path that reads those bytes already.
+        It reads through the per-page accessor the matcher uses, so the gate
+        and the matcher agree on what counts as a rule, and it stops at the
+        first hit.
         """
+        # The pages hold these rules and no index lists them. A page is small,
+        # about 16 KB for a full deck, and boot reads every one of them for the
+        # startup backup. The worst case parses them all, which stays under a
+        # millisecond for a handful of pages and near two for fifty.
         for page_path in self.get_pages():
             try:
                 if self.get_auto_change_settings(page_path).get("enable", False):
@@ -1013,16 +993,14 @@ class PageManagerBackend:
         """Re-gates the active-window watcher after anything that can add or
         remove a rule.
 
-        Public because rules also arrive by routes that bypass every setter
-        here -- an importer writing page files wholesale is the live one --
-        and such a writer must be able to re-gate without reaching into the
-        window grabber itself.
-
-        It never raises into the page operation that triggered it. A watcher
-        left in the wrong state costs a wasted poll or a dead auto-switch, and
-        a raise here would abort a page write. It returns at once, and the
-        grabber applies the decision on its own worker.
+        Public, because a rule also arrives by a route that bypasses every
+        setter here. An importer that writes page files wholesale does that,
+        and it must re-gate without a call into the window grabber.
         """
+        # This never raises into the page operation that called it. A watcher
+        # in the wrong state costs a wasted poll or a dead auto-switch, and a
+        # raise here would abort a page write. It returns at once, and the
+        # grabber applies the decision on its own worker.
         window_grabber = gl.window_grabber
         if window_grabber is None:
             return

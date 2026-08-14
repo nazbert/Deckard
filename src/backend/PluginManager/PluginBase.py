@@ -121,19 +121,16 @@ class PluginBase(rpyc.Service):
     def _resolve_settings_path(self) -> str:
         """Give the settings path of this plugin, under the manifest id.
 
-        The manifest id is the identity that registration and the store use.
-        A plugin whose folder name differs from its id, or changes between a
-        store install and a git clone, loses its settings on every reinstall
-        under a folder-name path. Settings that an earlier version wrote under
-        the folder-name path migrate once, at the first construction with a
-        folder name that differs from the id.
-
-        The decision reads the settings file at the id path, and not the id
-        directory alone. An id directory without a settings.json, left by an
-        aborted first setup, a half-finished migration or another tool, must
-        not win. A win there orphans the real folder-name settings and starts
-        the plugin empty.
+        The manifest id is the identity that registration and the store use. A
+        plugin whose folder name differs from its id would lose its settings on
+        every reinstall under a folder-name path.
         """
+        # Settings that an earlier version wrote under the folder-name path
+        # migrate once, at the first construction with a folder name that
+        # differs from the id. The decision reads the settings file at the id
+        # path, and not the id directory alone. An id directory without a
+        # settings.json, left by an aborted first setup or another tool, must
+        # not win, because a win there orphans the real folder-name settings.
         plugins_root = os.path.join(gl.DATA_PATH, "settings", "plugins")
         folder_name = self.get_plugin_id_from_folder_name()
         plugin_id = self.get_plugin_id()
@@ -654,10 +651,9 @@ class PluginBase(rpyc.Service):
     def add_css_stylesheet(self, path):
         """Add a CSS stylesheet to the style context of the application.
 
-        This marshals the work onto the GTK main loop. A plugin calls it from
-        __init__, which runs on a store worker thread on the install path, and
-        both the provider construction and the style-context mutation need the
-        main thread. On the main thread the marshal runs inline.
+        This marshals the work onto the GTK main loop, because a plugin calls
+        it from __init__, which runs on a store worker thread on the install
+        path. On the main thread the marshal runs inline.
 
         Args:
             path (str): The path to the CSS file.
@@ -693,12 +689,9 @@ class PluginBase(rpyc.Service):
     def get_selector_icon(self) -> Gtk.Widget:
         """Return a Gtk.Image widget with the icon "view-paged".
 
-        This marshals the work onto the GTK main loop, for the reason
-        add_css_stylesheet and the default icon of ActionHolder give. GTK4
-        works on the main thread alone. The one caller in this tree,
-        ActionChooser, runs on main, and a plugin override reachable from
-        another thread would otherwise build a widget off main and abort the
-        process. On the main thread the marshal runs inline.
+        This marshals the work onto the GTK main loop, because GTK4 works on
+        the main thread alone and a plugin override can reach this from another
+        thread. On the main thread the marshal runs inline.
 
         Returns:
             Gtk.Widget: A Gtk.Image widget.
@@ -810,16 +803,14 @@ class PluginBase(rpyc.Service):
     def _release_backend_resources(self) -> None:
         """Detach and tear down the rpyc server, connection and process.
 
-        It mirrors ActionCore._release_backend_resources. It clears the
-        references here, so a later launch_backend() or start_server() finds a
-        clean slate instead of a dead server to skip against. The blocking work
-        runs on a daemon worker, because an rpyc close can wait on a running
-        call, and terminate_backend_process sends SIGTERM, waits 3 seconds,
-        sends SIGKILL and waits 2 more. The caller, often the GTK main thread
-        on the uninstall path, therefore never blocks. It is idempotent, and
-        concurrent callers tolerate a lost race, as the ActionCore version
-        does, because a close or a terminate of a dead resource is
-        harmless."""
+        It mirrors ActionCore._release_backend_resources. It is idempotent, and
+        concurrent callers tolerate a lost race.
+        """
+        # It clears the references here, so a later launch_backend() or
+        # start_server() finds a clean slate instead of a dead server to skip
+        # against. The blocking work runs on a daemon worker, because an rpyc
+        # close can wait on a running call and terminate_backend_process waits
+        # up to 5 seconds, and the caller is often the GTK main thread.
         if self.backend_connection is None and self.server is None and self.backend_process is None:
             return
 
@@ -924,12 +915,12 @@ class PluginBase(rpyc.Service):
         """Observe a launched backend that has not registered yet.
 
         This manages nothing. On a bounded daemon thread it logs the
-        registration latency when the registration arrives, and an error when
-        the process dies or the timeout expires. launch_backend, on_disconnect
-        and terminate_backend_process own the process lifecycle. The watch
-        disarms in silence when a relaunch supersedes it, which a launch_gen
-        mismatch shows, when a caller asked for the stop through
-        _backend_stop_requested, or when the app quits."""
+        registration latency, and an error when the process dies or the timeout
+        expires. launch_backend, on_disconnect and terminate_backend_process
+        own the process lifecycle."""
+        # The watch disarms in silence when a relaunch supersedes it, which a
+        # launch_gen mismatch shows, when a caller asked for the stop through
+        # _backend_stop_requested, or when the app quits.
         plugin_id = self.get_plugin_id_from_folder_name()
 
         def _watch() -> None:
@@ -1025,13 +1016,9 @@ class PluginBase(rpyc.Service):
     def on_app_ready(self) -> None:
         """The app calls this once after it finished starting.
 
-        The call is asynchronous, in windowed mode and in background mode with
-        -b. Launch a plugin backend or start long-lived work here. __init__
-        runs during startup and blocks it, and the on_ready of an action never
-        fires while no deck is connected, so a backend launched from either one
-        can leave the first hardware presses inert after an autostart boot. It
-        runs on a background thread, so do not touch GTK from it. It does
-        nothing by default.
+        Launch a plugin backend or start long-lived work here. __init__ blocks
+        startup, and the on_ready of an action never fires while no deck is
+        connected. It runs on a background thread, so do not touch GTK from it.
         """
         pass
 

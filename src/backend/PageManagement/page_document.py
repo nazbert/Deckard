@@ -2,99 +2,25 @@
 One page file, one dict, one lock.
 
 Many decks can show one page json, and each deck holds its own Page object for
-it. A PageDocument holds that content once. Every Page on a path reads and
-writes the same dict object, so an edit through one Page is an edit for all of
-them, with no file involved.
+it. A PageDocument holds that content once, so an edit through one Page is an
+edit for all of them, with no file involved.
 
 The page manager owns the registry that hands documents out. It keys them
 through the flush seam's canonical_path, so a page named two ways is one
 document with one save lock and one pending write. A document is minted on
-first use and never dropped. Each one holds a whole page dict, tens of
-kilobytes, so a long session across many pages holds about a megabyte that it
-does not give back. Only the registry can promise one content per file. An
-entry dropped while a Page still reads through it gives the next Page a second
-copy, silently.
+first use and never dropped, and each one holds a whole page dict, tens of
+kilobytes. Only the registry can promise one content per file. An entry dropped
+while a Page still reads through it gives the next Page a second copy, silently.
 
-The mutation seam
+edit() is the mutation seam for everything that is not a Page: the page
+settings, the whole-file editor, and the sweep that strips a deleted asset out
+of every page. The lock rules live at edit() and at adopt(), and the refresh
+rules at refresh_from_disk() and _apply().
 
-edit() is how anything other than a Page changes a page: the page settings, the
-whole-file editor, and the sweep that strips a deleted asset out of every page.
-A read-modify-write of the file instead loses whichever of two concurrent edits
-ends second. Inside edit() the mutation happens in the content that every
-reader already holds. The edit is complete when the block ends, and the file
-catches up through the flush seam.
-
-The lock, and what it orders
-
-There is one lock per page file, and it is the flush seam's save lock. The
-write, the backup and the discard take that same lock. edit() holds it for a
-mutation, and adopt() holds it for a whole-content replacement. A flush
-therefore cannot snapshot a half-applied edit, and cannot catch a refresh
-between the insert of the new content and the removal of the old sections. A
-page file must never be written from either state.
-
-The lock is a leaf. While a caller holds it, only stdlib file I/O and the seam's
-pending-record guard run under it. So no edit() block may read a page file (the
-read barrier takes this lock), reload a page (the controller's page-load lock
-sits above this one), or marshal to the GTK main thread. Every writer here
-mutates the dict and nothing else. A reload that follows a settings change runs
-after the block closes.
-
-The load takes the two locks the other way round. ensure_loaded and
-refresh_from_disk take this document's load guard, then take the save lock
-under it through the page manager's read barrier. The reverse order is
-forbidden, so edit() loads before it locks.
-
-Refreshing
-
-refresh_from_disk serves the writers that go around the document: an importer
-that replaces a page wholesale, a migrator that runs before the page manager
-exists, and a page created under a name whose document still holds a deleted
-page. It reads through the page manager, so the read barrier and the
-corrupt-heal apply as they do to any read of a page file.
-
-A refresh can lose only an edit that the file does not know about. A mutator
-mutates the dict and saves in the same call, save() marks the page with the
-flush seam, and the barrier inside the load writes every marked edit out before
-it reads the file.
-
-One window stays open. An edit made and marked after the load returns, but
-before the swap below, is lost from memory and from the file. The mark survives
-the swap, but it points at content the swap reverted, so the write that follows
-puts the pre-edit page on disk. The window is one function return plus one lock
-acquisition wide, on a page that somebody edits while it is re-read. To close
-it, the caller must hold the file's lock across the read, which the read
-barrier inside that read takes for itself.
-
-In place, and what a render thread sees
-
-A refresh mutates the dict and does not replace it. Every Page holds this one
-object, so nobody would see a fresh dict. The media threads read page content
-under no lock, always as .get chains off page.dict, evaluated where they are
-needed and never held across frames.
-
-The new content goes in first. Only then do the top-level sections that it does
-not have come out. dict.update from another dict runs to completion in C under
-the GIL, and so does each del. A reader that arrives mid-refresh sees whole
-values, never a half-built one. Its one anomaly is a section that survives a
-moment past its removal. It cannot see a section missing that both the old and
-the new content hold, which is what a clear-first order would show it.
-
-Nested containers stay untouched. Only top-level keys are rebound, each to a
-tree the loader just built, so a structural snapshot that walks data["keys"]
-walks an object this never mutates. One reader could keep the anomaly. A flush
-that snapshots between the two steps writes sections the refresh is about to
-drop. The replacement holds the save lock for that reason, so it cannot run
-while a write does.
-
-What a document owns
-
-Turning this content into the bytes of a page file: the json-shaped snapshot,
-the removal of the live action objects from it, the key ordering, and the copy
-into pages/backups/. All four are properties of the content and its path, not
-of one deck's Page. The seam needs them for a page no deck shows. A
-page-settings edit on a page nobody has open has no Page object to ask. Page
-keeps the same four names and delegates them here.
+Page delegates four names here: the json-shaped snapshot, the removal of live
+action objects, the key ordering, and the copy into pages/backups/. All four
+belong to the content and its path, and the seam needs them for a page no deck
+shows.
 """
 from __future__ import annotations
 
@@ -116,11 +42,9 @@ def snapshot_json_tree(value):
     """Copy a json-shaped tree structurally, and share the leaves.
 
     dict.copy() and list() run in C under the GIL, so each container snapshots
-    atomically while another thread mutates it. This walks its own copy, so it
-    never raises RuntimeError: dict changed size during iteration, as json.dump
-    and copy.deepcopy do over a live page document. It shares the leaves,
-    because an action entry holds a live ActionCore under "object" that must
-    stay unique. The caller strips those from the copy."""
+    atomically while another thread mutates it, where json.dump and
+    copy.deepcopy raise over a live page document. It shares the leaves,
+    because an action entry holds a live ActionCore that must stay unique."""
     if isinstance(value, dict):
         return {key: snapshot_json_tree(item) for key, item in value.copy().items()}
     if isinstance(value, list):
@@ -192,11 +116,17 @@ def back_up_page_file(src_path: str) -> None:
 def _apply(data: dict[str, Any], content: dict[str, Any]) -> None:
     """Make data hold content without replacing the dict object.
 
-    New values first, removals second, for the reason the module header gives.
-    A reader that crosses this sees a stale top-level section one moment
-    longer, never a missing section that both versions hold. The caller holds
-    the page file's lock.
+    New values first, removals second. The caller holds the page file's lock.
     """
+    # A refresh mutates the dict, because every Page holds this one object and
+    # nobody would see a fresh one. The media threads read page content under
+    # no lock, as .get chains off page.dict. dict.update and del each run to
+    # completion in C under the GIL, so such a reader sees whole values. Its
+    # one anomaly is a section that survives a moment past its removal, and it
+    # never sees a section missing that both versions hold, which a clear-first
+    # order would show it. Only top-level keys are rebound, each to a tree the
+    # loader just built, so a snapshot that walks data["keys"] walks an object
+    # this never mutates.
     if content is data:
         return
     dropped = [key for key in data if key not in content]
@@ -208,12 +138,10 @@ def _apply(data: dict[str, Any], content: dict[str, Any]) -> None:
 class PageDocument:
     """The single in-memory copy of one page file.
 
-    json_path is the file this content belongs to, spelled as the first caller
-    named it. Page carries the same attribute name, because the flush seam
-    takes either object as the holder of a page's unwritten edits. data is the
-    content, the dict every Page on this path mutates directly. It is a
-    read-only property, so nothing can swap it and leave the Pages aliasing a
-    dict this document dropped.
+    json_path is the file this content belongs to, and Page carries the same
+    attribute name, because the flush seam takes either as the holder of a
+    page's unwritten edits. data is the dict every Page on this path mutates.
+    It is read-only, so nothing can leave the Pages aliasing a dropped dict.
     """
 
     def __init__(self, path: str) -> None:
@@ -234,27 +162,21 @@ class PageDocument:
     def edit(self) -> Iterator[dict[str, Any]]:
         """Change this page's content, and send the change to its file.
 
-        Every writer that is not a Page goes through this seam. Inside the
-        block the content is the process's one copy of the page, held against
-        the flush, the discard and every other edit of the same file. On the
-        way out the block marks the page with the flush seam, as Page.save()
-        marks it, so the write is the same debounced atomic one.
-
-        Nothing inside the block may touch a page file. The lock held here is
-        the file's only lock, and it is a leaf. A read of a page (the read
-        barrier takes the lock), a reload onto a deck (the controller takes its
-        page-load lock and then this one), and a marshal to the GTK main thread
-        each deadlock from in here. Mutate the dict, and do the rest after the
-        block.
-
-        The content comes from the file first, before the lock. A document
-        minted for a page no deck shows starts empty, and an edit into an empty
-        dict writes a page that holds that edit alone.
-
-        The block marks the page even when it raises. A mutator that stopped
-        halfway already changed the content every reader holds, so an unwritten
-        mark only puts the file out of step with the page.
+        Nothing inside the block may touch a page file or the GTK main loop.
+        Mutate the dict, and do the rest after the block.
         """
+        # The lock held here is the file's only lock, and it is a leaf. A read
+        # of a page (the read barrier takes the lock), a reload onto a deck
+        # (the controller takes its page-load lock and then this one), and a
+        # marshal to the GTK main thread each deadlock from in here.
+        #
+        # The content comes from the file before the lock. A document minted
+        # for a page no deck shows starts empty, and an edit into an empty dict
+        # writes a page that holds that edit alone.
+        #
+        # The block marks the page even when it raises, as Page.save() marks
+        # it. A mutator that stopped halfway already changed the content every
+        # reader holds, so an unwritten mark only puts the file out of step.
         self.ensure_loaded()
         with page_flush.save_lock(self.json_path):
             try:
@@ -265,17 +187,15 @@ class PageDocument:
     def replace(self, content: dict[str, Any]) -> None:
         """Make content this page's whole content, as one edit.
 
-        For the editor that hands back a whole page json. A replacement drops
-        whatever the caller's content does not carry, and it drops it from the
-        page and the file together. A file-only replacement loses to a page
-        edit still on its timer, which writes the old content back over it.
-
-        The document takes content by reference. It adopts the top-level values
-        as they are, so the caller must hand over a tree that it drops and never
-        touches again. A later change to that tree changes the live page from
-        any thread, under no lock. The caller today parses fresh json and drops
-        it, which is the shape to keep.
+        For the editor that hands back a whole page json. The document takes
+        content by reference, so the caller must drop the tree it passes.
         """
+        # A replacement drops whatever the caller's content does not carry, and
+        # it drops it from the page and the file together. A file-only
+        # replacement loses to a page edit still on its timer, which writes the
+        # old content back over it. A later change to the passed tree changes
+        # the live page from any thread, under no lock, so the caller parses
+        # fresh json and drops it.
         with self.edit() as data:
             _apply(data, content)
 
@@ -295,11 +215,20 @@ class PageDocument:
     def refresh_from_disk(self) -> None:
         """Bring this document back in line with the file.
 
-        It goes through the page manager, so the read barrier (pending edits
-        reach disk first) and the corrupt-heal (an unparseable primary comes
-        from pages/backups/) are the ones every read of a page file gets.
-        Nothing else in this module knows how a page loads.
+        It goes through the page manager, so the read barrier and the
+        corrupt-heal are the ones every read of a page file gets.
         """
+        # It serves the writers that go around the document: an importer that
+        # replaces a page wholesale, a migrator before the page manager exists,
+        # and a page created under a name whose document holds a deleted page.
+        #
+        # It can lose only an edit the file does not know about. A mutator
+        # mutates and saves in one call, save() marks the page, and the barrier
+        # writes every marked edit out before the read. One window stays open.
+        # An edit marked after the load returns, but before the swap, is lost
+        # from memory and from the file, because the mark then points at
+        # reverted content. Closing it needs the file's lock across the read,
+        # which the barrier inside that read takes for itself.
         with self._load_guard:
             self._load()
 

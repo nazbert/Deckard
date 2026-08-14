@@ -20,48 +20,23 @@ churn file descriptors and threads. AudioControl fires its PulseEvent holder
 tens of times per second during a volume change, which makes that churn visible
 in telemetry. See docs/memory-footprint-plan.md. Instead, a trigger hands its
 batch of observers to a background thread that keeps one loop alive across
-events.
-
-One app-wide worker thread makes a blocking observer everybody's problem. A
-wedged pulsectl call parks that worker, and every plugin's events stall behind
-it without bound. Dispatch therefore splits into lanes. Each EventHolder and
-each plugin-settings Observer owns one lane, and at most one thread services a
-lane. That thread spawns on the lane's first event and is reaped after
-_IDLE_REAP_S of idleness, which closes its loop, so an idle holder costs no
-thread and no epoll fd. A wedged observer therefore parks one daemon thread,
-which is its own lane's, and no other holder notices. There is no pool for a
-wedge to occupy, so there is no worker count at which the next wedge restores
-the app-wide stall.
-
-Some coupling stays. The observers of one holder share its lane, so one that
-blocks still delays that event source's other observers. A split of a batch
-across lanes would fix that and lose the registration-order FIFO that plugins
-depend on, which tests/scenario_event_dispatch_contract.py pins. Consumers of
-one event source share its fate, which is the normal event-bus bargain. The
-watchdog below still names the individual observer, so the culprit stays
-identifiable.
+events. Lane below states what a lane isolates, and shutdown() states what quit
+does to a queue.
 
 Ordering. Batches run FIFO inside a lane. The observers of a batch run in
 registration order, one at a time, each in its own try and except, so one
-failing observer never stops the rest. Nothing is ordered across lanes.
-Dispatch is a queue-and-return from arbitrary plugin threads, so the submit
-order of two holders was always a race between their callers.
+failing observer never stops the rest. The observers of one holder share its
+lane, so one that blocks still delays that event source's other observers. A
+split of a batch across lanes would lose the registration-order FIFO that
+plugins depend on, which tests/scenario_event_dispatch_contract.py pins.
+Nothing is ordered across lanes, because dispatch is a queue-and-return from
+arbitrary plugin threads.
 
 trigger_event() and notify() return as soon as the batch is queued, before the
 observers run. That already holds for the call site that matters.
 PulseEvent.trigger_event() runs synchronously inside the dispatch loop of
 pulse.event_listen(), and nothing reads a return value or waits for the
 observers.
-
-Quit. Lane runners are daemon threads, and their queues are abandoned instead
-of drained. shutdown(), which on_quit calls, stops accepting batches and wakes
-every runner. A runner checks the flag when it is idle and before it takes its
-next batch, so a lane that holds a backlog at quit stops there instead of
-running plugin observers into teardown. Anything still queued dies with the
-process. Nothing is joined, so a wedged observer cannot delay quit. A dispatch()
-after shutdown raises DispatchShutdown. The plugin-facing entry points,
-EventHolder.trigger_event and PluginSettings Observer.notify, swallow it,
-because plugin event sources keep firing until os._exit and cannot act on it.
 
 Known limitation. A lane's loop identity changes across an idle reap, so an
 observer that captured its running loop for a later call_soon_threadsafe holds
@@ -204,13 +179,10 @@ class _CurrentObserver(TypedDict):
 class DispatchShutdown(RuntimeError):
     """dispatch() raises this after shutdown() ran.
 
-    It subclasses RuntimeError, so a direct caller that expects a RuntimeError
-    keeps working, and tests/scenario_dispatch_watchdog.py check 5 pins that.
-    It is a distinct type, so the plugin-facing entry points swallow this and
-    nothing else. A thread-creation RuntimeError out of _spawn_locked must
-    still reach the caller. A dispatch during quit must not, because
-    trigger_event() and notify() queue and return by contract, and no caller
-    can act on it.
+    It subclasses RuntimeError, so a direct caller that expects one keeps
+    working, and tests/scenario_dispatch_watchdog.py check 5 pins that. It is a
+    distinct type, so the plugin-facing entry points swallow this alone and a
+    thread-creation RuntimeError out of _spawn_locked still reaches the caller.
     """
 
 
@@ -219,12 +191,10 @@ class Lane:
 
     A lane is the unit of wedge isolation. Its runner is the only thread that
     executes its batches, so a blocking observer parks that one daemon thread
-    and nothing else. There is no shared pool slot to occupy, so no number of
-    wedged lanes exhausts one.
+    and nothing else. There is no shared pool slot for a wedge to occupy.
 
     The runner spawns on the first dispatch and exits after _IDLE_REAP_S with
-    an empty queue, so a lane that never fires costs nothing, and an idle one
-    stops costing after a minute.
+    an empty queue, so an idle lane costs no thread.
     """
 
     def __init__(self, label: str | None = None):
@@ -454,15 +424,10 @@ _default_lane = Lane()
 def dispatch(observers: Iterable[Callable], args: tuple, kwargs: dict, label: str | None = None) -> None:
     """Queue observers on the shared default lane and return.
 
-    The observers run one at a time, each isolated from the exceptions of the
-    rest, and they can still be queued when this returns. The module docstring
-    states why that is safe.
-
     This lane serves the callers that own none. EventHolder and the
-    plugin-settings Observer each dispatch on their own lane, so a wedge stays
-    inside that one event source. Everything queued here shares one lane and
-    one fate. A plugin must not block in an observer either way. The watchdog
-    above names the culprit after 10 seconds and warns on a growing backlog.
+    plugin-settings Observer each dispatch on their own lane, so everything
+    queued here shares one lane and one fate. A plugin must not block in an
+    observer, and the watchdog above names one that does.
     """
     _default_lane.dispatch(observers, args, kwargs, label=label)
 
@@ -472,9 +437,8 @@ def shutdown() -> None:
 
     A woken runner returns instead of taking another batch, so the queued
     batches are abandoned and not drained. This interrupts no running batch and
-    waits for none. The runners are daemon threads and quit ends in os._exit
-    (src/app.py), so a wedged lane cannot delay shutdown. A dispatch() after
-    this raises DispatchShutdown instead of dropping its batch in silence.
+    joins nothing, and the runners are daemon threads that die at os._exit, so
+    a wedged lane cannot delay quit. A later dispatch() raises DispatchShutdown.
     """
     global _shutdown
     _shutdown = True

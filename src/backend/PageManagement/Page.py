@@ -118,19 +118,17 @@ class Page:
     def edit(self) -> Iterator[_Dict[str, Any]]:
         """Change this page's content as one edit, and send it to the file.
 
-        The mutation seam for a caller that holds a Page. The document's edit()
-        is the same block reached by path. Changes that only make sense
-        together, such as a swap of two keys or the removal of a state from an
-        input, go in one block. The block holds the file's lock, so a write in
-        flight cannot snapshot the page halfway through them, and it marks the
-        page once on the way out.
-
-        Nothing inside the block may touch a page file or the GTK main loop.
-        The lock is the file's only lock and it is a leaf. A read of a page
-        (the read barrier takes the lock), a reload onto a deck, and a marshal
-        to the main thread each deadlock from in here. Mutate the content, and
-        reload after the block.
+        The mutation seam for a caller that holds a Page. Nothing inside the
+        block may touch a page file or the GTK main loop.
         """
+        # Changes that only make sense together, such as a swap of two keys,
+        # go in one block. It holds the file's lock, so a write in flight
+        # cannot snapshot the page halfway, and it marks the page once.
+        #
+        # That lock is the file's only lock and it is a leaf. A read of a page
+        # (the read barrier takes the lock), a reload onto a deck, and a
+        # marshal to the main thread each deadlock from in here. Mutate the
+        # content, and reload after the block.
         with self._document.edit() as data:
             yield data
 
@@ -138,14 +136,10 @@ class Page:
         """Write this page's file now, and return the path written.
 
         It is the counterpart to save(). A mutator marks and a boundary
-        flushes. A
-        boundary is the last chance the edits get, such as a deck that leaves
-        this page, a deck that goes away, or the app that quits. A read of the
-        file is a boundary too.
-
-        It returns the path, because a boundary that flushes a page almost
-        always names the file it made current. The page switch reports that
-        file to plugins and over DBus.
+        flushes. A boundary is the last chance the edits get: a deck that
+        leaves this page, a deck that goes away, the app that quits, or a read
+        of the file. It returns the path, because such a boundary names the
+        file it made current, as the page switch does for plugins and DBus.
         """
         page_flush.get().flush_path(self.json_path)
         return self.json_path
@@ -675,11 +669,11 @@ class Page:
                              load_brightness: bool = True, load_screensaver: bool = True, load_background: bool = True, load_inputs: bool = True,
                              load_dials: bool = True, load_touchscreens: bool = True):
 
-        # The siblings share this page's dict, and this save is still needed. A
-        # caller that edits the dict and comes straight here, such as a pasted
-        # key or a pasted dial, has no other save in the call. The save marks
-        # the page, the read barrier inside the reload writes the mark out, and
-        # the re-read below then returns the edit instead of erasing it.
+        # A caller that edits the dict and comes straight here, such as a
+        # pasted key or a pasted dial, has no other save in the call, so this
+        # save must stay. It marks the page, the read barrier inside the reload
+        # writes the mark out, and the re-read below then returns the edit
+        # instead of erasing it.
         self.save()
         for page in self.get_pages_with_same_json(get_self=reload_self):
             page.load(load_from_file=True)
@@ -832,7 +826,7 @@ class Page:
     def set_label_text(self, identifier: InputIdentifier, state: int, label_position: str, text: str, update: bool = True) -> None:
         for input_state in self.get_controller_input_states(identifier, state):
             input_state.label_manager.page_labels[label_position].text = text
-            # An in-place mutation passes set_page_label and its invalidation,
+            # An in-place mutation skips set_page_label and its invalidation,
             # so drop the scroll caches here. A shortened label otherwise keeps
             # scrolling, and a lengthened one never starts.
             input_state.label_manager.invalidate_scroll_caches()

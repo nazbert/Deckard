@@ -152,13 +152,9 @@ class ActionCore(rpyc.Service):
     def on_ready(self):
         """The app calls this when the page can process action requests.
 
-        Set the default image here rather than in the constructor.
-
-        The threading contract runs this hook off the GTK main thread, because
-        a page loads on a worker, a USB or a store thread. Do not build or
-        touch a raw GTK object here, because that crashes the process. Use the
-        GenerativeUI layer, which marshals itself to the main loop, or wrap the
-        GTK work in GtkHelper.GtkHelper.run_on_main.
+        Set the default image here rather than in the constructor. This hook
+        runs off the GTK main thread, so do not touch a raw GTK object here.
+        Use the GenerativeUI layer or GtkHelper.GtkHelper.run_on_main.
         """
         pass
 
@@ -744,13 +740,10 @@ class ActionCore(rpyc.Service):
     def on_removed_from_cache(self) -> None:
         """A notification hook for an action dropped from a live page or cache.
 
-        A reload diff, a plugin uninstall, a removal in the sidebar or the
-        config, and a cache eviction each drop an action. See
-        docs/memory-footprint-plan.md. This hook only notifies. The framework
-        always calls clean_up() right after it, even when a plugin overrides
-        this method without super() and even when the override raises. A
-        plugin must not call clean_up() itself from here, although a call does
-        no harm, because clean_up() is idempotent."""
+        This hook only notifies. The framework always calls clean_up() right
+        after it, even when an override omits super() and even when it raises.
+        A plugin therefore needs no clean_up() call of its own here.
+        """
         pass
 
     def on_remove(self) -> None:
@@ -766,10 +759,7 @@ class ActionCore(rpyc.Service):
 
         Call this, and not the hook alone, wherever an action leaves a live
         structure. It notifies through the named hook and then always calls
-        clean_up(), so a plugin override that raises or omits super() cannot
-        skip the cleanup. action can be a placeholder that is no ActionCore,
-        such as NoActionHolderFound or ActionOutdated, and this ignores one,
-        like the isinstance guards at the call sites."""
+        clean_up(). It ignores a placeholder that is no ActionCore."""
         if not isinstance(action, ActionCore):
             return
         try:
@@ -781,29 +771,23 @@ class ActionCore(rpyc.Service):
         action.clean_up()
 
     def clean_up(self) -> None:
-        """Framework teardown for a dropped action.
+        """Framework teardown for a dropped action. It runs on any thread.
 
         A page reload, a plugin uninstall, a removal in the sidebar or the
-        config, and a cache eviction each drop an action. A lock makes this
-        idempotent, because an eviction and the rpyc on_disconnect path can
-        call it from two threads at once.
-
-        This runs on any thread, the main thread, the USB monitor and the media
-        thread through a page eviction. Never call run_on_main() from in here,
-        or from anything this method calls synchronously. GenerativeUI disposal
-        is GTK work, so GLib.idle_add marshals it onto the main loop. The
-        backend teardown goes to a worker thread, because a close of an rpyc
-        server or connection can block on a call that needs the main loop and
-        deadlock the UI.
-
-        clean_up() flushes and cancels no work queued elsewhere with a strong
-        reference to this action. An event callback such as on_key_down or
-        on_tick, submitted to the deck's action executor, and a GLib idle
-        dispatched just before the teardown, can still run after clean_up()
-        returns. The executor cancels its futures at deck close alone. A plugin
-        hook must therefore tolerate a cleaned-up action. get_is_present() is
-        the recommended guard, and a settings read returns an empty dict once
-        the page reference drops."""
+        config, and a cache eviction each drop an action. Never call
+        run_on_main() from in here, or from anything this calls synchronously.
+        """
+        # A lock makes this idempotent, because an eviction and the rpyc
+        # on_disconnect path can call it from two threads at once. The caller
+        # can be the main thread, the USB monitor or the media thread.
+        #
+        # clean_up() flushes and cancels no work queued elsewhere with a strong
+        # reference to this action. An event callback on the deck's action
+        # executor, and a GLib idle dispatched just before the teardown, can
+        # still run after this returns, because the executor cancels its
+        # futures at deck close alone. A plugin hook must therefore tolerate a
+        # cleaned-up action. get_is_present() is the recommended guard, and a
+        # settings read returns an empty dict once the page reference drops.
         with self._cleanup_lock:
             if self._cleaned_up:
                 return

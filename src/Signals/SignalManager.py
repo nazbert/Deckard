@@ -31,7 +31,9 @@ def _invoke_signal_callback(callback: Callable[..., Any], args: tuple[Any, ...],
 
     idle_add forwards no keyword arguments, and it repeats a handler that
     returns a truthy value. This trampoline forwards both argument shapes and
-    returns False, so the idle source fires once.
+    returns False, so the idle source fires once. A raising handler reaches the
+    main-loop dispatch, where the central exception hooks log it and GLib
+    removes the source.
     """
     callback(*args, **kwargs)
     return False

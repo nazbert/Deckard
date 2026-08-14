@@ -2,8 +2,8 @@
 Which cached pages the cache must not tear down.
 
 Eviction is an in-memory teardown. It destroys the page's action objects and
-pops its cache slot. A holder of an evicted page then drives dead objects. The
-next fetch for the same (controller, path) mints a second Page. One key then
+pops its cache slot. A holder of an evicted page then drives dead objects, and
+the next fetch for the same (controller, path) mints a second Page, so one key
 carries two sets of action objects that register live event handlers. The cache
 sees two holders by itself: a controller's active_page and its
 screensaver-pending page. A pin is how every other holder says so. It is a
@@ -14,42 +14,9 @@ release must name what the acquire named. A path can be renamed under a holder,
 and a cache entry can be replaced. There is one Page per (controller, path), so
 the keyspace stays the cache's own.
 
-There are two kinds of holder.
-
-The action tick loop and the key handler both run bracketed work that must
-outlive a page switch. A press that changes pages still owes its UP to the
-page it was pressed on. The release must be structural, through holding() below, or through a finally
-where the block cannot take that shape. A count that a raising body
-skips pins the page for the life of the process. It is a count and not a flag,
-because the two brackets overlap on one page routinely (a press during a tick).
-With a flag, the first release ends the protection the second one needs.
-
-get_page reserves what it returns, because nothing the cache sees refers to
-the page between the fetch and the caller's load_page. The
-caller can abandon the page, raise before it activates it, or hand it to a deck
-that refuses it. A release call that such a caller owes leaks instead. The
-reservation is bounded to one per deck, and that deck's next fetch or an
-installation retires it. An abandoned fetch costs one unevictable page on one deck
-until that deck fetches or loads again.
-
-The bound is per deck, not per caller. A second caller's fetch retires the
-first caller's reservation. Window cycling can retire the reservation the
-screensaver hand-off needs, and a reload that calls load_page(active_page)
-releases another caller's outstanding fetch. Each of those windows is protected
-better than with no reservation, and none of them absolutely. Absolute
-protection needs a release the caller owes, and these callers cannot pay it.
-
-Locking
-
-One private lock guards the counts and the reservation table, and nothing else.
-It is the innermost lock of this subsystem. The page cache holds _pages_lock
-across is_pinned and reserve_fetch, and a deck holds its page-load lock across
-the release at installation, so the order is always the cache lock or the load
-lock first and this lock second. Nothing calls out under it. That includes the
-call that is easy to miss. A drop of the last reference to a Page runs a
-teardown that can reach a plugin __del__. For that reason _retire releases the
-reservation outside the hold. The lock is re-entrant, because the reservation
-calls are written in terms of the count calls.
+There are two kinds of holder. holding() and bracket() below serve bracketed
+work, and reserve_fetch() serves the one outstanding fetch of a deck. Each of
+those states its own release rule. The lock rules live at PagePins.
 """
 from __future__ import annotations
 
@@ -71,8 +38,13 @@ def holding(page: "Page | None") -> Iterator["Page | None"]:
     """Hold page against cache eviction for the body of the block.
 
     The release runs on the exception path too, and it names the page the
-    acquire named. A hand-written bracket that re-reads active_page instead
-    pins a page forever. Tolerates a missing page manager and a None page."""
+    acquire named. Tolerates a missing page manager and a None page."""
+    # The action tick loop and the key handler run work that must outlive a
+    # page switch, because a press that changes pages still owes its UP to the
+    # page it was pressed on. The release must be structural, here or in a
+    # finally, because a count that a raising body skips pins the page for the
+    # life of the process. It is a count and not a flag, because the two
+    # brackets overlap on one page routinely.
     manager = gl.page_manager
     pins = manager.pins if manager is not None else None
     if pins is not None:
@@ -85,6 +57,18 @@ def holding(page: "Page | None") -> Iterator["Page | None"]:
 
 
 class PagePins:
+    """The holders that eviction cannot see for itself.
+
+    One private lock guards the counts and the reservation table, and nothing
+    else. It is the innermost lock of this subsystem.
+    """
+
+    # The page cache holds _pages_lock across is_pinned and reserve_fetch, and
+    # a deck holds its page-load lock across the release at installation, so
+    # the order is always the cache lock or the load lock first and this lock
+    # second. Nothing calls out under it. The lock is re-entrant, because the
+    # reservation calls are written in terms of the count calls.
+
     def __init__(self) -> None:
         self._lock = threading.RLock()
         # Holders per page, keyed by object identity. Page defines no __eq__,
@@ -148,6 +132,13 @@ class PagePins:
 
         It pins before it releases, so a repeat fetch of one page keeps at
         least one holder throughout."""
+        # get_page reserves what it returns, because nothing the cache sees
+        # refers to the page between the fetch and the caller's load_page. A
+        # release the caller owes would leak, so the reservation is bounded to
+        # one per deck, retired by that deck's next fetch or by an
+        # installation. An abandoned fetch therefore costs one unevictable page
+        # on one deck. The bound is per deck, not per caller, so a second
+        # caller's fetch retires the first caller's reservation.
         with self._lock:
             self.pin(page)
             previous = self._reservations.pop(deck_controller, None)
