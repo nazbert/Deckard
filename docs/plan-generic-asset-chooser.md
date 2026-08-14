@@ -2,7 +2,7 @@
 
 Status: plan (2026-08-09). Base: `main` @ `72ef781e`.
 
-Branch: `refactor/136-generic-asset-chooser` · 1 MR, `Closes #136` · Estimate: **M**. AssetManager UI — not a listed contract surface → single review pass. The **off-main GTK construction fix is the substantive half** (documented segfault class); the dedup is the vehicle.
+One branch, one MR. Estimate: **M**. AssetManager UI — not a listed contract surface → single review pass. The **off-main GTK construction fix is the substantive half** (documented segfault class); the dedup is the vehicle.
 
 ## Design
 

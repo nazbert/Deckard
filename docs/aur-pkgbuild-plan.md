@@ -2,7 +2,9 @@
 
 Status: **planning** (2026-07-14). Secondary distribution format; flatpak
 stays the broad cross-distro primary. Decision record on why AUR (and why not AppImage
-or a full deb+rpm suite): #128 note_2142.
+or a full deb+rpm suite): AppImage's read-only image breaks store plugin
+installs into the bundled venv, and a deb+rpm suite duplicates coverage the
+flatpak already provides.
 
 Scope: **Arch-family only** by design (Arch, Manjaro, EndeavourOS, CachyOS). Not a
 coverage play — serves the maintainer's own CachyOS machine and the Arch ecosystem.
@@ -20,14 +22,14 @@ Ship an installable, low-maintenance native package for Arch-family systems that
   structurally cannot do. This is the native package's headline advantage for a
   USB-HID device app.
 - Tracks `main` first (`deckard-git`), graduates to a tagged stable `deckard` once the
-  #128 pipeline stamps real `v*` tags (the `VERSION` file is currently empty).
+  release pipeline stamps real `v*` tags (the `VERSION` file is currently empty).
 
 ## 2. Two package variants (staged)
 
 | Variant | Source | When | Blocks on |
 |---|---|---|---|
 | `deckard-git` | `git+https://…/Deckard.git#branch=main`, `pkgver()` from `git describe`/commit count | **now** | nothing |
-| `deckard` (stable) | `v*` release tarball | after #128 tags | #128 versioning bootstrap (VERSION empty today) |
+| `deckard` (stable) | `v*` release tarball | after release tags exist | the release-pipeline versioning bootstrap (VERSION empty today) |
 
 Start with `deckard-git`. No stable tags exist yet, and a `-git` package matches the
 flatpak manifest's own "track main" stance (`io.github.nazbert.Deckard.yml` Deckard
@@ -153,7 +155,7 @@ deck); `update-desktop-database`; `gtk-update-icon-cache`.
 4. Install a plugin from the store → lands in the data dir, loads (validates the
    plugin-store path under a bundled venv — the mechanism AppImage couldn't support).
 5. Enable autostart → inspect the written `~/.config/autostart/*.desktop`, confirm it
-   execs `Deckard`, relogin persists (landmine #1).
+   execs `Deckard`, relogin persists (the first landmine above).
 6. Uninstall → udev rule removed, no dangling autostart entry.
 
 ## 8. Deliverables & milestones
@@ -164,7 +166,7 @@ deck); `update-desktop-database`; `gtk-update-icon-cache`.
       in-repo under `packaging/aur/deckard-git/` (source of truth; AUR is a mirror).
 - [ ] **M2 — build/verify:** clean-chroot `makepkg`, run §7 on CachyOS hardware.
 - [ ] **M3 — publish:** push to the AUR as `deckard-git`; link from README.
-- [ ] **M4 — stable:** add `deckard` (tag-based) once #128 stamps `v*` — depends on #128.
+- [ ] **M4 — stable:** add `deckard` (tag-based) once the release pipeline stamps `v*` tags.
 
 ## 9. Open decisions for Nigel
 
@@ -173,4 +175,4 @@ deck); `update-desktop-database`; `gtk-update-icon-cache`.
 3. **Repo home for the recipe** — `packaging/aur/` in this repo (recommended, keeps it
    versioned with the deps it mirrors) vs a standalone AUR-only repo.
 4. **Scope of variant 1** — `deckard-git` only for now, defer stable `deckard` to M4
-   behind #128 (recommended).
+   behind the release pipeline (recommended).
