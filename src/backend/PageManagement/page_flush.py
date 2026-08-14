@@ -123,6 +123,7 @@ def save_lock(path: str) -> threading.Lock:
     """
     # The save lock is a leaf and must stay one. While a caller holds it, it
     # takes only stdlib file I/O, _pending_guard, and the timer source's own
+    # lock. No timer-wheel callback outside this module may take a page's save
     # lock. Above it sit the controller's page-load lock, which a page switch
     # holds across its flush, and a document's load guard. The page cache lock
     # is never held across it.
@@ -336,7 +337,7 @@ class PageFlush:
         # One copy per path per session, because a copy re-parses the whole
         # file, and one copy per keystroke gives a backup that chases the
         # primary. A backup is read only when the primary is unreadable, and
-        # nothing here can make it unreadable: every page write goes out
+        # nothing here can make it unreadable. Every page write goes out
         # through the temporary-then-replace of atomic_write_json. The one page
         # write that is not atomic is the copy2 of a rename onto the name it
         # claims, which cannot truncate the page being renamed. Corruption
@@ -344,9 +345,9 @@ class PageFlush:
         # this seam's writes serves as well as a copy from a second ago. The
         # boot backup zip keeps the older history.
         #
-        # A refusal counts as done: make_backup copies nothing when
-        # the primary does not parse, which would destroy what the backup is
-        # for, and when the primary is absent, which the write recreates. A
+        # A refusal counts as done. make_backup copies nothing when the
+        # primary does not parse, which would destroy what the backup is for,
+        # and nothing when the primary is absent, which the write recreates. A
         # second attempt would find that primary parseable and put the current
         # file over the last copy taken before the damage. Only a raise, an
         # unexpected I/O error, leaves the question open, and it takes the

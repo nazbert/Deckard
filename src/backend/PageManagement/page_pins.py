@@ -138,7 +138,10 @@ class PagePins:
         # one per deck, retired by that deck's next fetch or by an
         # installation. An abandoned fetch therefore costs one unevictable page
         # on one deck. The bound is per deck, not per caller, so a second
-        # caller's fetch retires the first caller's reservation.
+        # caller's fetch retires the first caller's reservation. Window cycling
+        # can retire the reservation the screensaver hand-off needs, and a
+        # reload that calls load_page(active_page) releases another caller's
+        # outstanding fetch.
         with self._lock:
             self.pin(page)
             previous = self._reservations.pop(deck_controller, None)
