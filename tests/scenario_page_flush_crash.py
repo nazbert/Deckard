@@ -4,8 +4,9 @@ Dying inside a deferred page write costs the burst, never the page.
 A page write happens about a second after the edit, on a timer thread, so the
 process can die during a write nobody asked for. A child makes its pre-burst
 state durable, arms a fatal fsync, edits, and waits for the debounce timer.
-The parent then reads the page, the residue and the backup it left behind.
 """
+
+# The parent then reads the page, the residue and the backup it left behind.
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
 
 import glob

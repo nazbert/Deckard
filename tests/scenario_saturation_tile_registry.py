@@ -1,11 +1,11 @@
 """
 Unit-tier scenario for the KeyVideoCache tile-cache registry.
-
-mp4_tile_cache._registry_key carries the saturation as a distinguishing
-dimension, so two key or dial videos of one source and tile size but
-different factors resolve to distinct registry entries and distinct cache
-files, and each file bakes in its own factor.
 """
+
+# mp4_tile_cache._registry_key carries the saturation as a distinguishing
+# dimension, so two key or dial videos of one source and tile size but
+# different factors resolve to distinct registry entries and distinct cache
+# files, and each file bakes in its own factor.
 import os
 
 import fixtures  # noqa: F401  (isolated data dir + sys.path, house convention)

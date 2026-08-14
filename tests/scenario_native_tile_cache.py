@@ -3,9 +3,10 @@ Unit and integration scenario for the frame-identity native tile cache.
 
 NativeTileCache keys the encoded bytes by frame identity, not by composited
 pixels, so a looping video encodes once and every later loop is a dict lookup.
-A key with a visible label keeps the pixel-hash path, and a background swap
-empties the cache before the next frame reaches the device.
 """
+
+# A key with a visible label keeps the pixel-hash path, and a background swap
+# empties the cache before the next frame reaches the device.
 import fixtures  # noqa: F401  (isolated data dir + sys.path, house convention)
 
 import hashlib
@@ -208,9 +209,10 @@ def _settle(controller) -> None:
     """Waits out the page load.
 
     load_page and load_all_inputs rebuild each state's managers on worker
-    threads, so a label staged before that lands is discarded. One of those
-    threads ends in Background.set_video(None) and evicts a video installed
-    too early, which leaves the tile cache build unfinished."""
+    threads, so a label staged before that lands is discarded.
+    """
+    # One of those threads ends in Background.set_video(None) and evicts a
+    # video installed too early, which leaves the tile cache build unfinished.
     assert fixtures.wait_until(lambda: controller.active_page is not None, timeout=15), \
         "fixture sanity: no page loaded"
     def _background_load_done() -> bool:
@@ -283,7 +285,7 @@ def _start_video(controller, path: str) -> "BackgroundVideo":
 
 # Retry budget for _show_frame. A clean run needs zero retries, and one
 # deschedule longer than a frame period costs one. A higher count means the
-# landing no longer follows the timebase, and an unbounded retry would hide
+# landing has stopped following the timebase, and an unbounded retry hides
 # that behind green contract asserts.
 _MAX_ATTEMPTS_PER_CALL = 3
 _MAX_TOTAL_RETRIES = 3
@@ -294,8 +296,9 @@ def _show_frame(video, controller, index: int) -> None:
     """Advances the background to one named frame. get_next_tiles picks by
     wall clock once the cache is complete, so this rewinds the timebase to put
     index at now and clears _last_frame_tick, which stops the resume-gap clamp
-    from moving it. A budgeted retry absorbs one deschedule between the two
-    wall-clock reads, which costs one frame at the 15fps source."""
+    from moving it."""
+    # A budgeted retry absorbs one deschedule between the two wall-clock
+    # reads, which costs one frame at the 15fps source.
     global _frame_retries
     playback_fps = float(video.get_source_fps() or video.fps or 30)
     for attempt in range(1, _MAX_ATTEMPTS_PER_CALL + 1):

@@ -2,10 +2,11 @@
 Two writers of one page file, and neither loses.
 
 A deck's Page and the page-settings writers change one dict, held once per
-file, under one per-file lock. A plugin save that lands inside a settings
-write must leave both edits on the page and in the file. Timers stay
-disarmed, so every write here is one a check asks for by name.
+file, under one per-file lock. A plugin save that lands inside a settings write
+must leave both edits on the page and in the file.
 """
+
+# Timers stay disarmed, so every write here is one a check asks for by name.
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
 
 import json

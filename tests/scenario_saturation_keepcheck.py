@@ -2,10 +2,12 @@
 Unit-tier scenario for the touchscreen background-video keep-check.
 
 An InputVideo bakes the display saturation into its shared tile cache at
-construction, and set_playback updates only fps and loop. The keep-check
-therefore tracks the factor the strip video was built at and rebuilds when
-that factor diverges, so the strip never serves frames baked at the old one.
+construction, and set_playback updates only fps and loop.
 """
+
+# The keep-check therefore tracks the factor the strip video was built at and
+# rebuilds when that factor diverges, so the strip never serves frames baked at
+# the old one.
 import os
 import threading
 import types
@@ -74,7 +76,7 @@ def _make_touch_state(saturation_holder) -> ControllerTouchScreenState:
     return state
 
 
-def check_keepcheck_reacquires_on_saturation() -> None:
+def check_keepcheck_reacquires_on_sat_change() -> None:
     fixtures.install_stub_globals()
     # A path only. The spy InputVideo never opens it, but the method builds a
     # real one, so something must exist on disk.
@@ -122,7 +124,7 @@ def check_keepcheck_reacquires_on_saturation() -> None:
 
 def main() -> None:
     fixtures.start_watchdog(WATCHDOG_SECONDS, label="scenario_saturation_keepcheck")
-    check_keepcheck_reacquires_on_saturation()
+    check_keepcheck_reacquires_on_sat_change()
     print("PASS: scenario_saturation_keepcheck")
 
 

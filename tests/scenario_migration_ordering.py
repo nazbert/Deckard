@@ -1,11 +1,13 @@
 """
 Regression scenario for migrator order against the nested key shape.
 
-MigrationManager sorts Migrator_1_5_0_beta_5 before Migrator_1_5_0, so the
-keys are nested under states.0 first. Migrator_1_5_0 must apply its asset-id
-renames and label normalizations inside the nested shape and inside a flat
-page, and must leave the other state fields alone.
+MigrationManager sorts Migrator_1_5_0_beta_5 before Migrator_1_5_0, so the keys
+are nested under states.0 first.
 """
+
+# Migrator_1_5_0 must apply its asset-id renames and label normalizations
+# inside the nested shape and inside a flat page, and must leave the other
+# state fields alone.
 import json
 import os
 import shutil

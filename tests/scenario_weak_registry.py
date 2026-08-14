@@ -1,11 +1,12 @@
 """
 Unit-tier scenario for CallbackRegistry in src/Signals/weak_callbacks.py.
 
-The registry backs SignalManager, EventHolder and the plugin-settings
-Observer, and its properties hold whichever subsystem uses it. A bound method
-dies with its owner, a lambda survives, an add dedupes, concurrent use is
-safe, and SC_STRONG_CALLBACKS keeps a bound method alive.
+The registry backs SignalManager, EventHolder and the plugin-settings Observer,
+and its properties hold whichever subsystem uses it.
 """
+
+# A bound method dies with its owner, a lambda survives, an add dedupes,
+# concurrent use is safe, and SC_STRONG_CALLBACKS keeps a bound method alive.
 import gc
 import os
 import subprocess
@@ -68,9 +69,9 @@ def check_dedupe_same_bound_method():
     registry = CallbackRegistry()
     owner = _Owner()
     assert registry.add(owner.method) is True
-    # `owner.method` creates a brand new bound-method wrapper object every
-    # time it's accessed -- dedupe must be on (obj, func) equality, not the
-    # identity of that wrapper.
+    # An access of owner.method creates a new bound-method wrapper every
+    # time, so the dedupe must compare (obj, func) rather than the identity
+    # of that wrapper.
     assert registry.add(owner.method) is False
     assert len(registry) == 1
     snap = registry.snapshot()
@@ -108,8 +109,8 @@ def check_concurrent_add_remove_snapshot():
                 errors.append(e)
 
     def hammer_remove():
-        # Repeatedly remove a callable that was never added -- pure lock
-        # contention, must never raise or corrupt state.
+        # Repeatedly remove a callable that was never added. This is pure
+        # lock contention, and must never raise or corrupt state.
         ghost = _Owner()
         while not stop.is_set():
             try:
@@ -184,10 +185,9 @@ def check_strong_callbacks_env_escape_hatch():
 
 
 def check_prune_logs_debug():
-    # Dropping a subscription because its owner died is a
-    # deliberate D2 tradeoff, but it must leave a trace -- a DEBUG record
-    # naming the pruned callback -- or ecosystem regressions ("my plugin's
-    # events just stopped") are undiagnosable.
+    # A subscription dropped because its owner died is the price of weak
+    # storage, and it must leave a trace. Without a DEBUG record naming the
+    # pruned callback, a plugin whose events stop cannot be diagnosed.
     records: list[str] = []
     handle = log.add(lambda message: records.append(str(message)), level="DEBUG")
     try:

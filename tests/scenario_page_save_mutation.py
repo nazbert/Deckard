@@ -3,9 +3,11 @@ Page.save must persist a consistent snapshot.
 
 A save while another thread mutates page.dict must not raise, and must leave
 valid JSON on disk. Stripping "object" from action entries must not touch the
-live dict. Saves for one json_path serialize across Page objects, which two
-controllers showing one page hold separately.
+live dict.
 """
+
+# Saves for one json_path serialize across Page objects, which two controllers
+# showing one page hold separately.
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
 
 import json

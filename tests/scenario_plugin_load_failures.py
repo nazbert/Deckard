@@ -2,10 +2,12 @@
 The plugin load path survives broken plugins and records every failure.
 
 One poison plugin must not abort the healthy ones, and each failure lands in
-PluginManager.load_errors keyed by folder. The register() version gate
-disables a plugin with a reason instead of raising, and include_disabled must
-not leak disabled plugins into the enabled registry.
+PluginManager.load_errors keyed by folder.
 """
+
+# The register() version gate disables a plugin with a reason instead of
+# raising, and include_disabled must not leak disabled plugins into the enabled
+# registry.
 import json
 import os
 import sys

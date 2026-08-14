@@ -3,9 +3,11 @@ Integration scenario for PluginBase backend teardown.
 
 on_disconnect must return fast, null all four backend references and drop the
 gl.plugin_manager registry entries synchronously, then finish the closes and
-the process kill off-thread. A second call is a no-op, and start_server
-afterwards builds a fresh server instead of skipping against a dead one.
+the process kill off-thread.
 """
+
+# A second call is a no-op, and start_server afterwards builds a fresh server
+# instead of skipping against a dead one.
 import subprocess
 import sys
 import threading

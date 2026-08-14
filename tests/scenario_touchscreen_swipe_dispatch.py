@@ -3,9 +3,10 @@ Regression test for SD+ touchscreen swipe dispatch.
 
 A touchscreen DRAG event travels the whole pipeline into
 ActionBase.event_callback, whose compatibility mapping must reach a legacy
-action's on_key_down. The same mapping carries a strip tap and the key
-events. A real DeckController over a fake SD+ fires the callbacks.
+action's on_key_down. The same mapping carries a strip tap and the key events.
 """
+
+# A real DeckController over a fake SD+ fires the callbacks.
 import fixtures
 
 from StreamDeck.Devices.StreamDeck import TouchscreenEventType

@@ -2,10 +2,12 @@
 The no-bleed contract, the first half of the wipe-restore behavior.
 
 Switching to a page whose key has no action must clear that slot, so the
-previous page's action-owned image never survives. A cross-page load builds a
-different action object, so the stash-and-restore, which gates on action
-identity, never restores into it. The source image is set through a seam.
+previous page's action-owned image never survives. The source image is set
+through a seam.
 """
+
+# A cross-page load builds a different action object, so the stash-and-restore,
+# which gates on action identity, never restores into it.
 import os
 
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
@@ -67,9 +69,9 @@ def main() -> None:
                 "-- the no-bleed check that follows would be vacuous"
             )
 
-            # Switch to a page whose same key has NO action. The slot must
+            # Switch to a page whose same key has no action. The slot must
             # clear. A cross-page load builds a different action object, so
-            # nothing owns the old image -> it must not survive.
+            # nothing owns the old image, so it must not survive.
             controller.load_page(empty_page, allow_reload=True)
             cleared = wait_until(lambda: active_image() is None, timeout=5)
             if not cleared:

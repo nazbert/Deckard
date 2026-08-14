@@ -2,10 +2,15 @@
 
 prepare_plugin, prepare_icon, prepare_wallpaper and
 prepare_sd_plus_bar_wallpaper are thin wrappers over one _prepare_asset,
-selected by an AssetTypeDescriptor. All four run through one stubbed fetch
-layer, and the constructed Data is asserted field for field against a literal
-table. The same descriptor drives install, uninstall and the update legs.
+selected by an AssetTypeDescriptor.
 """
+
+# All four run through one stubbed fetch layer, and the constructed Data is
+# asserted field for field.
+
+# The same descriptor drives install, uninstall and the update legs, so those
+# are pinned here as well. Every expected table below is a literal, never read
+# off the descriptor, so a descriptor whose field names drift disagrees.
 import dataclasses
 import json
 import os

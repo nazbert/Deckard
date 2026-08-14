@@ -3,9 +3,11 @@ Regression test for StoreCache.remove_old_cache_files.
 
 A missing-path entry is purged from the index. A legacy entry with no "date"
 falls back to the content clocks, "fetched" and then file mtime, so a fresh
-legacy file survives the pass. A failed os.remove is logged and retried on
-the next pass instead of raising out of StoreCache.__init__.
+legacy file survives the pass.
 """
+
+# A failed os.remove is logged and retried on the next pass instead of raising
+# out of StoreCache.__init__.
 import json
 import os
 import time

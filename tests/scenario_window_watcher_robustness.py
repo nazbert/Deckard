@@ -2,10 +2,12 @@
 The window-based auto-page-switch machinery must survive two failures.
 
 WindowGrabber.on_active_window_changed must guard active_page, which is
-legitimately None mid-startup or mid-hotplug, or a window change in that
-window aborts routing for every remaining deck. The X11 watch loop must catch
-per iteration, or the first escaping exception ends the thread.
+legitimately None mid-startup or mid-hotplug, or a window change in that window
+aborts routing for every remaining deck.
 """
+
+# The X11 watch loop must catch per iteration, or the first escaping exception
+# ends the thread.
 import fixtures  # noqa: F401  (must be imported first: isolates DATA_PATH)
 
 import time
@@ -75,9 +77,9 @@ class StubWGDeckController:
 def check_pageless_deck_routing() -> None:
     deck_manager = fixtures.install_stub_globals()
 
-    # First in the list. A deck mid-startup/hotplug -- no page yet, but a
-    # previous auto-load left page_auto_loaded set, so the pre-fix code
-    # walks into the stay-on-page branch and derefs active_page.json_path.
+    # First in the list is a deck mid-startup or mid-hotplug. It has no page
+    # yet, and an earlier auto-load left page_auto_loaded set, so an unguarded
+    # body walks into the stay-on-page branch and derefs active_page.json_path.
     pageless = StubWGDeckController("HOTPLUG", active_page=None,
                                     page_auto_loaded=True)
     healthy = StubWGDeckController("GOOD",
@@ -116,16 +118,15 @@ def check_pageless_deck_routing() -> None:
 # ===================================================================== #
 
 def check_pageless_guard_is_noop() -> None:
-    """Part 1 routes through on_active_window_changed, whose per-deck
-    try/except (the per-deck restructure) also swallows the pre-fix
-    active_page.json_path deref -- so Part 1 alone stays green even if the
-    None-guard is deleted, and cannot red-test the guard on its own.
+    """The None-guard on its own, isolated from the per-deck try and except.
 
-    This calls _apply_auto_change directly (the isolated per-deck body, with
-    no surrounding try/except) so the guard's own effect is what is under
-    test. With the guard, a pageless deck is a clean no-op; without it the
-    deref raises straight out to here. Flips red iff the None-guard
-    specifically is removed, independent of that per-deck isolation."""
+    This calls _apply_auto_change directly, which is the per-deck body with
+    no surrounding handler, so a pageless deck is a clean no-op and an
+    unguarded deref raises straight out to here.
+    """
+    # Part 1 routes through on_active_window_changed, whose per-deck handler
+    # swallows that same deref, so Part 1 alone stays green with the guard
+    # removed and cannot red-test it.
     deck_manager = fixtures.install_stub_globals()
 
     pageless = StubWGDeckController("HOTPLUG", active_page=None,
@@ -205,9 +206,9 @@ def check_x11_watcher_survives() -> None:
     scripted = ScriptedX11(
         script=[
             None,                            # consumed by __init__'s priming call
-            crasher,                         # routing raises (pre-fix. Thread dies)
+            crasher,                         # routing raises here
             RuntimeError("xprop exploded"),  # poll itself raises
-            survivor,                        # must still arrive post-fix
+            survivor,                        # must still be routed to
         ],
         window_grabber=recorder,
     )
@@ -234,16 +235,16 @@ def check_x11_watcher_survives() -> None:
 
 
 def check_gnome_install_extension_uuid() -> None:
-    """The GNOME integration asked for its shell extension with the
-    uuid wrapped in a LIST -- unmarshallable against InstallRemoteExtension's
-    "(s)" signature (it would raise the moment anything called it), and never
-    equal to any entry of get_installed_extensions() either, so the
-    already-installed short-circuit could not fire. Dormant when fixed (no
-    call sites; onboarding drives gl.gnome_extensions directly), which is
-    exactly why it needs a guard. The next caller to wire it up must not
-    inherit a method that cannot work.
+    """The GNOME integration must ask for its shell extension by bare uuid.
 
-    `self` is untouched by the method, so no D-Bus proxy is built here."""
+    A uuid wrapped in a list does not marshal against InstallRemoteExtension's
+    "(s)" signature, and never equals an entry of get_installed_extensions, so
+    the already-installed short-circuit cannot fire.
+    """
+    # The method never touches self, so no D-Bus proxy is built here.
+    # The method has no call site today, because onboarding drives
+    # gl.gnome_extensions directly, which is why it needs a guard. The next
+    # caller to wire it up must not inherit a method that cannot work.
     import types
 
     from src.backend.WindowGrabber.Integrations.Gnome import Gnome

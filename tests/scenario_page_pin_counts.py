@@ -2,9 +2,11 @@
 
 get_page hands back a Page that nothing references yet, so an ownership pin
 covers that window. Eviction spares a reserved page, and installing the page
-retires the reservation. One reservation per deck bounds an abandoned fetch
-to one unevictable page, retired by that deck's next fetch or load.
+retires the reservation.
 """
+
+# One reservation per deck bounds an abandoned fetch to one unevictable page,
+# retired by that deck's next fetch or load.
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
 import globals as gl
@@ -378,9 +380,9 @@ def leg_tick_bracket_releases_on_error() -> int:
 def reservation_of(controller):
     """The deck's outstanding fetch, resolved. None when it has none.
 
-    This reads the reservation table directly. count reports that the page is
-    no longer held, and this reports that the deck no longer reserves it. A
-    release that unpins without retiring the entry leaves a stale slot."""
+    This reads the reservation table directly. count reports whether the page
+    is held, and this reports whether the deck reserves it. A release that
+    unpins without retiring the entry leaves a stale slot."""
     reference = gl.page_manager.pins._reservations.get(controller)
     return reference() if reference is not None else None
 

@@ -2,10 +2,11 @@
 Integration scenario for two fake decks stormed at once.
 
 Two independent headless controllers, each over its own FaultyFakeDeck, are
-switched concurrently from separate threads. Each deck's journal must reflect
-only its own controller's pages, with no sequence counter, journal or dedup
-state leaking across controller instances.
+switched concurrently from separate threads.
 """
+
+# Each deck's journal must reflect only its own controller's pages, with no
+# sequence counter, journal or dedup state leaking across controller instances.
 import os
 import threading
 import time
@@ -15,7 +16,7 @@ import globals as gl
 
 
 def _settle_on(controller, deck, page, key_count):
-    """Loads `page` alone, waits for every key to repaint, returns the
+    """Loads one page alone, waits for every key to repaint, returns the
     per-key hash signature (see scenario_switch_storm's helper of the same
     shape)."""
     deck.clear_journal()

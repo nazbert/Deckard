@@ -2,10 +2,12 @@
 Regression test for a first launch behind a dead or rate-limited store.
 
 StoreBackend.get_all_plugins answers an Err when every store is unreachable.
-PluginRecommendations.load shows the error state instead of iterating that
-Err, and an onboarding install failure reaches an error toast on the
-surviving main window. Both legs run unbound over duck-typed selves.
+Both legs run unbound over duck-typed selves.
 """
+
+# PluginRecommendations.load shows the error state instead of iterating that
+# Err, and an onboarding install failure reaches an error toast on the
+# surviving main window.
 import types
 
 import fixtures  # noqa: F401  (isolates DATA_PATH before src imports)

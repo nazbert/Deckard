@@ -2,10 +2,12 @@
 A store preview button must not read "installed" after a failed download.
 
 Each data-only preview install() checks the StoreResult, notifies on an Err,
-and leaves the button in its previous state so the user can retry. An Err is
-truthy, so the protocol is narrowing on the result type rather than a
-truthiness check. The previews run unbound over a duck-typed self.
+and leaves the button in its previous state so the user can retry. The previews
+run unbound over a duck-typed self.
 """
+
+# An Err is truthy, so the protocol is narrowing on the result type rather than
+# a truthiness check.
 import types
 
 import fixtures  # noqa: F401  (isolates DATA_PATH before src imports)

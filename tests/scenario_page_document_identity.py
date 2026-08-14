@@ -1,11 +1,13 @@
 """
 One page file holds one dict, shared by every deck that shows it.
 
-The page manager hands out one document per page file, so two Pages on one
-path share a dict and an edit crosses with no write. A refresh refills that
-dict in place and never blanks a section. Two spellings of one path are one
-document, one save lock and one pending write.
+The page manager hands out one document per page file, so two Pages on one path
+share a dict and an edit crosses with no write. A refresh refills that dict in
+place and never blanks a section.
 """
+
+# Two spellings of one path are one document, one save lock and one pending
+# write.
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
 
 import json
@@ -204,10 +206,11 @@ class ProbedContent(dict):
     """New page content that looks at the document while it is applied.
 
     dict.update() copies from a plain dict in C, with nothing to hook from
-    Python. An __iter__ override moves update() onto the mapping protocol,
-    where it asks for keys() first and inserts afterwards, so a probe in
-    keys() runs at the one moment the two possible orders differ.
+    Python.
     """
+    # An __iter__ override moves update() onto the mapping protocol, where it
+    # asks for keys() first and inserts afterwards, so a probe in keys() runs
+    # at the one moment the two possible orders differ.
 
     def __init__(self, content: dict, probe):
         super().__init__(content)

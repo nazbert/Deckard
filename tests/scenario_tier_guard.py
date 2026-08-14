@@ -3,9 +3,11 @@ Scenario for the tier-mixing guard.
 
 The unit tier and the integration tier install different, incompatible gl.*
 graphs, so each installer raises RuntimeError when the other tier is already
-live. This scenario sets the fixtures tier flags directly to drive both
-directions in one process, which no ordinary scenario does.
+live.
 """
+
+# This scenario sets the fixtures tier flags directly to drive both directions
+# in one process, which no ordinary scenario does.
 import fixtures
 
 

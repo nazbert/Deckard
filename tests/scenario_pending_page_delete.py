@@ -2,10 +2,12 @@
 Deleting a controller's screensaver-pending page clears the pending request.
 
 remove_page must clear the pending slot and drop the page's cache entry.
-Otherwise hide() loads a page whose file is gone, and the first save
-resurrects it. A page object that outlives the delete must not mark the path
-back into place over a page created under the same name.
+Otherwise hide() loads a page whose file is gone, and the first save resurrects
+it.
 """
+
+# A page object that outlives the delete must not mark the path back into place
+# over a page created under the same name.
 import json
 import os
 import time

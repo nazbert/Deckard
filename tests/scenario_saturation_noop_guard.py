@@ -1,11 +1,12 @@
 """
 Opening deck settings at a non-default saturation must not reload the page.
 
-The Saturation row defers load_default to "map", which runs after
-value-changed is connected, so set_value re-emits the stored factor.
-DeckController.set_display_saturation therefore short-circuits on the same
-value, and rounds to two decimals before it compares and persists.
+The Saturation row defers load_default to "map", which runs after value-changed
+is connected, so set_value re-emits the stored factor.
 """
+
+# DeckController.set_display_saturation therefore short-circuits on the same
+# value, and rounds to two decimals before it compares and persists.
 import fixtures
 
 import globals as gl

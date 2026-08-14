@@ -3,9 +3,11 @@ Unit-tier scenario for the display-saturation factor on two media paths.
 
 KeyGIF decodes and fits every frame at construction, so it bakes the factor
 into each frame there. The touchscreen fitted-background memo keys on the
-factor. _read_display_saturation validates the persisted value. Both paths run
-through the production classes with stubs for the surface each one reads.
+factor. _read_display_saturation validates the persisted value.
 """
+
+# Both paths run through the production classes with stubs for the surface each
+# one reads.
 import os
 
 import fixtures  # noqa: F401  (isolated data dir + sys.path, house convention)

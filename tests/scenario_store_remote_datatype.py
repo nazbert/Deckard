@@ -1,11 +1,11 @@
 """
 Regression test for StoreBackend.get_remote_file and get_web_image.
-
-The cache key carries the data type end to end, so a text fetch and a binary
-fetch of one repo path never collide on one cache file. get_web_image guards
-with except Exception, so a KeyboardInterrupt escapes while an ordinary
-decode or fetch error stays contained. request_from_url is stubbed.
 """
+
+# The cache key carries the data type end to end, so a text fetch and a binary
+# fetch of one repo path never collide on one cache file. get_web_image guards
+# with except Exception, so a KeyboardInterrupt escapes while an ordinary
+# decode or fetch error stays contained. request_from_url is stubbed.
 
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl  # noqa: F401

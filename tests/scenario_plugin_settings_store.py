@@ -1,11 +1,13 @@
 """
 Plugin settings on the settings store.
 
-All four entry points, get_settings, set_settings, load_assets and
-save_assets, heal a corrupt file through the store's quarantine, and an
-unreadable file reads as empty rather than raising. The file-version envelope
-round-trips, and the per-plugin lock serializes each read-modify-write.
+All four entry points, get_settings, set_settings, load_assets and save_assets,
+heal a corrupt file through the store's quarantine, and an unreadable file
+reads as empty rather than raising.
 """
+
+# The file-version envelope round-trips, and the per-plugin lock serializes
+# each read-modify-write.
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 
 import contextlib

@@ -3,9 +3,11 @@ Regression test for page import through the PageManager menu.
 
 MenuButton.import_page_name_selected_callback must derive the new page's name
 from its name parameter, not from page_path, which add_page assigns two lines
-later. The callback runs unbound with a duck-typed self, and everything else
-it touches is real.
+later.
 """
+
+# The callback runs unbound with a duck-typed self, and everything else it
+# touches is real.
 import json
 import os
 

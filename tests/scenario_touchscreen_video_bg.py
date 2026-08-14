@@ -1,11 +1,13 @@
 """
 Regression test for the per-touchscreen background video path.
 
-A video assigned as the SD+ touchscreen background must play. The state holds
-an InputVideo over a strip-sized shared frame cache, the media tick
-re-composites the strip while it is set, and the dual-hash dedup gates the
-device writes. A real DeckController over a fake SD+ drives it.
+A video assigned as the SD+ touchscreen background must play. A real
+DeckController over a fake SD+ drives it.
 """
+
+# The state holds an InputVideo over a strip-sized shared frame cache, the
+# media tick re-composites the strip while it is set, and the dual-hash dedup
+# gates the device writes.
 import os
 import time
 

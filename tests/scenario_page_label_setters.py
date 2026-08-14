@@ -1,11 +1,12 @@
 """
 Every Page.set_label_* styling setter reaches the UI port, then repaints.
 
-Each of the eight setters forwards to on_input_visuals_changed with the
-aspect "labels", then runs its trailing update_input. The port call must come
-first, because a raise in the forwarder would abort the repaint. Each setter
-must also work with no UI attached.
+Each of the eight setters forwards to on_input_visuals_changed with the aspect
+"labels", then runs its trailing update_input. The port call must come first,
+because a raise in the forwarder would abort the repaint.
 """
+
+# Each setter must also work with no UI attached.
 import fixtures
 
 from src.backend import ui_port

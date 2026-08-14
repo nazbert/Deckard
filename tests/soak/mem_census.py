@@ -3,24 +3,27 @@
 Bucket a process's anonymous VMAs by size class, and read its swap footprint.
 
 Reads /proc/<pid>/smaps and prints anonymous-mapping counts with total RSS
-and swap per size-class bucket, plus the process-wide VmRSS and VmSwap. That
-view surfaces glibc per-thread arena shapes, which a flat RSS number cannot
-tell apart from content growth. Swap alone under-reports an idle regrowth.
+and swap per size-class bucket, plus the process-wide VmRSS and VmSwap.
 
 Usage:
     .venv/bin/python tests/soak/mem_census.py [pid]
     .venv/bin/python tests/soak/mem_census.py [pid] --max-rss-mb 800 --max-swap-mb 200
-
-With no pid, this scans /proc for a process whose cmdline mentions main.py
-and Deckard. With --max-rss-mb or --max-swap-mb it exits 1 when the
-process-wide figure passes the threshold, so a soak can fail mechanically.
 """
+
+# The bucket view surfaces glibc per-thread arena shapes, which a flat RSS
+# number cannot tell apart from content growth. RSS alone under-reports an
+# idle regrowth, because the regrowth hides in swap.
+#
+# With no pid, the scan below walks /proc for a process whose cmdline mentions
+# main.py and Deckard. With --max-rss-mb or --max-swap-mb the exit code is 1
+# once the process-wide figure passes the threshold, so a soak fails
+# mechanically instead of needing someone to read the table.
 import argparse
 import os
 import re
 import sys
 
-# (label, exclusive upper bound in kB) -- last bucket has no upper bound.
+# (label, exclusive upper bound in kB). The last bucket has no upper bound.
 SIZE_CLASSES_KB = [
     ("<64KB", 64),
     ("64KB-256KB", 256),
@@ -60,14 +63,14 @@ def bucket_for(size_kb: int) -> str:
 
 
 def census(pid: int) -> dict[str, dict[str, int]]:
-    """Return {bucket_label: {"count": n, "rss_kb": n, "swap_kb": n}} for
-    anonymous VMAs (mappings with no backing file -- heap, arenas, mmap'd
-    anon regions; excludes file-backed mappings like .so's and mp4 cache
-    files, and the kernel's [vdso]/[vvar]/[vsyscall]).
+    """Return {bucket_label: {"count": n, "rss_kb": n, "swap_kb": n}} for the
+    anonymous VMAs, which are the mappings with no backing file.
 
-    Swap is summed per bucket alongside Rss. An anonymous region paged out to
-    swap has a small Rss but a large Swap, so an Rss-only view under-reports
-    where the memory actually went (the field symptom this tool exists for)."""
+    A file-backed mapping and the kernel's own regions are excluded.
+    """
+    # Swap is summed per bucket beside Rss. An anonymous region paged out to
+    # swap carries a small Rss and a large Swap, so an Rss-only view
+    # under-reports where the memory went, which is the field symptom.
     buckets = {label: {"count": 0, "rss_kb": 0, "swap_kb": 0} for label, _ in SIZE_CLASSES_KB}
     with open(f"/proc/{pid}/smaps") as f:
         lines = f.readlines()
@@ -100,10 +103,12 @@ def census(pid: int) -> dict[str, dict[str, int]]:
 
 
 def read_vm_status(pid: int) -> dict[str, int]:
-    """Process-wide VmRSS and VmSwap (kB) from /proc/<pid>/status -- the
-    authoritative totals, independent of the per-VMA smaps walk. VmSwap is the
-    field the soak README calls out (the 2+ hour idle symptom was RSS regrowth
-    plus ~463MB VmSwap); reading VmRSS alone under-reports the footprint."""
+    """Process-wide VmRSS and VmSwap in kB from /proc/<pid>/status.
+
+    These totals are authoritative and independent of the per-VMA smaps walk.
+    A VmRSS read alone under-reports the footprint, because the idle symptom
+    the soak README names is RSS regrowth beside about 463MB of VmSwap.
+    """
     result = {"VmRSS": 0, "VmSwap": 0}
     with open(f"/proc/{pid}/status") as f:
         for line in f:

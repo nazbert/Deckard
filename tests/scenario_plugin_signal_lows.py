@@ -1,11 +1,13 @@
 """
 Unit-tier scenario for grouped plugin, signal and GtkHelper fixes.
 
-SignalManager.trigger_signal forwards kwargs and runs a truthy handler once.
-EventHolder dedupes a functools.partial listener, CallbackRegistry accepts a
-__slots__ owner, launch_backend validates its path, get_own_key resolves
-through get_input, and a null action id survives removal. No deck, no widgets.
+SignalManager.trigger_signal forwards kwargs and runs a truthy handler once. No
+deck, no widgets.
 """
+
+# EventHolder dedupes a functools.partial listener, CallbackRegistry accepts a
+# __slots__ owner, launch_backend validates its path, get_own_key resolves
+# through get_input, and a null action id survives removal.
 import functools
 import threading
 import weakref

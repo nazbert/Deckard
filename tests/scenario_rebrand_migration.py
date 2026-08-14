@@ -2,10 +2,12 @@
 Regression test for the one-time rename migration in rebrand_migration.py.
 
 The whole pre-rename var-app tree moves to the new id and leaves a compat
-symlink behind. The migration never merges when both roots hold real files,
-heals a crash between the rename and the symlink through the pending marker,
-and aborts on a foreign symlink or a live pre-rename instance.
+symlink behind.
 """
+
+# The migration never merges when both roots hold real files, heals a crash
+# between the rename and the symlink through the pending marker, and aborts on
+# a foreign symlink or a live pre-rename instance.
 import os
 import shutil
 import sys

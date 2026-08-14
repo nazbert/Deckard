@@ -1,11 +1,12 @@
 """
 Regression test for mutable default arguments.
 
-Python evaluates a list or dict default once, at definition time, and shares
-it with every caller that omits the argument. The AST scan covers src/,
-GtkHelper/ and main.py. Media uses eq=False, so two instances must hold
-separate layers lists and keep identity == and hashability.
+Python evaluates a list or dict default once, at definition time, and shares it
+with every caller that omits the argument. Media declares layers with
+field(default_factory=list), so two instances hold separate lists.
 """
+
+# Media also sets eq=False, which keeps identity == and hashability.
 import ast
 import os
 

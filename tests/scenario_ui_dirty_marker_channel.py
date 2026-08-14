@@ -1,11 +1,13 @@
 """
 A frame the UI drops after acceptance must still reach the dirty marker.
 
-push_input_image answers True as soon as a frame is in the input's mirror
-slot, so the engine does not dirty-mark it. The window can unmap before that
-paint runs, and both drop sites route to ui_adapter.mark_dirty instead, or
-load_from_changes has nothing to replay on remap.
+push_input_image answers True as soon as a frame is in the input's mirror slot,
+so the engine does not dirty-mark it.
 """
+
+# The window can unmap before that paint runs, and both drop sites route to
+# ui_adapter.mark_dirty instead, or load_from_changes has nothing to replay on
+# remap.
 from types import SimpleNamespace
 
 import fixtures
@@ -56,8 +58,8 @@ def _child_with_screenbar(image_widget):
 def check_touchscreen_drain_drops(controller, ts_ident) -> None:
     markers = controller.ui_image_changes_while_hidden
 
-    # 1. A successful drain must NOT mark -- otherwise every assertion below
-    # would pass for the wrong reason.
+    # 1. A successful drain must not mark, or every assertion below passes
+    # for the wrong reason.
     adapter = GtkUIAdapter()
     image_widget = _RecordingImage()
     adapter.bind(controller, _child_with_screenbar(image_widget))
@@ -108,12 +110,11 @@ def check_touchscreen_drain_drops(controller, ts_ident) -> None:
         "with no replay"
     )
 
-    # 4. A drain that finds the widget gone (a rebuild between push and paint)
-    # is the last drop shape that is worth MARKING. One more exists and is
-    # silent by design. unbind() drops the slot, so a drain queued before
-    # it finds no payload and returns without marking. That is correct -- the
-    # deck is gone, and a marker on a controller nothing will ever re-map is
-    # only a reference to it.
+    # 4. A drain that finds the widget gone, after a rebuild between push and
+    # paint, is the last drop shape worth marking. One more drop stays silent,
+    # because unbind() drops the slot and a drain queued before it finds no
+    # payload. The deck is gone, so a marker on a controller nothing will
+    # re-map is only a reference that keeps it alive.
     adapter = GtkUIAdapter()
     adapter.bind(controller, SimpleNamespace())
     adapter._window_mapped = True
@@ -158,7 +159,7 @@ def check_key_paint_drop(controller, key_ident) -> None:
     assert len(painted) == 1, "the mapped button did not paint"
     assert not markers, f"a successful key paint dirty-marked: {markers!r}"
 
-    # 2. Unmapped between queue and run -- the mapped-guard drop.
+    # 2. Unmapped between queue and run, which is the mapped-guard drop.
     markers.clear()
     assert KeyButton.paint_mirror_frame(make_stand_in(False, None), object()) is False
     assert markers.get(key_ident) is True, (

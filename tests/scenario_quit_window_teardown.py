@@ -2,9 +2,10 @@
 
 GTK 4.22 segfaults on the dispose path of a window that was never realized. In
 background mode on_activate builds main_win but never presents it, so a
-destroy() in on_quit kills the process before terminate_all_backends runs. GTK
-windows need a display, so this scenario skips cleanly without one.
+destroy() in on_quit kills the process before terminate_all_backends runs.
 """
+
+# GTK windows need a display, so this scenario skips cleanly without one.
 
 import os
 import sys

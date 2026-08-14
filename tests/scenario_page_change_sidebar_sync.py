@@ -1,11 +1,13 @@
 """
 The page-change UI sync refreshes the sidebar.
 
-GtkUIAdapter.on_page_changed holds the logic and the engine calls the port.
-The fake DeckStackChild carries no settings_page, which is the real
-PageSettingsPage shape. No widget is constructed here, and the harness pumps
-the default MainContext by hand so the coalescer stays observable.
+GtkUIAdapter.on_page_changed holds the logic and the engine calls the port. The
+fake DeckStackChild carries no settings_page, which is the real
+PageSettingsPage shape.
 """
+
+# No widget is constructed here, and the harness pumps the default MainContext
+# by hand so the coalescer stays observable.
 import time
 from types import SimpleNamespace
 

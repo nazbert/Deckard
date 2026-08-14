@@ -1,11 +1,12 @@
 """
 Screensaver media must loop when the config carries no explicit loop key.
 
-Every media-layer default says True, so a screensaver config written before
-the loop toggle existed loops as well, at page level and at deck level. An
-explicit "loop": false still wins, and the defaulted value reaches the live
-background provider rather than parking on the ScreenSaver.
+Every media-layer default says True, so a screensaver config written before the
+loop toggle existed loops as well, at page level and at deck level.
 """
+
+# An explicit "loop": false still wins, and the defaulted value reaches the
+# live background provider rather than parking on the ScreenSaver.
 import json
 import os
 

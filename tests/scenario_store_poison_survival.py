@@ -2,10 +2,12 @@
 Regression test for poison-entry survival across all four preparers.
 
 A failed thumbnail or asset fetch lists the entry with image None, and only a
-failed manifest, which leaves no id or name to list, still drops it. Under a
-partial 429 storm the catalogs must therefore keep their entries rather than
-thin out silently. No network is involved.
+failed manifest, which leaves no id or name to list, still drops it. No network
+is involved.
 """
+
+# Under a partial 429 storm the catalogs must therefore keep their entries
+# rather than thin out silently.
 from types import SimpleNamespace
 
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)

@@ -1,11 +1,11 @@
 """
 Three small guards.
-
-Page.set_media_fps applies only to inputs on a controller showing that page.
-mark_page_ready_to_clear releases the page it captured at the False call, not
-whatever is active at the True call. initialize_actions claims on_ready
-atomically under a per-page lock, at both of its entry points.
 """
+
+# Page.set_media_fps applies only to inputs on a controller showing that page.
+# mark_page_ready_to_clear releases the page it captured at the False call, not
+# whatever is active at the True call. initialize_actions claims on_ready
+# atomically under a per-page lock, at both of its entry points.
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
 import threading
@@ -106,9 +106,10 @@ def _make_claim_probe(barrier):
 
     Both ready-claim checks share it, so they drive the same interleave. The
     on_ready_called getter reads the flag before any rendezvous. A True read
-    returns at once, which marks the serialized second reader. A False read
-    waits on a two-party barrier to force the concurrent-read interleave.
+    returns at once, which marks the serialized second reader.
     """
+    # A False read waits on a two-party barrier to force the concurrent-read
+    # interleave.
     from src.backend.PluginManager.ActionCore import ActionCore
 
     class ClaimProbeAction(ActionCore):
@@ -175,9 +176,11 @@ def check_atomic_ready_claim_reload_path(controller) -> int:
     """The second entry point for the ready claim.
 
     Page.load calls initialize_actions when this page is already active, so a
-    reload picks up newly-added actions. The per-page lock sits at the claim
-    site, so a reload racing a direct initialize_actions must still yield
-    exactly one ready claim for the shared action instance."""
+    reload picks up newly-added actions.
+    """
+    # The per-page lock sits at the claim site, so a reload racing a direct
+    # initialize_actions must still yield exactly one ready claim for the
+    # shared action instance.
     page = controller.active_page
     barrier = threading.Barrier(2)
     action = _make_claim_probe(barrier)
@@ -226,9 +229,10 @@ def check_ready_to_clear_evicts_end_to_end(controller) -> int:
     """ready_to_clear, end to end.
 
     A page that was mid-work, marked ready_to_clear False and then reset, must
-    become evictable again through clear_old_cached_pages. Without the
-    pass-back the page stays pinned and survives eviction forever, which
-    silently shrinks the budget."""
+    become evictable again through clear_old_cached_pages.
+    """
+    # Without the pass-back the page stays pinned and survives eviction
+    # forever, which silently shrinks the budget.
     import globals as gl
 
     pm = gl.page_manager

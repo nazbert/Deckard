@@ -2,10 +2,11 @@
 Single-slot task races must not lose frames.
 
 The drain, the Clear, the write-cap putback and the two slot wipes all take
-_slot_lock, so a producer assigning concurrently either wins or blocks. A
-hooked touchscreen_task property fires a real producer inside each window, so
-every interleave is deterministic rather than left to the scheduler.
+_slot_lock, so a producer assigning concurrently either wins or blocks.
 """
+
+# A hooked touchscreen_task property fires a real producer inside each window,
+# so every interleave is deterministic rather than left to the scheduler.
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
 import threading
@@ -15,13 +16,16 @@ from fixtures import start_watchdog
 
 
 def hook_types(media_player):
-    """Subclass the real class with a hooked touchscreen_task property and
-    swap the instance's __class__.
+    """Subclass the real class with a hooked touchscreen_task property and swap
+    the instance's __class__.
 
-    An armed hook fires on a read. It captures the value first, lets a
-    producer thread run a real add_touchscreen_task, then returns the value
-    it captured, which is the producer-in-the-window interleave. _read_hook
-    fires once, and _read_hook_on_nth fires on the Nth read of the slot."""
+    An armed hook fires on a read.
+    """
+    # It captures the value first, lets a producer thread run a real
+    # add_touchscreen_task, then returns what it captured, which is the
+    # producer-in-the-window interleave.
+    # _read_hook fires once, and _read_hook_on_nth fires on the Nth read of
+    # the slot, which is how a check targets the putback's own None check.
     base = type(media_player)
 
     class Hooked(base):

@@ -2,10 +2,12 @@
 The media loop's quiescence gate, over a real MediaPlayerThread.
 
 A background-video page decodes, composites and writes every key at 30 FPS
-forever. With the user away the gate stops every animation write, still lands
-control messages and interactive paints, repaints once on a page change, and
-resumes animation within 500ms of a presence return.
+forever.
 """
+
+# With the user away the gate stops every animation write, still lands control
+# messages and interactive paints, repaints once on a page change, and resumes
+# animation within 500ms of a presence return.
 import itertools
 import os
 import threading
@@ -37,9 +39,9 @@ def wait_until_quiet(deck, quiet_for: float = 0.5, timeout: float = 10.0) -> boo
     """Waits until no device write has landed for quiet_for seconds.
 
     The settle window's length depends on how fast the page-load tasks drain,
-    which is not a constant on a loaded machine. The invariant is that the
-    loop goes quiet, not that it goes quiet in a fixed number of
-    milliseconds."""
+    which is not a constant on a loaded machine."""
+    # The invariant is that the loop goes quiet, not that it goes quiet within
+    # a fixed number of milliseconds.
     deadline = time.monotonic() + timeout
     seen = len(deck.journal())
     stable_since = time.monotonic()
@@ -241,8 +243,8 @@ def main() -> None:
         # The render window is bounded in wall clock, not only in quiet
         # ticks. Its countdown re-arms whenever the task queues are non-empty,
         # which a producer at the loop's own rate holds forever. The
-        # producer's own paints keep landing, because that traffic is
-        # interactive by design and the gate never touches it.
+        # producer's own paints keep landing, because the gate covers
+        # animation and never touches a caller's own paint.
         stop_producer = threading.Event()
         fills = itertools.count(11)
 

@@ -3,9 +3,11 @@ run_on_main's timeout path cancels the queued GLib idle source.
 
 Exactly one of the caller's timeout path and the idle callback proceeds.
 Otherwise a retry above it, such as GenerativeUI._ensure_built, builds twice
-and leaves duplicate widgets. No GTK main loop runs here, and leaving the
-default GLib.MainContext unpumped is what stalls the loop for a timeout.
+and leaves duplicate widgets.
 """
+
+# No GTK main loop runs here, and leaving the default GLib.MainContext unpumped
+# is what stalls the loop for a timeout.
 import threading
 import time
 

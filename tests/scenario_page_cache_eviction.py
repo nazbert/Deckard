@@ -2,10 +2,12 @@
 Page-cache eviction budget arithmetic.
 
 clear_old_cached_pages removes exactly (total - max_pages) pages, oldest
-page_number first, and a shrink through set_pages_to_cache runs a pass. A
-controller with active_page None inflates total but never gives up its own
-pages. This unit tier runs stub controllers over the real PageManagerBackend.
+page_number first, and a shrink through set_pages_to_cache runs a pass. This
+unit tier runs stub controllers over the real PageManagerBackend.
 """
+
+# A controller with active_page None inflates total but never gives up its own
+# pages.
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
 import globals as gl

@@ -2,10 +2,11 @@
 Wiring scenario for SIGTERM and SIGHUP running App.on_quit's teardown.
 
 Plugin backends spawn with start_new_session=True, so no killpg aimed at the
-app's group reaches them and only terminate_all_backends does. The checks
-drive the real methods unbound on stub objects, because constructing App
-needs a live display and the whole main.py bootstrap.
+app's group reaches them and only terminate_all_backends does.
 """
+
+# The checks drive the real methods unbound on stub objects, because
+# constructing App needs a live display and the whole main.py bootstrap.
 import fixtures  # noqa: F401  (must be first: isolates the data dir)
 
 import contextlib
@@ -84,13 +85,14 @@ class _ProbeDone(BaseException):
 
 
 class QuitRecorder:
-    """Stands in for App as the handler's self, and records every on_quit
-    call with the args its route passed.
+    """Stands in for App as the handler's self, and records every on_quit call
+    with the args its route passed.
 
-    The routes differ. A GLib unix-signal source and a queued Ctrl+C pass no
-    args, the Gio quit action passes (action, param), and a signal.signal
-    fallback passes (signum, frame). Hence on_quit(self, *args).
+    The routes differ. Hence on_quit(self, *args).
     """
+    # A GLib unix-signal source and a queued Ctrl+C pass no args, the Gio quit
+    # action passes (action, param), and a signal.signal fallback passes
+    # (signum, frame).
 
     # The real wrappers the signals are registered against, under test unbound
     # on this stub exactly like the other App methods here.
@@ -151,11 +153,12 @@ def check_sigint_stays_python_handler() -> QuitRecorder:
 def check_sigint_defers_teardown(recorder: QuitRecorder) -> None:
     """The SIGINT handler must queue on_quit, not run it.
 
-    A Python-level handler runs between bytecodes on the main thread, so it
-    can interrupt any statement in the app. Running the teardown there would
-    destroy the window on top of an unrelated stack frame, so the handler
-    hands on_quit to the main loop instead.
+    A Python-level handler runs between bytecodes on the main thread, so it can
+    interrupt any statement in the app.
     """
+    # Running the teardown there would destroy the window on top of an
+    # unrelated stack frame, so the handler hands on_quit to the main loop
+    # instead.
     recorder._sigint_first_at = None
     before = len(recorder.calls)
     recorder._on_sigint(signal.SIGINT, None)
@@ -178,10 +181,11 @@ def check_sigint_escalates_on_wedged_loop(recorder: QuitRecorder) -> None:
     """A Ctrl+C left undispatched must force the quit, and only that one.
 
     On a wedged loop the idle never dispatches, and TERM and HUP are loop
-    sources too, so nothing short of SIGKILL ends the process. The escalation
-    gates on elapsed time and on the quit-started latch, and it restores
-    SIG_DFL first so a force_quit that itself wedges stays killable.
+    sources too, so nothing short of SIGKILL ends the process.
     """
+    # The escalation gates on elapsed time and on the quit-started latch, and
+    # it restores SIG_DFL first so a force_quit that itself wedges stays
+    # killable.
     import src.app as app_mod
 
     recorder._sigint_first_at = None
@@ -256,9 +260,9 @@ def report_signal_path(signum: int, name: str) -> None:
 
     GLib's sigaction is invisible to signal.getsignal(), so a SIG_DFL reading
     means the GLib unix-signal source is armed. Anything else means
-    unix_signal_add degraded to signal.signal on this runtime. This is
-    informational, because degrading is a supported outcome.
+    unix_signal_add degraded to signal.signal on this runtime.
     """
+    # This is informational, because degrading is a supported outcome.
     handler = signal.getsignal(signum)
     if handler == signal.SIG_DFL:
         print(f"  INFO: {name} armed via a GLib unix-signal source")
@@ -327,11 +331,11 @@ def check_signal_reaches_on_quit(recorder: QuitRecorder, signum: int, name: str)
 def check_unix_signal_add_degrades() -> None:
     """A symbol that resolves but blows up on call must still degrade.
 
-    unix_signal_add runs from App.__init__ through register_signal_handlers,
-    so anything it lets escape aborts startup outright. A refused signum, a
-    GLib built without UNIX signal support, or an argument mismatch between
-    the two spellings all raise at call time.
+    unix_signal_add runs from App.__init__ through register_signal_handlers, so
+    anything it lets escape aborts startup outright.
     """
+    # A refused signum, a GLib built without UNIX signal support, or an
+    # argument mismatch between the two spellings all raise at call time.
     import src.app as app_mod
 
     class _BoomGLib:
@@ -535,11 +539,12 @@ def check_appquit_handlers_isolated() -> None:
     """A raising AppQuit handler must not deny its peers the notification.
 
     The fan-out is synchronous, because the process exits moments later, and
-    its observers are strangers to each other. Three failure shapes run here:
-    a plain exception, a sys.exit, and a handler whose failure cannot be
-    named, because an rpyc netref raises again from inside the error path.
-    A bound method sits behind them, on the weak retrieval path.
+    its observers are strangers to each other.
     """
+    # Three failure shapes run here: a plain exception, a sys.exit, and a
+    # handler whose failure cannot be named, because an rpyc netref raises
+    # again from inside the error path. A bound method sits behind them, so
+    # the weak retrieval path is covered too.
     import sys
     import weakref
 
@@ -616,9 +621,10 @@ def check_quit_drains_store_cache_index() -> None:
 
     Without the flush, the deferred read-clock renewals of the last store
     browse are lost on every quit, because os._exit(0) skips the atexit hook
-    and the debounce timer is a daemon. A flush before the watchdog is armed
-    parks the quit forever on a wedged filesystem.
+    and the debounce timer is a daemon.
     """
+    # A flush before the watchdog is armed parks the quit forever on a wedged
+    # filesystem.
     watchdog = Recorder()
     probe = _StoreCacheProbe(watchdog)
     result = drive_on_quit(Obj(trigger_signal_sync=Recorder()),

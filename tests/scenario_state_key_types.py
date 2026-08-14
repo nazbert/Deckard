@@ -2,10 +2,12 @@
 Pins the page state-key type contract.
 
 A page json's states map is keyed by strings, because Page.save writes
-self.dict through atomic_write_json. The in-memory action_objects registry is
-keyed by ints, and the InputIdentifier accessors are the one coercion point,
-so no non-str state key ever reaches page.dict or the file.
+self.dict through atomic_write_json.
 """
+
+# The in-memory action_objects registry is keyed by ints, and the
+# InputIdentifier accessors are the one coercion point, so no non-str state key
+# ever reaches page.dict or the file.
 import json
 import os
 

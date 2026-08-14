@@ -1,15 +1,16 @@
 """
 PluginManager.warm_up_plugins calls on_app_ready once per plugin.
 
-The call runs off the caller's GTK main thread and returns at once, even when
-a hook is slow, and one raising hook must not stop the others. A second
-warm-up re-fires nothing, and a plugin loaded after activation still gets its
-hook. PluginBase carries the hook as an inherited no-op.
+The call runs off the caller's GTK main thread and returns at once, even when a
+hook is slow, and one raising hook must not stop the others. A second warm-up
+re-fires nothing, and a plugin loaded after activation still gets its hook.
 """
+
+# PluginBase carries the hook as an inherited no-op.
 import threading
 import time
 
-import fixtures  # must be first. Isolates DATA_PATH before `import globals`
+import fixtures  # must be first, to isolate DATA_PATH before globals loads
 import globals as gl  # noqa: F401  (imported for side-effect ordering)
 
 from src.backend.PluginManager.PluginBase import PluginBase

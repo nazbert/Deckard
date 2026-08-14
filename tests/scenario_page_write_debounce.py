@@ -3,9 +3,11 @@ Page edits are written once per burst, and at every boundary.
 
 Page.save marks the page and arms a trailing timer, so a burst of edits costs
 one write. Every reader crosses a barrier that writes pending edits first, and
-every boundary a user reads as "done" writes now. A virtual clock drives the
-timing with no sleeps, so the delay, the re-arm and the cap are assertions.
+every boundary a user reads as "done" writes now.
 """
+
+# A virtual clock drives the timing with no sleeps, so the delay, the re-arm
+# and the cap are assertions.
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
 
 import ast
@@ -339,11 +341,11 @@ def check_max_dirty_age_cap(controller) -> None:
 def check_mid_write_mark_survives(controller) -> None:
     """An edit made while a write is in flight must not be swallowed by it.
 
-    The write in flight serializes a snapshot taken before that edit existed.
-    Retiring the pending record it finds afterwards drops an edit no timer
-    comes back for, and both outcomes leave the map empty and the file
-    written.
+    The write in flight serializes a snapshot taken before that edit existed,
+    so retiring the pending record it finds afterwards drops an edit.
     """
+    # No timer comes back for that edit, and both outcomes leave the map empty
+    # and the file written, so nothing else can tell them apart.
     scheduler = ManualScheduler()
     page_flush._flush = page_flush.PageFlush(scheduler=scheduler, clock=time.monotonic)
     WRITES.clear()
@@ -398,13 +400,14 @@ def check_mid_write_mark_survives(controller) -> None:
 
 
 def check_flush_writes_locked_path(controller) -> None:
-    """The file written is the key the edits were marked under, never
-    whatever json_path says when the flush runs.
+    """The file written is the key the edits were marked under, never whatever
+    json_path says when the flush runs.
 
-    A page move re-points json_path in place, so the two names can differ
-    while a mark is outstanding. With this invariant a flush and its lock can
-    never be about different files.
+    A page move re-points json_path in place, so the two names can differ while
+    a mark is outstanding.
     """
+    # With this invariant a flush and its lock can never be about different
+    # files.
     scheduler = ManualScheduler()
     page_flush._flush = page_flush.PageFlush(scheduler=scheduler, clock=time.monotonic)
     WRITES.clear()
@@ -670,9 +673,10 @@ def check_discard_reopens_backup(controller) -> None:
     path backs up what that writer left there.
 
     Every discard means the page at this path is not the page the backup
-    describes. Carrying the "already backed up" record across would leave a
-    heal restoring a page that no longer exists at this name.
+    describes.
     """
+    # Carrying the "already backed up" record across would leave a heal
+    # restoring a page that has since gone from this name.
     vt = fresh_flush()
 
     # The shape of an import. The pending state is discarded, because a flush
@@ -702,7 +706,7 @@ def check_discard_reopens_backup(controller) -> None:
         "disk")
 
     # The shape of a delete. The file goes away and a new page takes the
-    # name, so the old backup describes a page that no longer exists.
+    # name, so the old backup describes a page that has since gone.
     deleted_path = seed_page("DiscardDeleted")
     deleted_backup = backup_path_of(deleted_path)
     old_page = gl.page_manager.get_page(deleted_path, controller)
@@ -731,11 +735,11 @@ def check_discard_reopens_backup(controller) -> None:
 def check_discard_waits_for_flush(controller) -> None:
     """A discard arriving while a flush holds the path must wait for it.
 
-    The flush finishes its backup bookkeeping after the copy, so a discard
-    that slips through mid-copy is overwritten by the record the flush adds
-    on its way out. The flush's own write then lands on top of the file the
-    importer wrote. Real threads open that window.
+    The flush finishes its backup bookkeeping after the copy, so a discard that
+    slips through mid-copy is overwritten by the record the flush adds on its
+    way out. Real threads open that window.
     """
+    # The flush's own write then lands on top of the file the importer wrote.
     scheduler = ManualScheduler()
     page_flush._flush = page_flush.PageFlush(scheduler=scheduler, clock=time.monotonic)
     WRITES.clear()
@@ -813,10 +817,12 @@ def check_quarantined_primary_is_written_back(controller) -> None:
     """A page whose file is gone stays writable, because the write recreates
     it.
 
-    The loader quarantines an unparseable page by renaming it aside, and
-    get_page_data serves the backup, so a page can be live on screen with no
-    primary behind it. Nothing to copy is a refusal, and the write still runs.
+    A page can be live on screen with no primary behind it.
     """
+    # The loader quarantines an unparseable page by renaming it aside, and
+    # get_page_data then serves the backup.
+    # Nothing to copy is a refusal like any other, and the write it guards
+    # still runs and puts the page back.
     vt = fresh_flush()
     path = seed_page("Quarantined")
     quarantined = path + ".corrupt"
@@ -858,10 +864,11 @@ def check_corrupt_primary_is_never_backed_up(controller) -> None:
     """A primary that will not parse is not copied over the backup, and that
     refusal stands for the session.
 
-    A corrupt page is healed from the backup, so copying the corruption over
-    it loses the page for good. A later write would find the primary
-    parseable again, because this seam wrote it a moment ago.
+    A corrupt page is healed from the backup, so copying the corruption over it
+    loses the page for good.
     """
+    # A later write would find the primary parseable again, because this seam
+    # wrote it a moment ago.
     vt = fresh_flush()
     path = seed_page("CorruptPrimary")
     backup = backup_path_of(path)
@@ -950,10 +957,11 @@ def check_every_reader_takes_barrier() -> None:
     get_page_data, each pinned so that removing its barrier turns red.
 
     A reader without a barrier sees a page as it was up to a second ago, and
-    an importer without one has its work undone a second later. Two run
-    headless through a counting seam, and four are pinned at the source,
-    where the call must also come before the read or write it guards.
+    an importer without one has its work undone a second later.
     """
+    # Two sites run headless through a counting seam. The four behind GTK are
+    # pinned at the source, where the call must also come before the read or
+    # the write it guards.
     counting = CountingFlush()
     page_flush._flush = counting
 

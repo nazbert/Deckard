@@ -1,11 +1,12 @@
 """
 Pins the typed gl accessors in src/backend/services.py.
 
-An accessor is a one-line forward, so it breaks by forwarding less than the
-raw expression did. A dropped argument, a cached slot or a None branch turned
-into a crash are the shapes, and every check below aims at one of them. The
-accessors know nothing about GTK, and neither does this scenario.
+An accessor is a one-line forward, so it breaks by forwarding less than the raw
+expression did. A dropped argument, a cached slot or a None branch turned into
+a crash are the shapes, and every check below aims at one of them.
 """
+
+# The accessors know nothing about GTK, and neither does this scenario.
 import fixtures  # noqa: F401  (isolates DATA_PATH before src imports)
 
 import ast

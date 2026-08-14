@@ -3,9 +3,11 @@ Pins the app-ready startup queue in src/backend/startup_queue.py.
 
 The protocol is a race protocol, so most checks are about ownership. A task
 queued before gl.app exists must be delivered exactly once, by the caller
-through its post-append reclaim or by the drain. The module stays lock-free
-and engine-closure-safe, and knows nothing about GLib.
+through its post-append reclaim or by the drain.
 """
+
+# The module stays lock-free and engine-closure-safe, and knows nothing about
+# GLib.
 import fixtures  # noqa: F401  (isolates DATA_PATH before src imports)
 
 import ast

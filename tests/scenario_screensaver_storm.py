@@ -1,11 +1,12 @@
 """
 Integration scenario for a concurrent screensaver transition storm.
 
-Three threads hammer ScreenSaver's entry points at once, a timer-like show(),
-a USB-event-like on_key_change() and a settings-like set_enable pair. Nothing
-may deadlock or raise, and the final journal must agree with showing on every
-key, with no mix across keys and no stuck blank.
+Three threads hammer ScreenSaver's entry points at once, a timer-like show(), a
+USB-event-like on_key_change() and a settings-like set_enable pair.
 """
+
+# Nothing may deadlock or raise, and the final journal must agree with showing
+# on every key, with no mix across keys and no stuck blank.
 import os
 import threading
 import time

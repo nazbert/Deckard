@@ -2,10 +2,11 @@
 Regression test for a page-flipping button that starts pressed on the new page.
 
 load_page resets press_state on every ControllerKey, after the early-outs and
-before the generation bump. A render reads config_gen at the start of update()
-and press_state later, so a render stamped with the new generation always
-composes the key unpressed.
+before the generation bump.
 """
+
+# A render reads config_gen at the start of update() and press_state later, so
+# a render stamped with the new generation always composes the key unpressed.
 import fixtures
 import globals as gl
 

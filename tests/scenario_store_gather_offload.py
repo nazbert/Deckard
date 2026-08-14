@@ -1,11 +1,13 @@
 """
 Regression test for get_last_commit on the shared store fetch path.
 
-Catalog prepare tasks fan out on StoreBackend._prepare_pool, so per-entry
-lookups overlap. get_last_commit runs under _fetch_limiter like every
-sibling fetch, a network failure raises StoreFetchError, and download_repo
-fails up front on an unresolved sha. No network is involved.
+No network is involved.
 """
+
+# Catalog prepare tasks fan out on StoreBackend._prepare_pool, so per-entry
+# lookups overlap. get_last_commit runs under _fetch_limiter like every sibling
+# fetch, a network failure raises StoreFetchError, and download_repo fails up
+# front on an unresolved sha.
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor

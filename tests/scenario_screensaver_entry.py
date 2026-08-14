@@ -2,10 +2,11 @@
 Integration scenario for screensaver entry and exit with a static image.
 
 ScreenSaver.show must clear the deck before it repaints with the screensaver
-media, and hide must repaint every key with the page's content. The blank
-reference hash comes from the deterministic bootstrap clear, so no assertion
-races show()'s asynchronous background repaint.
+media, and hide must repaint every key with the page's content.
 """
+
+# The blank reference hash comes from the deterministic bootstrap clear, so no
+# assertion races show()'s asynchronous background repaint.
 import os
 import time
 

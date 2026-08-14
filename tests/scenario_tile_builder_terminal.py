@@ -3,9 +3,10 @@ The tile-cache builder thread must terminate when a build cannot complete.
 
 _run_builder funnels every non-completing outcome through one terminal seam,
 is_build_terminal, and returns. A promote failure at end-of-source, a
-VideoWriter that never opens and a truncated source each drive that seam. A
-bounded join detects a builder that busy-spins instead of returning.
+VideoWriter that never opens and a truncated source each drive that seam.
 """
+
+# A bounded join detects a builder that busy-spins instead of returning.
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
 import os
@@ -129,12 +130,12 @@ def leg_writer_open_fail() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Leg 3. Truncated source -- the container metadata promises N frames but the
+# Leg 3. A truncated source. The container metadata promises N frames but the
 # file delivers fewer. Byte-truncating an mp4v file is all-or-nothing here
 # (the moov atom sits in the trailing bytes, so any truncation that drops
-# sample data also drops the frame-count metadata -> the file won't open,
-# which is the already-covered n_frames<=0 path, not the terminal seam). So
-# the truncation is modelled at the capture seam instead. A source capture
+# sample data also drops the frame-count metadata, so the file does not open
+# and takes the n_frames path this file already covers rather than the
+# terminal seam). The truncation is modelled at the capture seam. A capture
 # that opens and reports a positive CAP_PROP_FRAME_COUNT but whose read fails
 # at once, as a source truncated to its header does. _end_of_source then
 # releases the capture with nothing written and nothing promoted, which is
@@ -185,7 +186,7 @@ def leg_truncated_source() -> int:
 
     # The writer would open fine, but with zero readable source frames nothing
     # is ever written; still, stub it so no real encoder file is touched and
-    # _end_of_source's `_frames_written > 0` branch is provably not taken.
+    # The _frames_written branch of _end_of_source is provably not taken.
     mtc.cv2.VideoCapture = fake_capture
     mtc.cv2.VideoWriter = lambda *a, **k: _DeadWriter()
     try:

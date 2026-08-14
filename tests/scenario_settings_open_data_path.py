@@ -1,11 +1,13 @@
 """
 The settings Data path Open button opens through Gio, not a subprocess.
 
-DataPathGroup.on_open_data_path_button_clicked expanduser's the entry text
-and launches it as a file:// URI through Gio.AppInfo.launch_default_for_uri,
-which the portal routes under flatpak. A raising launcher stays inside the
-handler, and a missing display makes this scenario skip.
+DataPathGroup.on_open_data_path_button_clicked expanduser's the entry text and
+launches it as a file:// URI through Gio.AppInfo.launch_default_for_uri, which
+the portal routes under flatpak.
 """
+
+# A raising launcher stays inside the handler, and a missing display makes this
+# scenario skip.
 import os
 
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)

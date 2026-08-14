@@ -3,9 +3,10 @@ The PresenceMonitor quiescence rule and its wake fan-out.
 
 The monitor alone can make DeckController.animations_gated true. Mode
 "screensaver" never gates; mode "system-idle" gates on lock and on the logind
-idle hint, and a deck press outranks the lock for a grace period. Every
-transition wakes every deck. No deck, no GTK and no real bus run here.
+idle hint, and a deck press outranks the lock for a grace period.
 """
+
+# Every transition wakes every deck. No deck, no GTK and no real bus run here.
 import fixtures  # noqa: F401  (isolates gl.DATA_PATH before anything reads it)
 
 import os

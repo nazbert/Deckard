@@ -1,11 +1,13 @@
 """
 Plugin settings are keyed by the manifest id, not by the folder name.
 
-PluginBase.settings_path uses the manifest id, which registration and the
-store also use. A plugin whose folder name differs from its id keeps its
-settings across a rename or a reinstall, and an existing id path always wins
-over a legacy folder-name path.
+PluginBase.settings_path uses the manifest id, which registration and the store
+also use.
 """
+
+# A plugin whose folder name differs from its id keeps its settings across a
+# rename or a reinstall, and an existing id path always wins over a legacy
+# folder-name path.
 import json
 import os
 import textwrap

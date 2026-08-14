@@ -2,10 +2,11 @@
 Persistence round-trip for a page edited, then activated, then saved.
 
 set_page_settings must refresh the cached Page object, not only the pages
-already active. Activation adopts the same cached object, so a stale dict
-makes the first ordinary save erase the settings section. A real
-DeckController over the FaultyFakeDeck drives the activation.
+already active. Activation adopts the same cached object, so a stale dict makes
+the first ordinary save erase the settings section.
 """
+
+# A real DeckController over the FaultyFakeDeck drives the activation.
 import json
 
 import fixtures

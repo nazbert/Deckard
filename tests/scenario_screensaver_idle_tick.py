@@ -3,9 +3,11 @@ An idle deck showing a static screensaver must cost nothing per tick.
 
 While ScreenSaver.show owns the deck, deck_controller.inputs holds a freshly
 built set with no action, no media and no label, and the screensaver's own
-imagery lives in background. The tick loop therefore calls update() on no
-input at all, and hide() still repaints every key.
+imagery lives in background.
 """
+
+# The tick loop therefore calls update() on no input at all, and hide() still
+# repaints every key.
 import os
 import threading
 import time
@@ -133,11 +135,12 @@ def late_clear_recovers_content(controller, deck, key_count, blank_hash,
                                      page_sig, ss_sig) -> None:
     """The screensaver-entry interleave that strands a blank deck.
 
-    show() submits its Clear on the control queue and only afterwards
-    enqueues the screensaver's paints. A tick that already drained control
-    writes the screensaver first and pops the Clear on its next pass, which
-    blanks a deck whose slots are now empty and whose screensaver is still.
+    show() submits its Clear on the control queue and only afterwards enqueues
+    the screensaver's paints.
     """
+    # A tick that already drained control writes the screensaver first and pops
+    # the Clear on its next pass, which blanks a deck whose slots are now empty
+    # and whose screensaver is still.
     media_player = controller.media_player
     arm = threading.Event()
     parked = threading.Event()

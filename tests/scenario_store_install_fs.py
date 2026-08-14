@@ -1,11 +1,12 @@
 """
 Coverage for the destructive filesystem half of the store install path.
 
-download_repo is the single choke point every install_* caller funnels
-through. A network fault mid-stream removes the partial archive, a corrupt
-archive leaves no extracted temp folder, an unsafe member is refused before
-unpack, and the destination changes only through a staged, validated swap.
+download_repo is the single choke point every install_* caller funnels through.
 """
+
+# A network fault mid-stream removes the partial archive, a corrupt archive
+# leaves no extracted temp folder, an unsafe member is refused before unpack,
+# and the destination changes only through a staged, validated swap.
 import io
 import os
 import zipfile
@@ -291,7 +292,7 @@ def test_download_fault_leaves_existing_install_intact() -> None:
 
 
 def _hidden_swap_siblings(parent: str) -> list[str]:
-    """Transient swap trees (_swap_into_place) left behind in `parent`."""
+    """Transient swap trees that _swap_into_place left behind in parent."""
     if not os.path.isdir(parent):
         return []
     return [e for e in os.listdir(parent) if ".deckard-new" in e or ".deckard-old" in e]

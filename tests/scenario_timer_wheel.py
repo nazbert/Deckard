@@ -2,10 +2,12 @@
 Unit-tier scenario for the single timer wheel in src/backend/timer_wheel.py.
 
 One daemon scheduler thread backs a min-heap of due times, and 50 concurrent
-schedule calls start no further thread. A cancel is idempotent and safe after
-a fire. A fired callback runs off the scheduler thread, so a slow one cannot
-delay an unrelated due timer.
+schedule calls start no further thread. A cancel is idempotent and safe after a
+fire.
 """
+
+# A fired callback runs off the scheduler thread, so a slow one cannot delay an
+# unrelated due timer.
 import threading
 import time
 
@@ -110,7 +112,7 @@ def check_one_thread_for_many_schedules() -> None:
     print("PASS: one TimerWheel == one scheduler thread, even under 50 concurrent schedule() calls")
 
 
-def check_slow_callback_delays_nothing() -> None:
+def check_slow_callback_delays_no_other_timer() -> None:
     wheel = timer_wheel.TimerWheel(name="SlowCallbackWheel")
     timeline = []
     timeline_lock = threading.Lock()
@@ -181,7 +183,7 @@ def main() -> None:
     check_cancel_before_fire_prevents()
     check_cancel_after_fire_is_noop()
     check_one_thread_for_many_schedules()
-    check_slow_callback_delays_nothing()
+    check_slow_callback_delays_no_other_timer()
     check_module_level_default_wheel_smoke()
 
     print("PASS: scenario_timer_wheel")

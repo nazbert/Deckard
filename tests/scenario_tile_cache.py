@@ -2,10 +2,12 @@
 Unit-tier scenario for the file-level tile-cache registry.
 
 Two consumers that acquire the same (md5, size, saturation) share one cache
-file and one builder thread, each with its own VideoCapture. The detached
-builder promotes the cache while a consumer plays from the source, and the
-consumer switches over on its next get_frame. Releasing both drops the entry.
+file and one builder thread, each with its own VideoCapture. Releasing both
+drops the entry.
 """
+
+# The detached builder promotes the cache while a consumer plays from the
+# source, and the consumer switches over on its next get_frame.
 import os
 import threading
 
@@ -118,13 +120,14 @@ def check_builder_promotes_during_playback() -> None:
 
 
 def check_plays_from_source_forced_window() -> None:
-    """The sibling check guards its from-source assertion behind a ready
-    test, and on a fast machine the tiny-frame builder promotes first, so
-    that assertion is skipped.
+    """A from-source read inside a window where the build cannot promote.
 
-    A wrapper around _run_builder blocks on a barrier until a from-source
-    read has run, then runs the real builder. Inside that window entry.ready
-    is False, so the from-source assertion always runs."""
+    A wrapper around _run_builder blocks on a barrier until a from-source read
+    has run, then runs the real builder, so entry.ready is False throughout.
+    """
+    # The sibling check guards its from-source assertion behind a ready test,
+    # and on a fast machine the tiny-frame builder promotes first, which skips
+    # that assertion. Here it always runs.
     fixtures.install_stub_globals()
     # A distinctive frame count and size, so this source's md5, and its
     # cache filename, cannot collide with another check's video in the shared

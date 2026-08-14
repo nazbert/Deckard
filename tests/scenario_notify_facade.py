@@ -1,11 +1,12 @@
 """
 Pins the gl.notify facade and the send_notification threading contract.
 
-The facade toasts a report when the main window is visible, and sends a
-desktop notification when the window is hidden or absent. It decides on the
-main thread, queues a call made before gl.app exists, and delivers once. The
-app and the window are stubs here, with no GTK widgets and no display.
+The facade toasts a report when the main window is visible, and sends a desktop
+notification when the window is hidden or absent. It decides on the main
+thread, queues a call made before gl.app exists, and delivers once.
 """
+
+# The app and the window are stubs here, with no GTK widgets and no display.
 import threading
 import types
 

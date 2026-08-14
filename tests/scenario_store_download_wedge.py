@@ -2,10 +2,11 @@
 An exception during a store install must not wedge every later download.
 
 The real StorePreview.perform_download_threaded takes a lock, so the
-currently_downloading flag clears whatever the operation did, a download
-after a failure completes promptly, and two concurrent downloads never
-overlap.
+currently_downloading flag clears whatever the operation did.
 """
+
+# A download after a failure therefore completes promptly, and two concurrent
+# downloads never overlap.
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
 import threading

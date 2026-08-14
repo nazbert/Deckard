@@ -3,9 +3,11 @@ Regression test for the two backend failure modes that blanked the store.
 
 process_store_data collects each prepare_* future on its own and filters, so
 one raising entry cannot kill the catalog. get_remote_file with force_refetch
-falls back to the cached copy, bounded by the entry's fetched age. Fetches
-overlap up to the limiter's cap, and a failed thumbnail lists without image.
+falls back to the cached copy, bounded by the entry's fetched age.
 """
+
+# Fetches overlap up to the limiter's cap, and a failed thumbnail lists without
+# image.
 import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace

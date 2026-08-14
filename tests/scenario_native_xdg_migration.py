@@ -1,11 +1,13 @@
 """
 Regression test for rebrand_migration.migrate_native_var_app_to_xdg.
 
-Pre-XDG native builds stored data at ~/.var/app/<id>. The migration moves it
-to $XDG_DATA_HOME/deckard and leaves a compat symlink. The same-filesystem
-path reuses migrate()'s atomic rename, so the cases below cover the XDG wiring
-and the cross-filesystem copy. Stdlib only, so globals stay unimported.
+Pre-XDG native builds stored data at ~/.var/app/<id>. The migration moves it to
+$XDG_DATA_HOME/deckard and leaves a compat symlink. Stdlib only, so globals
+stay unimported.
 """
+
+# The same-filesystem path reuses migrate()'s atomic rename, so the cases below
+# cover the XDG wiring and the cross-filesystem copy.
 import os
 import shutil
 import sys

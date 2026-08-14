@@ -2,10 +2,12 @@
 Regression test for three ways the store tab froze or built garbage URLs.
 
 get_official_store_branch answers a str and falls back to STORE_BRANCH,
-uncached. The versions.json parse is guarded and StorePage re-arms itself
-after a failed load. A url that names no GitHub repository is skipped
-everywhere, through one shared parse. No network is involved.
+uncached. The versions.json parse is guarded and StorePage re-arms itself after
+a failed load. No network is involved.
 """
+
+# A url that names no GitHub repository is skipped everywhere, through one
+# shared parse.
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor

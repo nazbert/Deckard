@@ -1,11 +1,11 @@
 """
 reload_similar_pages must reload each sibling controller's own Page object.
-
-Passing self to another controller's load_page bleeds this controller's page
-onto other decks. get_pages_with_same_json must also snapshot
-controller.active_page once, because another thread clears it to None while a
-controller connects or disconnects.
 """
+
+# Passing self to another controller's load_page bleeds this controller's page
+# onto other decks. get_pages_with_same_json must also snapshot
+# controller.active_page once, because another thread clears it to None while a
+# controller connects or disconnects.
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
 
 import globals as gl

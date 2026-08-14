@@ -2,10 +2,12 @@
 Onboarding and store loaders must not build GTK on worker threads.
 
 GLib.idle_add(section.append_child, XPreview(...)) marshals the append but
-builds the widget as its argument, on the loader thread. The four sites here
-are store previews, recommendation rows, the onboarding selection read and
-the custom-asset chooser build. Stubs record the constructing thread.
+builds the widget as its argument, on the loader thread. Stubs record the
+constructing thread.
 """
+
+# The four sites here are store previews, recommendation rows, the onboarding
+# selection read and the custom-asset chooser build.
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
 import threading

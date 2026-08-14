@@ -3,9 +3,13 @@ Regression test for uncapped touchscreen writes.
 
 Every touchscreen write is rate-capped at the write point in
 perform_media_player_tasks, on the shared _video_write_hz budget with
-latest-wins semantics. An over-budget frame goes back into the single task
-slot, so content is delayed by at most one budget window and never lost.
+latest-wins semantics.
 """
+
+# Without that cap, a back-to-back write flood out-races the 20Hz HID read
+# poll on the transport's single mutex and starves input. An over-budget frame
+# goes back into the single task slot, so content is delayed by at most one
+# budget window and never lost.
 import time
 
 import fixtures

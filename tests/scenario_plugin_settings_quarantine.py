@@ -1,11 +1,12 @@
 """
 Corrupt-JSON quarantine on the plugin file set, with sidecar retention.
 
-A corrupt settings.json moves to a .corrupt sidecar and the read falls back
-to {}, so a later set_settings cannot overwrite the last copy. Retention
-keeps three sidecars per file and prunes the oldest. A plugin source file, a
-manifest or an about.json, is never moved. An OSError is not corruption.
+A corrupt settings.json moves to a .corrupt sidecar and the read falls back to
+{}, so a later set_settings cannot overwrite the last copy. Retention keeps
+three sidecars per file and prunes the oldest. An OSError is not corruption.
 """
+
+# A plugin source file, a manifest or an about.json, is never moved.
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 
 import json

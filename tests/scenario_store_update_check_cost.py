@@ -3,9 +3,11 @@ Regression test for the cost and the identity of the boot update check.
 
 install_* stamps the origin repository into the tree beside VERSION, and
 identity is that stamp, because the catalog cannot say which repository an
-install came from. Once the installs are stamped, an update check fetches the
-catalog files and nothing else. No network is involved.
+install came from. No network is involved.
 """
+
+# Once the installs are stamped, an update check fetches the catalog files and
+# nothing else.
 
 import io
 import json
@@ -41,12 +43,11 @@ def _sha(seed: str) -> str:
 
 class _Entry:
     """One catalog entry plus the local state that decides its verdict.
-
-    installed names which sha the install directory holds, "old", "new" or
-    None. lists_old_sha mirrors the two shapes the real store produces, one
-    version key whose sha is replaced in place, or a map that still lists
-    the older release.
     """
+    # installed names which sha the install directory holds, "old", "new" or
+    # None. lists_old_sha mirrors the two shapes the real store produces, one
+    # version key whose sha is replaced in place, or a map that still lists the
+    # older release.
 
     def __init__(self, repo: str, asset_id: str, installed: str | None = None,
                  lists_old_sha: bool = False, stamped: bool = True,
@@ -337,8 +338,8 @@ def _stub_globals(**kwargs) -> None:
 
 # Six uninstalled and two installed plugins, plus a smaller spread of the
 # other three asset classes. The outdated ones carry the shape the real store
-# produces, one version key whose sha was replaced in place, so the installed
-# sha is no longer listed anywhere in the catalog.
+# produces, one version key whose sha was replaced in place, so the catalog
+# lists the installed sha nowhere.
 def _main_catalogs() -> dict:
     plugins = [_Entry(f"Uninstalled{i}Plugin", f"com_acme_Uninstalled{i}Plugin") for i in range(6)]
     plugins += [
@@ -792,8 +793,8 @@ def test_stamp_naming_dropped_repo_re_resolved() -> None:
 
 def test_stamp_matches_catalog_case_insensitive() -> None:
     """GitHub owner and repository names are case-insensitive, so a tree
-    stamped Acme/Widget is the same install the catalog spells acme/Widget
-    -- and must not be identified all over again."""
+    stamped Acme/Widget is the same install the catalog spells acme/Widget,
+    and must not be identified again."""
     _stub_globals()
     _reset_local_state()
 

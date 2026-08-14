@@ -1,11 +1,12 @@
 """
 The default on_update does not re-enter on_ready.
 
-ActionCore's default on_update calls on_ready for compatibility. It skips
-that call, and logs a debug line, while the initial on_ready is still in
-flight. After on_ready_finished is set, the compat call runs on every
-on_update again. An action that overrides on_update keeps its own body.
+ActionCore's default on_update calls on_ready for compatibility. It skips that
+call, and logs a debug line, while the initial on_ready is still in flight.
+After on_ready_finished is set, the compat call runs on every on_update again.
 """
+
+# An action that overrides on_update keeps its own body.
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
 import threading

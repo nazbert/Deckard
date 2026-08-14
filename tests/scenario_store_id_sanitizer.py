@@ -2,10 +2,11 @@
 Regression test for manifest-controlled asset ids and shell-free installs.
 
 plugin_id, icon_id and wallpaper_id come from a remote manifest.json.
-StoreBackend.is_safe_asset_id whitelists an id at every join site, rejecting
-rather than normalizing, and the install scripts run as argv lists with no
-shell. download_repo is stubbed, so no network is involved.
 """
+
+# StoreBackend.is_safe_asset_id whitelists an id at every join site, rejecting
+# rather than normalizing, and the install scripts run as argv lists with no
+# shell. download_repo is stubbed, so no network is involved.
 import os
 import sys
 

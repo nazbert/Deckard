@@ -2,10 +2,12 @@
 The quiescence gate never touches the deck screensaver.
 
 The physical deck stays visible while the monitor is locked, so the
-screensaver's animation is the intended content and animations_gated carries
-a not screen_saver.showing term. On hide() the restored page must paint every
-key once, transparent ones included, and only then go quiet.
+screensaver's animation is the intended content and animations_gated carries a
+not screen_saver.showing term.
 """
+
+# On hide() the restored page must paint every key once, transparent ones
+# included, and only then go quiet.
 import os
 import time
 
@@ -28,9 +30,9 @@ def wait_until_quiet(deck, quiet_for: float = 0.5, timeout: float = 10.0) -> boo
     """Waits until no device write has landed for quiet_for seconds.
 
     The settle window's length depends on how fast the page-load tasks drain,
-    which is not a constant on a loaded machine. The invariant is that the
-    loop goes quiet, not that it goes quiet in a fixed number of
-    milliseconds."""
+    which is not a constant on a loaded machine."""
+    # The invariant is that the loop goes quiet, not that it goes quiet within
+    # a fixed number of milliseconds.
     deadline = time.monotonic() + timeout
     seen = len(deck.journal())
     stable_since = time.monotonic()

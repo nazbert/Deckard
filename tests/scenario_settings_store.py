@@ -2,10 +2,11 @@
 The settings store, the one owner of the app's settings files.
 
 The store answers where each file is, what an absent or corrupt one reads as,
-who may write it, and what a write does to a cached copy. A corrupt
-Assets.json must boot as an empty library rather than take the app down from
-inside AssetManagerBackend.__init__.
+who may write it, and what a write does to a cached copy.
 """
+
+# A corrupt Assets.json must boot as an empty library rather than take the app
+# down from inside AssetManagerBackend.__init__.
 import fixtures  # noqa: F401  (must be first -- see fixtures.py docstring)
 
 import json  # noqa: E402
@@ -214,11 +215,12 @@ def check_write_during_cold_read() -> None:
     """A write that lands while a reader is still in the file must not be
     undone by that reader finishing afterwards.
 
-    The window sits between a cache miss and the parsed content being stored.
-    A reader that got there first holds pre-write content, and caching it
-    leaves every later reader on the old settings. Only a write to that
-    deck's own file drops its cache, so nothing else would correct it.
+    The window sits between a cache miss and the parsed content being stored,
+    where a reader that got there first holds pre-write content.
     """
+    # Caching that content leaves every later reader on the old settings, and
+    # only a write to this deck's own file drops its cache, so nothing else
+    # would correct it.
     serial = "STORE-RACE"
     path = seed_deck(serial, {"marker": "before-the-write"})
 
@@ -273,13 +275,14 @@ def check_write_during_cold_read() -> None:
 
 
 def check_symlinked_surface_one_file() -> None:
-    """A settings file that is a symlink must read, write, cache and
-    invalidate under one identity.
+    """A settings file that is a symlink must read, write, cache and invalidate
+    under one identity.
 
-    The atomic writer follows the link and writes the real file, so a store
-    that keyed its cache on the spelling it was handed would cache under the
-    link and invalidate under the target. Managed config trees do this.
+    Managed config trees do this.
     """
+    # The atomic writer follows the link and writes the real file, so a store
+    # that keyed its cache on the spelling it was handed would cache under the
+    # link and invalidate under the target.
     serial = "STORE-LINK"
     link_path = os.path.join(DECKS_DIR, f"{serial}.json")
     real_path = probe_path(f"real-{serial}.json")
@@ -566,13 +569,12 @@ def check_ui_asset_manager_schema() -> None:
 
 
 def check_static_surface_roundtrip() -> None:
-    """The static settings surface holds the data-path override file, read
-    and written through the store rather than raw.
-
-    The real static file lives outside the data path, because it chooses the
-    data path, so this check points the surface at an isolated temp file and
-    must never touch the user's own.
+    """The static settings surface holds the data-path override file, read and
+    written through the store rather than raw.
     """
+    # The real static file lives outside the data path, because it chooses the
+    # data path, so this check points the surface at an isolated temp file and
+    # must never touch the user's own.
     original = gl.STATIC_SETTINGS_FILE_PATH
     static_path = probe_path("static-settings.json")
     for stale in (static_path, static_path + ".corrupt", static_path + ".corrupt.1"):

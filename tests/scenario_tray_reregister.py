@@ -2,10 +2,11 @@
 Regression scenario. Tray icon registration must not be one-shot.
 
 A watcher that appears late must still receive the item, and the SNI spec
-requires an item to re-register with a watcher that restarted. This scenario
-runs an isolated session bus, registers the tray icon with no watcher
-present, then starts one, kills it, and starts a fresh one.
+requires an item to re-register with a watcher that restarted.
 """
+
+# This scenario runs an isolated session bus, registers the tray icon with no
+# watcher present, then starts one, kills it, and starts a fresh one.
 import fixtures  # noqa: F401  (must be imported first: isolates DATA_PATH)
 
 import time
@@ -77,7 +78,7 @@ class FakeWatcher:
 
 
 def pump_until(condition, timeout: float, what: str) -> None:
-    """Iterate the default GLib main context until `condition()` or timeout."""
+    """Iterate the default GLib main context until condition() or a timeout."""
     context = GLib.MainContext.default()
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -109,8 +110,8 @@ class _StubBus:
         self.unregistered.append(reg_id)
 
     def emit_signal(self, **kwargs):
-        # DBusMenuService.set_items() -> LayoutUpdate() emits a signal on
-        # construction; the double-register accounting doesn't care.
+        # DBusMenuService.set_items calls LayoutUpdate, which emits a signal
+        # at construction. The double-register accounting does not read it.
         pass
 
     @property
@@ -150,33 +151,23 @@ def check_base_double_register_no_orphan() -> None:
 
 
 def check_sni_double_register_keeps_menu_live() -> None:
-    """Real TrayIcon path (regression guard). The actual
-    double-register path is TrayIcon.initialize() + the Settings-panel
-    start(), which goes through StatusNotifierItemService.register(), NOT
-    the bare DBusService. That override registers BOTH the SNI object and
-    a nested menu object, and overrides unregister() to cascade
-    self._menu.unregister().
+    """A second register() over the real TrayIcon path must keep both objects.
 
-    An unregister-then-reregister remedy in the base register() dispatches
-    virtually to the SNI unregister() override, tears the menu object down,
-    and never re-registers it -- leaving the tray menu dead on the bus while
-    the base only re-registers the SNI object. So after a second register()
-    BOTH sni.registration_id AND sni._menu.registration_id must stay live,
-    with no orphaned/leaked prior registration.
-
-    Driven against a stub bus so the register/unregister accounting is exact
-    and deterministic. StatusNotifierItemService.register() also watches
-    org.kde.StatusNotifierWatcher via Gio.bus_watch_name_on_connection (which
-    type-checks its first arg against a real connection); that name-watch is
-    orthogonal to the object-registration leak under test, so it is stubbed
-    out here.
-
-    Red-test. Against the unregister-then-reregister remedy this FAILS
-    (menu.registration_id is None, and the SNI + menu ids churn); with the
-    early-return guard it passes."""
+    StatusNotifierItemService.register registers the SNI object and a nested
+    menu object, and its unregister cascades to the menu. Both registration
+    ids must stay live across a second register, with nothing orphaned.
+    """
     import src.backend.trayicon as trayicon_mod
     from src.backend.trayicon import StatusNotifierItemService
 
+    # An unregister-then-reregister remedy inside the base register()
+    # dispatches virtually to the SNI unregister override, which tears the
+    # menu down, and the base then re-registers the SNI object alone. That
+    # leaves the tray menu dead on the bus, which is what this check fails on.
+    # register() also watches org.kde.StatusNotifierWatcher through
+    # Gio.bus_watch_name_on_connection, which type-checks its first argument
+    # against a real connection. That name-watch is orthogonal to the
+    # object-registration leak, so it is stubbed out.
     orig_watch = trayicon_mod.Gio.bus_watch_name_on_connection
     orig_unwatch = trayicon_mod.Gio.bus_unwatch_name
     trayicon_mod.Gio.bus_watch_name_on_connection = (
@@ -212,9 +203,9 @@ def check_sni_double_register_keeps_menu_live() -> None:
             f"(no leak, no teardown): registered={bus.registered}, "
             f"unregistered={bus.unregistered}, live={bus.live} (expected 2)"
         )
-        # No-op double-register. Each object keeps its original registration
-        # id -- nothing was unregistered-then-reregistered (which would both
-        # churn the id and, on this path, kill the menu).
+        # A double register changes nothing. Each object keeps its original
+        # registration id, so nothing was unregistered and re-registered,
+        # which would churn the id and kill the menu on this path.
         assert sni.registration_id == sni_id, (
             f"SNI object id churned on double register(): {sni_id} -> "
             f"{sni.registration_id}; register() must be a no-op when already "
@@ -264,8 +255,8 @@ def run_checks(bus_address: str) -> None:
     tray = DBusTrayIcon(menu=menu, app_id="com.example.HarnessTray",
                         title="HarnessTray")
 
-    # 1) Late watcher. Registering while no watcher exists must neither
-    #    raise nor lose the icon -- the announcement must arrive as soon
+    # 1. A late watcher. Registering while no watcher exists must neither
+    #    raise nor lose the icon, and the announcement must arrive as soon
     #    as a watcher shows up.
     try:
         tray.register()
@@ -286,7 +277,7 @@ def run_checks(bus_address: str) -> None:
     )
 
     # 2) Watcher restart. A fresh watcher instance knows nothing about
-    #    previously registered items; the item must re-announce itself.
+    #    the items an earlier watcher held, so the item re-announces itself.
     watcher.crash()
     reborn = FakeWatcher(bus_address)
     reborn.wait_until_owning_name()

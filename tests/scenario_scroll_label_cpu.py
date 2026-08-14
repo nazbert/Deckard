@@ -2,10 +2,11 @@
 Regression test for the scroll-label CPU cost.
 
 get_has_scroll_labels honors the rolling-labels setting and measures with the
-multiline-aware textbbox the render uses. A key re-renders only when its own
-offset moved, and the scrolling text rasterizes once into a cached strip,
-which is capped by width.
+multiline-aware textbbox the render uses.
 """
+
+# A key re-renders only when its own offset moved, and the scrolling text
+# rasterizes once into a cached strip, which is capped by width.
 import time
 
 import fixtures

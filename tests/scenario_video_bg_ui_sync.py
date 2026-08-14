@@ -3,9 +3,11 @@ update_all_inputs must sync the in-app key previews under a background video.
 
 An early return after the dials skips set_ui_key_image for every key, and the
 video loop skips an opaque key's per-frame render as well, so the in-app grid
-diverges from the deck. No UI is attached here, so the null port refuses each
-push and set_ui_key_image stores a dirty marker per key instead.
+diverges from the deck.
 """
+
+# No UI is attached here, so the null port refuses each push and
+# set_ui_key_image stores a dirty marker per key instead.
 import fixtures
 from src.backend.DeckManagement.InputIdentifier import Input
 

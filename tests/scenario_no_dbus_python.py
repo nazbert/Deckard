@@ -3,9 +3,10 @@ Regression fence against dbus-python anywhere in the tree.
 
 The tree uses Gio for bus work and dasbus where a proxy layer helps. The scan
 matches the import forms and the GLib mainloop glue class, on word boundaries,
-in every tracked *.py. It assembles the needles at runtime, so this file never
-matches itself.
+in every tracked *.py.
 """
+
+# It assembles the needles at runtime, so this file never matches itself.
 import os
 import re
 import subprocess

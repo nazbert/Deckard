@@ -2,10 +2,12 @@
 clone_repo must never install a tree it did not move onto.
 
 git checkout handles a branch and a tag alike, and the return codes of the
-checkout and of the reset --hard are both checked, so an unreachable ref or
-sha fails the install rather than staging the default tip. The remote is a
-local fixture repository, and the assertions read the installed content.
+checkout and of the reset --hard are both checked, so an unreachable ref or sha
+fails the install rather than staging the default tip.
 """
+
+# The remote is a local fixture repository, and the assertions read the
+# installed content.
 import os
 import subprocess
 

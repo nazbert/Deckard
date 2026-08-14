@@ -1,11 +1,11 @@
 """
 Pins the app-settings DEFAULTS table.
-
-SettingsManager owns one DEFAULTS table and AppSettings reads and writes
-through it, so a transcription slip fails here. store.custom-stores defaults
-to a list, the value the writer appends to, and system.keep-running has no
-default, so None means never asked.
 """
+
+# SettingsManager owns one DEFAULTS table and AppSettings reads and writes
+# through it, so a transcription slip fails here. store.custom-stores defaults
+# to a list, the value the writer appends to, and system.keep-running has no
+# default, so None means never asked.
 import fixtures  # noqa: F401  (isolates gl.DATA_PATH before anything reads it)
 import globals as gl
 

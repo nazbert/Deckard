@@ -2,10 +2,11 @@
 Unit-tier scenario for the plugin event and callback layer.
 
 The pieces between an EventHolder firing and a plugin callback running are
-deck-independent, so this drives them with no deck and no controller. It
-covers observer error logging, InputBases delivery to the no-arg handlers,
-and the cross-plugin connect and disconnect APIs.
+deck-independent, so this drives them with no deck and no controller.
 """
+
+# It covers observer error logging, InputBases delivery to the no-arg handlers,
+# and the cross-plugin connect and disconnect APIs.
 import fixtures  # noqa: F401  (isolated data dir + sys.path, house convention)
 
 from loguru import logger as log

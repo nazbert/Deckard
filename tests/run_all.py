@@ -2,9 +2,8 @@
 """
 Runner for the scenario harness (docs/presenter-migration-plan.md).
 
-Runs each tests/scenario_*.py in its own subprocess and interpreter, with an
-isolated temp data dir from fixtures.py, so one crash or hang cannot corrupt
-the next scenario. Prints a PASS/FAIL table. Exits 1 if a scenario fails.
+Runs each tests/scenario_*.py in its own subprocess and interpreter, so one
+crash or hang cannot corrupt the next scenario.
 
 Usage:
     .venv/bin/python tests/run_all.py [-k SUBSTRING] [--timeout SECONDS]
@@ -19,6 +18,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from xml.dom import minidom
 
+# Each scenario gets an isolated temp data dir from fixtures.py. The run
+# prints a PASS and FAIL table, and exits 1 when a scenario fails.
 TESTS_DIR = Path(__file__).resolve().parent
 
 # Scenarios that assert behavior the current code does not have yet. Add an

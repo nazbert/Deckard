@@ -1,11 +1,13 @@
 """
 Regression test for Change Page and Run Command on one button.
 
-ControllerKey snapshots the state and the resolved action objects at key
-DOWN, then dispatches every event of the gesture to that snapshot, whatever
-page swaps happen in between. Stub actions sit on two real Pages over a fake
-deck, with a recorder on page B's same key to catch bleed.
+ControllerKey snapshots the state and the resolved action objects at key DOWN,
+then dispatches every event of the gesture to that snapshot, whatever page
+swaps happen in between.
 """
+
+# Stub actions sit on two real Pages over a fake deck, with a recorder on page
+# B's same key to catch bleed.
 import os
 
 import fixtures

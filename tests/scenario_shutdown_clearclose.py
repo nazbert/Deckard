@@ -2,10 +2,11 @@
 Integration scenario for the terminal clear-and-close on shutdown.
 
 DeckManager.close_all submits a ClearAndClose control message per controller
-and joins each media thread with a 2s bound. The journal ends with the blank
-writes and one close(), the thread exits inside the bound, and a later
-delete() returns fast.
+and joins each media thread with a 2s bound.
 """
+
+# The journal ends with the blank writes and one close(), the thread exits
+# inside the bound, and a later delete() returns fast.
 import time
 
 import fixtures

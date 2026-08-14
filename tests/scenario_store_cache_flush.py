@@ -2,10 +2,12 @@
 Regression test for the deferred StoreCache index flush.
 
 A read, and the first sighting of a cache string, marks the index dirty, and
-one daemon timer flushes the whole index once, FLUSH_DEBOUNCE_S later. A
-committed blob write stays synchronous, because a lost path or fetched
-record orphans the blob forever. No network is involved.
+one daemon timer flushes the whole index once, FLUSH_DEBOUNCE_S later. No
+network is involved.
 """
+
+# A committed blob write stays synchronous, because a lost path or fetched
+# record orphans the blob forever.
 import atexit
 import json
 import os
@@ -199,9 +201,11 @@ def test_read_burst_arms_one_timer() -> None:
     read.
 
     The write counts cannot see this alone, because many timers firing inside
-    one window still collapse to one write. What they cost is one thread per
-    read, which turns a warm catalog browse into a thread storm. The debounce
-    here is long enough that nothing fires mid-burst."""
+    one window still collapse to one write.
+    """
+    # What those timers cost is one thread per read, which turns a warm
+    # catalog browse into a thread storm. The debounce here is long enough
+    # that nothing fires mid-burst.
     def _armed_flush_threads() -> list:
         return [t for t in threading.enumerate()
                 if t.name == "store-cache-index-flush" and t.is_alive()]

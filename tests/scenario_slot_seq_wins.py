@@ -3,9 +3,11 @@ Single-slot assignment must be highest-seq-wins.
 
 add_touchscreen_task and add_image_task stamp the seq inside _slot_lock,
 atomically with the assignment, so seq order is assignment order and the slot
-always ends holding the maximum allocated seq. A seq-ordered sleep after
-allocation makes an inversion deterministic rather than scheduler-dependent.
+always ends holding the maximum allocated seq.
 """
+
+# A seq-ordered sleep after allocation makes an inversion deterministic rather
+# than scheduler-dependent.
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
 import threading
@@ -28,10 +30,9 @@ def _run_rounds(media_player, submit_fn, read_slot_seq, label: str) -> int:
     Each round installs a recorder that captures the allocated seqs and sleeps
     after allocation, longest for the earliest seq. The first round whose slot
     does not end on that round's max seq fails.
-
-      submit_fn(thread_index) enqueues one frame through the add_* under test.
-      read_slot_seq() returns the current slot's submit_seq, or None.
     """
+    # submit_fn(thread_index) enqueues one frame through the add_* under test.
+    # read_slot_seq() returns the current slot's submit_seq, or None.
     base_next = media_player.next_submit_seq
 
     for rnd in range(ROUNDS):

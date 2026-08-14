@@ -3,9 +3,10 @@ A page change requested while the screensaver shows must be deferred.
 
 load_page records the requested page as pending and leaves active_page alone,
 because the media player gates the screensaver's background video on
-background.video.page is active_page. hide() loads the pending page on
-dismiss. Distinct per-page backgrounds make a leak detectable by hash.
+background.video.page is active_page. hide() loads the pending page on dismiss.
 """
+
+# Distinct per-page backgrounds make a leak detectable by hash.
 import os
 import time
 

@@ -1,11 +1,12 @@
 """
 run_command detaches a command line without forking the interpreter.
 
-It Popens the command line directly, so shell semantics such as redirection
-and && survive, and it reaps the child on a throwaway daemon thread. The call
-never blocks its caller, run_command(None) is a silent no-op, and an
-unspawnable command is logged rather than raised.
+It Popens the command line directly, so shell semantics such as redirection and
+&& survive, and it reaps the child on a throwaway daemon thread.
 """
+
+# The call never blocks its caller, run_command(None) is a silent no-op, and an
+# unspawnable command is logged rather than raised.
 import multiprocessing
 import os
 import time

@@ -2,10 +2,12 @@
 Regression test for install and update results across the store backend.
 
 The four install_* entry points answer a StoreResult, Ok(None) on success and
-an Err naming the failure otherwise. Each update_all_* narrows on Ok, never
-on truthiness, and returns Ok(count) or propagates the Err. update_everything
-returns Ok(sum) or the first leg's Err. No network is involved.
+an Err naming the failure otherwise. No network is involved.
 """
+
+# Each update_all_* narrows on Ok, never on truthiness, and returns Ok(count)
+# or propagates the Err. update_everything returns Ok(sum) or the first leg's
+# Err.
 
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl  # noqa: F401
@@ -65,7 +67,7 @@ def test_install_plugin_failure_skips_reload() -> None:
     )
 
 
-def test_update_all_plugins_counts_successes() -> None:
+def test_update_all_plugins_counts_never_predeletes() -> None:
     fixtures.install_stub_globals()
     sb = _make_backend()
 
@@ -235,7 +237,7 @@ def test_install_icon_propagates_download_result() -> None:
 def main() -> None:
     fixtures.start_watchdog(30, label="scenario_store_install_contract")
     test_install_plugin_failure_skips_reload()
-    test_update_all_plugins_counts_successes()
+    test_update_all_plugins_counts_never_predeletes()
     test_update_everything_checks_all_four_legs()
     test_update_all_sd_plus_successes()
     test_update_all_icons_counts_only_successes()

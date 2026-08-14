@@ -3,9 +3,10 @@ Regression test for the minimum-app-version gate.
 
 StoreData.is_min_app_version_satisfied is the one implementation, and it
 compares inclusively, so an asset requiring exactly the running version is
-compatible. StorePreview delegates to it. No GTK widget is built here,
-because the method never touches self.
+compatible. StorePreview delegates to it.
 """
+
+# No GTK widget is built here, because the method never touches self.
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl
 
@@ -34,11 +35,11 @@ def test_helper_gate_semantics() -> None:
 def test_verdict_matches_runtime_gate_on_suffixed_versions() -> None:
     """The store badge must agree with the runtime plugin loader.
 
-    PluginBase.is_minimum_version_ok compares base versions, with the
-    pre-release, post-release, dev and local suffixes stripped. A raw parsed
-    compare diverges on a pre-release build, where an asset pinned to the
-    release loads at runtime but reads as incompatible.
+    PluginBase.is_minimum_version_ok compares base versions, with the pre-
+    release, post-release, dev and local suffixes stripped.
     """
+    # A raw parsed compare diverges on a pre-release build, where an asset
+    # pinned to the release loads at runtime but reads as incompatible.
     running = version.parse(gl.app_version)
     base = running.base_version  # e.g. "1.5.0" for a "1.5.0-beta.15" build
 

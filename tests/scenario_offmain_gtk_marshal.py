@@ -1,12 +1,15 @@
 """
 Integration scenario for framework GTK construction at plugin registration.
 
-The store-install path runs a plugin's whole __init__ on the installer
-thread. GTK4 is main-thread-only, so the ActionHolder default icon,
-add_css_stylesheet and get_selector_icon all construct on the main thread,
-and stay inline when the caller already runs on main. No GTK main loop runs,
-so the scenario pumps the default GLib.MainContext itself.
+The store-install path runs a plugin's whole __init__ on the installer thread.
 """
+
+# GTK4 is main-thread-only, so the ActionHolder default icon,
+# add_css_stylesheet and get_selector_icon all construct on the main thread,
+# and stay inline when the caller already runs on main.
+
+# No GTK main loop runs here, so the scenario pumps the default
+# GLib.MainContext itself.
 import threading
 import time
 import types

@@ -3,9 +3,11 @@ on_ready ordering guarantees, against the real dispatch code.
 
 own_actions_tick and own_actions_update gate on on_ready_finished, so no tick
 and no second on_ready runs beside the initial one. A per-plugin RLock
-serializes get_settings against set_settings. A raising on_ready still opens
-the gates, so the action does not stay dead for the page's lifetime.
+serializes get_settings against set_settings.
 """
+
+# A raising on_ready still opens the gates, so the action does not stay dead
+# for the page's lifetime.
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
 import json

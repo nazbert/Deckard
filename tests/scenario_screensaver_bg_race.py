@@ -2,10 +2,11 @@
 Integration scenario for the background-load and screensaver race.
 
 A load_background worker that holds _background_load_lock and already passed
-its generation check must never land its write after the screensaver's. A
-gate inside Background.set_from_path parks the worker with the lock held, so
-show() blocks on that same lock and its background lands last.
+its generation check must never land its write after the screensaver's.
 """
+
+# A gate inside Background.set_from_path parks the worker with the lock held,
+# so show() blocks on that same lock and its background lands last.
 import os
 import threading
 import time
