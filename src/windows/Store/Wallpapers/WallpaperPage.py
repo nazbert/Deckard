@@ -42,8 +42,8 @@ class WallpaperPage(StorePage):
         self.store = store
         self.compatible_section.search_entry.set_placeholder_text(gl.lm.get("store.wallpapers.search-placeholder"))
 
-    # No @log.catch here: StorePage._load_guarded needs to SEE the failure to
-    # show the error page and re-arm the tab for a retry.
+    # Carry no @log.catch here. StorePage._load_guarded must see the failure,
+    # so it can show the error page and arm the tab for a retry.
     def load(self):
         self.set_loading()
         result = self.store.backend.get_all_wallpapers()

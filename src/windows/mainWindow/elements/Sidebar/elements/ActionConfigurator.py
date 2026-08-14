@@ -298,8 +298,8 @@ class RemoveButton(Gtk.Button):
         if load:
             page.reload_similar_pages(identifier=self.action.input_ident, reload_self=True)
 
-        # Destroy the actual action: notify then unconditionally clean_up(),
-        # regardless of whether the action overrides the hook (D1).
+        # Destroy the action. This notifies, then calls clean_up(), whether or
+        # not the action overrides the hook.
         ActionCore.teardown(self.action, hook_name="on_remove")
         del self.action
 

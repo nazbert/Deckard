@@ -78,9 +78,9 @@ class ActionChooser(Gtk.Box):
         self.search_entry.connect("search-changed", self.on_search_changed)
         self.main_box.append(self.search_entry)
 
-        # Created before the PluginGroup: its update() (called from the
-        # PluginGroup constructor and on every store install/uninstall)
-        # refreshes this label through update_empty_state().
+        # Create this before the PluginGroup. Its update() refreshes this
+        # label through update_empty_state(), and that update runs from the
+        # PluginGroup constructor and at every store install and uninstall.
         self.empty_state_label = Gtk.Label(
             wrap=True,
             justify=Gtk.Justification.CENTER,

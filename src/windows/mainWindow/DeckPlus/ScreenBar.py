@@ -283,25 +283,22 @@ class ScreenBarImage(Gtk.Picture):
     def prepare_mirror_frame(self, image: Image.Image) -> MirrorFrame:
         """The paint-ready payload for paint_mirror_frame.
 
-        Any thread may call it. The thumbnail and every conversion use only
-        PIL and GdkPixbuf, so they run on the caller, which is the media
-        thread for a live frame, and only the paint needs the loop. The mapped
-        check lives in set_pixbuf_and_del, because widget state needs the main
-        thread.
-
-        The task id travels with the pixbuf, so a paint that lost the race to
-        a newer frame still drops out in set_pixbuf_and_del. The stamp goes on
-        this widget while the mirror drain resolves the screenbar from the
-        deck stack again, so the stamp decides only between frames of one
-        widget. A screenbar that is replaced between a push and its paint
-        takes the id with it, and the replacement stamps its own frames from
-        its own counter.
+        Any thread may call it. The thumbnail and every conversion use only PIL
+        and GdkPixbuf, so they run on the caller, which is the media thread for
+        a live frame. The mapped check lives in set_pixbuf_and_del, because
+        widget state needs the main thread.
         """
         width = 385 #TODO: Find a better way to do this
         thumbnail = image.copy()
         thumbnail.thumbnail((width, width/8))
 
         pixbuf = image2pixbuf(thumbnail.convert("RGBA"), force_transparency=True)
+        # The task id travels with the pixbuf, so a paint that lost the race to
+        # a newer frame drops out in set_pixbuf_and_del. The stamp goes on this
+        # widget while the mirror drain resolves the screenbar from the deck
+        # stack again, so it decides only between frames of one widget. A
+        # screenbar replaced between a push and its paint takes the id with it,
+        # and the replacement stamps its own frames from its own counter.
         self.latest_task_id = self.get_new_task_id()
         task_id = self.latest_task_id
 
@@ -323,14 +320,13 @@ class ScreenBarImage(Gtk.Picture):
         return False
 
     def _prepare_dial_preview(self, image: Image.Image) -> DialPreview:
-        """The sidebar's icon preview for a selected dial, cropped out of this
-        same strip frame and converted here on the producer.
+        """The icon preview of the sidebar for a selected dial.
 
-        It travels in the strip's payload rather than in a slot of its own:
-        the crop cannot be newer or older than the frame it came from, so one
-        payload keeps the two in step and costs no second callback. Sending it
-        straight to IconSelector.set_image instead would put an uncoalesced
-        idle per produced frame back on the loop.
+        The crop comes out of this same strip frame, and the conversion runs
+        here on the producer. It travels in the payload of the strip, because
+        the crop matches the frame it came from, so one payload keeps the two
+        in step and costs no second callback. A direct call to
+        IconSelector.set_image would add one uncoalesced idle per frame.
         """
         if gl.app is None or not recursive_hasattr(gl, "app.main_win.sidebar"):
             return None
@@ -360,8 +356,8 @@ class ScreenBarImage(Gtk.Picture):
             if task_id != self.latest_task_id:
                 log.debug("Screenbar: Abort task")
                 return
-        # Skip if the widget was unmapped between queuing and running this
-        # callback: painting a disposed widget crashes GTK.
+        # Skip when the widget unmapped between the queue and this callback,
+        # because a paint on a disposed widget crashes GTK.
         try:
             if not self.get_mapped():
                 # Replay this pixbuf on the map. This is a second net. The

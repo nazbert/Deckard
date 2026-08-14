@@ -1,14 +1,8 @@
 """Deckard DBus API.
 
 The interface at io.github.nazbert.Deckard lets external tools query and
-control Deckard.
-
-Top-level object /io/github/nazbert/Deckard: the Controllers, Pages, IconPacks
-and ForegroundWindow properties, plus AddPage, RemovePage, ChangePage,
-ChangeState, NotifyForegroundWindow and GetIconNames.
-
-Per-controller object /io/github/nazbert/Deckard/controllers/<serial>:
-SetActivePage and the ActivePageName property.
+control Deckard. The top-level object is /io/github/nazbert/Deckard, and each
+controller gets /io/github/nazbert/Deckard/controllers/<serial>.
 """
 
 import json
@@ -268,16 +262,14 @@ class DeckardAPI:
         The value comes from the published object set, not from the deck
         manager list, so each serial here has an object at the path composed
         from it, because _publish_controller lists and publishes in one step.
-
-        Publishing marshals onto the main context, so between a deck
-        registering and its publish idle running this property omits a deck the
-        app has. An omission costs a client one retry, and an extra name costs
-        it an error on a path it composed from this list. GLib runs idles below
-        the GDBus dispatch, so an external read can overtake a queued publish,
-        and the PropertiesChanged from publishing corrects the value.
-
         Main context only, like every registration change.
         """
+        # Publishing marshals onto the main context, so between a deck
+        # registering and its publish idle running this property omits a deck
+        # the app has. An omission costs a client one retry, and an extra name
+        # costs it an error on a path it composed from this list. GLib runs
+        # idles below the GDBus dispatch, so an external read can overtake a
+        # queued publish, and the PropertiesChanged from publishing corrects it.
         return list(_controller_instances)
 
     @property
@@ -329,11 +321,10 @@ def publish_controller(controller) -> None:
     Decks register from the USB monitor thread, the boot re-enumeration thread
     and the main thread. dasbus holds its object registrations in a plain dict
     and dispatches on the GLib main context, so the registration marshals there.
-
-    The bus check comes first and reads nothing from the controller, because a
-    boot caller passes a controller that is still under construction. The sweep in
-    start_dbus_service covers those decks.
     """
+    # The bus check comes first and reads nothing from the controller, because
+    # a boot caller passes a controller that is still under construction. The
+    # sweep in start_dbus_service covers those decks.
     if _bus is None:
         return
     GLib.idle_add(_publish_on_main, controller)
@@ -527,10 +518,10 @@ def notify_foreground_window_changed(name: str, wm_class: str) -> None:
     """Update ForegroundWindow on the top-level API object.
 
     WindowGrabber.on_active_window_changed() calls this, so DBus clients see
-    the foreground window change. That watcher runs only while a page holds a
-    window auto-change rule, so the property tracks the desktop only then, and
-    otherwise keeps its empty value. A constant feed would poll the desktop for
-    the property alone. NotifyForegroundWindow can still set it.
+    the foreground window change. NotifyForegroundWindow can still set it.
     """
+    # That watcher runs only while a page holds a window auto-change rule, so
+    # the property tracks the desktop only then, and otherwise keeps its empty
+    # value. A constant feed would poll the desktop for the property alone.
     if _api_instance is not None:
         _api_instance.ForegroundWindow = WindowInfo(name, wm_class)

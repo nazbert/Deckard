@@ -202,7 +202,7 @@ def create_global_objects():
 
     # Construct before LockScreenManager, whose __init__ starts setup() on a
     # daemon thread at once. A lock event in the gap finds gl.presence_monitor
-    # still None and drops it.
+    # still None, and the event is lost.
     gl.presence_monitor = PresenceMonitor()
 
     gl.lock_screen_detector = LockScreenManager()
@@ -391,6 +391,8 @@ def make_api_calls():
 
     True means a running instance took them and this process stops.
     False means the requests are parked, or absent, and this process boots.
+    Everything but reading argv and leaving the process lives in cli_forward,
+    where a test can reach it, because this module re-execs itself on import.
     """
     verdict = cli_forward.forward_cli_requests(gl.argparser.parse_args())
     for failure in verdict.failures:

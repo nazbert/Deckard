@@ -12,29 +12,24 @@ def is_min_app_version_satisfied(minimum_app_version: str | None) -> bool:
     It is the one implementation behind StorePreview.check_required_version.
     The comparison includes the running version, so an asset that requires
     exactly the running version passes.
-
-    It compares base versions and strips the pre-release, post and local
-    suffixes, which matches the decision of the runtime plugin loader in
-    PluginBase.is_minimum_version_ok. Without that, a pre-release such as
-    1.5.0-beta.15 badges an asset that requires 1.5.0 as incompatible while
-    the loader loads it. The badge must match the install-time verdict.
-
-    An unparseable version string returns True and logs a warning, which
-    matches the None case. A malformed catalog entry must not raise out of a
-    store page build.
     """
-    import globals as gl  # deferred: keep this leaf module cycle-free
+    import globals as gl  # deferred, to keep this leaf module cycle-free
 
     if minimum_app_version is None:
         return True
     try:
-        # .base_version drops pre/post/dev/local segments the same way the
-        # runtime gate does; re-parse so the comparison is version-aware,
-        # not a string compare.
+        # .base_version drops the pre, post, dev and local segments the same
+        # way PluginBase.is_minimum_version_ok does, and the re-parse keeps the
+        # comparison version-aware instead of a string compare. Without that, a
+        # pre-release such as 1.5.0-beta.15 badges an asset that requires 1.5.0
+        # as incompatible while the loader loads it, and the badge must match
+        # the install-time verdict.
         minimum = version.parse(version.parse(minimum_app_version).base_version)
         running = version.parse(version.parse(gl.app_version).base_version)
         return minimum <= running
     except InvalidVersion:
+        # An unparseable version string returns True, which matches the None
+        # case. A malformed catalog entry must not raise out of a page build.
         log.warning(
             f"Unparseable minimum app version {minimum_app_version!r}; assuming compatible"
         )

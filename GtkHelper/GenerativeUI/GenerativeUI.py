@@ -354,14 +354,14 @@ class GenerativeUI[T](ABC):
 
         A second call does nothing. Never call run_dispose() on the widget,
         because a dispose of a live Adw composite, such as a ComboRow or an
-        ExpanderRow, logs Gtk-CRITICAL messages. A widget that never built
-        skips disconnect_signals() and the unparent, because it has nothing
-        to disconnect and nothing to unparent, and a .widget read here forces
-        the build that this class avoids.
+        ExpanderRow, logs Gtk-CRITICAL messages.
         """
         from GtkHelper.GtkHelper import run_on_main
 
         def _do():
+            # A widget that never built has nothing to disconnect and nothing
+            # to unparent, and a .widget read here forces the build that this
+            # class avoids.
             if self._widget is not None:
                 try:
                     self.disconnect_signals()

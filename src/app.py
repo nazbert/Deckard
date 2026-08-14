@@ -58,8 +58,9 @@ import globals as gl
 
 # How long a queued Ctrl+C can wait for a dispatch before the next one force
 # quits from signal-handler context. See App._on_sigint. This is a third of the
-# 6 s force_quit watchdog. It is longer than any dispatch delay a responsive
-# main loop makes, and short enough to reach when the loop is wedged.
+# 6 s force_quit watchdog. The gate is elapsed time with the teardown not
+# started, never the press count. A busy app answers late, and key repeat
+# sends three presses in 66 ms.
 SIGINT_ESCALATE_AFTER_S = 2.0
 
 
@@ -296,8 +297,8 @@ class App(Adw.Application):
         # those threads dirty-mark instead.
         ui_port.install(None)
         # Drop the references of the adapter too: the bound DeckStackChildren,
-        # the window, and the per-controller throttle state. The uninstall only
-        # stops new calls, and the adapter still points at the widget graph
+        # the window, and the per-controller throttle and coalescer state. The
+        # uninstall only stops new calls, and it still points at the widget graph
         # while the tick threads wind down. Use getattr, not self._ui_adapter,
         # so a quit that lands before __init__ finished still reaches
         # terminate_all_backends().
@@ -432,23 +433,22 @@ class App(Adw.Application):
     def _destroy_main_window(self) -> None:
         """Tear down the main window, when a window exists that can go.
 
-        GTK 4.22 segfaults when it disposes a window that never realized.
-        destroy(), remove_window() and set_application(None) all abort on that
-        path, and only close() is safe. In background mode on_activate builds
-        main_win and skips present(), so the window never realizes, and a
-        destroy kills the process before terminate_all_backends() runs and
-        orphans every plugin backend.
-
         close() is no substitute, because MainWindow.on_close shows the
         keep-running dialog when the setting is unset, and otherwise re-enters
-        on_quit through GLib.idle_add. A skip loses nothing. An unrealized
-        window holds no surface, and the process calls os._exit() below.
+        on_quit through GLib.idle_add.
         """
         main_win = getattr(self, "main_win", None)
         if main_win is None:
             # A TERM arrived before on_activate built the window.
             return
         if not main_win.get_realized():
+            # GTK 4.22 segfaults when it disposes a window that never realized.
+            # destroy(), remove_window() and set_application(None) all abort
+            # there, and only close() and a skip are safe. Background mode
+            # builds main_win and skips present(), so a destroy here kills the
+            # process before terminate_all_backends() runs, which orphans every
+            # plugin backend. An unrealized window holds no surface, so the
+            # skip loses nothing.
             log.debug("Main window was never realized (background mode); "
                       "skipping destroy to avoid the GTK unrealized-dispose "
                       "abort")
@@ -478,62 +478,53 @@ class App(Adw.Application):
     def _on_unix_signal(self, *args):
         """SIGTERM and SIGHUP entry point. Runs on_quit and keeps the source.
 
-        GLib destroys a unix-signal source whose callback returns a false
-        value, and it restores SIG_DFL for that signum, so the next TERM kills
-        the process. on_quit returns through its _quit_started latch once a
-        teardown runs, so a bare on_quit callback disarms the handler during
-        the teardown. SOURCE_CONTINUE keeps the source armed.
-
         The Gio quit action and the GLib.idle_add(on_quit) routes do not use
         this method, because a true return on an idle source means run again,
         which spins the main loop.
-
-        An exception from on_quit propagates. GLib then drops the source, and a
-        later TERM kills the process, which keeps a broken teardown from making
-        the app immune to TERM.
         """
+        # An exception from on_quit propagates. GLib then drops the source, and
+        # a later TERM kills the process, which keeps a broken teardown from
+        # making the app immune to TERM.
         self.on_quit()
+        # GLib destroys a unix-signal source whose callback returns a false
+        # value, and it restores SIG_DFL for that signum, so the next TERM
+        # kills the process. on_quit returns through its _quit_started latch
+        # once a teardown runs, so a plain return disarms the handler.
         return GLib.SOURCE_CONTINUE
 
     def _on_sigint(self, signum, frame):
         """SIGINT entry point. Queues the teardown, and escalates on a wedge.
 
-        A Python-level handler runs between bytecodes on the main thread, so it
-        can interrupt any statement, including a render, a GTK callback, or a
-        section that holds a lock. This method hands on_quit to the main loop
-        instead, which is where the TERM and HUP sources run it, so every
-        signal route uses one teardown context. The idle takes PRIORITY_DEFAULT
-        to match those sources, because the default idle priority sits below
-        the GTK frame-clock redraws and a busy UI can postpone the quit.
-
-        The main loop dispatches the queued on_quit, so a press on a wedged
-        loop never arrives. TERM and HUP are loop sources too, so only SIGKILL
-        ends such a process, and SIGKILL orphans the plugin backends and skips
-        the force_quit watchdog that on_quit arms. The escalation covers that
-        case. It measures elapsed time with the teardown not started, never the
-        press count. A busy app answers late, and key repeat sends three
-        presses in 66 ms. force_quit is the one call that is safe from handler
-        context, because it only terminates the backends and calls os._exit(1).
-        The _quit_started gate keeps presses during a running teardown as
-        no-ops.
-
-        SIGINT returns to SIG_DFL just before that call. This handler and
-        force_quit both log, log sinks take locks, and a wedge inside one
-        swallows the escalation. A further Ctrl+C then kills the process.
+        The _quit_started gate keeps a press during a running teardown a no-op.
         """
         now = time.monotonic()
         if self._sigint_first_at is None:
             self._sigint_first_at = now
         elif (not self._quit_started
                 and now - self._sigint_first_at >= SIGINT_ESCALATE_AFTER_S):
+            # The main loop dispatches the queued on_quit, so a press on a
+            # wedged loop never arrives. TERM and HUP are loop sources too, so
+            # only SIGKILL ends such a process, and SIGKILL orphans the plugin
+            # backends and skips the force_quit watchdog that on_quit arms.
             log.warning(
                 f"Interrupt requested {now - self._sigint_first_at:.1f}s ago and "
                 f"the teardown never started (the main loop is not dispatching); "
                 f"forcing quit"
             )
+            # Back stop. This handler and force_quit both log, a log sink
+            # takes a lock, and a wedge inside one swallows the escalation. A
+            # further Ctrl+C then kills the process.
             signal.signal(signal.SIGINT, signal.SIG_DFL)
+            # force_quit is the one call that is safe from handler context,
+            # because it only terminates the backends and calls os._exit(1).
             self.force_quit()
             return
+        # A Python handler runs between bytecodes on the main thread, so it can
+        # interrupt a render, a GTK callback, or a section that holds a lock.
+        # The main loop runs on_quit instead, which is where the TERM and HUP
+        # sources run it, so every signal route uses one teardown context.
+        # PRIORITY_DEFAULT matches those sources, because the default idle
+        # priority sits below the GTK frame-clock redraws.
         GLib.idle_add(self.on_quit, priority=GLib.PRIORITY_DEFAULT)
 
     def register_signal_handlers(self):

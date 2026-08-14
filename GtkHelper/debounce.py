@@ -2,22 +2,15 @@
 
 Without it, the four Settings font rows each start a reload-all-pages thread
 from on_set, so a change of family, size and colour runs up to three full page
-reloads at once, and one colour-picker drag alone fires several. One shared
-debouncer turns a burst into a single reload after the user stops.
-
-The timer source is injectable, so a test drives the coalescing logic with no
-GTK main loop. Production keeps the GLib.source_remove and GLib.timeout_add
-pattern that the saturation row uses.
-
-One thread only. trigger() and the callback both run on the thread that drives
-the scheduler, which in production is the GTK main thread, because GTK
-dispatches the signal handlers there. The pending handle therefore needs no
-lock.
+reloads at once, and one colour-picker drag alone fires several.
 """
 import threading
 from typing import Any, Callable, Optional, Protocol
 
 
+# The timer source is injectable, so a test drives the coalescing logic with
+# no GTK main loop. Production keeps the GLib.source_remove and
+# GLib.timeout_add pattern that the saturation row uses.
 class Scheduler(Protocol):
     """The two operations that a trailing debounce needs from a timer."""
 
@@ -57,12 +50,6 @@ class TrailingDebouncer:
 
     Every trigger() disarms the pending timer and arms it again, so the
     callback runs once, delay_ms after the last trigger of the burst.
-
-    Every trigger reaches the callback. A caller relies on one callback run per
-    burst, so this class holds no equality check, no dirty flag and no early
-    return that can drop a trigger. FontPageGroup carries the note on why the
-    work must always happen. A later change may move when the callback fires,
-    and it must keep every trigger reaching one fire.
     """
 
     def __init__(self, delay_ms: int, callback: Callable[[], None],
@@ -70,7 +57,15 @@ class TrailingDebouncer:
         self.delay_ms = delay_ms
         self.callback = callback
         self.scheduler: Scheduler = scheduler or GLibScheduler()
+        # Every trigger reaches the callback. A caller relies on one callback
+        # run per burst, so this class holds no equality check, no dirty flag
+        # and no early return that can drop a trigger. A later change may move
+        # when the callback fires, and every trigger must still reach one fire.
         self._pending: Optional[Any] = None
+        # One thread only. trigger() and the callback both run on the thread
+        # that drives the scheduler, which in production is the GTK main
+        # thread, because GTK dispatches the signal handlers there, so the
+        # pending handle needs no lock.
         self._owner_thread: Optional[int] = None
 
     def trigger(self) -> None:

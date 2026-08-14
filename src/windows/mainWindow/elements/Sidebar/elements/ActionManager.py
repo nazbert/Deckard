@@ -350,7 +350,7 @@ class ActionRowLabelToggle(Gtk.Button):
             try:
                 button.disconnect_by_func(self.on_label_toggled)
             except TypeError:
-                # Already disconnected: disconnect_by_func raises TypeError.
+                # disconnect_by_func raises TypeError when nothing is connected.
                 pass
 
     def set_active(self, values: list[bool]) -> None:

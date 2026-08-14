@@ -89,14 +89,14 @@ class Preview(Gtk.FlowBoxChild):
     def decode_pixbuf(path: str | None) -> GdkPixbuf.Pixbuf | None:
         """Decode path at preview size, or return None on a failed decode.
 
-        A missing, corrupt or unreadable file returns None. This method
-        touches no widget, because a GdkPixbuf decode is file I/O and not GTK
-        work, so it is safe off the main thread. It is also slow, about 17 ms
-        for a store thumbnail and about 110 ms for an oversized one, so a run
-        inside a main-loop callback freezes the window for a whole pack grid.
-        The pack choosers therefore decode on their build worker and pass the
-        result to set_pixbuf.
+        A missing, corrupt or unreadable file returns None. This method touches
+        no widget, because a GdkPixbuf decode is file I/O and not GTK work, so
+        it is safe off the main thread.
         """
+        # The decode is slow, about 17 ms for a store thumbnail and about
+        # 110 ms for an oversized one, so a run inside a main-loop callback
+        # freezes the window for a whole pack grid. The pack choosers therefore
+        # decode on their build worker and pass the result to set_pixbuf.
         # The None check runs before any str() call, because str(None) gives
         # the true string "None". The decode also needs the guard, because a
         # corrupt or unreadable file raises GLib.Error, which kills the idle

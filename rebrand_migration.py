@@ -1,32 +1,17 @@
 """One-time move of the app var-app tree from the pre-rename id to Deckard.
 
-migrate() must run before the globals import, and before anything that imports
-globals. globals.py resolves DATA_PATH and makes that directory at import
-time, on every invocation, which creates an empty tree under the new id and
-breaks the "does the new tree exist" check below. main.py calls migrate()
-before its main import block. For the same reason this module uses only the
-standard library, plus appinfo and cli_args, which are also stdlib-only and
-have no import-time side effects.
-
-The whole ~/.var/app/<id> directory moves, which includes data, static, cache
-and config. static/settings.json can hold a custom data-path pointer, so it
-must move with the data. A compat symlink stays at the old root, because the
-live JSON files, which include deck settings, pages and page backups, hold
-absolute paths into the old tree.
-
-The rename and the symlink cannot be atomic together, so a marker file records
-the state. The pending marker goes into the old root, with an fsync, just
-before the rename, so it travels with the tree. A crash after the rename
-leaves a symlink-pending marker in the new tree, and the next start finishes
-the work. A file lock serializes the real work, so two first-run launches
-cannot race os.rename and rmtree on real user data. The migration never merges
-and never deletes user data. If both roots hold files beyond the import-time
-skeleton, it stops and reports the conflict.
+The whole ~/.var/app/<id> directory moves, a compat symlink stays at the old
+root, and a marker file plus a file lock make the move crash-safe. The
+migration never merges and never deletes user data. If both roots hold files
+beyond the import-time skeleton, it stops and reports the conflict.
 
 autostart.py owns the autostart filenames and removes the pre-rename entries
 at every launch, so this one-shot path does not handle them.
 """
 
+# Standard library only, plus appinfo and cli_args, which are also stdlib-only
+# and have no import-time side effects. migrate() runs before the globals
+# import, so everything this module imports must import cleanly that early too.
 import contextlib
 import os
 import shutil
@@ -34,11 +19,19 @@ import sys
 
 import appinfo
 
+# The whole directory moves, because static/settings.json can hold a custom
+# data-path pointer and must travel with the data. A compat symlink stays at
+# the old root, because the live JSON files, which include deck settings, pages
+# and page backups, hold absolute paths into the old tree.
 OLD_ID = appinfo.OLD_APP_ID
 NEW_ID = appinfo.APP_ID
 OLD_ROOT = os.path.expanduser(os.path.join("~", ".var", "app", OLD_ID))
 NEW_ROOT = os.path.expanduser(os.path.join("~", ".var", "app", NEW_ID))
 
+# The rename and the symlink cannot be atomic together, so a marker file
+# records the state. _migrate_locked fsyncs the pending marker into the old
+# root just before the rename, so it travels with the tree. A crash after the
+# rename leaves a symlink-pending marker, and the next start finishes the work.
 MARKER_NAME = ".migrated-from-" + OLD_ID
 LOCK_NAME = ".deckard-migration.lock"
 _STATE_PENDING = "symlink-pending"
@@ -211,6 +204,10 @@ def _finish_symlink(old_root: str, new_root: str, marker_path: str) -> None:
 def migrate(old_root: str = OLD_ROOT, new_root: str = NEW_ROOT,
             argv: list[str] | None = None, require_pre_globals: bool = True,
             marker_name: str = MARKER_NAME, running_check=None, locked_fn=None) -> None:
+    # globals.py resolves DATA_PATH and makes that directory at import time,
+    # on every invocation, which creates an empty tree under the new id and
+    # breaks the "does the new tree exist" check below. main.py therefore calls
+    # migrate() before its main import block.
     if require_pre_globals and "globals" in sys.modules:
         raise AssertionError(
             "rebrand_migration.migrate() must run before `import globals` -- "
@@ -406,11 +403,11 @@ def _copy_migrate_locked(old_root: str, new_root: str, marker_path: str,
 
     os.rename cannot cross a filesystem. This copies old_root to a staging
     sibling on the new_root filesystem, fsyncs it, marks it pending, renames it
-    into place, and only then removes the original. Each crash point recovers.
-    A crash before the publish leaves old_root intact, and the copy repeats. A
-    crash after the publish leaves a pending marker, and _finish_copy completes
-    the work. This function ignores running_check.
+    into place, and only then removes the original. It ignores running_check.
     """
+    # Each crash point recovers. A crash before the publish leaves old_root
+    # intact, and the copy repeats. A crash after the publish leaves a pending
+    # marker, and _finish_copy completes the work.
     state = _read_marker(marker_path)
     if state == _STATE_COMPLETE:
         return
@@ -485,28 +482,24 @@ def migrate_native_var_app_to_xdg(old_root: str = NEW_ROOT, xdg_root: str | None
 
     This runs once and leaves a compat symlink. It does nothing under flatpak,
     where ~/.var/app/<id> is the correct per-app data root. Call it after
-    migrate(), so the rename lands in ~/.var/app/<id> first.
-
-    It reuses the crash-safe machinery of migrate() with its own marker, and it
-    differs in two points. It runs no running-instance check, because it moves
-    the tree of the same app, and the compat symlink keeps a live instance
-    writing into one tree. One known limitation stays. Between the publish and
-    the symlink, a live instance that opens a new absolute path gets ENOENT.
-    A cross-filesystem move copies and then publishes, because os.rename fails
-    with EXDEV. A same-filesystem move keeps the atomic rename. A copy that
-    fails part-way is not fatal, because native_data_root() keeps the app on
-    ~/.var/app/<id> until a later start finishes the move.
+    migrate(), so the rename lands in ~/.var/app/<id> first. It reuses the
+    crash-safe machinery of migrate() with its own marker.
     """
     if _is_flatpak():
         return
     new_root = xdg_root or _xdg_root()
-    # The mover is an atomic rename when old_root and the destination share a
-    # filesystem, and a crash-safe copy otherwise. A resumed migration picks the same
-    # route, because a cross-filesystem pair stays cross-filesystem. An old_root
-    # that is already a symlink takes the rename path, which returns at once on
-    # the complete marker.
+    # os.rename fails with EXDEV across a filesystem, so the mover is an atomic
+    # rename when old_root and the destination share one, and a crash-safe copy
+    # otherwise. A resumed migration picks the same route, because a
+    # cross-filesystem pair stays cross-filesystem. An old_root that is already
+    # a symlink takes the rename path, which returns at once on the marker.
     cross_fs = (os.path.isdir(old_root) and not os.path.islink(old_root)
                 and not _same_filesystem(old_root, new_root))
+    # This move needs no running-instance check, because it moves the tree of
+    # the same app and the compat symlink keeps a live instance writing into
+    # one tree. One known limitation stays. Between the publish and the
+    # symlink, a live instance that opens a new absolute path gets one
+    # transient ENOENT, which is not fatal.
     migrate(old_root=old_root, new_root=new_root, argv=argv,
             require_pre_globals=require_pre_globals,
             marker_name=XDG_MARKER_NAME, running_check=lambda: False,

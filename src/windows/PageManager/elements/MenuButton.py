@@ -124,8 +124,8 @@ class MenuButton(Gtk.MenuButton):
         # Read the path once, so the flush and the open reach the same file
         # when the editor selection changes during this call.
         page_path = self.pageEditor.active_page_path
-        # Read barrier: the export reads the file directly, so an edit still
-        # in flight would be missing from what the user exports.
+        # A read barrier. The export reads the file directly, so an edit that
+        # is still in flight would be absent from what the user exports.
         page_flush.get().flush_path(page_path)
         with open(page_path, "r") as f:
             page_json = json.load(f)

@@ -1,19 +1,15 @@
 """GTK side of the engine-to-UI port.
 
 GtkUIAdapter implements src.backend.ui_port.UIPort against the real widget
-tree. It resolves the DeckStackChild of a controller, tracks the mapped state
-of the main window, scans the deck stack, and drives the sidebar editors, so
-the engine touches no widget.
-
-Every method accepts a call from any thread and returns without a block on
-the main loop. Widget changes marshal with GLib.idle_add. Do not use
-run_on_main here, because a wedged main loop must not stall the media writer.
-on_deck_layout_changed is the one exception, and its docstring says why.
-
-This module imports nothing from src.windows at module scope, because KeyGrid
-imports it for mark_dirty. The one widget import is function-local, in the
-rotation path.
+tree, so the engine touches no widget. Every method accepts a call from any
+thread and returns without a block on the main loop. Widget changes marshal
+with GLib.idle_add. Do not use run_on_main here, because a wedged main loop
+must not stall the media writer. on_deck_layout_changed is the one exception,
+and its docstring says why.
 """
+# This module imports nothing from src.windows at module scope, because
+# KeyGrid imports it for mark_dirty. The one widget import is function-local,
+# in the rotation path.
 import threading
 import time
 
@@ -37,12 +33,11 @@ def mark_dirty(controller, identifier) -> None:
     """Record a frame that the adapter accepted and then dropped.
 
     push_input_image returns True as soon as a frame reaches the mirror slot of
-    the input. The window can unmap, or a rebuild can orphan the widget, before
-    that paint runs, and no engine call is left to return False. Each such drop
-    routes here, so load_from_changes can replay it on the remap. The markers
-    dict lives on the controller, so a detached UI client can ask the engine to
-    composite again.
+    the input, and the window can unmap before that paint runs, so no engine
+    call is left to return False. load_from_changes replays what lands here.
     """
+    # The markers dict lives on the controller, so a detached UI client can
+    # ask the engine to composite again.
     try:
         controller.ui_image_changes_while_hidden[identifier] = True
     except Exception:
@@ -57,18 +52,14 @@ class _MirrorSlot:
     callback. That callback paints whatever the slot holds when it runs, so a
     backlogged loop keeps one callback and one payload per input, and the
     newest frame is the one that lands.
-
-    interval is a floor on the drain rate, for a preview that is worth a limit
-    of its own. 0 drains as fast as the loop allows. A delayed callback still
-    flushes a held frame, so the last frame of a burst lands.
-
-    offer runs on a producer, such as the media thread, and take runs on the
-    main loop.
     """
 
     __slots__ = ("_interval", "_lock", "_pending", "_armed", "_last_drain")
 
     def __init__(self, interval: float = 0.0) -> None:
+        # A floor on the drain rate, for a preview that is worth a limit of its
+        # own. 0 drains as fast as the loop allows. A delayed callback still
+        # flushes a held frame, so the last frame of a burst lands.
         self._interval = interval
         self._lock = threading.Lock()
         self._pending: object | None = None
@@ -136,11 +127,9 @@ class GtkUIAdapter(ui_port.UIPort):
     def attach_window(self, window) -> None:
         """Bind to a built MainWindow.
 
-        This tracks the mapped state and re-scans the deck stack, so a child
-        that the constructor added binds too. It runs after the constructor,
-        because the map and unmap handlers need a real window. The adapter
-        installs before the constructor, because every boot-time add_page runs
-        inside MainWindow.build().
+        It runs after the constructor, because the map and unmap handlers need
+        a real window. The adapter installs before the constructor, because
+        every boot-time add_page runs inside MainWindow.build().
         """
         self._window = window
         try:
@@ -149,19 +138,21 @@ class GtkUIAdapter(ui_port.UIPort):
             window.connect("unmap", self._on_window_unmap)
         except Exception:
             log.opt(exception=True).warning("Could not track the main window's mapped state")
+        # Re-scan the deck stack, so a child that the constructor added binds
+        # too.
         self.rescan_children()
         self.reconcile_children()
 
     def reconcile_children(self) -> None:
         """Heal the decks that the window constructor could not see.
 
-        on_deck_added and on_deck_removed do nothing while _window is None,
-        which is the period that MainWindow.__init__ occupies. A deck that the
-        USB monitor plugs in during that period gets no stack child, and a deck
-        that it unplugs leaves a stale one. rescan_children re-binds only the
-        children that exist, so this method reconciles both directions against
-        the live list of the deck manager.
+        rescan_children re-binds only the children that exist, so this method
+        reconciles both directions against the deck manager list.
         """
+        # on_deck_added and on_deck_removed do nothing while _window is None,
+        # which is the period that MainWindow.__init__ occupies. A deck that
+        # the USB monitor plugs in then gets no stack child, and a deck that it
+        # unplugs leaves a stale one.
         window = self._window
         if not recursive_hasattr(window, "leftArea.deck_stack"):
             return

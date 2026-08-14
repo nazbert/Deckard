@@ -186,14 +186,15 @@ class Brightness(Adw.PreferencesRow):
 class Saturation(Adw.PreferencesRow):
     """Per-deck display saturation boost, a PIL ImageEnhance.Color factor.
 
-    It lives in the deck settings under display and saturation, and its
-    default of 1.0 changes nothing. Brightness has a live per-frame setter,
-    and this factor has none, because the media takes the factor at load time
-    and at cache-build time. A change therefore reloads the active page
-    through DeckController.set_display_saturation, which enhances the static
-    media at once and rebuilds the video cache under the cache filename of the
-    new factor at the next playthrough.
+    It lives in the deck settings under display and saturation, and its default
+    of 1.0 changes nothing.
     """
+    # Brightness has a live per-frame setter, and this factor has none, because
+    # the media takes the factor at load time and at cache-build time. A change
+    # therefore reloads the active page through
+    # DeckController.set_display_saturation, which enhances the static media at
+    # once and rebuilds the video cache under the cache filename of the new
+    # factor at the next playthrough.
     def __init__(self, settings_page: "DeckSettingsPage", deck_serial_number, **kwargs):
         super().__init__()
         self.settings_page = settings_page

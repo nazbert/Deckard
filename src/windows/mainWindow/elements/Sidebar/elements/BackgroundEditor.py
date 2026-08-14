@@ -173,7 +173,7 @@ class ColorRow(Adw.PreferencesRow):
         try:
             self.button.button.disconnect_by_func(self.on_change_color)
         except TypeError:
-            # Already disconnected: disconnect_by_func raises TypeError.
+            # disconnect_by_func raises TypeError when nothing is connected.
             pass
 
     def set_color(self, color_values: list):

@@ -150,8 +150,8 @@ class SizeRow(Adw.PreferencesRow):
             controller_input = controller.get_input(self.active_identifier)
             composed_label = controller_input.get_active_state().layout_manager.get_composed_layout()
 
-        # ImageLayout.size is optional: unset means the spinner
-        # keeps whatever it is showing.
+        # ImageLayout.size is optional, and an unset one leaves the spinner
+        # on the value it shows.
         size = composed_label.size
         if size is not None:
             self.size_spinner.button.set_value(size*100)
@@ -178,7 +178,7 @@ class SizeRow(Adw.PreferencesRow):
         try:
             self.size_spinner.button.disconnect_by_func(self.on_size_changed)
         except TypeError:
-            # Already disconnected: disconnect_by_func raises TypeError.
+            # disconnect_by_func raises TypeError when nothing is connected.
             pass
 
 

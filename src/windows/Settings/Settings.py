@@ -323,13 +323,13 @@ class DataPathGroup(Adw.PreferencesGroup):
         """True when a data path is absolute and usable.
 
         Usable means an existing writable directory, or a directory that this
-        call creates. globals.py creates it at boot in any case, and a create
-        here shows the failure while the user still looks at the row.
-
-        It runs on the GTK main thread, and only on an explicit apply, not per
-        keystroke. The stat and the makedirs can stall the UI on a hung
-        network mount, and that cost arrives once, when the user commits.
+        call creates. It runs on the GTK main thread, and only on an explicit
+        apply, not per keystroke.
         """
+        # globals.py creates the directory at boot in any case, and a create
+        # here shows the failure while the user still looks at the row. The
+        # stat and the makedirs can stall the UI on a hung network mount, and
+        # that cost arrives once, when the user commits.
         if not path or not os.path.isabs(path):
             return False
         if os.path.isdir(path):
@@ -858,9 +858,9 @@ class PerformancePageGroup(Adw.PreferencesGroup):
         self.push_to_presence_monitor()
 
     def push_to_presence_monitor(self):
-        # Runtime push, same pattern as the FPS-warning row's fan-out to the
-        # media players: the monitor re-evaluates immediately instead of
-        # waiting for the next lock/idle event.
+        # A runtime push, in the same pattern as the fan-out of the
+        # FPS-warning row to the media players. The monitor re-evaluates at
+        # once instead of waiting for the next lock or idle event.
         if gl.presence_monitor is not None:
             gl.presence_monitor.set_mode(
                 self.settings.app.animation_pause_mode,

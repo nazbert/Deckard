@@ -53,11 +53,11 @@ class StorePreview(Gtk.FlowBoxChild):
                                  width_request=250, height_request=250)
         self.set_child(self.main_box)
 
-        # ADD BOX FOR SEARCHING
+        # Box that holds the search bar
         self.search_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         self.main_box.append(self.search_box)
 
-        # ADD SEARCH BAR
+        # Search bar
         self.search_bar = Gtk.SearchBar()
         self.search_box.append(self.search_bar)
 
@@ -187,7 +187,7 @@ class StorePreview(Gtk.FlowBoxChild):
         # Allow one download at a time, because two break the plugin
         # initialization. The lock replaces a check-then-set poll on
         # currently_downloading, which lets a double-click start two installs.
-        # The finally is required: an install, uninstall or update that raises
+        # The finally is required. An install, uninstall or update that raises
         # leaves the flag at True, which wedges every later download in the
         # poll loop and runs the spinner forever.
         store = self.store_page.store

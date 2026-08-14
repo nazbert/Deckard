@@ -121,11 +121,11 @@ class KeyGrid(Gtk.Grid):
 
         The lookup is duck-typed, because an import of DeckStackChild or
         DeckConfig here is a cycle, and the engine caches no child to read.
-        The lookup may fail. During __init__ this grid is not in the widget
-        tree, because DeckConfig.build appends the grid before the screenbar
-        exists, so the touchscreen replay waits for
-        ScreenBar.load_from_changes.
         """
+        # The lookup may fail. During __init__ this grid is not in the widget
+        # tree, because DeckConfig.build appends the grid before the screenbar
+        # exists, so the touchscreen replay waits for
+        # ScreenBar.load_from_changes.
         widget = self.get_parent()
         while widget is not None:
             if recursive_hasattr(widget, "screenbar.image"):
@@ -362,15 +362,14 @@ class KeyButton(Gtk.Frame):
         """The paint-ready payload for paint_mirror_frame.
 
         Any thread may call it. image2pixbuf uses only PIL and GdkPixbuf, so
-        the conversion runs on the caller, which is the media thread for a
-        live frame, and only the widget change needs the loop.
-
-        This carries no staleness stamp, unlike the screenbar. One slot
-        coalesces the live frames of a key, so they cannot queue out of order,
-        and the only other producer is the map-time replay, which dispatches
-        in attach order like every idle. An inversion between the two costs
-        one stale frame, and the next repaint corrects it.
+        the conversion runs on the caller, which is the media thread for a live
+        frame, and only the widget change needs the loop.
         """
+        # This carries no staleness stamp, unlike the screenbar. One slot
+        # coalesces the live frames of a key, so they cannot queue out of
+        # order, and the only other producer is the map-time replay, which
+        # dispatches in attach order. An inversion between the two costs one
+        # stale frame, and the next repaint corrects it.
         return image2pixbuf(image.convert("RGBA"), force_transparency=True)
 
     def paint_mirror_frame(self, pixbuf) -> bool:
@@ -380,8 +379,8 @@ class KeyButton(Gtk.Frame):
         # update righthand side key preview if possible - before the paint
         # below, which bails out when this button is unmapped
         self.set_icon_selector_previews(pixbuf)
-        # Skip if the button was unmapped between queuing and running this
-        # callback: painting a disposed widget crashes GTK.
+        # Skip when the button unmapped between the queue and this callback,
+        # because a paint on a disposed widget crashes GTK.
         try:
             if not self.get_mapped():
                 # This is a late failure. push_input_image already returned
@@ -402,7 +401,7 @@ class KeyButton(Gtk.Frame):
             mark_dirty(controller, self.identifier)
 
     def set_icon_selector_previews(self, pixbuf):
-        # Main loop only: the gating below reads widget state.
+        # Main loop only, because the gating below reads widget state.
         if not recursive_hasattr(gl, "app.main_win.sidebar"):
             return
         sidebar = gl.app.main_win.sidebar

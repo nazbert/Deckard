@@ -221,11 +221,9 @@ def parse_keys_as_keycodes(keys: str) -> list[list[int]]:
         individual: list[int | str] = [getattr(e, f"KEY_{key.upper()}", key) for key in names]
         # check if delay
         # StreamDeck-UI encodes an inter-key pause as a "delay<ms>" token.
-        # This module defines no keysym base to offset such a token from, so
-        # a token reaches a NameError, which the except Exception of the
-        # importer swallows together with the whole hotkey. The Hotkey action
-        # of Deckard has no delay form to map a token onto, so reject a token
-        # here instead of inventing an encoding.
+        # Without this check a delay token falls through to the generic
+        # not-an-int failure with an unclear message. The Hotkey action has no
+        # delay form, so reject the token here.
         for key in individual:
             if isinstance(key, str) and key.startswith("delay"):
                 raise ValueError(f"Delays are not supported in imported hotkeys: {key!r}")

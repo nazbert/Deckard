@@ -2,12 +2,12 @@
 
 A caller imports it without globals, which resolves and creates the data
 directory at import time. This module uses the standard library only and has
-no import-time side effects, so a module can import it before globals. That
-includes rebrand_migration.py. globals.py imports argparser from here, so
-every gl.argparser reference works, and the rebrand migration resolves a
---data override with the same parser, which matches the argparse
-abbreviations and the flag handling.
+no import-time side effects, so a module can import it before globals, and
+rebrand_migration.py does.
 """
+# globals.py imports argparser from here, so every gl.argparser reference
+# works, and the rebrand migration resolves a --data override with the same
+# parser, which matches the argparse abbreviations and the flag handling.
 import argparse
 
 argparser = argparse.ArgumentParser()
