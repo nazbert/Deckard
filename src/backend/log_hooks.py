@@ -12,63 +12,24 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 
----
-
 Central exception hooks.
 
-Only @log.catch-decorated functions feed exceptions into loguru; an uncaught
-exception on any other path reaches stderr only and is lost the moment the
-app runs detached (autostart/flatpak) -- the "tracebacks bypass loguru" hole.
-install_exception_hooks() closes four surfaces in one place:
+A function decorated with @log.catch feeds its exceptions into loguru. An
+uncaught exception on any other path reaches stderr alone, and a detached run
+under autostart or flatpak loses it. install_exception_hooks() closes the four
+surfaces that leak one, and _log_exc() rate-limits what they report.
 
-  * main thread AND every GLib/Gio callback (idle_add, timeout_add, signal
-    handlers, Gio actions): PyGObject routes their uncaught exceptions
-    through PyErr_Print, which calls sys.excepthook;
-  * plain threading.Thread targets, via threading.excepthook;
-  * __del__/weakref-finalizer/GC-time errors, via sys.unraisablehook;
-  * the plugin-dispatch asyncio loop, via asyncio_exception_handler (wired
-    in event_dispatch._get_loop).
+Every hook routes through loguru, so a record reaches every sink that
+config_logger() installed, which are logs/logs.log, stderr and the gl.logs
+ring behind the About dialog. Loguru's default stderr sink catches a record
+emitted before that call. Each hook resolves the sinks at call time, so no
+re-install follows.
 
-All of them route through loguru, which fans out to every sink
-config_logger() has installed (logs/logs.log, stderr, the gl.logs ring
-behind the About dialog). Before config_logger() runs, loguru's default
-stderr sink catches them; no re-install is needed afterwards because the
-hooks resolve the logger's sinks at call time.
-
-Note the pool blind spot: exceptions inside ThreadPoolExecutor tasks are
-stored on their Future and NEVER reach threading.excepthook -- submit sites
-must attach a done-callback (the main_loop.run_in_background /
-DeckController._log_callback_exception convention).
-
-Pressure valve: _log_exc() rate-limits per failing SITE -- one
-record per (exception type, innermost frame) per RATE_LIMIT_WINDOW_S, with
-the suppressed count reported on that site's next record. A raising GTK
-signal handler on a hot path would otherwise put a full diagnose=True
-traceback into every sink on every emission.
-
-Known bound of that key: two DIFFERENT failures raised from the same line
-with the same exception type -- one `raise ValueError(...)` reached by
-several callers, with different messages -- share one budget and can mask
-each other for a window. Folding the message into the key was considered and
-rejected: real messages carry varying ids, paths and counters, so a
-message-keyed guard degenerates into no throttling at all, which is the
-exact failure mode this exists to prevent. The suppressed-count line is
-therefore worded "N further failures at <site>", never "N repeats": the
-guard knows the site, and does not know that the failures were identical.
-
-Kill switch: SC_NO_ERROR_HOOKS=1 makes install_exception_hooks()
-and redirect_faulthandler() no-ops, so a field anomaly suspected to involve
-the hooks (double logging, exit-path interaction, a hook firing where it
-shouldn't) can be A/B'd against the un-hooked behavior with an env var instead of
-a revert + rebuild. See install_exception_hooks() for the one thing the flag
-deliberately does NOT disable.
-
-Import discipline: this module must stay importable before `globals` (the
-test harness's fixtures.py contract) -- stdlib + loguru only, nothing from
-src/ or globals.py. log_redaction is the one allowed sibling import: it
-follows the same stdlib+loguru-only contract, and install_exception_hooks()
-installs its scrubbing patcher so these hooks can never route
-an unredacted traceback into the sinks.
+This module stays importable before globals, which the fixtures.py contract
+of the test harness needs, so it imports stdlib and loguru only. log_redaction
+is the one allowed sibling import, on the same contract, and
+install_exception_hooks() installs its scrubbing patcher, so no hook routes an
+unredacted traceback into a sink.
 """
 import atexit
 import faulthandler
@@ -89,81 +50,96 @@ from loguru import logger as _LOG
 
 from src.backend.log_redaction import install_log_redaction, scrub
 
-# Bisect switch, read once at import -- like SC_STRONG_CALLBACKS
-# (src/Signals/weak_callbacks.py) this is a debugging knob, not something that
-# may change behavior mid-run (the hooks are process-global; a mid-run flip
-# would leave half of them installed).
+# A bisect switch, read once at import, like SC_STRONG_CALLBACKS in
+# src/Signals/weak_callbacks.py. Set to 1 it turns install_exception_hooks()
+# and redirect_faulthandler() into no-ops, so an operator compares a field
+# anomaly that involves the hooks against the un-hooked behaviour with an
+# environment variable rather than a revert and a rebuild. It is a debugging
+# knob and must not change behaviour mid-run, because the hooks are
+# process-global and a mid-run flip leaves half of them installed.
 #
-# STRICTLY "1", matching that precedent. A truthiness test
-# would read SC_NO_ERROR_HOOKS=false / no / off -- what an operator writes to
-# turn a switch OFF -- as "on", silently dropping the entire safety net
-# on the run that was trying to keep it.
+# The test accepts "1" only, like that precedent. A truth test reads
+# SC_NO_ERROR_HOOKS=false, no or off, which an operator writes to turn a
+# switch off, as "on", and drops the whole safety net on the run that wanted
+# to keep it.
 _HOOKS_DISABLED = os.environ.get("SC_NO_ERROR_HOOKS") == "1"
 _announced_disabled = False
 
 _installed = False
-# Same shape as sys.excepthook, which is what install() stores here.
+# The same shape as sys.excepthook, which install() stores here.
 _ExceptHook = Callable[[type[BaseException], BaseException, TracebackType | None], Any]
 _prev_sys_hook: _ExceptHook = None  # type: ignore[assignment]  # late-init: install(); only read from _sys_hook, which install() wires up
-# faulthandler stores the raw fd, not the file object: this module-level
-# reference must keep the file alive for the life of the process, or a
-# fatal-signal dump would write into a recycled fd.
+# faulthandler stores the raw fd and not the file object, so this
+# module-level reference must keep the file alive for the life of the
+# process. Otherwise a fatal-signal dump writes into a recycled fd.
 _fault_file = None
 
 
-# --- Per-site rate limiting -------------------------------------------------
+# Per-site rate limiting.
 #
-# GLib idle/timeout sources self-cancel on exception, but GTK signal handlers
-# are NOT disconnected: a raising handler on a frequent signal (notify::, a
-# 20-30Hz media-tick path) reaches sys.excepthook on EVERY emission, and one
-# broken __del__ hits sys.unraisablehook once per object during a GC sweep.
-# Unthrottled that is ~30 diagnose=True tracebacks per second into a
-# 3-day-rotated logs.log and into the About-dialog ring -- the safety net's
-# first big catch would DoS the log it reports to.
+# A GLib idle or timeout source cancels itself on an exception, and GTK keeps
+# a signal handler connected. A raising handler on a frequent signal, such as
+# notify:: or a media-tick path at 20 to 30 Hz, reaches sys.excepthook on
+# every emission, and one broken __del__ hits sys.unraisablehook once per
+# object during a GC sweep. Without a throttle that writes about 30
+# diagnose=True tracebacks a second into a logs.log that rotates every 3 days,
+# and into the About-dialog ring, so the safety net's first big catch floods
+# the log it reports to.
 #
-# One record per site per window; further failures within the window are
-# counted and reported as a summary riding on the NEXT record from that same
-# site. Deliberately per-SITE, never global: a storm on one signal handler
-# must never mask a different, one-shot failure somewhere else. A count that
-# will never get a next record is flushed instead of dropped -- when its
-# entry is evicted by the prune, when the process exits (atexit), or onto the
-# terminal record itself: the guard may make a flood quiet, never invisible.
-RATE_LIMIT_WINDOW_S = 5.0  # module-level so scenarios can shrink the window
+# One record per site per window, keyed by exception type and innermost
+# frame. A further failure inside the window raises a count, which rides on
+# the next record from that same site. The budget covers one site and never
+# the whole process, so a storm on one signal handler cannot mask a one-shot
+# failure elsewhere. A count that gets no next record is flushed rather than
+# dropped, when the prune evicts its entry, when the process exits through
+# atexit, and onto a terminal record. The guard may make a flood quiet, and
+# never invisible.
+#
+# That key has a known bound. Two different failures raised from one line with
+# one exception type, such as a raise ValueError(...) that several callers
+# reach with different messages, share one budget and can mask each other for
+# a window. The message stays out of the key, because a real message carries a
+# varying id, path or counter, and a message-keyed guard then throttles
+# nothing, which is the failure this guard prevents. The summary line
+# therefore reads "N further failures at <site>" and never "N repeats",
+# because the guard knows the site and does not know that the failures
+# matched.
+RATE_LIMIT_WINDOW_S = 5.0  # Module-level, so a scenario can shrink the window
 _RATE_LIMIT_MAX_KEYS = 256
-# _log_exc runs on whatever thread failed: any worker (threading.excepthook),
-# the main/GLib thread (sys.excepthook), whichever thread happened to trigger
-# a GC sweep (sys.unraisablehook), and the dispatch loop thread (asyncio). The
-# window test is a read-modify-write over shared state, so it needs a lock.
-# RLock, not Lock: GC can fire on an allocation INSIDE the guarded region, and
-# a raising __del__ collected there re-enters this module on the same thread
-# -- a plain Lock would self-deadlock inside the crash handler. The lock is
-# never held across the loguru call.
+# _log_exc runs on the thread that failed. That is a worker through
+# threading.excepthook, the main GLib thread through sys.excepthook, whichever
+# thread triggered a GC sweep through sys.unraisablehook, and the dispatch
+# loop thread through asyncio. The window test reads and writes shared state,
+# so it needs a lock. An RLock, and not a Lock, because GC can fire on an
+# allocation inside the guarded region, and a raising __del__ collected there
+# re-enters this module on the same thread. A plain Lock deadlocks with itself
+# inside the crash handler. No holder keeps this lock across the loguru
+# call.
 _rate_lock = threading.RLock()
-# Every acquire in the hook path is bounded. The critical section is a few
-# microseconds, so this can only expire when something is genuinely wedged --
-# and then the answer is to log the occurrence unthrottled, never to park a
-# failing thread on a lock inside its own crash handler. Found by the
-# Lock-swap mutation of the re-entrancy scenario: with an unbounded acquire,
-# one deadlocked holder silently hung every later hook, including the one
-# reporting the deadlock.
+# Every acquire in the hook path is bounded. The critical section runs for a
+# few microseconds, so this timeout expires only when something is wedged.
+# The answer then is to log the occurrence without a throttle, and never to
+# park a failing thread on a lock inside its own crash handler. With an
+# unbounded acquire, one deadlocked holder hangs every later hook, including
+# the hook that reports the deadlock.
 _RATE_LOCK_TIMEOUT_S = 0.5
-# site key -> [window start, suppressed, last hit]. The window start is
-# refreshed only when a record is ALLOWED; the last hit on every occurrence.
-# Eviction needs the second one -- see _prune_locked.
+# Maps a site key to [window start, suppressed, last hit]. An allowed record
+# refreshes the window start, and every occurrence refreshes the last hit. The
+# eviction reads the last hit; see _prune_locked.
 _rate_state: dict[tuple, list] = {}
 
 
 def _exc_site(exc_type, exc_value, exc_tb) -> tuple[tuple, str]:
-    """(key, printable label) for the code site that raised: exception type
-    plus the INNERMOST traceback frame. The same handler failing on every
-    emission collapses onto one key, while the same exception type raised
-    from two different places keeps two.
+    """Returns (key, printable label) for the code site that raised. The key
+    holds the exception type and the innermost traceback frame. One handler
+    that fails on every emission collapses onto one key, and one exception
+    type raised from two places keeps two keys.
 
-    The type NAME, not the type object: a key must not pin a plugin's
-    exception class (and through it, its module) alive for the life of the
-    dict. Tracebackless calls (asyncio message-only contexts, synthesized
-    errors) fall back to the message text, so two unrelated tb-less failures
-    still get independent budgets instead of silencing each other."""
+    The key holds the type name and not the type object, so it never pins a
+    plugin's exception class, and through it that plugin's module, alive for
+    the life of the dict. A call with no traceback, such as an asyncio
+    message-only context or a synthesized error, falls back to the message
+    text, so two unrelated failures of that shape keep separate budgets."""
     type_name = getattr(exc_type, "__name__", None) or str(exc_type)
     tb = exc_tb
     while tb is not None and tb.tb_next is not None:
@@ -176,19 +152,19 @@ def _exc_site(exc_type, exc_value, exc_tb) -> tuple[tuple, str]:
 
 
 def _label_for_key(key: tuple) -> str:
-    """Printable site for a key. Rebuildable from the key alone, so a pending
-    count can still be reported after its exception object is long gone (the
-    prune and atexit flushes hold keys, never exceptions)."""
+    """The printable site for a key. It builds from the key alone, so a
+    pending count still reports after its exception object is gone. The prune
+    and the atexit flush hold keys and never exceptions."""
     type_name, where = key
     return f"{where[0]}:{where[1]} [{type_name}]"
 
 
 def _emit_pending(key: tuple, count: int, reason: str) -> None:
-    """Report a pending count that will never get a next record to ride on.
-    Same never-raise contract as _log_exc: loguru first, __stderr__ second,
-    swallow last. Carries the "Uncaught exception" prefix on purpose -- an
-    incident reader greps for that string, and these counts are part of the
-    same story."""
+    """Report a pending count that gets no next record to ride on. It follows
+    the never-raise contract of _log_exc, with loguru first, __stderr__
+    second, and a swallow last. It keeps the "Uncaught exception" prefix,
+    because an incident reader greps for that string and these counts belong
+    to the same story."""
     message = (
         f"Uncaught exception [rate-limit]: {count} further failures at "
         f"{_label_for_key(key)} since the last record ({reason})"
@@ -203,22 +179,22 @@ def _emit_pending(key: tuple, count: int, reason: str) -> None:
 
 
 def _prune_locked(now: float) -> list[tuple[tuple, int]]:
-    """Cap the dict; called with _rate_lock held, only once it is oversized --
-    a BROAD storm (many distinct sites) must not turn the guard itself into an
-    unbounded leak. Returns the pending counts of everything it dropped, for
-    the caller to report once the lock is released: an evicted count has no
-    next record to ride on, and silently discarding it would let the guard
-    turn a flood into silence.
+    """Cap the dict. The caller holds _rate_lock and calls this only once the
+    dict is oversized, so a broad storm across many distinct sites cannot turn
+    the guard into an unbounded leak. Returns the pending counts of everything
+    it dropped, and the caller reports them once it releases the lock. An
+    evicted count gets no next record to ride on, and a silent discard lets
+    the guard turn a flood into silence.
 
-    Eviction is by LAST HIT, never by window start. entry[0] is refreshed only
-    when a record is allowed, so a site that is storming right now looks OLD by
-    that measure while a one-shot newcomer looks fresh -- sorting on it evicted
-    exactly the sites the guard exists to contain, and past the cap every hot
-    site was re-admitted (and re-logged) on its next hit, collapsing the flood
-    protection to nothing. Idle sites go first, then the least-recently-hit
-    half, which bounds the dict unconditionally. Items are list()ed up front so
-    a GC-time re-entrant hook mutating the dict cannot turn a prune into a
-    'changed size during iteration' RuntimeError."""
+    The eviction reads the last hit and never the window start. An allowed
+    record alone refreshes entry[0], so a site that storms right now looks old
+    by that measure while a one-shot newcomer looks fresh. A sort on entry[0]
+    evicts the sites this guard contains, and past the cap every hot site
+    re-enters, and logs again, on its next hit, which removes the flood
+    protection. Idle sites go first, then the least recently hit half, which
+    bounds the dict. This lists the items up front, so a re-entrant hook at GC
+    time that mutates the dict cannot turn a prune into a RuntimeError of
+    "changed size during iteration"."""
     dropped: list[tuple[tuple, int]] = []
 
     def evict(key: tuple) -> None:
@@ -237,17 +213,17 @@ def _prune_locked(now: float) -> list[tuple[tuple, int]]:
 
 
 def _flush_pending_counts() -> None:
-    """atexit: report every count still waiting for a next record to ride on.
+    """The atexit hook. It reports every count that still waits for a next
+    record to ride on.
 
-    Without this, a storm that simply STOPS -- the handler was disconnected,
-    the page changed, the process is quitting mid-window -- takes its last
-    window's failures to the grave, which is the one outcome this guard must
-    never produce. atexit needs no thread of its own: it runs on the thread
-    already shutting the interpreter down.
+    Without this hook a storm that stops, because a handler got disconnected,
+    the page changed, or the process quits mid-window, loses its last window's
+    failures, which this guard must never do. atexit needs no thread of its
+    own, because it runs on the thread that shuts the interpreter down.
 
-    The lock is taken with a bounded wait and skipped on failure: process exit
-    must never hang on a wedged holder. Same reasoning as the non-blocking
-    flock in _scrub_fault_log -- a diagnostic must not be able to stop a
+    The acquire takes a bounded wait and skips the flush on a failure, because
+    a process exit must not hang on a wedged holder. The non-blocking flock in
+    _scrub_fault_log follows the same rule. A diagnostic must not stop a
     shutdown."""
     if not _rate_state:
         return
@@ -266,11 +242,11 @@ atexit.register(_flush_pending_counts)
 
 
 def _rate_limit_bypass(key: tuple) -> int:
-    """Take (and clear) a site's pending count WITHOUT throttling it.
+    """Take a site's pending count, clear it, and throttle nothing.
 
-    The terminal path's entry point: that record is the last one this site
-    will ever get, so anything its window swallowed has to ride along on it
-    instead of waiting for a next record that is not coming."""
+    The terminal path enters here. That record is the last one this site gets,
+    so whatever its window swallowed must ride on it rather than wait for a
+    next record that never comes."""
     if not _rate_lock.acquire(timeout=_RATE_LOCK_TIMEOUT_S):
         return 0
     try:
@@ -285,17 +261,18 @@ def _rate_limit_bypass(key: tuple) -> int:
 
 
 def _rate_limit(key: tuple) -> tuple[bool, int]:
-    """(suppress this occurrence?, failures suppressed since the last record).
+    """Returns (suppress this occurrence, failures suppressed since the last
+    record).
 
-    The first hit of a site is always logged immediately -- throttling must
-    never delay the record that says the failure exists; only what follows."""
+    The first hit of a site always logs at once. A throttle must never delay
+    the record that says the failure exists, and only delays what follows."""
     now = time.monotonic()
     dropped: list[tuple[tuple, int]] = []
     if not _rate_lock.acquire(timeout=_RATE_LOCK_TIMEOUT_S):
-        # Never wait unboundedly inside a crash handler. If the guard's state
-        # is wedged, the right answer is to log this occurrence, not to park
-        # the failing thread on a lock: throttling is an optimization, and a
-        # hook that can hang is worse than a log that repeats itself.
+        # Never wait without a bound inside a crash handler. With the guard's
+        # state wedged, log this occurrence rather than park the failing
+        # thread on a lock. The throttle saves work, and a hook that hangs
+        # costs more than a log that repeats itself.
         return False, 0
     try:
         entry = _rate_state.get(key)
@@ -311,24 +288,23 @@ def _rate_limit(key: tuple) -> tuple[bool, int]:
                 dropped = _prune_locked(now)
     finally:
         _rate_lock.release()
-    # Outside the lock: reporting is I/O, and a sink must never be able to
-    # stall every other thread's hook.
+    # Report outside the lock. A report is I/O, and a sink must not stall
+    # every other thread's hook.
     for dropped_key, count in dropped:
         _emit_pending(dropped_key, count, "rate-limit state pruned")
     return suppress, suppressed
 
 
 def _announce_disabled() -> None:
-    """Emit exactly one line so a flagged run self-identifies in the logs --
-    an incident switch nobody can tell was on is half a switch.
+    """Emit one line, so a flagged run identifies itself in the logs. A
+    reader must be able to tell that the switch was on.
 
-    Deliberately announced from redirect_faulthandler() rather than from
-    install_exception_hooks(): main() installs the hooks BEFORE
-    config_logger() opens logs.log and the About-dialog ring, so a line
-    emitted there would be stderr-only -- lost on exactly the detached
-    (autostart/flatpak) runs this flag exists to debug. redirect_faulthandler()
-    is called right after the sinks come up, so the line lands where an
-    incident reader will actually find it."""
+    redirect_faulthandler() announces this, and install_exception_hooks()
+    does not. main() installs the hooks before config_logger() opens logs.log
+    and the About-dialog ring, so a line emitted there reaches stderr alone,
+    and a detached run under autostart or flatpak loses it, which is the run
+    this flag debugs. redirect_faulthandler() runs right after the sinks come
+    up, so the line lands where an incident reader finds it."""
     global _announced_disabled
     if _announced_disabled:
         return
@@ -345,22 +321,22 @@ def _announce_disabled() -> None:
 
 
 def _is_terminal(exc_tb) -> bool:
-    """True when sys.excepthook was called by the interpreter for an exception
-    that unwound the whole program, rather than by PyGObject's PyErr_Print for
-    a GLib/GTK callback.
+    """True when the interpreter called sys.excepthook for an exception that
+    unwound the whole program, and False when PyGObject's PyErr_Print called
+    it for a GLib or GTK callback.
 
-    The distinction is load-bearing: in THIS app sys.excepthook is not
-    primarily a terminal path. PyGObject routes every uncaught callback
-    exception through it (see the module docstring), which is the 20-30Hz
-    storm vector the rate limit exists for -- so exempting the whole surface from
-    the rate limit would reopen exactly that vector. Exempting only the
-    terminal SHAPE gives the guarantee that matters (a fatal exception is
-    never swallowed by a window some hot handler opened) at no such cost.
+    This app reaches sys.excepthook mostly along the callback path, so the
+    distinction decides the throttle. PyGObject routes every uncaught callback
+    exception through it (see the module docstring), which is the storm at 20
+    to 30 Hz that the rate limit exists for, so an exemption for the whole
+    surface reopens that storm. An exemption for the terminal shape alone
+    keeps a fatal exception out of a window that a hot handler opened, and
+    costs nothing else.
 
-    Shape test: a terminal exception has unwound through the entry script's
-    module frame, so the OUTERMOST traceback frame is <module> in __main__. A
-    callback invoked from C has its own function frame there instead,
-    whatever module defined it."""
+    The shape test reads the frames. A terminal exception unwound through the
+    entry script's module frame, so its outermost traceback frame is <module>
+    in __main__. A callback invoked from C carries its own function frame
+    there, whatever module defined it."""
     frame = getattr(exc_tb, "tb_frame", None)
     if frame is None:
         return False
@@ -375,9 +351,9 @@ def _is_terminal(exc_tb) -> bool:
 
 def _log_exc(kind: str, exc_type, exc_value, exc_tb, extra: str = "",
              rate_limit: bool = True) -> None:
-    # Rate limiting sits HERE rather than in the individual hooks, so all four
-    # hook surfaces inherit it. Any failure inside the guard falls
-    # through to logging: it may drop repeats, never an original.
+    # The rate limit sits here rather than in each hook, so all four hook
+    # surfaces get it. A failure inside the guard falls through to the log. It
+    # may drop a repeat, and never an original.
     try:
         key, label = _exc_site(exc_type, exc_value, exc_tb)
         if rate_limit:
@@ -387,21 +363,21 @@ def _log_exc(kind: str, exc_type, exc_value, exc_tb, extra: str = "",
         else:
             suppressed = _rate_limit_bypass(key)
         if suppressed:
-            # "since the last record", not "in the last 5s": the gap between
-            # two records from one site is unbounded (a site that goes quiet
-            # for an hour and fires again reports counts an hour old), so a
-            # window-worded summary would be a lie on exactly the slow
-            # trickle it is meant to describe.
+            # The text reads "since the last record" and not "in the last
+            # 5s". The gap between two records from one site has no bound. A
+            # site that goes quiet for an hour and fires again reports counts
+            # an hour old, and a window-worded summary misreports exactly
+            # that slow trickle.
             extra = (
                 f"{extra} ({suppressed} further failures at {label} "
                 f"since the last record)"
             )
     except Exception:
         pass
-    # A hook must never raise or recurse. If loguru itself fails (sink error,
-    # ring lock, interpreter teardown) fall back to plain stderr; if even
-    # that fails, swallow -- losing one traceback beats crashing the process
-    # from inside its own crash handler.
+    # A hook must never raise and never recurse. When loguru itself fails,
+    # through a sink error, the ring lock or interpreter teardown, fall back
+    # to plain stderr. When that fails too, swallow the error. One lost
+    # traceback costs less than a crash inside the crash handler.
     try:
         _LOG.opt(exception=(exc_type, exc_value, exc_tb)).critical(
             f"Uncaught exception [{kind}]{extra}"
@@ -416,13 +392,13 @@ def _log_exc(kind: str, exc_type, exc_value, exc_tb, extra: str = "",
 
 def _sys_hook(exc_type, exc_value, exc_tb) -> None:
     if issubclass(exc_type, KeyboardInterrupt):
-        # Stock quiet Ctrl-C: delegate to whatever hook was installed before us.
+        # Keep Ctrl-C quiet. Delegate to the hook installed before this one.
         _prev_sys_hook(exc_type, exc_value, exc_tb)
         return
-    # A terminal exception is never rate-limited -- it cannot flood (the
-    # process is on its way out) and it is the one record nobody can afford
-    # to lose to a window a hot callback opened. Callback-shaped invocations
-    # of this same hook stay throttled; see _is_terminal.
+    # A terminal exception passes the rate limit. It cannot flood, because
+    # the process is on its way out, and it is the one record that must not
+    # fall into a window that a hot callback opened. A callback-shaped call of
+    # this same hook stays throttled; see _is_terminal.
     _log_exc("main", exc_type, exc_value, exc_tb,
              rate_limit=not _is_terminal(exc_tb))
 
@@ -446,15 +422,15 @@ def _unraisable_hook(unraisable) -> None:
 
 
 def asyncio_exception_handler(loop, context) -> None:
-    """loop.set_exception_handler target for long-lived loops (see
-    event_dispatch._get_loop): an un-retrieved task exception or failing
-    call_soon callback otherwise dies in asyncio's default stderr handler."""
+    """The loop.set_exception_handler target for a long-lived loop; see
+    event_dispatch._get_loop. Without it an unread task exception, or a
+    failing call_soon callback, dies in asyncio's default stderr handler."""
     if _HOOKS_DISABLED:
-        # SC_NO_ERROR_HOOKS covers this surface too: it is one of the four
-        # hooks, and the wiring lives in event_dispatch, not in
-        # a call this module's install path owns -- so the opt-out has to be
-        # here. Delegating (rather than returning) is what makes the flag
-        # "exactly the un-hooked behavior": asyncio's own stderr handler.
+        # SC_NO_ERROR_HOOKS covers this surface too, because it is one of
+        # the four hooks. event_dispatch holds the wiring, and this module's
+        # install path does not, so the opt-out lives here. This delegates
+        # rather than returns, so the flag gives the un-hooked behaviour,
+        # which is asyncio's own stderr handler.
         loop.default_exception_handler(context)
         return
     exc = context.get("exception")
@@ -466,21 +442,34 @@ def asyncio_exception_handler(loop, context) -> None:
 
 
 def install_exception_hooks() -> None:
-    """Install sys/threading/unraisable hooks. Idempotent; call before any
-    code that can throw on a background thread or GLib callback.
+    """Install the sys, threading and unraisable hooks. Idempotent. Call it
+    before any code that can throw on a background thread or a GLib callback.
 
-    Also installs the redaction patcher: these hooks are what
-    route full tracebacks into the sinks, so they must never fire without
-    the scrubbing layer in place. main()'s boot path relies on this
-    piggyback -- scenario_log_redaction asserts the coupling.
+    This closes four surfaces. The main thread and every GLib or Gio callback,
+    which covers idle_add, timeout_add, signal handlers and Gio actions,
+    because PyGObject routes their uncaught exceptions through PyErr_Print,
+    which calls sys.excepthook. A plain threading.Thread target, through
+    threading.excepthook. An error inside __del__, a weakref finalizer or a GC
+    sweep, through sys.unraisablehook. The plugin-dispatch asyncio loop,
+    through asyncio_exception_handler, which event_dispatch._get_loop wires up.
 
-    SC_NO_ERROR_HOOKS=1 turns the hook installs into a no-op --
-    sys.excepthook/threading.excepthook/sys.unraisablehook are left exactly
-    as the interpreter set them. The redaction patcher is deliberately NOT
-    part of that opt-out: this call is its ONLY boot-path install site, so
-    skipping it would silently ship a run with no PII scrubbing on ANY log
-    line, turning a debugging switch into a privacy regression. The flag
-    disables the hooks it is named after, nothing else."""
+    One blind spot stays. An exception inside a ThreadPoolExecutor task sits
+    on its Future and never reaches threading.excepthook, so a submit site
+    must attach a done-callback, as main_loop.run_in_background and
+    DeckController._log_callback_exception do.
+
+    It also installs the redaction patcher. These hooks route a full traceback
+    into the sinks, so they must never fire without the scrubbing layer.
+    main()'s boot path depends on that pairing, and scenario_log_redaction
+    asserts it.
+
+    SC_NO_ERROR_HOOKS=1 turns the hook installs into a no-op and leaves
+    sys.excepthook, threading.excepthook and sys.unraisablehook as the
+    interpreter set them. The redaction patcher stays outside that opt-out.
+    This call is its only boot-path install site, so a skip ships a run with
+    no PII scrubbing on any log line, which turns a debugging switch into a
+    privacy defect. The flag disables the hooks it names, and nothing
+    else."""
     global _installed, _prev_sys_hook
     install_log_redaction()
     if _HOOKS_DISABLED or _installed:
@@ -493,48 +482,46 @@ def install_exception_hooks() -> None:
 
 
 def _scrub_fault_log(path: str) -> None:
-    """Scrub PREVIOUS sessions' faulthandler dumps in place.
+    """Scrub the faulthandler dumps of earlier sessions, in place.
 
-    faulthandler writes its dumps at the C level straight to the stored fd
-    -- by design, so they still land when the interpreter is wedged -- which
-    means the loguru redaction patcher never sees them, and traceback frame
-    paths (File "/home/<user>/...") reach disk raw. A live intercept is
-    impossible without breaking that wedged-interpreter guarantee, so the
-    file is scrubbed here instead, at boot, right before the next boot
-    marker is appended: the sharing scenario only ever reads this file after
-    a restart. Residual risk (accepted): a dump written during the
-    CURRENT session stays raw on disk until the next boot.
+    faulthandler writes a dump at the C level, straight to the stored fd, so
+    the dump still lands while the interpreter is wedged. The loguru redaction
+    patcher therefore never sees it, and a traceback frame path such as
+    File "/home/<user>/..." reaches disk raw. A live intercept would break the
+    wedged-interpreter guarantee, so this scrubs the file at boot, right
+    before the next boot marker appends, because a reader opens this file
+    after a restart. One known limitation stays. A dump written during the
+    current session stays raw on disk until the next boot.
 
-    Streams line-by-line (dumps are line-oriented and every scrub() pattern
-    is single-line) so a years-old multi-boot file cannot balloon memory:
-    the scrubbed content goes to a unique same-dir mkstemp tmp first, then
-    is copied back over the original IN PLACE. In place, not os.replace:
-    replace swaps the inode, which strands every already-RUNNING
-    instance's registered faulthandler fd on the unlinked old file
-    -- a booting secondary (this runs before the single-instance gate) then
-    silently redirected the primary's future crash/SIGQUIT dumps into a
-    file nothing can find. Same-inode rewrite keeps live fds valid, and
-    mode/ownership untouched (nothing is re-created); the one coverage
-    trade is that "r+" needs WRITE permission, so a manually chmod'd
-    read-only log is skipped (warning below) where os.replace would have
-    swapped it.
+    This streams line by line, because a dump is line-oriented and every
+    scrub() pattern fits one line, so a years-old multi-boot file cannot
+    balloon memory. The scrubbed content goes to a unique mkstemp temp file in
+    the same directory, and then copies back over the original in place. It
+    must not use os.replace. A replace swaps the inode, which strands the
+    registered faulthandler fd of every running instance on the unlinked old
+    file. A booting secondary, and this runs before the single-instance gate,
+    then redirects the primary's later crash and SIGQUIT dumps into a file
+    that nothing finds. A same-inode rewrite keeps a live fd valid and leaves
+    the mode and the ownership alone, because nothing re-creates the file. It
+    costs one case. "r+" needs write permission, so this skips a log that
+    somebody chmod'd read-only, and logs the warning below. os.replace instead
+    swaps such a file.
 
-    Concurrency: the flock is NON-blocking -- on contention the scrub is
-    skipped outright, because the only legitimate holder is another boot
-    scrubbing this same file to the same result, and waiting would let a
-    wedged holder (SIGSTOP, stalled disk) block every subsequent launch.
-    The flock is advisory: it excludes other scrubbers only. A dump another
-    instance appends at the C level DURING the writeback window lands past
-    the read snapshot and is lost to truncate() -- accepted; the old code
-    lost the same dump to the unlinked inode AND stranded the fd forever.
-    Scrubbing is idempotent for faulthandler content (frame paths, boot
-    markers -- all fixed points; scrub() is NOT idempotent in general), so a
-    second boot's re-scrub is a content no-op -- and the unchanged-detection
-    below turns it into a no-WRITE as well: the file is
-    only rewritten when a line actually changed, so the partial-writeback
-    window (crash/ENOSPC mid-copy) exists only on boots that had raw PII to
-    redact. Any failure is logged and swallowed -- a scrub problem must
-    never block startup."""
+    The flock does not block. On contention this skips the scrub, because the
+    only legitimate holder is another boot that scrubs this same file to the
+    same result, and a wait lets a wedged holder, under SIGSTOP or a stalled
+    disk, block every later launch. The flock is advisory and excludes another
+    scrubber only. A dump that another instance appends at the C level during
+    the writeback window lands past the read snapshot and truncate() drops it.
+    A replace instead loses the same dump to the unlinked inode and strands
+    the fd for good. A scrub of faulthandler content is idempotent, because a
+    frame path and a boot marker are fixed points, and scrub() is not
+    idempotent in general. A second boot's scrub therefore changes no content,
+    and the unchanged check below turns it into no write at all. The file is
+    rewritten only when a line changed, so the partial-writeback window, from
+    a crash or an ENOSPC mid-copy, opens only on a boot that had raw PII to
+    redact. Any failure logs and returns, because a scrub problem must not
+    block startup."""
     if not os.path.exists(path):
         return
     tmp_path = None
@@ -543,8 +530,8 @@ def _scrub_fault_log(path: str) -> None:
             try:
                 fcntl.flock(log_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                # Another boot is scrubbing this exact file right now; its
-                # result is what ours would be. Never wait.
+                # Another boot scrubs this file right now, to the same
+                # result. Never wait.
                 return
             fd, tmp_path = tempfile.mkstemp(
                 dir=os.path.dirname(path), prefix="faulthandler.", suffix=".scrub"
@@ -576,22 +563,22 @@ def _scrub_fault_log(path: str) -> None:
 
 
 def redirect_faulthandler(directory: str) -> None:
-    """Re-point the import-time stderr faulthandler (main.py:40) at
-    <directory>/faulthandler.log so native crashes / SIGQUIT dumps survive
-    detached runs.
+    """Re-point the import-time stderr faulthandler of main.py at
+    <directory>/faulthandler.log, so a native crash dump and a SIGQUIT dump
+    survive a detached run.
 
-    Separate from install_exception_hooks() because gl.DATA_PATH cannot be
-    resolved at import time (it can come from --data or the static settings
-    file), and the short-lived CLI invocations that return before
-    config_logger() must not touch the running app's files. Any failure
-    falls back silently to the stderr enable() -- a missing dump target must
-    never block startup. Idempotent.
+    This stays apart from install_exception_hooks(), because gl.DATA_PATH does
+    not resolve at import time, since --data or the static settings file can
+    set it, and because a short-lived CLI call that returns before
+    config_logger() must not touch the running app's files. Any failure falls
+    back to the stderr enable(), because a missing dump target must not block
+    startup. Idempotent.
 
-    SC_NO_ERROR_HOOKS=1 skips the redirection entirely, leaving
-    main.py's import-time faulthandler.enable() pointed at stderr: the
-    un-hooked arrangement, and no logs/faulthandler.log is opened or scrubbed.
-    This is also where the flag announces itself -- see _announce_disabled()
-    for why the announcement is here and not at install time."""
+    SC_NO_ERROR_HOOKS=1 skips the redirection and leaves the import-time
+    faulthandler.enable() of main.py pointed at stderr, which is the un-hooked
+    arrangement, and it opens and scrubs no logs/faulthandler.log. The flag
+    also announces itself here; see _announce_disabled() for why the
+    announcement lands here and not at install time."""
     global _fault_file
     if _HOOKS_DISABLED:
         _announce_disabled()
@@ -601,17 +588,18 @@ def redirect_faulthandler(directory: str) -> None:
     try:
         os.makedirs(directory, exist_ok=True)
         path = os.path.join(directory, "faulthandler.log")
-        # Previous sessions' dumps bypassed the redaction layer
-        # (C-level fd writes); scrub them BEFORE opening the append fd, so
-        # this boot's marker lands after the rewritten content. The scrub is
-        # in-place (same inode), so it is also safe while
-        # other instances hold registered fds on the file. Dumps from THIS
-        # session stay raw until the next boot -- see _scrub_fault_log for
-        # why that is accepted.
+        # A dump from an earlier session skipped the redaction layer, because
+        # faulthandler writes at the C level to an fd. Scrub those dumps
+        # before this code opens the append fd, so this boot's marker lands
+        # after the rewritten content. The scrub keeps the inode, so it stays
+        # safe while another instance holds a registered fd on the file. A
+        # dump from this session stays raw until the next boot; see
+        # _scrub_fault_log for why.
         _scrub_fault_log(path)
         f = open(path, "a", buffering=1)
-        # Crash dumps are only read after a restart: append + boot markers,
-        # never truncate, so the previous crash's evidence survives boot.
+        # A reader opens a crash dump after a restart, so this appends a boot
+        # marker and never truncates, and the evidence of the previous crash
+        # survives the boot.
         f.write(f"\n===== boot {datetime.now().isoformat()} pid={os.getpid()} =====\n")
         faulthandler.enable(file=f, all_threads=True)
         faulthandler.register(signal.SIGQUIT, file=f, all_threads=True, chain=False)

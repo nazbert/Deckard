@@ -25,16 +25,16 @@ from loguru import logger as log
 import globals as gl
 from src.backend.DeckManagement.Subclasses import cache_budget
 
-# Never sample faster than this: /proc/self/smaps_rollup measured 6.4ms
-# median / 20ms max on the live 6.1GB-VmData process, and the walk holds
-# mmap_lock for read (docs/memory-footprint-plan.md §2).
+# Never sample faster than this. A read of /proc/self/smaps_rollup measured
+# 6.4ms median and 20ms maximum on the live process at 6.1GB of VmData, and
+# that walk holds mmap_lock for read (docs/memory-footprint-plan.md).
 SAMPLE_INTERVAL = 60.0
 
-# malloc_trim gate (P0.5): only probe when nothing has switched pages
-# recently, and not more than once per window. With MALLOC_ARENA_MAX=2
-# (P0.4) a trim holds the shared arena lock that every allocating thread
-# funnels through, so it must never run on a hot path -- only from here,
-# and only when the deck looks idle.
+# The malloc_trim gate. Probe only while no page switch happened recently,
+# and once per window at most. With MALLOC_ARENA_MAX=2 a trim holds the shared
+# arena lock that every allocating thread passes through, so it must never run
+# on a hot path. It runs from here alone, and only while the deck looks
+# idle.
 IDLE_SECONDS = 120.0
 MIN_TRIM_INTERVAL = 600.0
 
@@ -47,12 +47,11 @@ CSV_HEADER = (
 
 
 class _PageSwitchCounter:
-    """Monotonic counter bumped by DeckController.load_page (any thread) and
-    read by the sampler thread. itertools.count().__next__ is a single
-    C-level op that holds the GIL for its whole call, so it's safe to bump
-    without a lock; the paired timestamp is a plain rebind, also atomic
-    under the GIL -- a torn read only costs a diagnostic reading one stale
-    tick, never a real race."""
+    """A monotonic counter. DeckController.load_page raises it from any
+    thread, and the sampler thread reads it. itertools.count().__next__ is one
+    C-level operation that holds the GIL for its whole call, so a bump needs
+    no lock. The paired timestamp is a plain rebind, which is atomic under the
+    GIL too. A torn read costs a diagnostic one stale tick and no more."""
 
     def __init__(self):
         self._counter = itertools.count(1)
@@ -109,15 +108,16 @@ def _fd_count() -> int:
 
 
 def _image_cache_fields() -> tuple[int, int, int, int, int]:
-    """(evictable image-cache kB, cumulative evictions, cumulative evicted kB,
-    video-reader kB, GIF-frame kB) from the image-cache budget.
+    """Returns the evictable image-cache kB, the cumulative evictions, the
+    cumulative evicted kB, the video-reader kB and the GIF-frame kB, from the
+    image-cache budget.
 
-    This is the attribution half of that work and the reason it is default-on:
-    the ceiling can only be tuned against the field once the CSV says how much
-    image RAM is actually held, how hard the ceiling is biting, and how much of
-    the rest sits in holders the ceiling does NOT govern (video readers and
-    especially GIF frame lists, which have no byte cap at all). Every value is
-    a cheap sum of per-cache counters -- no cache is walked."""
+    This attributes the memory, which is why it stays on by default. The
+    ceiling tunes against the field once the CSV says how much image RAM the
+    process holds, how hard the ceiling bites, and how much of the rest sits
+    in holders that the ceiling does not govern, which are the video readers
+    and above all the GIF frame lists, which carry no byte cap. Every value is
+    a cheap sum of per-cache counters, and nothing walks a cache."""
     try:
         totals = cache_budget.totals()
         evictions, evicted_bytes = cache_budget.eviction_stats()
@@ -137,8 +137,8 @@ _libc = None
 
 
 def _malloc_trim() -> None:
-    """ctypes libc malloc_trim(0). Never call this off the idle+interval
-    gate in MemTelemetrySampler -- see the module docstring note above
+    """Calls malloc_trim(0) in libc through ctypes. Call it from the idle and
+    interval gate in MemTelemetrySampler alone; see the note above
     IDLE_SECONDS."""
     global _libc
     if _libc is None:
@@ -147,15 +147,15 @@ def _malloc_trim() -> None:
 
 
 class MemTelemetrySampler(threading.Thread):
-    """Process memory sampler + idle malloc_trim.
+    """The process memory sampler, and the idle malloc_trim.
 
-    Always runs for the trim side: the 2026-07-07 overnight A/B measured 64
-    trims at 0-3ms each (no arena-lock stall with MALLOC_ARENA_MAX=2),
-    typically reclaiming 2-5MB and pulling a post-burst high-water down
-    ~29MB -- cost is negligible, so the P0.5 probe was promoted to default-on
-    (opt out with SC_MALLOC_TRIM=0). CSV recording stays opt-in via
-    SC_MEM_TELEMETRY=1; without it the loop skips the smaps walk entirely
-    and only reads /proc/self/status (microseconds) to log trim deltas.
+    The trim side always runs. An overnight A/B measured 64 trims at 0 to 3ms
+    each, with no arena-lock stall under MALLOC_ARENA_MAX=2, which reclaimed 2
+    to 5MB each and pulled a post-burst high-water down by about 29MB. That
+    cost is small, so the trim is on by default, and SC_MALLOC_TRIM=0 turns it
+    off. The CSV recording stays opt-in through SC_MEM_TELEMETRY=1. Without it
+    the loop skips the smaps walk and reads /proc/self/status alone, which
+    costs microseconds, to log the trim deltas.
     """
 
     def __init__(self):
@@ -173,11 +173,11 @@ class MemTelemetrySampler(threading.Thread):
     def _ensure_header(self) -> None:
         """Writes the header into a new or empty CSV.
 
-        An existing file whose header predates a schema change is rotated to
-        `<path>.old` once and a fresh file started: appending wider rows
-        under a narrower header would silently misalign every column for
-        every reader of the file (tests/soak/mem_census.py, hw_verify.py
-        soak, and anyone's spreadsheet)."""
+        An existing file whose header predates a schema change rotates once
+        to <path>.old, and a fresh file starts. Wider rows appended under a
+        narrower header misalign every column for every reader of the file,
+        which are tests/soak/mem_census.py, the hw_verify.py soak, and any
+        spreadsheet."""
         try:
             if os.path.exists(self.csv_path) and os.path.getsize(self.csv_path) > 0:
                 with open(self.csv_path) as f:

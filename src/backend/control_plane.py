@@ -1,67 +1,21 @@
-"""
-One place decides whether a page or state switch is valid.
+"""One place decides whether a page or state switch is valid.
 
 "Switch deck S to page P" and "set input (x,y) on page P of deck S to state N"
-arrive from several transports -- the DBus methods an external tool or a
-second CLI invocation calls on the running instance, and the argv requests a
-booting process parks for a deck that has not enumerated yet. Each of those
-used to carry its own copy of the rules, and the copies had drifted: the
-same-page no-op was in two of the three, an unknown page was warned about,
-listed with suggestions, or silently swallowed depending on where the request
-landed, and coordinate bounds were the device's truth here but invented
-constants in the CLI's own pre-check. This module is the single rule set they
-all ask.
+arrive from several transports. Those are the D-Bus methods that an external
+tool or a second CLI invocation calls on the running instance, and the argv
+requests that a booting process parks for a deck which has not enumerated yet.
+A copy of the rules per transport drifts apart, so this module is the one rule
+set they all ask. The decision lives here, and the rendering stays at the
+surface. Nothing here logs, and nothing here touches the toolkit.
 
-WHAT IS A RULE AND WHAT IS A TRANSPORT
+No blanket except
 
-The DECISION lives here; the RENDERING stays at the surface. Every method
-answers with a ``ControlResult`` carrying a machine-readable ``code`` and the
-human sentence that goes with it, and the caller decides what a sentence is:
-a log line, a DBus return string, something printed to a terminal. Nothing in
-here logs, and nothing in here touches the toolkit -- which is also why the
-messages name the deck only where the failure is genuinely about the deck (an
-unknown serial, or a state successfully changed), leaving each surface free to
-add its own context.
-
-TWO LAYERS, BECAUSE ONE CALLER HAS NO SERIAL TO RESOLVE
-
-``load_default_page`` runs inside ``DeckController.__init__``, before the
-controller is appended to ``gl.deck_manager.deck_controller``: it holds the
-controller but could not look itself up by serial. So the rules are written
-against a controller (``change_page_on`` / ``change_state_on``) and the
-serial-resolving wrappers (``change_page`` / ``change_state``) are a thin
-lookup on top for the transports that speak serials.
-
-NO BLANKET EXCEPT, DELIBERATELY
-
-An invalid REQUEST is a result. An unexpected EXCEPTION -- a ``load_page``
-that raises, a device gone mid-call -- propagates to the caller untouched, and
-that is load-bearing rather than tidy: the boot path peeks a parked state
-request, applies it through here, and only resolves it once the apply
-returned, so an exception on the way through is exactly what leaves the
+An invalid request is a result. An unexpected exception, such as a load_page
+that raises or a device gone mid-call, propagates to the caller untouched. The
+boot path peeks a parked state request, applies it through here, and resolves
+it once the apply returns, so an exception on the way through leaves the
 request parked for the next load to retry (see src/backend/startup_queue.py).
-Catching everything here would turn that retry into a silent drop.
-
-THREAD CONTRACT
-
-The caller's thread, whichever it is -- the boot thread, a USB hotplug thread,
-the GTK main thread, the DBus dispatch. Same as every surface this replaces:
-``load_page`` serializes itself under the controller's page lock, the media
-thread stays the only device writer, and no UI call is made from here. The
-manager's controller list is snapshotted before it is walked, because hotplug
-threads append to and remove from it.
-
-IMPORTS
-
-``globals`` and the input identifiers at runtime, everything else under
-``TYPE_CHECKING``, no ``gi`` at all. The deck controller imports this module,
-so it is inside the render engine's import closure and inherits both of that
-closure's standing guards: the widget-free rule (scenario_headless_engine_no_gtk)
-and the named `gl` surface (scenario_engine_gl_surface -- this reads
-``deck_manager`` and ``page_manager``, and nothing else). The deployment floor
-(Python 3.13) evaluates annotations at definition time, which the future-import
-is what prevents; scenario_floor_import executes this module body on that
-interpreter to keep it true.
+A catch here turns that retry into a silent drop.
 """
 from __future__ import annotations
 
@@ -69,6 +23,14 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+# globals and the input identifiers at runtime, everything else under
+# TYPE_CHECKING, and no gi. The deck controller imports this module, so it
+# sits inside the render engine's import closure and takes both guards of that
+# closure, the widget-free rule (scenario_headless_engine_no_gtk) and the
+# named gl surface (scenario_engine_gl_surface, and this module reads
+# deck_manager and page_manager and nothing else). The deployment floor runs
+# Python 3.13, which evaluates an annotation at definition time, and the
+# future import above prevents that.
 import globals as gl
 from src.backend.DeckManagement.InputIdentifier import Input
 
@@ -81,22 +43,24 @@ if TYPE_CHECKING:
 class ControlResult:
     """The outcome of one control request.
 
-    ``code`` is the vocabulary a caller can branch on; ``message`` is the same
-    thing said to a person, and is the only part any current surface renders:
+    code is the vocabulary a caller branches on. message says the same thing
+    to a person, and every current surface renders that part alone. A message
+    names the deck only where the failure is about the deck, which is an
+    unknown serial or a state changed, and each surface adds its own context.
 
-      ``""``                    the request was applied
-      ``"already-active"``      ok: the deck already shows that page, nothing
-                                to do (still an ok result -- a no-op is a
-                                fulfilled request, not a failure)
-      ``"no-such-deck"``        no controller reports that serial
-      ``"no-such-page"``        no page file matches that name or path
-      ``"page-build-failed"``   the page exists but could not be built
-      ``"no-page-manager"``     asked before the page store exists (boot only)
-      ``"bad-coords"``          coordinates are not ``x,y``
-      ``"coords-out-of-bounds"``  outside THIS device's key layout
-      ``"no-such-input"``       in bounds, but the deck has no input there
-      ``"bad-state"``           the state number is not an integer
-      ``"state-out-of-range"``  that input has no such state
+      ""                      the request applied
+      "already-active"        the deck already shows that page, so nothing
+                              happens. This is an ok result, because a no-op
+                              fulfils the request.
+      "no-such-deck"          no controller reports that serial
+      "no-such-page"          no page file matches that name or path
+      "page-build-failed"     the page exists and could not be built
+      "no-page-manager"       asked before the page store exists, on boot only
+      "bad-coords"            the coordinates do not read as x,y
+      "coords-out-of-bounds"  outside this device's key layout
+      "no-such-input"         in bounds, and the deck has no input there
+      "bad-state"             the state number is no integer
+      "state-out-of-range"    that input has no such state
     """
 
     ok: bool
@@ -115,14 +79,14 @@ def _controllers() -> list[DeckController]:
 
 
 def _no_such_deck(serial_number: str) -> ControlResult:
-    """The unknown-serial result, listing what IS connected -- the answer to
-    "did I typo the serial?" belongs in the failure itself.
+    """The unknown-serial result. It lists what is connected, because the
+    answer to "did I mistype the serial?" belongs in the failure itself.
 
-    With nothing connected there is no list to give, and the empty answer is
-    ambiguous in a way that matters: the app answers requests from the moment
-    it takes the bus name, which is before it has enumerated a single deck. So
-    the empty case names that possibility rather than leaving a person to
-    conclude their deck is unplugged when it is simply not open yet.
+    With nothing connected there is no list to give, and an empty answer reads
+    two ways. The app answers a request from the moment it takes the bus name,
+    which comes before it enumerates a deck. So the empty case names that
+    possibility, rather than let a person conclude that a deck is unplugged
+    while it is only not open yet.
     """
     available = [controller.serial_number() for controller in _controllers()]
     if available:
@@ -144,22 +108,31 @@ def _no_such_page(page_ref: str, page_manager: PageManagerBackend) -> ControlRes
 
 
 class ControlPlane:
-    """The rules. Stateless: every call reads the `gl` slots it needs, so a
-    controller list or page store rebound underneath it (which is what the
-    test harness does) is honoured."""
+    """The rules. This holds no state, and every call reads the gl slots it
+    needs, so a controller list or a page store rebound underneath it, which
+    the test harness does, still applies.
 
-    # ---------------------------------------------------------------- #
-    # Controller-taking cores                                          #
-    # ---------------------------------------------------------------- #
+    The caller's thread runs every method, whichever it is, which covers the
+    boot thread, a USB hotplug thread, the GTK main thread and the D-Bus
+    dispatch. load_page serializes itself under the controller's page lock,
+    the media thread stays the one device writer, and nothing here calls the
+    UI. _controllers() snapshots the manager's list before a walk, because a
+    hotplug thread appends to it and removes from it.
+    """
+
+    # The cores, which take a controller. load_default_page runs inside
+    # DeckController.__init__, before anything appends the controller to
+    # gl.deck_manager.deck_controller, so it holds a controller and cannot
+    # look itself up by serial. The wrappers below add that lookup for the
+    # transports that speak serials.
 
     def change_page_on(self, controller: DeckController, page_ref: str) -> ControlResult:
-        """Show `page_ref` -- a page name or a page path -- on `controller`.
+        """Show page_ref, which is a page name or a page path, on controller.
 
-        Loading is skipped when the page is already the active one. That
-        no-op is the whole reason this check has one home: a repeated switch
-        request used to reload the deck on one transport and be ignored on
-        the others, which on a real deck is a visible flicker and a full
-        re-render of every key.
+        The load is skipped while that page is already the active one. That
+        no-op is why this check has one home. A repeated switch request
+        otherwise reloads the deck on one transport and does nothing on the
+        others, and on a real deck a reload flickers and re-renders every key.
         """
         page_manager = gl.page_manager
         if page_manager is None:
@@ -170,10 +143,10 @@ class ControlPlane:
         if page_path is None:
             return _no_such_page(page_ref, page_manager)
 
-        # Snapshot + None-guard: active_page can be None (a racing
-        # close()/clear, or a load deferred by a showing screensaver) and can
-        # be swapped by another thread between the read and the compare. No
-        # current page means the requested one is trivially different, so the
+        # Snapshot the page and check it for None. active_page can be None,
+        # after a racing close or clear, or a load deferred by a showing
+        # screensaver, and another thread can swap it between the read and the
+        # compare. No current page means the requested one differs, so the
         # load proceeds.
         active_page = controller.active_page
         if active_page is not None and os.path.abspath(page_path) == os.path.abspath(active_page.json_path):
@@ -181,12 +154,11 @@ class ControlPlane:
 
         page = page_manager.get_page(page_path, controller)
         if page is None:
-            # The file matched a name but could not be built into a page.
-            # Handing that None to load_page is how every switch surface used
-            # to answer this: load_page(None) CLEARS the deck, so a page that
-            # failed to build blanked the device and reported success. A deck
-            # that keeps showing what it had is the better failure, and the
-            # caller gets told why instead of being congratulated.
+            # The file matched a name and did not build into a page. A None
+            # handed to load_page clears the deck, so a page that failed to
+            # build blanks the device and reports success. A deck that keeps
+            # what it shows is the better failure, and this tells the caller
+            # the reason.
             return ControlResult(False, "page-build-failed",
                                  f"Page '{page_ref}' could not be loaded")
 
@@ -195,14 +167,14 @@ class ControlPlane:
 
     def change_state_on(self, controller: DeckController, page_ref: str,
                         coords: str, state: int | str) -> ControlResult:
-        """Set the input at `coords` on `page_ref` to `state`, loading the
-        page first if it is not already the active one.
+        """Set the input at coords on page_ref to state, and load the page
+        first when it is not the active one.
 
-        The page comes first because the input being addressed is the one the
-        REQUESTED page defines, and its state count is what the state number
-        is checked against. Bounds are this device's own key layout and this
-        input's own state list -- never a constant, because no constant is
-        true of every deck.
+        The page comes first, because the requested page defines the input
+        this addresses, and that input's state count bounds the state number.
+        The bounds come from this device's own key layout and this input's own
+        state list, and never from a constant, because no constant holds for
+        every deck.
         """
         page_result = self.change_page_on(controller, page_ref)
         if not page_result.ok:
@@ -226,12 +198,12 @@ class ControlPlane:
             return ControlResult(False, "no-such-input",
                                  f"Could not find input at coordinates ({x},{y})")
 
-        # The state number is an int on the DBus method's signature and on the
-        # CLI's parked requests, which convert at their own edge -- but the
-        # parked dict is written into directly, by the boot path's own tests
-        # and by anything else holding `gl.api_state_requests`, so a string
-        # still reaches here. Converting is cheaper than requiring every
-        # writer of that dict to have got the type right.
+        # The state number is an int on the D-Bus method's signature and on
+        # the CLI's parked requests, which convert at their own edge. The boot
+        # path's own tests write into the parked dict directly, and so does
+        # anything else that holds gl.api_state_requests, so a string still
+        # reaches here. A conversion costs less than a rule that every writer
+        # of that dict must get the type right.
         try:
             state_number = int(state)
         except (TypeError, ValueError):
@@ -253,12 +225,10 @@ class ControlPlane:
                              f"Successfully changed state of ({x},{y}) to state "
                              f"{state_number} on device {controller.serial_number()}")
 
-    # ---------------------------------------------------------------- #
-    # Serial-resolving wrappers                                        #
-    # ---------------------------------------------------------------- #
+    # The wrappers, which resolve a serial.
 
     def change_page(self, serial_number: str, page_ref: str) -> ControlResult:
-        """``change_page_on`` for the deck reporting `serial_number`."""
+        """change_page_on for the deck that reports serial_number."""
         controller = self._find(serial_number)
         if controller is None:
             return _no_such_deck(serial_number)
@@ -266,25 +236,26 @@ class ControlPlane:
 
     def change_state(self, serial_number: str, page_ref: str,
                      coords: str, state: int | str) -> ControlResult:
-        """``change_state_on`` for the deck reporting `serial_number`."""
+        """change_state_on for the deck that reports serial_number."""
         controller = self._find(serial_number)
         if controller is None:
             return _no_such_deck(serial_number)
         return self.change_state_on(controller, page_ref, coords, state)
 
     def _find(self, serial_number: str) -> DeckController | None:
-        """The first controller reporting `serial_number`, or None. Serials
-        are unique per device; a duplicate would be a deck reporting another's
-        identity, and picking the first is as good an answer as exists."""
+        """The first controller that reports serial_number, or None. A serial
+        is unique per device. A duplicate means a deck that reports another
+        deck's identity, and the first controller is as good an answer as
+        exists."""
         for controller in _controllers():
             if controller.serial_number() == serial_number:
                 return controller
         return None
 
 
-# The process-wide control plane. A module singleton rather than a `gl` slot,
-# for the reason the startup queue is one: naming a protocol should shrink the
-# shared namespace, not add to it.
+# The process-wide control plane. A module singleton rather than a gl slot,
+# for the reason the startup queue is one. A named protocol should shrink the
+# shared namespace.
 _control_plane = ControlPlane()
 
 

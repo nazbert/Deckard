@@ -12,7 +12,6 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
-# Import Python modules
 import os
 import uuid
 import cv2
@@ -22,11 +21,9 @@ from PIL import Image, ImageDraw, ImageSequence
 import os, psutil
 process = psutil.Process()
 
-# Import own modules
 from src.backend.DeckManagement.HelperMethods import is_svg, sha256, file_in_dir, svg_to_pil
 
 
-# Import globals
 import globals as gl
 
 class MediaManager:
@@ -34,15 +31,13 @@ class MediaManager:
         pass
 
     def get_fallback_thumbnail(self) -> Image.Image:
-        """
-        In-memory "broken image" placeholder returned instead of raising when
-        a file cannot be decoded. Tagged via img.info["sc_broken"] so
-        callers can tell it apart from a real thumbnail and never persist it
-        (a corrupt file must stay retryable, not poison the on-disk cache).
-        """
+        """The in-memory "broken image" placeholder for a file that does not
+        decode. img.info["sc_broken"] tags it, so a caller tells it apart from
+        a real thumbnail and never writes it to the on-disk cache. A corrupt
+        file must stay retryable."""
         img = Image.new("RGBA", (250, 180), (58, 58, 58, 255))
         draw = ImageDraw.Draw(img)
-        # Simple "broken image" glyph: a frame with a diagonal cross
+        # A "broken image" glyph, drawn as a frame with a diagonal cross.
         draw.rectangle((95, 60, 155, 120), outline=(170, 170, 170, 255), width=3)
         draw.line((95, 60, 155, 120), fill=(170, 170, 170, 255), width=3)
         draw.line((155, 60, 95, 120), fill=(170, 170, 170, 255), width=3)
@@ -51,11 +46,9 @@ class MediaManager:
 
     @staticmethod
     def save_image_atomic(image: Image.Image, path: str) -> None:
-        """
-        Crash-safe image save: write to a unique temp file in the same
-        directory, then os.replace() into place. A crash/disk-full mid-save
-        must never leave a half-written (poison) file at `path`.
-        """
+        """Crash-safe image save. Write a unique temp file in the same
+        directory, then os.replace() it into place. A crash or a full disk
+        mid-save must leave no half-written file at path."""
         tmp_path = f"{path}.{uuid.uuid4().hex}.tmp"
         try:
             image.save(tmp_path, format="PNG")
@@ -68,10 +61,10 @@ class MediaManager:
                     pass
 
     def get_thumbnail(self, file_path):
-        # Guarded whole: sha256() raises on unreadable files
-        # (chmod 000), Image.open raises on a poisoned cache entry, and the
-        # .thumbnail() calls force lazy decodes -- every caller here is a UI
-        # path that must get *an* image back, never an exception.
+        # Guard the whole body. sha256() raises on an unreadable file (chmod
+        # 000), Image.open raises on a poisoned cache entry, and .thumbnail()
+        # forces a lazy decode. Every caller is a UI path that needs an image
+        # back rather than an exception.
         try:
             hash = sha256(file_path)
 
@@ -81,7 +74,7 @@ class MediaManager:
             os.makedirs(thumbnail_dir, exist_ok=True)
 
 
-            # Check if thumbnail has already been cached:
+            # Check for a cached thumbnail.
             cached = file_in_dir(f"{hash}.png", thumbnail_dir)
             if cached is None:
                 cached = False
@@ -92,10 +85,10 @@ class MediaManager:
                         img.thumbnail((250, 250), resample=Image.Resampling.LANCZOS)
                         return img.copy()
                 except Exception as e:
-                    # Poisoned cache entry (e.g. an old crash mid-write
-                    # truncated it): a bad CACHE file must never wedge a valid
-                    # SOURCE file to the broken placeholder --
-                    # drop the entry and fall through to regeneration.
+                    # A poisoned cache entry, from a crash mid-write for
+                    # example. A bad cache file must not pin a valid source
+                    # file to the broken placeholder, so drop the entry and
+                    # fall through to a fresh generation.
                     log.opt(exception=True).warning(
                         f"Poisoned thumbnail cache entry for {file_path}, regenerating: {e}")
                     try:
@@ -106,9 +99,9 @@ class MediaManager:
             thumbnail = self.generate_thumbnail(file_path)
             thumbnail.thumbnail((250, 250), resample=Image.Resampling.LANCZOS)
             if not thumbnail.info.get("sc_broken"):
-                # Never cache the placeholder -- the cache is keyed by the
-                # file's content hash, so a cached placeholder would stick
-                # even for transient failures (e.g. permissions).
+                # Never cache the placeholder. The cache key is the file's
+                # content hash, so a cached placeholder stays even after a
+                # transient failure such as a permission error.
                 self.save_image_atomic(thumbnail, thumbnail_path)
             return thumbnail
         except Exception as e:
@@ -116,10 +109,10 @@ class MediaManager:
             return self.get_fallback_thumbnail()
 
     def generate_thumbnail(self, file_path):
-        # Never raises: one corrupt/unreadable file must not kill the
+        # This never raises. One corrupt or unreadable file must not kill the
         # import worker thread, the Custom Assets build or app startup
-        # (AssetManagerBackend.fill_missing_thumbnails). On any decode failure
-        # this logs the path and returns the tagged fallback placeholder.
+        # (AssetManagerBackend.fill_missing_thumbnails). A decode failure logs
+        # the path and returns the tagged fallback placeholder.
         try:
             extension = os.path.splitext(file_path)[1].lower()
             if extension in (".jpg", ".jpeg", ".png"):
@@ -133,13 +126,13 @@ class MediaManager:
 
             if thumbnail is None:
                 raise ValueError("decoder returned no image")
-            # Image.open is lazy -- force the decode NOW so a truncated file
-            # raises inside this guard instead of later in the caller.
+            # Image.open is lazy. Force the decode here, so a truncated file
+            # raises inside this guard and not later in the caller.
             thumbnail.load()
             return thumbnail
         except Exception as e:
-            # exception=True: a real programming error in the decode chain
-            # must stay distinguishable from a poison file in the logs.
+            # Pass exception=True, so the logs separate a programming error in
+            # the decode chain from a poison file.
             log.opt(exception=True).warning(f"Could not generate thumbnail for {file_path}: {e}")
             return self.get_fallback_thumbnail()
 
@@ -154,8 +147,8 @@ class MediaManager:
             cap.release()
 
         if not ret or frame is None:
-            # 0-byte/corrupt video: cap.read() returns (False, None) and
-            # cv2.cvtColor(None) would raise an opaque cv2.error.
+            # For a 0-byte or corrupt video cap.read() returns (False, None),
+            # and cv2.cvtColor(None) raises an opaque cv2.error.
             raise ValueError(f"could not read a frame from video: {video_path}")
 
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -169,12 +162,12 @@ class MediaManager:
         return Image.open(file_path)
     
     def generate_gif_thumbnail(self, file_path):
-        # This is the same as load_video but with transparency support
+        # Same as the video path, plus transparency support.
         gif = Image.open(file_path)
         iterator = ImageSequence.Iterator(gif)
         n_frames = 0
         for frame in iterator: n_frames += 1 #TODO: Find a better way to do this
-        frame = iterator[n_frames // 2] # Gifs tend to have a empty frame at the beginning
+        frame = iterator[n_frames // 2] # A GIF often starts with an empty frame
         frame = frame.convert("RGBA")
 
         gif = None

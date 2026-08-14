@@ -1,32 +1,23 @@
-"""
-Thread-safe user-notification facade.
+"""Thread-safe user-notification facade.
 
-Every caller that wanted to tell the user something used to carry its own
-copy of the same dance: is `gl.app` up yet, does it have a `main_win`, do I
-need a `GLib.idle_add`, and do I fall back to a desktop notification. Six
-call sites, six slightly different guards, several of them subtly wrong
-(checking the window on a background thread, or toasting onto a window that
-is hidden in the tray).
+gl.notify.info() and gl.notify.error() are the only entry points. Both are
+safe from any thread and at any point in startup.
 
-`gl.notify.info(...)` / `gl.notify.error(...)` is the whole interface. It is
-safe from any thread and at any point in startup:
+Before gl.app exists, the delivery queues on gl.app_loading_finished_tasks,
+and App.on_activate drains that queue on the main thread once the window is
+up. src/backend/startup_queue.py owns the queueing decision and the race
+between the append and the drain.
 
-* Before `gl.app` exists the delivery is queued on
-  `gl.app_loading_finished_tasks`, which `App.on_activate` drains on the
-  main thread once the window is up. The queueing decision, and the race
-  between that append and the drain, belong to
-  `src/backend/startup_queue.py`.
-* Otherwise it is marshalled with `GLib.idle_add`, and the choice between
-  an in-app toast and a desktop notification is made *inside* that callback
-  -- i.e. on the GTK main thread. Deciding at call time would read
-  `is_visible()` off-thread and leave a window between the check and the
-  delivery in which the main window can disappear.
-* A main window that exists but is not visible (closed to the tray, or
-  still behind onboarding) gets the desktop notification, not a toast on an
-  overlay nobody is looking at.
+Otherwise GLib.idle_add marshals the delivery, and the callback chooses
+between an in-app toast and a desktop notification on the GTK main thread. A
+choice at call time reads is_visible() off-thread and leaves a gap in which
+the main window can disappear.
 
-Imports `globals` directly; `globals` must NOT import this module back
-(it only declares the `notify` slot, filled by main.create_global_objects).
+A main window that exists but is not visible (closed to the tray, or behind
+onboarding) gets the desktop notification.
+
+This module imports globals. globals must not import it back, and globals
+declares the notify slot alone, which main.create_global_objects fills.
 """
 from gi.repository import GLib
 
@@ -47,20 +38,19 @@ class Notify:
         self._dispatch(True, text, title)
 
     def _dispatch(self, is_error: bool, text: str, title: str | None) -> None:
-        # False means the queue owns the delivery: it is drained on the main
-        # thread by App.on_activate once the window is up, and re-entering
-        # _dispatch then takes the deliver-now path. The append-vs-drain
-        # reclaim protocol behind that answer lives in
-        # src/backend/startup_queue.py.
+        # False means the queue owns the delivery. App.on_activate drains the
+        # queue on the main thread once the window is up, and the re-entry
+        # into _dispatch then takes the deliver-now path.
+        # src/backend/startup_queue.py holds the append-against-drain protocol.
         if not startup_queue.get().when_app_ready(
                 lambda: self._dispatch(is_error, text, title)):
             return
         GLib.idle_add(self._deliver, is_error, text, title)
 
     def _deliver(self, is_error: bool, text: str, title: str | None) -> bool:
-        # Main thread only. Bound once: _dispatch only schedules us once gl.app
-        # is up, but the idle callback runs later and the desktop-notification
-        # branch below would dereference it a second time.
+        # Main thread only. Bind gl.app once. _dispatch schedules this
+        # callback only after gl.app is up, but the callback runs later and
+        # the desktop-notification branch below reads it a second time.
         app = gl.app
         main_win = getattr(app, "main_win", None)
         if main_win is not None and main_win.is_visible():

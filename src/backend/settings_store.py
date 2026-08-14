@@ -1,112 +1,18 @@
-"""
-One owner for the app's settings files.
+"""One owner for the app's settings files.
 
-A settings surface is a JSON file the app itself owns: the deck settings under
-``settings/decks/``, the asset library index, the app settings, the page
-manager's own bookkeeping, the file a plugin's settings are kept in. Each of
-them needs the same three answers -- where does it live, what happens when it
-is corrupt, and who may write it -- and each of them used to answer
-separately. The answers had drifted: one surface was healed and quarantined by
-a loader, another was read with a bare ``json.load`` inside a constructor and
-took the whole app down with it, and a third was written straight past the
-cache that other readers were served from.
+A settings surface is a JSON file the app owns. The deck settings under
+settings/decks/, the asset library index, the app settings, the page manager's
+bookkeeping and a plugin's settings file are all surfaces. Each one needs the
+same three answers. Where does it live, what happens when it is corrupt, and
+who may write it. SurfaceSpec, load_file and save_file below hold those
+answers.
 
-This module is where those answers live now.
+A settings file holds what the user chose, and the schema supplies the rest at
+read time. SchemaView applies those defaults; its docstring says why a read
+must never write one back.
 
-WHAT A SURFACE IS
-
-A ``SurfaceSpec`` says four things about one file, and nothing else knows them:
-
-* ``path_fn`` -- where it is, resolved at call time rather than at import, so a
-  surface follows the data path instead of freezing the one that existed when
-  this module was first imported. A ``keyed`` surface takes a key (the deck
-  serial); a keyless one refuses to be given one, which turns a swapped
-  argument into an exception rather than a file named after a serial number.
-* ``root`` -- the type of an empty one. This is the difference between a
-  list-rooted file that is missing and a dict: the asset library index is a
-  JSON array, and handing its reader ``{}`` on a fresh install is how it came
-  to be seeded with the wrong shape.
-* ``cached`` -- whether reads are served from memory. A cached surface hands
-  out a deep copy per read, so a caller may mutate what it got without
-  reaching anything else, and its entry is dropped the moment the store writes
-  that path.
-* ``shared`` -- whether a cached surface hands out the cached object ITSELF
-  instead of a copy of it. The app settings are one dict that many holders
-  read, mutate in place, and save back, and every one of them has to be
-  looking at the same one: hand each reader its own copy and a write through
-  one view becomes invisible to the reader that is about to persist another.
-  A surface is shared because its callers were written that way, not because
-  sharing is cheaper. Only a cached surface can be one.
-* ``schema`` -- the table of defaults its readers fall back to, or None for a
-  surface whose keys the app does not describe. A surface that has one is
-  read through a ``SchemaView`` (below): defaults applied at read, unknown
-  keys refused at write. Whether to describe a surface is a decision per
-  surface rather than one this module makes for all of them.
-
-DEFAULTS ARE APPLIED AT READ, AND STORAGE STAYS SPARSE
-
-A settings file holds only what was actually chosen. Everything else comes
-from the surface's schema, at the moment it is read, and is never written
-back. That is the whole difference between a default and a value: filling a
-missing key on a load path -- ``setdefault`` and save, the shape this replaced
--- persists it, so the first person to open a settings page freezes today's
-default into their config and the day the default changes they are the only
-ones who do not get it. It also means a load path that writes, which is how a
-settings pane came to dim a deck to a number nobody chose.
-
-So ``read`` hands back exactly what is on disk (its callers mutate it and save
-it back; materializing defaults into that dict would persist the whole table
-on the next save), and a ``SchemaView`` applies the defaults on the way out.
-A view is built from ONE read and destructured from there: asking the store
-per key pays for a read per key.
-
-CORRUPT IS NOT FATAL, AND CORRUPT IS NOT DISCARDED
-
-``load_file`` is the single read-with-heal. A file that is absent reads as an
-empty root. A file that is present but unparseable is moved aside to a
-``.corrupt`` sidecar -- never clobbering an older one -- logged loudly, and
-read as an empty root, with the corruption reported back so a caller holding a
-backup can heal from it. Quarantining rather than leaving it in place is the
-whole point: the caller gets an empty result either way, but the next save
-would otherwise overwrite the only remaining copy of the user's data. The heal
-must not depend on the rename succeeding, so the reported flag is set whether
-or not the file could be moved.
-
-An unreadable-but-present file (permissions, a dead mount) is NOT corrupt and
-is NOT quarantined: the read raises, because the content is unknown and
-pretending it is empty would invite a write that destroys it. One surface
-answers that differently and says why it does: ``PluginSettings``, where a
-raise costs the user the whole plugin.
-
-WRITES GO THROUGH THE ATOMIC WRITER, AND INVALIDATE BY PATH
-
-Every write here lands via ``atomic_write_json``: temp file, fsync, rename, so
-an interrupted write can never leave a truncated settings file. Immediately
-after, the store drops any cached entry for that RESOLVED path. Invalidation is
-therefore keyed by the file that was written, not by the surface the writer
-thought it was writing -- a write through the generic path-level entry point
-invalidates the cached surface it happens to land on, and there is no way to
-write through this module and leave a stale reader behind.
-
-Dropping the entry is not enough on its own, because a reader can be inside
-the file when the write lands: it would finish afterwards and re-insert the
-content from BEFORE the write, which no later write to any other file would
-ever correct. So invalidation COUNTS as well as drops, per path, and a read
-that missed only caches what it parsed if the count has not moved since the
-miss. A read that loses that race still answers its own caller -- it read what
-was there when it read it -- but it leaves the cache cold for the next one.
-
-THREADING
-
-``edit()`` serializes a read-modify-write against other ``edit()`` calls on the
-same file, which is what a concurrent pair of them needs to not lose an update.
-The cache lock is a leaf: it is never held across file I/O, and never across
-the edit lock. Nothing else in here blocks.
-
-The store is a module singleton reached through ``get()``, deliberately not a
-``gl`` slot: naming a protocol should shrink the shared namespace, not add to
-it. Its imports are the standard library, globals, the atomic writer and the
-logger -- no toolkit -- so any layer may import it.
+This module imports stdlib, globals, the atomic writer and the logger, and no
+toolkit, so any layer can import it.
 """
 from __future__ import annotations
 
@@ -133,49 +39,50 @@ from src.backend.atomic_json import (
 class SurfaceSpec:
     """One settings file, described once.
 
-    Specs are module-level constants, compared and hashed by value; the store
-    keys nothing on their identity, so a caller that builds an equal spec of
-    its own gets the same behaviour as the registered one.
+    A spec is a module-level constant, and it compares and hashes by value.
+    The store keys nothing on identity, so a caller that builds an equal spec
+    gets the behaviour of the registered one.
     """
 
     #: Human name, used in error messages only.
     name: str
-    #: Called with the key for a keyed surface, with nothing for a keyless
-    #: one. Every read and write in here resolves the path through this, per
-    #: call, rather than holding one resolved at import: a caller is free to
-    #: snapshot ``path()`` for its own use, but the store never does.
+    #: Takes the key for a keyed surface, and nothing for a keyless one.
+    #: Every read and write here resolves the path through this, per call, and
+    #: holds no path resolved at import. A caller may snapshot path() for its
+    #: own use, and the store never does.
     path_fn: Callable[..., str]
-    #: Type of an empty one -- ``dict`` for an object-rooted file, ``list``
-    #: for an array-rooted one. Missing and corrupt both read as ``root()``.
+    #: Type of an empty file. dict for an object-rooted file, list for an
+    #: array-rooted one. A missing file and a corrupt file both read as
+    #: root().
     root: type[dict[str, Any]] | type[list[Any]] = dict
     #: Defaults table, or None for a surface whose keys the app does not
-    #: describe. Read through a ``SchemaView``, never merged into the stored
-    #: content (see the module docstring). Out of the hash (a table is a
-    #: mapping, and a mapping is unhashable) but still part of equality: two
-    #: specs describing the same file under different schemas are different
-    #: specs, and a spec must stay usable as a dict key.
+    #: describe. A SchemaView reads it, and nothing merges it into the stored
+    #: content (see the module docstring). It stays out of the hash, because a
+    #: table is a mapping and a mapping is unhashable, and it stays part of
+    #: equality. Two specs that describe one file under different schemas are
+    #: different specs, and a spec must work as a dict key.
     schema: Mapping[str, Any] | None = field(default=None, hash=False)
     #: Serve reads from memory, deep-copied per call, dropped on write.
     cached: bool = False
-    #: Whether ``path_fn`` takes a key.
+    #: Whether path_fn takes a key.
     keyed: bool = False
     #: Hand every reader the cached object itself rather than a copy (see the
-    #: module docstring). Requires ``cached``.
+    #: module docstring). This needs cached.
     shared: bool = False
 
     def __post_init__(self) -> None:
-        # Fails at import, where the spec is written, rather than at the first
-        # read: an uncached surface has nothing to share, so asking for it is a
-        # mistake about what the surface is, not a runtime condition.
+        # Fail at import, where the author writes the spec, and not at the
+        # first read. An uncached surface has nothing to share, so this
+        # request describes the surface wrongly.
         if self.shared and not self.cached:
             raise ValueError(f"the {self.name} surface is shared but not cached: there is nothing to share")
 
     def path(self, key: str | None = None) -> str:
-        """This surface's file, for ``key`` where it has one.
+        """This surface's file, for key where the surface takes one.
 
-        A missing or surplus key is an error rather than a guess: the keyed
-        surfaces are per-device files, and inventing a path for a caller that
-        forgot the serial would write settings nothing ever reads back.
+        A missing or surplus key raises rather than starts a guess. A keyed
+        surface holds a per-device file, and a path invented for a caller that
+        forgot the serial writes settings that nothing reads back.
         """
         if self.keyed:
             if key is None:
@@ -186,77 +93,71 @@ class SurfaceSpec:
         return self.path_fn()
 
 
-# --------------------------------------------------------------------- #
-# The registered surfaces                                               #
-# --------------------------------------------------------------------- #
+# The registered surfaces.
 
-# Every deck-settings default, defined exactly once. Each of these used to be
-# an inline literal at the four or five places that read the key, and they had
-# drifted: the device dimmed an idle deck to one number while the page editor
-# showed another, and the settings pane wrote a third into the file the first
-# time it was opened.
+# Every deck-settings default, defined once. An inline literal per reader
+# drifts, so the device, the page editor and the settings pane each apply a
+# different number for one key.
 #
-# A name here maps either to a SECTION (its own table of keys) or to a
+# A name here maps to a section, which holds its own table of keys, or to a
 # top-level setting stored as a bare value.
 DECK_DEFAULTS: dict[str, Any] = {
     "brightness": {
-        # What the deck runs at when nothing has chosen a brightness. The
-        # device layer and the page-level brightness UI have always used 75;
-        # the deck settings pane said 50 and applied it on open, which is the
-        # one surface that had to move.
+        # What the deck runs at while nothing chooses a brightness. The
+        # device layer and the page-level brightness UI both use 75.
         "value": 75,
     },
     "screensaver": {
         "enable": False,
         "media-path": None,
-        # Loop ON. A screensaver video or GIF whose config predates the loop
-        # toggle otherwise plays exactly one pass and then holds its last
-        # frame on the device for the whole idle window -- a frozen deck,
-        # never what "screensaver" means. True is also what every media layer
-        # already defaults to (ScreenSaver.loop, Background.set_from_path /
-        # prebuild_from_path, BackgroundVideo/GifBackground), so the toggle
-        # can no longer show OFF while the media loops.
+        # Loop by default. A screensaver video or GIF whose config predates
+        # the loop toggle otherwise plays one pass and holds its last frame on
+        # the device for the whole idle window, which freezes the deck. Every
+        # media layer already defaults to True (ScreenSaver.loop,
+        # Background.set_from_path, Background.prebuild_from_path,
+        # BackgroundVideo and GifBackground), so the toggle and the media
+        # agree.
         "loop": True,
         "fps": 30,
         # Minutes of no input before it shows.
         "time-delay": 5,
-        # 30, not the 75 the running brightness defaults to: a screensaver
-        # that "dims" to the normal brightness is no screensaver. 30 is also
-        # what the device has actually applied to every config without the
-        # key, so this is the number those decks were already using -- the
-        # page editor was the surface displaying a value the deck ignored.
+        # 30, and not the 75 of the running brightness. A screensaver that
+        # dims to the normal brightness dims nothing. The device also applies
+        # 30 to every config without this key, so those decks already run at
+        # this number, and the page editor showed a value the deck ignored.
         "brightness": 30,
     },
     "background": {
         "enable": False,
         "media-path": None,
-        # Loop ON, for the screensaver's reason: a deck-level background is
-        # the "leave it running" case, and a config predating the toggle would
-        # otherwise freeze on its last frame. A PAGE-level background keeps
-        # its own literal False where the page arm reads it -- a one-shot
-        # flourish on page entry is a real use there, and this table describes
-        # the deck.
+        # Loop by default, for the reason the screensaver does. A deck-level
+        # background runs until something stops it, and a config that predates
+        # the toggle otherwise freezes on its last frame. A page-level
+        # background keeps its own False where the page arm reads it, because
+        # a single pass on page entry is a real use there, and this table
+        # describes the deck.
         "loop": True,
         "fps": 30,
         "extend-to-touchscreen": False,
     },
     "display": {
-        # A strict no-op factor: every application site compares against it
-        # before doing any enhancement work. The clamp and the non-finite
-        # rejection stay with the reader that feeds an ImageEnhance factor and
-        # a cache key -- a defaults table describes absence, not validity.
+        # A factor that changes nothing. Every application site compares
+        # against it before it enhances an image. The clamp and the
+        # non-finite check stay with the reader that feeds an ImageEnhance
+        # factor and a cache key, because a defaults table describes an absent
+        # value rather than a valid one.
         "saturation": 1.0,
     },
-    # Degrees. Stored as a bare int rather than a section, which is why it is
-    # read and written without a key.
+    # Degrees. Stored as a bare int rather than a section, so it reads and
+    # writes without a key.
     "rotation": 0,
-    # Deliberately absent: "key-layout". A fake deck's layout is decided by
-    # whoever constructs the deck and passed in as that caller's own fallback,
-    # so there is no one shape this table could name for it.
+    # This table names no "key-layout". Whoever constructs a fake deck decides
+    # its layout and passes that caller's own fallback, so no single shape
+    # fits here.
 }
 
-#: Per-deck settings, one file per serial. Cached because the render path
-#: reads them repeatedly and the read is a JSON parse; deep-copied per read
+#: Per-deck settings, one file per serial. Cached, because the render path
+#: reads them again and again and each read parses JSON. Deep-copied per read,
 #: because most callers mutate what they get and save it back.
 DECK = SurfaceSpec(
     name="deck settings",
@@ -267,11 +168,11 @@ DECK = SurfaceSpec(
     keyed=True,
 )
 
-#: The custom asset library index. A JSON ARRAY, which is why ``root`` is not
-#: the default: an absent or corrupt one must read as an empty library, and a
-#: dict there is what makes a list-rooted reader silently see nothing.
-#: Uncached -- it is read once at construction and written by the import
-#: worker, and the backend holds the parsed list itself.
+#: The custom asset library index. A JSON array, so root differs from the
+#: default. An absent or corrupt index must read as an empty library, and a
+#: dict there leaves a list-rooted reader with nothing. Uncached, because the
+#: backend reads it once at construction, the import worker writes it, and the
+#: backend holds the parsed list itself.
 ASSET_LIBRARY = SurfaceSpec(
     name="asset library",
     path_fn=lambda: os.path.join(gl.DATA_PATH, "Assets", "AssetManager", "Assets.json"),
@@ -280,7 +181,7 @@ ASSET_LIBRARY = SurfaceSpec(
 
 
 # Every app-settings default, defined exactly once. Callers read through
-# AppSettings instead of repeating `.get(section, {}).get(key, default)`.
+# AppSettings, rather than repeat .get(section, {}).get(key, default).
 APP_DEFAULTS: dict[str, dict] = {
     "general": {
         "hold-time": 0.5,
@@ -302,7 +203,7 @@ APP_DEFAULTS: dict[str, dict] = {
         "enable-fps-warnings": True,
     },
     "system": {
-        # Tri-state: None means "never asked", which is what makes
+        # Three states. None means "never asked", and it makes
         # mainWindow.on_close raise the KeepRunningDialog.
         "keep-running": None,
         "autostart": True,
@@ -311,10 +212,10 @@ APP_DEFAULTS: dict[str, dict] = {
     "performance": {
         "n-cached-pages": 3,
         "cache-videos": True,
-        # Quiescence gating. "screensaver" is today's behavior
-        # exactly (the deck screensaver's own transition already releases the
-        # underlying page's media, so nothing extra engages); "system-idle"
-        # also pauses deck animations while the session is idle or locked.
+        # Quiescence gating. "screensaver" engages nothing extra, because the
+        # deck screensaver's own transition already releases the underlying
+        # page's media. "system-idle" also pauses deck animations while the
+        # session is idle or locked.
         "animation-pause-mode": "screensaver",
         "animation-idle-minutes": 5,
     },
@@ -334,41 +235,37 @@ APP_DEFAULTS: dict[str, dict] = {
 
 
 def _fallback_font() -> str:
-    # Resolved lazily: gl.fallback_font runs a system font scan on first
-    # access (globals.py __getattr__), so it must not be evaluated while
-    # this module is being imported.
+    # Resolve this late. gl.fallback_font runs a system font scan on first
+    # access, through the __getattr__ of globals.py, so it must not run during
+    # the import of this module.
     return gl.fallback_font
 
 
-# general.default-font subkeys. Deliberately NOT the schema of a section:
-# these use `or` fallback semantics (a stored value that is falsy falls back
-# too, because an empty family or a zero size is a half-written font, not a
-# choice), and one of them is resolved by calling it. A schema answers "this
-# key is absent"; this table answers "there is no usable value here", and
-# folding the second into the first would either start honouring a zero size
-# or give every schema in the app a second meaning. It lives next to
-# APP_DEFAULTS because it describes the same file, and it is read only through
-# ``AppSettings.font_default``.
+# The subkeys of general.default-font. This is no section schema. These keys
+# fall back on falsy values as well, because an empty family or a zero size is
+# a half-written font rather than a choice, and one value resolves through a
+# call. A schema answers "this key is absent". This table answers "no usable
+# value sits here". A merge of the two honours a zero size, or gives every
+# schema in the app a second meaning. It sits next to APP_DEFAULTS because it
+# describes the same file, and only AppSettings.font_default reads it.
 APP_FONT_DEFAULTS: dict = {
     "font-family": _fallback_font,
     "font-size": 15,
     "font-weight": 400,
     "font-style": "normal",
     "font-color": (255, 255, 255, 255),
-    # 255, not 1: this feeds color_values_to_gdk (0-255 on all four channels)
-    # and the render fallback is (0,0,0,255) -- the old value 1 only looked
-    # opaque because an earlier clamp rounded any alpha >=1 up.
+    # Alpha 255, and not 1. This value feeds color_values_to_gdk, which reads
+    # 0 to 255 on all four channels, and the render fallback is (0,0,0,255).
     "outline-color": (0, 0, 0, 255),
     "outline-width": 2,
 }
 
-#: The app's own settings. Shared rather than copied per read: its holders
-#: were written around one process-wide dict -- the settings dialog's rows,
-#: the store pages and the launch counter all read it, write into it and save
-#: it back -- and splitting that into a copy per reader would lose whichever
-#: write was not the last one saved. The one caller that must NOT join it is
-#: the settings dialog's construction snapshot, which reads through
-#: ``read_fresh`` for exactly that reason.
+#: The app's own settings. Shared rather than copied per read. Its holders
+#: work on one process-wide dict. The settings dialog's rows, the store pages
+#: and the launch counter all read it, write into it and save it back, and a
+#: copy per reader loses every write except the last one saved. One caller
+#: must stay off it, the settings dialog's construction snapshot, and it reads
+#: through read_fresh for that reason.
 APP = SurfaceSpec(
     name="app settings",
     path_fn=lambda: os.path.join(gl.DATA_PATH, "settings", "settings.json"),
@@ -380,26 +277,25 @@ APP = SurfaceSpec(
 
 
 
-# The page manager's own bookkeeping: which page each deck opens on, and the
-# pages it keeps warm. Schema-less -- its readers walk raw ``.get`` chains over
-# a ``default-pages`` map keyed by serial -- and uncached: it is read and
-# rewritten by a handful of page operations, never on a render path. Its
-# read-modify-write callers go through ``edit()``, which serializes them
-# against each other so two of them cannot lose an update.
+# The page manager's own bookkeeping, which is the page each deck opens on
+# and the pages it keeps warm. It carries no schema, because its readers walk
+# raw .get chains over a default-pages map keyed by serial. It stays uncached,
+# because a handful of page operations read and rewrite it and no render path
+# touches it. Its read-modify-write callers go through edit(), which
+# serializes them so two of them keep both updates.
 PAGES = SurfaceSpec(
     name="page manager settings",
     path_fn=lambda: os.path.join(gl.DATA_PATH, "settings", "pages.json"),
     root=dict,
 )
 
-#: The static settings: the data-path override, kept at a FIXED location outside
-#: the data path, because it is the file that chooses the data path. Uncached --
-#: read rarely, from a settings pane. The bootstrap read of this same file in
-#: globals.py is the one sanctioned reader that does NOT come through here: it
-#: runs before this module -- before anything -- is importable, and it is the
-#: read that DEFINES ``gl.DATA_PATH``, which every keyed surface resolves
-#: against. Its silent-default-on-error policy is the right one for a bootstrap
-#: and stays exactly where it is.
+#: The static settings, which hold the data-path override. This file sits at
+#: a fixed location outside the data path, because it chooses the data path.
+#: Uncached, because a settings pane reads it rarely. The bootstrap read of
+#: this file in globals.py is the one approved reader that skips this module.
+#: It runs before this module or anything else is importable, and it defines
+#: gl.DATA_PATH, which every keyed surface resolves against.
+#: Its quiet fallback on an error suits a bootstrap and stays there.
 STATIC = SurfaceSpec(
     name="static settings",
     path_fn=lambda: gl.STATIC_SETTINGS_FILE_PATH,
@@ -408,17 +304,18 @@ STATIC = SurfaceSpec(
 
 
 # The asset chooser's two filter toggles, remembered between openings. Both
-# default ON: a chooser that opened showing nothing until the user found the
-# toggles would look broken. Defined here, once, rather than as an inline
-# ``.get(..., True)`` at each of the three sites that read or write them.
+# default to True, because a chooser that opens empty until the user finds the
+# toggles reads as broken. They live here once, rather than as an inline
+# .get(..., True) at each of the three sites that read or write them.
 UI_ASSET_MANAGER_DEFAULTS: dict[str, Any] = {
     "video-toggle": True,
     "image-toggle": True,
 }
 
-#: The asset manager window's remembered UI state. Schema'd (the two toggles),
-#: uncached (a per-open read on the main thread), read through a ``SchemaView``
-#: so the True defaults live in one place instead of at every call site.
+#: The asset manager window's remembered UI state. It carries a schema for
+#: the two toggles. It stays uncached, because each open reads it once on the
+#: main thread. A SchemaView reads it, so the True defaults live in one place
+#: rather than at every call site.
 UI_ASSET_MANAGER = SurfaceSpec(
     name="asset manager ui state",
     path_fn=lambda: os.path.join(gl.DATA_PATH, "settings", "ui", "AssetManager.json"),
@@ -428,15 +325,15 @@ UI_ASSET_MANAGER = SurfaceSpec(
 
 
 
-#: One plugin's settings file, keyed by the path the plugin resolved for itself
-#: rather than by its id: that path is decided once in ``PluginBase.__init__``
-#: (which migrates a legacy folder-name directory to the manifest-id one), and
-#: rederiving it here would give the store a second opinion about where a
-#: plugin's settings live. Schema-less by design -- the app owns the envelope
-#: and nothing inside it, so a defaults table could only describe keys the
-#: plugin alone knows about, and its write-side tripwire would reject every one
-#: of them. Uncached: a cache would buy a parse nothing repeats and owe a
-#: coherence answer for a backend running in another process.
+#: One plugin's settings file, keyed by the path the plugin resolved for
+#: itself and not by its id. PluginBase.__init__ decides that path once, and
+#: it moves an old folder-name directory to the manifest-id one. A second
+#: derivation here gives the store another opinion about where a plugin's
+#: settings live. It carries no schema, because the app owns the envelope and
+#: nothing inside it. A defaults table could describe only keys that the
+#: plugin knows, and the write-side check refuses every one of them. It
+#: stays uncached, because a cache saves a parse that nothing repeats, and
+#: owes a coherence answer for a backend in another process.
 PLUGIN = SurfaceSpec(
     name="plugin settings",
     path_fn=lambda settings_path: settings_path,
@@ -444,91 +341,90 @@ PLUGIN = SurfaceSpec(
     keyed=True,
 )
 
-#: The envelope version this app writes: it keeps the plugin's own keys under
-#: ``settings``. Anything else IS the settings, from before the envelope
-#: existed, and is migrated the first time it is read.
+#: The envelope version this app writes. It keeps the plugin's own keys under
+#: "settings". A file of another shape holds the settings themselves, from
+#: before the envelope existed, and the first read migrates it.
 PLUGIN_FILE_VERSION = "2.0"
 
 
 class SettingsStore:
-    """The process-wide settings store. Reached through ``get()``."""
+    """The process-wide settings store. get() reaches it."""
 
     def __init__(self) -> None:
-        # Resolved path -> parsed content. The content here is the master
-        # copy: it is never handed out, only deep-copied from. It is keyed by
-        # FILE and holds an entry per settings file actually read, so it grows
-        # with the number of decks a session has seen and not with how often
-        # they are read. The cache the deck settings used to live in was per
-        # settings-manager instance and kept that instance alive; this one
-        # belongs to the file it caches, which is what it was always
-        # describing.
+        # Maps a resolved path to its parsed content. This content is the
+        # master copy. Nothing hands it out, and every read deep-copies from
+        # it. The file keys it, and it holds one entry per settings file read,
+        # so it grows with the number of decks a session sees and not with the
+        # number of reads. A per-instance cache instead keeps that instance
+        # alive; this one belongs to the file it caches.
         self._cache: dict[str, Any] = {}
-        # Resolved path -> how many times that path has been invalidated. A
-        # read that misses records this before it parses and stores what it
-        # parsed only if the number has not moved, so a write landing during a
-        # cold read cannot be undone by that read finishing afterwards.
-        # Counted rather than flagged because the reader must be able to tell
-        # "nothing happened" from "something happened and was then undone
-        # again". Bounded like the edit locks: one entry per settings file
-        # ever WRITTEN through the store.
+        # Maps a resolved path to the number of invalidations of that path. A
+        # read that misses records this number before it parses, and stores
+        # what it parsed only while the number stands still, so a write that
+        # lands during a cold read survives that read. A count, and not a
+        # flag, because the reader must tell "nothing happened" from
+        # "something happened and something else undid it". The edit locks
+        # bound it, at one entry per settings file written through the
+        # store.
         self._invalidations: dict[str, int] = {}
-        # Raw path -> the resolved path it is cached under, for reads served
-        # from memory. Resolving is an lstat walk of every component, and
-        # paying it per read puts a syscall chain in front of what is
-        # otherwise a dict lookup -- the app settings are read from the label
-        # engine and the media caches, not once per load, and measured 30x the
-        # cost of the plain shared dict they replaced.
+        # Maps a raw path to the resolved path it caches under, for a read
+        # served from memory. A resolution lstats every component, and a
+        # resolution per read puts a chain of syscalls in front of a dict
+        # lookup. The label engine and the media caches read the app settings,
+        # rather than one read per load, and that measured 30 times the cost
+        # of the plain shared dict.
         #
-        # What remembering it costs, exactly: symlink retargeting moves from
-        # the set of outside changes the store followed correctly into the set
-        # it is blind to until the next write -- joining outside rewrites of
-        # the file, which the content cache never followed. Resolving per read
-        # meant a repointed link changed the cache key, so the very next read
-        # missed and parsed the new target; now the old target's content is
-        # served until something resolves again.
+        # This memo costs one thing. A retargeted symlink joins the outside
+        # changes that the store misses until the next write, next to an
+        # outside rewrite of the file, which the content cache never followed.
+        # A resolution per read changes the cache key when a link moves, so
+        # the next read misses and parses the new target. With the memo the
+        # old target's content serves until something resolves again.
         #
-        # Every write, edit and invalidation still resolves for real -- nothing
-        # is ever written, locked or invalidated under a remembered name -- and
-        # any write through the store drops the whole memo, so the blindness
-        # self-heals at the next write. The shape to have in mind is a managed
-        # config tree (stow, chezmoi) re-linking these files while the app is
-        # running.
+        # Every write, edit and invalidation still resolves for real, so
+        # nothing writes, locks or invalidates under a remembered name. Any
+        # write through the store drops the whole memo, so the next write
+        # heals this. The case to picture is a managed config tree, such as
+        # stow or chezmoi, that re-links these files while the app runs.
         self._resolved: dict[str, str] = {}
+        # A leaf lock. No holder keeps it across file I/O, and no holder
+        # keeps it across the edit lock.
         self._cache_lock = threading.Lock()
-        # Resolved path -> the lock edit() serializes on. Created on demand and
-        # kept, because a settings file is edited again and the map is bounded
-        # by how many settings files exist.
+        # Maps a resolved path to the lock that edit() serializes on. Each
+        # lock is built on demand and kept, because a settings file gets
+        # edited again, and the number of settings files bounds the map.
         self._edit_locks: dict[str, threading.Lock] = {}
         self._edit_locks_guard = threading.Lock()
 
-    # -- surfaces ------------------------------------------------------ #
+    # Surfaces
 
     def read(self, spec: SurfaceSpec, key: str | None = None) -> Any:
-        """This surface's content, or an empty root if it is absent or corrupt.
+        """This surface's content, or an empty root when it is absent or
+        corrupt.
 
-        A cached surface answers from memory with a deep copy, so mutating the
-        result reaches nothing else and is not persisted -- pair it with
-        ``write`` exactly as an uncached read must be. A SHARED surface is the
-        exception, and answers with the one object every other reader of it
-        holds; mutating that one is seen by all of them, still unpersisted.
+        A cached surface answers from memory with a deep copy, so a mutation of
+        the result reaches nothing else and persists nothing. Pair it with
+        write(), as an uncached read needs too. A shared surface answers with
+        the one object that every other reader holds. Every reader sees a
+        mutation of that object, and it still persists nothing.
         """
         data, _corrupt = self.read_reporting_corruption(spec, key)
         return data
 
     def read_reporting_corruption(self, spec: SurfaceSpec, key: str | None = None) -> tuple[Any, bool]:
-        """``(content, corrupt)`` for this surface.
+        """Returns (content, corrupt) for this surface.
 
-        ``corrupt`` describes THIS read: True only when the read found the
-        file present and unparseable -- not for a legitimately empty one and
-        not for a missing one. A caller holding a backup heals on the flag
-        rather than on the quarantine side-effect having removed the primary:
-        corrupt is corrupt whether or not the file could be moved aside.
+        corrupt describes this read. It is True only when the read found the
+        file present and unparseable, and False for an empty file and for a
+        missing one. A caller that holds a backup heals on this flag, and not
+        on the quarantine rename, because a corrupt file stays corrupt whether
+        or not the rename worked.
 
-        It is deliberately not a property of the surface, so it is not cached
-        with the content. The read that quarantines reports True; a later read
-        of the same surface finds the file gone and reports False, and a
-        cached answer says False for the same reason -- which is what a fresh
-        read of that surface would now say.
+        This flag belongs to the read and not to the surface, so nothing
+        caches it with the content. The read that quarantines reports True. A
+        later read of the same surface finds the file gone and reports False,
+        and a cached answer reports False for the same reason, which is what a
+        fresh read now says.
         """
         path = spec.path(key)
         if not spec.cached:
@@ -543,48 +439,48 @@ class SettingsStore:
             # on is guaranteed to move it.
             generation = self._invalidations.get(resolved, 0)
 
-        # Parsed outside the lock: a parse must never block another surface's
+        # Parse outside the lock. A parse must not block another surface's
         # reader.
         data, corrupt = self.load_file(path, root=spec.root)
 
         with self._cache_lock:
             if self._invalidations.get(resolved, 0) == generation:
-                # setdefault, not assignment: two readers can miss the same
-                # cold surface at once, and the one that finishes second must
-                # adopt the entry the first left rather than replace it. The
-                # two parsed the same bytes -- an intervening write would have
-                # moved the count -- so for a copying surface this is a
-                # formality, but for a SHARED one it is what makes "every
-                # reader holds the same object" true rather than usually true.
+                # Use setdefault rather than an assignment. Two readers can
+                # miss the same cold surface together, and the second one must
+                # adopt the entry the first left. Both parsed the same bytes,
+                # because a write between them moves the count. That changes
+                # nothing for a copying surface, and it makes "every reader
+                # holds one object" hold for a shared surface.
                 data = self._cache.setdefault(resolved, data)
-            # Otherwise a write landed while this read was in the file: what
-            # was just parsed is the content from BEFORE that write, and
-            # caching it would leave every later reader on the old settings
-            # with nothing to correct it. Dropped instead -- this caller still
-            # gets the content it read, which is a read that happened before
-            # the write, and the next reader loads afresh.
+            # Otherwise a write landed while this read was in the file. The
+            # parsed content is what stood before that write, and a cache of
+            # it leaves every later reader on the old settings with nothing to
+            # correct them. Drop it instead. This caller keeps the content it
+            # read, which is a read from before the write, and the next reader
+            # loads afresh.
         return self._handout(spec, data), corrupt
 
     def read_fresh(self, spec: SurfaceSpec, key: str | None = None) -> Any:
-        """This surface as it is ON DISK right now, as a copy of its own.
+        """This surface as it stands on disk now, as a private copy.
 
-        For the caller shape a cache cannot serve: an editor that takes a
-        snapshot, changes several things against it, and writes the whole
-        snapshot back when it is done. It must not join a shared surface --
-        its half-finished edits would read as settled to everyone else -- and
-        it must not be served a cache entry, because what it eventually writes
-        has to be what it was shown. Corruption heals exactly as in any other
-        read; a cached surface's entry is neither read nor filled.
+        This serves a caller that a cache cannot. An editor takes a snapshot,
+        changes several things against it, and writes the whole snapshot back
+        at the end. It must stay off a shared surface, because every other
+        reader takes its half-finished edits as settled, and it must not
+        get a cache entry, because what it writes must match what it was
+        shown. Corruption heals as in any other read, and a cached surface's
+        entry stays neither read nor filled.
         """
         data, _corrupt = self.load_file(spec.path(key), root=spec.root)
         return data
 
     def view(self, spec: SurfaceSpec, key: str | None = None) -> SchemaView:
-        """A ``SchemaView`` over this surface's current content.
+        """A SchemaView over this surface's current content.
 
-        For a schema'd surface read outside the settings-manager facade -- the
-        asset chooser's toggle state. One read, wrapped: a shared surface's
-        view aliases the cached object, every other copies (see ``SchemaView``).
+        This serves a schema'd surface read outside the settings-manager
+        facade, such as the asset chooser's toggle state. It wraps one read. A
+        shared surface's view aliases the cached object, and every other view
+        holds a copy (see SchemaView).
         """
         if spec.schema is None:
             raise ValueError(f"the {spec.name} surface has no schema to read through")
@@ -598,19 +494,18 @@ class SettingsStore:
     def edit(self, spec: SurfaceSpec, key: str | None = None) -> Iterator[Any]:
         """Read-modify-write this surface, serialized against other edits of it.
 
-        The block is handed the current content and whatever it leaves behind
-        is written when the block ends. An exception inside the block writes
-        nothing: a half-applied edit is worse than none, and the caller is the
-        only one who knows whether its half was meaningful.
+        The block receives the current content, and the end of the block
+        writes back whatever it leaves. An exception inside the block writes
+        nothing, because a half-applied edit costs more than none, and only
+        the caller knows whether its half meant anything.
 
-        Serialization is per FILE, not per surface type -- two decks are two
-        locks. It bounds only other ``edit()`` calls; a plain ``write`` of the
-        same surface still lands whenever it lands, which is the same
-        last-writer-wins it has always been.
+        The lock covers one file, and not one surface type, so two decks take
+        two locks. It bounds another edit() call only. A plain write() of the
+        same surface lands whenever it lands, and the last writer wins.
 
-        The read is always from disk, cached surface or not: the point of the
-        block is that what is written is what was just read, and a cache is by
-        definition a copy of something the store did not watch.
+        The read always comes from disk, for a cached surface too. The block
+        exists so that the write matches the read that opened it, and a cache
+        holds a copy of something the store did not watch.
         """
         path = spec.path(key)
         with self._edit_lock(path):
@@ -618,14 +513,15 @@ class SettingsStore:
             yield data
             self.save_file(path, data)
 
-    # -- files --------------------------------------------------------- #
+    # Files
 
     def load_file(self, file_path: str, root: type[dict[str, Any]] | type[list[Any]] = dict) -> tuple[Any, bool]:
-        """Read one JSON file, healing a corrupt one. Returns ``(data, corrupt)``.
+        """Read one JSON file and heal a corrupt one. Returns (data,
+        corrupt).
 
-        The path-level entry point: it knows nothing about surfaces and is
-        what the settings-manager facade forwards its own path-taking readers
-        to. ``root`` decides what an absent or corrupt file reads as.
+        This is the path-level entry point. It knows nothing about surfaces,
+        and the settings-manager facade forwards its path-taking readers here.
+        root decides what an absent or corrupt file reads as.
         """
         empty = root()
         if not os.path.exists(file_path):
@@ -634,29 +530,28 @@ class SettingsStore:
             with open(file_path) as f:
                 return json.load(f), False
         except FileNotFoundError:
-            # Raced a concurrent quarantine between the exists() check and
-            # the open.
+            # A concurrent quarantine moved the file between the exists()
+            # check and the open.
             return empty, False
         except ValueError as e:
-            # ValueError, not JSONDecodeError: garbage bytes raise
-            # UnicodeDecodeError while decoding, which is a ValueError but not
-            # a JSON error -- it used to escape this handler and propagate out
-            # of every page/settings load. JSONDecodeError is itself a
-            # ValueError subclass, so one clause covers both.
-            # Quarantine instead of leaving the corrupt file in place: the
-            # caller gets an empty root either way, but the next save would
-            # overwrite the only remaining copy of the user's data. Renamed
-            # aside it stays recoverable (a prior .corrupt is never
-            # clobbered), and page loads heal from their backup off the
-            # returned corrupt=True flag regardless of whether this rename
-            # succeeded.
+            # Catch ValueError. A file of garbage bytes raises
+            # UnicodeDecodeError while the reader decodes it, and json raises
+            # JSONDecodeError. Both derive from ValueError, so one clause
+            # covers both.
+            #
+            # Quarantine the file rather than leave it in place. The caller
+            # gets an empty root either way, and the next save overwrites the
+            # only remaining copy of the user's data. A file renamed aside
+            # stays recoverable, and the rename keeps an earlier .corrupt. A
+            # page load heals from its backup on the returned corrupt flag,
+            # whether or not this rename worked.
             moved, dest = quarantine_corrupt_file(file_path)
             if moved:
                 log.error(f"Invalid json in {file_path}: {e} -- preserved at {dest}, loading empty")
-                # Bounded retention, scoped to the file that just gained a
-                # sidecar -- never a startup-wide sweep. Covers pages
-                # and deck/app settings alike: page loads route their
-                # corrupt-read handling through this loader.
+                # Bound the sidecar count for the file that just gained one,
+                # and never sweep at startup. This covers a page and the deck
+                # and app settings alike, because a page load routes its
+                # corrupt read through this loader.
                 for pruned in prune_corrupt_sidecars(file_path, protect=dest):
                     log.info(f"Pruned old quarantined copy {pruned}")
             else:
@@ -669,12 +564,13 @@ class SettingsStore:
     def save_file(self, file_path: str, data: Any) -> None:
         """Write one JSON file atomically, then invalidate that path.
 
-        Invalidation follows the write rather than the surface, so a caller
-        that reaches a cached file through this path-level entry point cannot
-        leave a stale reader behind.
+        The invalidation follows the write rather than the surface, so a
+        caller that reaches a cached file through this path-level entry point
+        leaves no stale reader behind.
         """
-        # Atomic write (tmp file + fsync + os.replace) so an interrupted
-        # write can't truncate the settings file; also creates parent dirs.
+        # An atomic write, with a temp file, an fsync and an os.replace, so an
+        # interrupted write cannot truncate the settings file. It also creates
+        # the parent directories.
         atomic_write_json(file_path, data)
         self.invalidate_path(file_path)
 
@@ -683,25 +579,25 @@ class SettingsStore:
         resolved = _resolve(file_path)
         with self._cache_lock:
             self._cache.pop(resolved, None)
-            # Resolutions are remembered for the read fast path only, and only
-            # between writes: a link that has moved is followed again from
-            # here on, and the entry it used to point at is already gone.
+            # The memo of resolutions serves the read fast path only, and
+            # only between writes. A link that moved gets followed again from
+            # here on, and the entry it pointed at is already gone.
             self._resolved.clear()
-            # Counted even when nothing was cached: a reader may be between
-            # its miss and its store right now, holding content this write has
-            # just superseded, and dropping an entry that does not exist yet
-            # is the one thing a cache cannot do.
+            # Count this even when nothing was cached. A reader can sit
+            # between its miss and its store right now, holding content that
+            # this write replaces, and a cache cannot drop an entry that does
+            # not exist yet.
             self._invalidations[resolved] = self._invalidations.get(resolved, 0) + 1
 
-    # -- internals ----------------------------------------------------- #
+    # Internals
 
     def _resolve_for_read(self, file_path: str) -> str:
-        """The cache key for a read, remembered per raw path (see ``_resolved``).
+        """The cache key for a read, remembered per raw path (see _resolved).
 
-        Deliberately outside the cache lock and deliberately not guarded by
-        one of its own: two readers racing here compute the same answer, and
-        one of them writing it twice costs a dict store. Only reads come
-        through this -- writes, edits and invalidations resolve for real.
+        This runs outside the cache lock and takes no lock of its own. Two
+        readers that race here compute the same answer, and a second write of
+        it costs one dict store. Only a read comes through here. A write, an
+        edit and an invalidation each resolve for real.
         """
         try:
             return self._resolved[file_path]
@@ -712,8 +608,9 @@ class SettingsStore:
 
     @staticmethod
     def _handout(spec: SurfaceSpec, data: Any) -> Any:
-        """What a reader of a cached surface receives: the cached object
-        itself for a shared surface, a deep copy of it for every other."""
+        """What a reader of a cached surface receives. A shared surface hands
+        out the cached object itself, and every other hands out a deep
+        copy."""
         return data if spec.shared else copy.deepcopy(data)
 
     def _edit_lock(self, file_path: str) -> threading.Lock:
@@ -729,16 +626,16 @@ class SettingsStore:
 def _resolve(file_path: str) -> str:
     """The cache and lock key for a path.
 
-    Symlinks are resolved because the atomic writer resolves them too: a
-    settings file that is a link into a managed config tree must read, write,
-    lock and invalidate under one name, not two.
+    This resolves a symlink, because the atomic writer resolves one too. A
+    settings file that links into a managed config tree must read, write, lock
+    and invalidate under one name.
     """
     return os.path.realpath(file_path)
 
 
-# The process-wide settings store. A module singleton rather than a `gl` slot,
-# for the reason the startup queue and the control plane are ones: naming a
-# protocol should shrink the shared namespace, not add to it.
+# The process-wide settings store. A module singleton rather than a gl slot,
+# for the reason the startup queue and the control plane are singletons. A
+# named protocol should shrink the shared namespace.
 _store = SettingsStore()
 
 
@@ -746,14 +643,14 @@ def get() -> SettingsStore:
     """The process-wide settings store. Never None."""
     return _store
 
-# The typed views live in their own module -- the store plus its views had grown
-# past what one module stays reviewable at -- but every caller still reaches them
-# here. This is the import that keeps ``from src.backend.settings_store import
-# AppSettings`` (and DeckSettings, PluginSettings, SchemaView) working exactly as
-# before. It sits at the foot of the body on purpose: settings_views imports the
-# surface specs and ``get()`` defined above from this module, so they must exist
-# before it runs, which is why nothing imports settings_views directly -- it is
-# this module's back half, reached only through here.
+# The typed views live in their own module, because the store and its views
+# together grew past a reviewable size, and every caller still reaches them
+# here. This import keeps "from src.backend.settings_store import AppSettings"
+# working, along with DeckSettings, PluginSettings and SchemaView. It sits at
+# the foot of the body because settings_views imports the surface specs and
+# get() defined above, which must exist before it runs. Nothing imports
+# settings_views directly. It is this module's back half, reached through
+# here.
 from src.backend.settings_views import (  # noqa: E402, F401
     AppSettings,
     DeckSettings,

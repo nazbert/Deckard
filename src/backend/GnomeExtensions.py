@@ -32,10 +32,9 @@ class GnomeExtensions:
                 "org.gnome.Shell.Extensions",
                 None
             )
-            # A GDBusProxy is constructed happily for a name nobody owns, so
-            # off GNOME the failure would otherwise surface much later, out of
-            # the calls below that have no error path. The owner check keeps
-            # "not connected" where it used to be.
+            # Gio builds a proxy for a name that nobody owns, so off GNOME the
+            # failure surfaces later, out of calls that have no error path.
+            # Check the owner to report "not connected" here instead.
             if self.proxy.get_name_owner() is None:
                 self.proxy = None
                 raise RuntimeError("nothing owns org.gnome.Shell on the session bus")
@@ -58,8 +57,8 @@ class GnomeExtensions:
 
     def request_installation(self, uuid: str) -> bool:
         if not self.get_is_connected(): return False
-        # Default timeout on purpose: GNOME Shell only answers this once the
-        # user has dismissed its install confirmation dialog.
+        # Keep the default timeout. GNOME Shell answers only after the user
+        # dismisses its install confirmation dialog.
         reply = self.proxy.call_sync(
             "InstallRemoteExtension", GLib.Variant("(s)", (uuid,)), Gio.DBusCallFlags.NONE, -1, None
         )

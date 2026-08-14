@@ -43,39 +43,30 @@ class Migrator:
         self.set_settings(settings)
 
     def get_settings(self) -> dict:
-        """
-        SettingsManager is not yet loaded when this is called
-        """
+        """SettingsManager does not exist yet when a caller reaches this."""
         if not os.path.exists(self.SETTINGS_DIR):
             return {}
         try:
             with open(self.SETTINGS_DIR, "r") as f:
                 return json.load(f)
         except ValueError as e:
-            # ValueError, not JSONDecodeError: a file of garbage bytes raises
-            # UnicodeDecodeError (a ValueError, not a JSON error) while
-            # decoding, which used to escape this handler and abort startup --
-            # exactly what the comment below claims was fixed. json's own
-            # JSONDecodeError is a ValueError subclass, so one clause covers
-            # both (StoreBackend.py:945 is the in-repo precedent).
+            # Catch ValueError. A file of garbage bytes raises
+            # UnicodeDecodeError while the reader decodes it, and json raises
+            # JSONDecodeError. Both derive from ValueError.
             #
-            # A torn migrations.json used to abort startup here (raised
-            # straight out of run_migrators). Quarantine and treat as "no
-            # migrations recorded": re-running the migrators is safe --
-            # beta_5 never deletes-without-write and leaves existing targets
-            # alone, 1_5_0's walker is idempotent, and create_backup() runs
-            # before any destructive work. A prior .corrupt is never
-            # clobbered (shared helper picks the first free sidecar name).
+            # Quarantine the file and report every migration as pending. A
+            # re-run is safe. beta_5 writes before it deletes and leaves an
+            # existing target alone, the 1_5_0 walker is idempotent, and
+            # create_backup() runs before any destructive work.
             moved, dest = quarantine_corrupt_file(self.SETTINGS_DIR)
             if moved:
                 log.error(
                     f"Could not read {self.SETTINGS_DIR} ({e}) -- preserved at "
                     f"{dest}, treating all migrations as pending"
                 )
-                # Bounded retention for this one file's sidecars. Safe
-                # this early: atomic_json is stdlib-only by design precisely so
-                # the migrators (which run before SettingsManager exists) can
-                # use it, and this module already imports from it.
+                # Bound the sidecar count for this file. atomic_json imports
+                # stdlib only, so the migrators can call it before
+                # SettingsManager exists.
                 for pruned in prune_corrupt_sidecars(self.SETTINGS_DIR, protect=dest):
                     log.info(f"Pruned old quarantined copy {pruned}")
             else:
@@ -86,11 +77,10 @@ class Migrator:
                 )
             return {}
         except OSError as e:
-            # Unreadable is not corrupt. Quarantining here would rename a
-            # perfectly healthy migrations.json away over a transient EACCES/
-            # EIO and re-run every migrator against a state file that now
-            # claims nothing has run. Report pending (which is what an
-            # unreadable state file means) and leave the file alone.
+            # Unreadable is not corrupt. A rename here moves a healthy
+            # migrations.json aside over a transient EACCES or EIO, and every
+            # migrator then re-runs against an empty state file. Report every
+            # migration as pending and leave the file alone.
             log.error(
                 f"Could not read {self.SETTINGS_DIR} ({e}) -- leaving it in place "
                 f"(unreadable, not corrupt), treating all migrations as pending"
@@ -98,16 +88,14 @@ class Migrator:
             return {}
         
     def set_settings(self, settings: dict) -> None:
-        """
-        SettingsManager is not yet loaded when this is called
-        """
+        """SettingsManager does not exist yet when a caller reaches this."""
         atomic_write_json(self.SETTINGS_DIR, settings)
 
     def create_backup(self) -> None:
-        # Back up everything a migrator may destructively rewrite/delete:
-        # pages/ AND settings/plugins/ (Migrator_1_5_0_beta_5 moves-then-deletes
-        # each plugin's settings.json -- pages/ alone left that with no recovery
-        # path). Nothing to back up if neither exists yet (fresh install).
+        # Back up every tree a migrator can rewrite or delete, which are
+        # pages/ and settings/plugins/. Migrator_1_5_0_beta_5 moves and then deletes each
+        # plugin's settings.json, so a pages-only backup gives no recovery
+        # path. A fresh install has neither tree and needs no backup.
         pages_path = os.path.join(gl.DATA_PATH, "pages")
         plugin_settings_path = os.path.join(gl.DATA_PATH, "settings", "plugins")
         sources = [p for p in (pages_path, plugin_settings_path) if os.path.exists(p)]
@@ -117,10 +105,10 @@ class Migrator:
         backup_path = os.path.join(gl.DATA_PATH, "backups")
         os.makedirs(backup_path, exist_ok=True)
 
-        # Namespace the archive by the MIGRATOR's own version, not gl.app_version:
-        # a chained upgrade runs several migrators in one session and they all
-        # share gl.app_version, so keying on it made each migrator's backup
-        # overwrite the previous one's. self.app_version is unique per migrator.
+        # Name the archive after this migrator's own version, not
+        # gl.app_version. A chained upgrade runs several migrators in one
+        # session and they all share gl.app_version, so each backup would
+        # overwrite the previous one. self.app_version is unique per migrator.
         safe_version = self.app_version.replace(os.sep, "_")
         with tempfile.TemporaryDirectory() as staging:
             for src in sources:

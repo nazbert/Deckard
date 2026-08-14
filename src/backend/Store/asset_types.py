@@ -1,31 +1,29 @@
-"""One row per store asset class, so the backend can carry a single
-implementation of the work that used to exist four times over.
+"""One row per store asset class, so the backend carries one implementation
+of work that four types share.
 
-The four asset classes -- plugins, icon packs, wallpapers and SD+ bar
-wallpapers -- differ only in a handful of names: which catalog file lists
-them, which directory they install into, which dataclass describes them,
-and what the id/name/version fields on that dataclass are called. A
-descriptor names those differences as DATA so the prepare/install/update
-pipelines can be written once and select the right names by looking them up
-here.
+The four asset classes, which are plugins, icon packs, wallpapers and SD+ bar
+wallpapers, differ in a handful of names. Which catalog file lists them, which
+directory they install into, which dataclass describes them, and what the id,
+name and version fields on that dataclass are called. A descriptor names those
+differences as data, so the prepare, install and update pipelines exist once
+and look the right names up here.
 
-Two constraints shape the field types, both driven by how the store is
-tested and how the data dir moves under it:
+Two constraints shape the field types, and both come from how the store is
+tested and how the data directory moves under it.
 
-  * Every cross-method reference the backend makes is a METHOD NAME, resolved
-    with ``getattr(self, name)`` at call time -- never a bound callable
-    captured here. The store's tests stub instance attributes
-    (``sb.get_all_icons = fake``, ``sb.install_icon = fake``); a descriptor
-    that held a function reference would run the original past the stub and
-    silently defeat every one of those tests.
+Every cross-method reference the backend makes is a method name, resolved with
+getattr(self, name) at call time, and never a bound callable captured here.
+The store's tests stub an instance attribute, such as sb.get_all_icons = fake
+or sb.install_icon = fake. A descriptor that held a function reference runs the
+original past the stub and defeats every one of those tests.
 
-  * Install directories are the NAME of a backend method, not a path. The
-    backend resolves ``gl.DATA_PATH`` / ``gl.PLUGIN_DIR`` when the method is
-    called, and the test harness re-points the data dir per process -- a path
-    frozen at import time here would point at the wrong tree.
+An install directory is the name of a backend method, and no path. The backend
+resolves gl.DATA_PATH and gl.PLUGIN_DIR when a caller invokes the method, and
+the test harness re-points the data directory per process. A path frozen at
+import time here points at the wrong tree.
 
-This module reads no globals and touches neither GTK nor json at import
-time; it imports only the dataclasses it names.
+This module reads no globals, and touches neither GTK nor json at import time.
+It imports the dataclasses it names and nothing else.
 """
 from __future__ import annotations
 
@@ -51,11 +49,11 @@ class AssetTypeDescriptor:
     id_field: str                # the data_cls field holding the asset id
     name_field: str              # the data_cls field holding the display name
     version_field: str           # the data_cls field holding the version
-    get_all_attr: str            # backend method NAME: list every entry
-    get_to_update_attr: str      # backend method NAME: list the outdated ones
-    update_all_attr: str         # backend method NAME: reinstall the outdated
-    install_attr: str            # backend method NAME: install one entry
-    get_custom_attr: str | None  # backend method NAME for user-added entries
+    get_all_attr: str            # backend method name that lists every entry
+    get_to_update_attr: str      # backend method name that lists the outdated
+    update_all_attr: str         # backend method name that reinstalls those
+    install_attr: str            # backend method name that installs one entry
+    get_custom_attr: str | None  # backend method name for user-added entries
     is_plugin: bool              # gates the plugin-only install/prepare paths
 
 

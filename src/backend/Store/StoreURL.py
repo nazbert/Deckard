@@ -15,16 +15,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 from typing import NamedTuple
 
-# Both spellings appear in stored urls: the settings UI and the store
-# catalogs carry github.com repository urls, while build_url rewrites those
-# to raw.githubusercontent.com before a fetch, and rewritten urls come back
-# through the cache key helpers.
+# Stored urls carry both spellings. The settings UI and the store catalogs
+# hold github.com urls. build_url rewrites those to raw.githubusercontent.com
+# before a fetch, and the rewritten urls come back through the cache keys.
 _REPO_DOMAINS = ("github.com", "raw.githubusercontent.com")
 
 
 class RepoRef(NamedTuple):
-    """The owner/repository pair every store url is reduced to: it drives
-    the API urls, the download urls, the cache keys and the displayed
+    """The owner and repository pair that every store url reduces to. It
+    drives the API urls, the download urls, the cache keys and the displayed
     author."""
     user: str
     repo: str
@@ -33,12 +32,10 @@ class RepoRef(NamedTuple):
 def parse_repo_url(repo_url: object) -> RepoRef | None:
     """The single definition of "a usable store repository url".
 
-    Returns None instead of raising for anything that is not one -- an
-    empty field, a half-typed entry, a non-GitHub host, a url that names an
-    owner but no repository. Callers decide what to do with an unusable
-    entry (the settings UI refuses to store it, the store paths skip it);
-    the settings UI and the store MUST agree on what "parseable" means, so
-    neither side may re-implement this.
+    Returns None, and does not raise, for an empty field, a half-typed entry,
+    a non-GitHub host, or a url with an owner but no repository. The settings
+    UI refuses such an entry and the store paths skip it. Both sides must
+    agree on "parseable", so neither side reimplements this function.
     """
     if not isinstance(repo_url, str):
         return None

@@ -20,7 +20,6 @@ from src.backend.WindowGrabber.Window import Window
 import subprocess
 from loguru import logger as log
 
-# Import globals
 import globals as gl
 
 import gi
@@ -28,7 +27,6 @@ import gi
 gi.require_version("Xdp", "1.0")
 from gi.repository import Xdp
 
-# Import typing
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.backend.WindowGrabber.WindowGrabber import WindowGrabber
@@ -75,9 +73,9 @@ class X11(Integration):
         if thread is not None and thread.is_alive():
             return
 
-        # A Thread object cannot be restarted, so each start builds a fresh
-        # one -- which also re-primes the "last seen window" against whatever
-        # is focused now rather than against a stale pre-stop reading.
+        # A Thread object cannot restart, so each start builds a fresh one.
+        # The new thread also primes its "last seen window" from the window
+        # focused now, not from a reading taken before the stop.
         thread = WatchForActiveWindowChange(self)
         self.active_window_change_thread = thread
         thread.start()
@@ -91,20 +89,18 @@ class X11(Integration):
 
         thread.stop()
         if thread is threading.current_thread():
-            # Never join the calling thread to itself: routing a window
-            # change can reach a page write, and a page write re-gates. The
-            # loop ends at its next stop check instead -- and returning here
-            # keeps the timeout warning below for real timeouts, rather than
-            # firing on a liveness check that is trivially true because the
-            # join was skipped.
+            # Never join the calling thread to itself. A window change can
+            # reach a page write, and a page write re-gates. The loop ends at
+            # its next stop check. The return also keeps the timeout warning
+            # below for a real timeout, not for a skipped join.
             return
 
         thread.join(timeout=WATCHER_STOP_TIMEOUT_S)
         if thread.is_alive():
-            # Parked in an xprop read that outlived the timeout. The thread is
-            # a daemon and its loop rechecks the stop flag the moment the read
-            # returns, so it unwinds on its own; the reference is dropped
-            # either way so a later start builds a clean one.
+            # The thread is parked in an xprop read past the timeout. It is a
+            # daemon, and its loop rechecks the stop flag once the read
+            # returns, so it unwinds on its own. The reference drops either
+            # way, so a later start builds a clean thread.
             log.warning("The X11 active window watcher did not stop within the timeout")
 
     @log.catch
@@ -226,22 +222,22 @@ class WatchForActiveWindowChange(threading.Thread):
         self.last_active_window = x11.get_active_window()
 
     def stop(self) -> None:
-        """Asks the loop to end. Returns immediately -- the caller joins."""
+        """Asks the loop to end. Returns at once, and the caller joins."""
         self._stop_event.set()
 
     @log.catch
     def run(self) -> None:
         while gl.threads_running and not self._stop_event.is_set():
-            # Waiting on the stop event rather than sleeping cuts the stop
-            # short instead of running out the poll interval. One already-
-            # elapsed wait can still dispatch after a stop; harmless, since
-            # routing re-reads the rules and finds none.
+            # Wait on the stop event instead of a sleep, so a stop ends the
+            # loop before the poll interval runs out. A wait that already
+            # elapsed can dispatch once after a stop; routing then re-reads
+            # the rules and finds none.
             if self._stop_event.wait(0.2):
                 break
-            # Catch per iteration (like the Hyprland integration's socket
-            # listener): one failing poll or page-switch must not end this
-            # thread -- an exception escaping to @log.catch would kill
-            # window-based page switching until app restart.
+            # Catch per iteration, like the Hyprland socket listener does. One
+            # failed poll or page switch must not end this thread. An
+            # exception that reaches @log.catch kills window-based page
+            # switching until the next app start.
             try:
                 new_active_window = self.x11.get_active_window()
                 if new_active_window is None:
@@ -252,11 +248,10 @@ class WatchForActiveWindowChange(threading.Thread):
                 self.last_active_window = new_active_window
                 self.x11.window_grabber.on_active_window_changed(new_active_window)
             except Exception as e:
-                # Full traceback: this coarse backstop catches errors from
-                # deep in the poll plumbing (get_active_window -> xprop /
-                # subprocess) that would otherwise be invisible; a bare
-                # message is not enough to diagnose them. Matches the
-                # per-deck catch in WindowGrabber.on_active_window_changed.
+                # Log the full traceback, because this backstop catches errors deep in
+                # the poll path (get_active_window, xprop, subprocess), and a
+                # bare message cannot diagnose them. The per-deck catch in
+                # WindowGrabber.on_active_window_changed does the same.
                 log.opt(exception=True).error(
                     f"Unexpected error in X11 active window watcher: {e}"
                 )

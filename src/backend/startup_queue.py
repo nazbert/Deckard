@@ -1,120 +1,12 @@
-"""
-Boot-phase deferral: work asked for before whatever must carry it out exists.
+"""Boot-phase deferral for work asked of something that does not exist yet.
 
-This module owns two such handshakes for the whole process. Leg A defers
-CALLS until the ``App`` is running. Legs B/C park CLI REQUESTS until the deck
-they name shows up. Different mechanisms, one stance: name the protocol here,
-leave the data where the rest of the process already looks for it.
+This module owns two handshakes for the whole process. Leg A defers a call
+until the App runs, and App.on_activate drains it. Legs B and C park a CLI
+request, named by deck serial, until that deck appears, and the controller for
+the serial claims it on its first default-page load.
 
-WHERE THE STATE LIVES
-
-Not here. This is the protocol, not the data: tasks live on
-``gl.app_loading_finished_tasks``, parked requests on
-``gl.api_page_requests`` / ``gl.api_state_requests``, and every method reads
-the slot it works on ON EVERY CALL, never caching it in an attribute. Plugin
-code appends to the task list directly (it is reachable, therefore it is API),
-and tests both swap that slot for an instrumented list and write parked
-requests straight into the dicts; all of it keeps working only as long as this
-module looks the slots up instead of holding the objects it found once.
-
-NO LOCKS, DELIBERATELY
-
-GIL-atomic list and dict operations plus the operation orders described below
-ARE the synchronization. A lock cannot make ownership more exclusive than it
-already is, and it would put a boot-phase acquisition in front of every
-notification from every thread -- including the drain running tasks that
-enqueue further tasks -- and in front of every page load.
-
-============================================================================
-LEG A -- DELIVERIES THAT NEED THE RUNNING APP
-============================================================================
-
-Its callers are the notification facade (any thread) and the plugin manager's
-disabled-plugins report (the pre-GTK main thread, mid
-``create_global_objects``); the drain that pairs with their appends is
-``App.on_activate``. The protocol below is subtle enough that one copy of it
-is the right number.
-
-``when_app_ready(task)`` answers exactly one question: *may I deliver this
-myself, right now?* True means yes -- the caller owns the delivery. False means
-the task is queued and the drain owns it. Exactly one side ever owns a task.
-
-READINESS IS LITERALLY ``gl.app is not None``
-
-Not an internal flag. ``gl.app`` is published twice: in ``Main.__init__``
-before ``app.run()``, and again in ``App.on_activate`` immediately before the
-drain. Calls landing in that window must skip the queue entirely and marshal
-themselves onto the main loop that is about to start. An internal "ready" flag
-flipped at on_activate would queue them instead -- a different set of
-deliveries waiting on the window than the app has today.
-
-THE APPEND-VS-DRAIN RACE
-
-The append races the drain: on_activate can publish ``gl.app`` and finish
-popping the queue between the None-check and the append, stranding the task
-forever. So after appending, re-check and try to take the task back --
-list append/pop/remove are atomic under the GIL, so exactly one side ends up
-owning it: either the drain popped it (remove raises ValueError; the drain
-delivers) or the task comes back here and the caller delivers. The operation
-ORDER -- append, then re-check, then remove -- is what makes ownership
-exclusive; reordering it reintroduces the strand.
-
-THREAD CONTRACT (LEG A)
-
-``when_app_ready`` is callable from any thread at any point in startup.
-``drain_app_ready`` is main-thread-only: ``App.on_activate`` calls it once,
-after ``gl.app`` is published.
-
-============================================================================
-LEGS B/C -- CLI REQUESTS PARKED FOR A DECK THAT IS NOT THERE YET
-============================================================================
-
-``--change-page SERIAL PAGE`` and ``--change-state SERIAL PAGE X,Y N`` name a
-deck by serial. With no instance already running, the invocation becomes the
-instance: it parks its own requests here, boots, and the controller for that
-serial claims them the first time it loads its default page. With an instance
-already running the request travels over DBus to that process instead and
-never reaches this module -- except under ``--close-running``, which parks
-here like the no-instance case and then boots over the instance it shut down.
-
-Parking is keyed by serial and last-write-wins -- two ``--change-page`` pairs
-for one serial leave only the second. A request naming a serial that never
-connects stays parked for the life of the process; nothing sweeps it. Both
-are the shipped behavior, written down here so neither reads as an oversight.
-
-The two legs differ in exactly one way, and it is the whole reason there are
-three methods rather than two:
-
-* A page request is CLAIMED -- read and removed in one step, because it is
-  one-shot (see ``claim_page_request``).
-* A state request is PEEKED, processed, and only then RESOLVED. Processing it
-  means loading a page and setting an input state, work that can raise;
-  leaving the request parked until that work is done is what makes the next
-  load retry it rather than lose it. Collapsing the pair into one claim would
-  silently turn a retry into a drop.
-
-There is one caller that wants the whole parking rather than one serial's, and
-it is not going to apply any of it: an invocation parks BEFORE the race for the
-application name is decided, so a launch can park its requests and then find
-out it is the second instance. ``claim_parked_requests`` is how those reach the
-instance that won instead of leaving with this process.
-
-THREAD CONTRACT (LEGS B/C)
-
-``park_page_request`` / ``park_state_request`` run on the main thread during
-the pre-boot, single-threaded CLI phase, before any deck exists.
-
-The claim, peek and resolve calls run on whichever thread brings a controller
-up or reloads its default page, which is very nearly every thread this process
-has: the main thread (the boot path, before the GTK loop starts), the boot
-rescan thread, the USB hotplug monitor, a deck's own HID reader thread (a key
-press dismisses a showing screensaver, and the hide reloads the default page),
-plugin and action threads (the same dismissal, reached through
-``Page.update_input``), and the GTK main thread (the no-pages fallback). That
-spread is why claiming is one dict operation rather than a check and a pop.
-
-Imports ``globals`` and nothing else first-party, so any layer -- including the
-render engine's import closure -- can import it without risking a cycle.
+This module imports globals and nothing else first-party, so any layer,
+including the render engine's import closure, imports it without a cycle.
 """
 from __future__ import annotations
 
@@ -127,26 +19,40 @@ if TYPE_CHECKING:
     from typing import Any
 
 
+# No locks. The GIL-atomic list and dict operations, plus the operation
+# orders in the methods below, are the synchronization. A lock cannot make the
+# ownership more exclusive, and it puts a boot-phase acquire in front of every
+# notification from every thread and in front of every page load.
 class StartupQueue:
-    """The boot-phase deferral protocols. Stateless: every method reads the
-    ``gl`` slot it works on, so the queue never diverges from the list and
-    dicts the rest of the process (and plugin code) sees."""
+    """The boot-phase deferral protocols.
 
-    # ---------------------------------------------------------------- #
-    # Leg A -- deliveries waiting on the running App                    #
-    # ---------------------------------------------------------------- #
+    This holds no state. Every method reads the gl slot it works on, per call,
+    and caches nothing, so a test that swaps gl.app_loading_finished_tasks,
+    and plugin code that appends to it, both keep working.
+    """
+
+    # Leg A. Deliveries that wait on the running App.
 
     def when_app_ready(self, task: Callable[[], Any]) -> bool:
-        """True if the caller owns delivery and must run its work now; False
-        if `task` is queued and the drain will run it.
+        """True when the caller owns the delivery and must run its work now.
+        False when the queue holds task and the drain runs it.
 
-        Safe from any thread. `task` must be zero-argument; its return value
-        is ignored. A True answer does NOT mean `task` ran -- the caller
-        delivers however it likes (the notification facade re-enters itself
-        through GLib.idle_add rather than calling the queued lambda).
+        Safe from any thread. task takes no argument, and nothing reads its
+        return value. A True answer does not mean that task ran. The caller
+        delivers as it likes, and the notification facade re-enters itself
+        through GLib.idle_add rather than call the queued lambda.
 
-        Both the readiness predicate and the reclaim race are described in the
-        module docstring; the operation order below is load-bearing.
+        Readiness is gl.app is not None, and no internal flag. gl.app
+        publishes in Main.__init__ before app.run(), and again in
+        App.on_activate right before the drain. A call that lands in that
+        window must skip the queue and marshal itself onto the main loop that
+        starts next, which a ready flag flipped at on_activate prevents.
+
+        The append races the drain. on_activate can publish gl.app and finish
+        popping the queue between the None check and the append, which strands
+        the task. So the order is append, then re-check, then remove. A list
+        append, pop and remove are atomic under the GIL, so exactly one side
+        owns the task. Another order strands it again.
         """
         if gl.app is None:
             gl.app_loading_finished_tasks.append(task)
@@ -155,118 +61,124 @@ class StartupQueue:
             try:
                 gl.app_loading_finished_tasks.remove(task)
             except ValueError:
-                # The drain took it first and will deliver it.
+                # The drain took it first and delivers it.
                 return False
         return True
 
     def drain_app_ready(self) -> None:
-        """Run every queued task on the calling thread. Main thread only,
-        called from ``App.on_activate`` once ``gl.app`` is published.
+        """Run every queued task on the calling thread. Main thread only.
+        App.on_activate calls it once gl.app publishes.
 
-        Drain by atomic pop, never iterate-then-clear: background threads race
-        their appends against this drain, and a task appended mid-iteration
-        would be cleared unrun. pop(0) makes every task owned by exactly one
-        side -- this loop, or the appender's post-append reclaim -- and a task
-        that appends further tasks while running gets those drained too.
+        Drain by atomic pop, and never iterate and then clear. A background
+        thread races its append against this drain, and a clear drops a task
+        appended mid-iteration unrun. pop(0) gives every task to exactly one
+        side, this loop or the appender's reclaim after its append, and a task
+        that appends further tasks while it runs gets those drained too.
 
-        Return values are ignored. A NON-CALLABLE entry is skipped rather than
-        raised on: the list is reachable from plugin code, and an append of
-        `f()` where `f` was meant must not take the drain down with it. A task
-        that RAISES is a different case and is deliberately not caught -- the
-        exception propagates out of the drain, and the tasks behind it stay
-        queued, exactly as when this loop lived in on_activate. Swallowing it
-        here would hide failures on the activation path.
+        Nothing reads a return value. This skips an entry that is not callable
+        rather than raise on it, because plugin code reaches the list, and an
+        append of f() where f was meant must not end the drain. A task that
+        raises is another case, and nothing catches it. The exception
+        propagates out of the drain and the tasks behind it stay queued. A
+        catch here hides a failure on the activation path.
         """
         while gl.app_loading_finished_tasks:
             task = gl.app_loading_finished_tasks.pop(0)
             if callable(task):
                 task()
 
-    # ---------------------------------------------------------------- #
-    # Leg B -- `--change-page` requests waiting for their deck          #
-    # ---------------------------------------------------------------- #
+    # Leg B. --change-page requests that wait for their deck.
 
     def park_page_request(self, serial_number: str, page_name: str) -> None:
         """Park a page change for a deck that has not appeared yet.
 
-        Last-write-wins per serial. `page_name` is stored as the user typed
-        it and resolved to a path by the claimer -- there is no page store to
-        resolve it against at parking time.
+        The last write wins per serial, so two --change-page pairs for one
+        serial leave the second. A request that names a serial which never
+        connects stays parked for the life of the process, and nothing sweeps
+        it. page_name stores as the user typed it, and the claimer resolves it
+        to a path, because no page store exists at parking time.
+
+        The pre-boot CLI phase calls this on the main thread, before any deck
+        exists.
         """
         gl.api_page_requests[serial_number] = page_name
 
     def claim_page_request(self, serial_number: str) -> str | None:
-        """This serial's parked page name, removed as it is handed over, or
-        None if nothing is parked for it.
+        """This serial's parked page name, removed as it hands it over, or
+        None when nothing is parked for it.
 
-        Pop, don't just read (design doc bug 13): a `--change-page` request is
-        one-shot -- left in place, it silently re-applied itself on every
-        future load_default_page() call for this serial (every unplug/replug,
-        every "no page found" fallback).
+        Pop it rather than read it. A --change-page request applies once. Left
+        in place, it re-applies itself on every later load_default_page() call
+        for this serial, which covers every unplug and replug and every "no
+        page found" fallback. A state request instead peeks and resolves, so
+        it survives a raise; see peek_state_request.
 
-        Lookup and removal are one dict operation, so two threads racing the
-        same serial up cannot both come away holding the request.
+        The lookup and the removal are one dict operation, so two threads that
+        race the same serial up cannot both hold the request. Nearly every
+        thread in the process reaches this, which is why it is one operation.
+        The main thread on the boot path, the boot rescan thread, the USB
+        hotplug monitor, a deck's HID reader thread through a screensaver
+        dismissal, a plugin or action thread through Page.update_input, and
+        the GTK main thread on the no-pages fallback all claim from here.
         """
         return gl.api_page_requests.pop(serial_number, None)
 
-    # ---------------------------------------------------------------- #
-    # Leg C -- `--change-state` requests waiting for their deck         #
-    # ---------------------------------------------------------------- #
+    # Leg C. --change-state requests that wait for their deck.
 
     def park_state_request(self, serial_number: str, request: dict) -> None:
         """Park a state change for a deck that has not appeared yet.
 
-        Last-write-wins per serial. The request is stored as given: argument
-        validation and the state-number conversion belong to the CLI parser,
-        the only layer that can still report a bad argument to the person who
-        typed it.
+        The last write wins per serial. The request stores as given. The CLI
+        parser owns the argument validation and the state-number conversion,
+        because it is the one layer that can still report a bad argument to
+        the person who typed it.
         """
         gl.api_state_requests[serial_number] = request
 
     def peek_state_request(self, serial_number: str) -> dict | None:
-        """This serial's parked state request, LEFT PARKED, or None.
+        """This serial's parked state request, left parked, or None.
 
-        Peeking rather than claiming is what lets the request survive an
-        exception thrown while it is being applied -- loading the page it
-        names, resolving coordinates, setting the state. The next
-        load_default_page() for this serial sees it again and retries.
+        A peek rather than a claim lets the request survive an exception
+        thrown while something applies it, which loads the page it names,
+        resolves the coordinates and sets the state. The next
+        load_default_page() for this serial sees it again and retries. One
+        claim in place of the peek and the resolve turns that retry into a
+        drop, which is why a page request claims and a state request does not.
 
-        Every peek that goes on to process the request must be paired with
-        resolve_state_request().
+        Every peek that goes on to process the request must call
+        resolve_state_request() afterwards.
         """
         return gl.api_state_requests.get(serial_number)
 
     def resolve_state_request(self, serial_number: str) -> None:
-        """Drop this serial's parked state request: it has been processed.
+        """Drop this serial's parked state request, which is now processed.
 
-        Call only once the processing peek_state_request handed out has run to
-        its end -- resolving earlier turns the retry above into a drop.
-        Idempotent, and a serial with nothing parked is not an error.
+        Call it once the processing that peek_state_request handed out ends. A
+        call before that turns the retry above into a drop. Idempotent, and a
+        serial with nothing parked is no error.
         """
         gl.api_state_requests.pop(serial_number, None)
 
-    # ---------------------------------------------------------------- #
-    # Legs B/C -- the whole parking, for a process that is leaving      #
-    # ---------------------------------------------------------------- #
+    # Legs B and C. The whole parking, for a process that leaves.
 
     def claim_parked_requests(self) -> tuple[list[tuple[str, str]],
                                              list[tuple[str, dict]]]:
-        """Everything parked, removed as it is handed over.
+        """Everything parked, removed as it hands it over.
 
-        Claimed, not peeked: the caller is a launch that lost the race for the
-        application name and is passing its requests to the instance that won
-        (see src/backend/cli_forward.py). Nothing here is going to be applied
-        by this process, so leaving a copy behind for a retry that will never
-        run would only be a way to apply them twice if one ever did.
+        This claims rather than peeks. The caller is a launch that lost the
+        race for the application name and passes its requests to the instance
+        that won (see src/backend/cli_forward.py). This process applies none
+        of them, so a copy left behind serves a retry that never runs, and a
+        retry that did run applies them twice.
 
-        Insertion order is argv order within each kind -- the CLI parks pages
-        and states in the order it read the flags, and the forwarder sends
-        every page change and then every state change, each group in that
-        order. Each removal is a single dict operation, the
-        same discipline the per-serial claim keeps.
+        The insertion order is the argv order within each kind. The CLI parks
+        pages and states in the order it read the flags, and the forwarder
+        sends every page change and then every state change, each group in
+        that order. Each removal is one dict operation, the same discipline
+        the per-serial claim keeps.
 
-        Called from the pre-boot CLI phase, single-threaded, before any deck
-        exists: the same phase the parking itself happens in.
+        The pre-boot CLI phase calls this, single-threaded and before any deck
+        exists, which is the phase the parking happens in.
         """
         pages = [(serial, gl.api_page_requests.pop(serial))
                  for serial in list(gl.api_page_requests)]
@@ -275,9 +187,8 @@ class StartupQueue:
         return pages, states
 
 
-# The process-wide queue. A module singleton rather than a `gl` slot: the point
-# of naming this protocol is to shrink what lives on the shared namespace, not
-# to add to it.
+# The process-wide queue. A module singleton rather than a gl slot. A named
+# protocol should shrink what lives on the shared namespace.
 _queue = StartupQueue()
 
 

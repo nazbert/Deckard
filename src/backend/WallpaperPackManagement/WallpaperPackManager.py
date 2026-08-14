@@ -13,15 +13,12 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
-# Import Python modules
 import os
 from typing import Any
 from loguru import logger as log
 
-# Import globals
 import globals as gl
 
-# Import own modules
 from src.backend.WallpaperPackManagement.WallpaperPack import WallpaperPack
 
 class WallpaperPackManager:
@@ -61,8 +58,6 @@ class WallpaperPackManager:
 
     def get_wallpaper_attribution(self, attribution: dict[str, Any], wallpaper_name: str) -> dict[str, Any] | None:
         if wallpaper_name in attribution:
-            # Use specific
             return attribution[wallpaper_name]
         else:
-            # Use default
             return attribution.get("generic", attribution.get("default", attribution.get("general")))

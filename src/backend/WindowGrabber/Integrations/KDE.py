@@ -20,7 +20,6 @@ from src.backend.WindowGrabber.Window import Window
 from subprocess import Popen, CalledProcessError, PIPE
 from loguru import logger as log
 
-# Import globals
 import globals as gl
 
 import gi
@@ -28,7 +27,6 @@ import gi
 gi.require_version("Xdp", "1.0")
 from gi.repository import Xdp
 
-# Import typing
 from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:
     from src.backend.WindowGrabber.WindowGrabber import WindowGrabber
@@ -76,9 +74,9 @@ class KDE(Integration):
         if thread is not None and thread.is_alive():
             return
 
-        # A Thread object cannot be restarted, so each start builds a fresh
-        # one -- which also re-primes the "last seen window" against whatever
-        # is focused now rather than against a stale pre-stop reading.
+        # A Thread object cannot restart, so each start builds a fresh one.
+        # The new thread also primes its "last seen window" from the window
+        # focused now, not from a reading taken before the stop.
         thread = WatchForActiveWindowChange(self)
         self.active_window_change_thread = thread
         thread.start()
@@ -92,20 +90,18 @@ class KDE(Integration):
 
         thread.stop()
         if thread is threading.current_thread():
-            # Never join the calling thread to itself: routing a window
-            # change can reach a page write, and a page write re-gates. The
-            # loop ends at its next stop check instead -- and returning here
-            # keeps the timeout warning below for real timeouts, rather than
-            # firing on a liveness check that is trivially true because the
-            # join was skipped.
+            # Never join the calling thread to itself. A window change can
+            # reach a page write, and a page write re-gates. The loop ends at
+            # its next stop check. The return also keeps the timeout warning
+            # below for a real timeout, not for a skipped join.
             return
 
         thread.join(timeout=WATCHER_STOP_TIMEOUT_S)
         if thread.is_alive():
-            # Parked in a kdotool read that outlived the timeout. The thread
-            # is a daemon and its loop rechecks the stop flag as soon as the
-            # read returns, so it unwinds on its own; the reference is dropped
-            # either way so a later start builds a clean one.
+            # The thread is parked in a kdotool read past the timeout. It is a
+            # daemon, and its loop rechecks the stop flag once the read
+            # returns, so it unwinds on its own. The reference drops either
+            # way, so a later start builds a clean thread.
             log.warning("The KDE active window watcher did not stop within the timeout")
 
     @log.catch
@@ -206,16 +202,16 @@ class WatchForActiveWindowChange(threading.Thread):
             self.last_active_window = self.kde.get_window(window_id)
 
     def stop(self) -> None:
-        """Asks the loop to end. Returns immediately -- the caller joins."""
+        """Asks the loop to end. Returns at once, and the caller joins."""
         self._stop_event.set()
 
     @log.catch
     def run(self) -> None:
         while gl.threads_running and not self._stop_event.is_set():
-            # Waiting on the stop event rather than sleeping cuts the stop
-            # short instead of running out the poll interval. One already-
-            # elapsed wait can still dispatch after a stop; harmless, since
-            # routing re-reads the rules and finds none.
+            # Wait on the stop event instead of a sleep, so a stop ends the
+            # loop before the poll interval runs out. A wait that already
+            # elapsed can dispatch once after a stop; routing then re-reads
+            # the rules and finds none.
             if self._stop_event.wait(0.2):
                 break
             window_id = self.kde.get_active_window_id()

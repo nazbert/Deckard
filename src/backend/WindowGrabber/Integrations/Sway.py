@@ -21,7 +21,6 @@ import subprocess
 import json
 from loguru import logger as log
 
-# Import globals
 import globals as gl
 
 import gi
@@ -29,7 +28,6 @@ import gi
 gi.require_version("Xdp", "1.0")
 from gi.repository import Xdp
 
-# Import typing
 from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from src.backend.WindowGrabber.WindowGrabber import WindowGrabber
@@ -51,9 +49,9 @@ class Sway(Integration):
         if thread is not None and thread.is_alive():
             return
 
-        # A Thread object cannot be restarted, so each start builds a fresh
-        # one -- which also re-primes the "last seen window" against whatever
-        # is focused now rather than against a stale pre-stop reading.
+        # A Thread object cannot restart, so each start builds a fresh one.
+        # The new thread also primes its "last seen window" from the window
+        # focused now, not from a reading taken before the stop.
         thread = WatchForActiveWindowChange(self)
         self.active_window_change_thread = thread
         thread.start()
@@ -67,20 +65,18 @@ class Sway(Integration):
 
         thread.stop()
         if thread is threading.current_thread():
-            # Never join the calling thread to itself: routing a window
-            # change can reach a page write, and a page write re-gates. The
-            # loop ends at its next stop check instead -- and returning here
-            # keeps the timeout warning below for real timeouts, rather than
-            # firing on a liveness check that is trivially true because the
-            # join was skipped.
+            # Never join the calling thread to itself. A window change can
+            # reach a page write, and a page write re-gates. The loop ends at
+            # its next stop check. The return also keeps the timeout warning
+            # below for a real timeout, not for a skipped join.
             return
 
         thread.join(timeout=WATCHER_STOP_TIMEOUT_S)
         if thread.is_alive():
-            # Parked in a swaymsg read that outlived the timeout. The thread
-            # is a daemon and its loop rechecks the stop flag as soon as the
-            # read returns, so it unwinds on its own; the reference is dropped
-            # either way so a later start builds a clean one.
+            # The thread is parked in a swaymsg read past the timeout. It is a
+            # daemon, and its loop rechecks the stop flag once the read
+            # returns, so it unwinds on its own. The reference drops either
+            # way, so a later start builds a clean thread.
             log.warning("The Sway active window watcher did not stop within the timeout")
 
     def get_all_windows(self) -> list[Window]:
@@ -98,7 +94,7 @@ class Sway(Integration):
 
     def _walk_tree(self, node, windows: list[dict[str, Any]]):
         if "window_properties" in node or "app_id" in node:
-           # Try to only add actual windows
+           # Add container nodes that are windows.
            windows.append(node)
 
         if "nodes" in node:
@@ -110,9 +106,7 @@ class Sway(Integration):
     def _get_windows(self) -> list[dict[str, Any]]:
         windows: list[dict[str, Any]] = []
         try:
-            # Run the swaymsg command and capture the output
             output = subprocess.check_output([*self.command_prefix, "swaymsg", "-t", "get_tree"], text=True, cwd="/").strip()
-            # Parse the JSON output into a Python list
             clients = json.loads(output)
 
             for output in clients.get("nodes", []):
@@ -120,8 +114,8 @@ class Sway(Integration):
                     self._walk_tree(workspace, windows)
 
         except (subprocess.CalledProcessError, OSError) as e:
-            # OSError covers the binary being absent: with the argv list there
-            # is no shell to turn that into a 127 CalledProcessError.
+            # OSError covers a missing binary. The argv list runs no shell,
+            # which would turn that into a 127 CalledProcessError.
             log.error(f"An error occurred while running swaymsg: {e}")
         except json.JSONDecodeError as e:
             log.error(f"Failed to parse JSON: {e}")
@@ -130,7 +124,7 @@ class Sway(Integration):
 
     def _parse_window(self, client: dict[str, Any]) -> Window:
         if "window_properties" in client:
-            # XWindow clients are slightly differently organized
+            # An XWindow client keeps its class and title one level deeper.
             props = client["window_properties"]
             return Window(props["class"], props["title"])
         else:
@@ -145,16 +139,16 @@ class WatchForActiveWindowChange(threading.Thread):
         self.last_active_window = sway.get_active_window()
 
     def stop(self) -> None:
-        """Asks the loop to end. Returns immediately -- the caller joins."""
+        """Asks the loop to end. Returns at once, and the caller joins."""
         self._stop_event.set()
 
     @log.catch
     def run(self) -> None:
         while gl.threads_running and not self._stop_event.is_set():
-            # Waiting on the stop event rather than sleeping cuts the stop
-            # short instead of running out the poll interval. One already-
-            # elapsed wait can still dispatch after a stop; harmless, since
-            # routing re-reads the rules and finds none.
+            # Wait on the stop event instead of a sleep, so a stop ends the
+            # loop before the poll interval runs out. A wait that already
+            # elapsed can dispatch once after a stop; routing then re-reads
+            # the rules and finds none.
             if self._stop_event.wait(0.2):
                 break
             new_active_window = self.sway.get_active_window()

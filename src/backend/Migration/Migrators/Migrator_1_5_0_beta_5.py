@@ -70,24 +70,17 @@ class Migrator_1_5_0_beta_5(Migrator):
                 continue
 
             new_settings_path = os.path.join(gl.DATA_PATH, "settings", "plugins", plugin_dir_name, "settings.json")
-            # INVARIANT: write the migrated copy to the new path FIRST,
-            # and only remove the old file once that copy is durably in place.
-            # NEVER the inverted exists-check main had -- gating the write on
-            # the new path already existing meant the normal case (new path
-            # absent) wrote nothing and then os.remove'd the old, deleting the
-            # settings forever. If the new path already exists it holds the
-            # CURRENT settings; leave it untouched rather than clobbering it
+            # Write the migrated copy to the new path first, and remove the old
+            # file only after that copy is on disk. An existing new path holds
+            # the current settings, so leave it alone rather than overwrite it
             # with the stale pre-beta.5 copy.
             if not os.path.exists(new_settings_path):
-                # Crash-safe write: a plain open('w')+dump truncates in place on
-                # a mid-write crash, and with the old file removed just below
-                # the settings would be gone. atomic_write_json commits via a
-                # same-dir temp + fsync + os.replace, so a crash leaves either
-                # the old file intact (temp discarded, never renamed) or the
-                # complete new file. It creates the parent directory itself.
-                # A write failure propagates, which is what keeps os.remove
-                # below unreachable until the copy is durably in place.
+                # atomic_write_json commits through a same-directory temp file,
+                # an fsync and an os.replace, and it creates the parent
+                # directory. A crash leaves the old file whole or the new file
+                # complete. A write failure propagates and keeps os.remove
+                # below out of reach.
                 atomic_write_json(new_settings_path, settings)
 
-            # Remove old settings -- a complete copy now exists at the new path.
+            # The new path now holds a complete copy, so remove the old file.
             os.remove(old_settings_path)

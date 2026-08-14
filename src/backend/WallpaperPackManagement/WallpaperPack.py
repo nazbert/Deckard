@@ -19,7 +19,6 @@ from pathlib import Path
 
 from src.backend.DeckManagement.HelperMethods import instance_cache
 
-# Import own modules
 from src.backend.WallpaperPackManagement.Wallpaper import Wallpaper
 
 class WallpaperPack:
@@ -95,12 +94,10 @@ class WallpaperPack:
             self.is_valid = False
             return
 
-        # Load Content From Base Directory
         base_dir_content = self.load_content(pack_path)
         if base_dir_content:
             self.pack_structure["Base"] = base_dir_content
 
-        # Load content from Subfolders
         subfolders = [entry for entry in os.scandir(pack_path) if entry.is_dir()]
 
         for folder in subfolders:
