@@ -1,25 +1,10 @@
 """
-Regression scenario: the window-based auto-page-switch machinery
-must survive a deck without a page and an exception inside one watcher
-iteration.
+The window-based auto-page-switch machinery must survive two failures.
 
-Two layers, matching the issue:
-
-  1. WindowGrabber.on_active_window_changed dereferenced
-     `deck_controller.active_page.json_path` with no None-guard --
-     `active_page` is legitimately None mid-startup/hotplug, so a window
-     change in that window raised AttributeError, aborting routing for
-     every remaining deck (and, via layer 2, killing the watcher).
-
-  2. X11's WatchForActiveWindowChange.run() had only the outer @log.catch:
-     the first exception escaping the loop body ended the thread, killing
-     window-based page switching until app restart. (Hyprland's socket
-     listener already catches per-iteration and survives.)
-
-Asserts: routing a window change with a pageless deck first in the list
-does not raise and still auto-switches the healthy deck; the X11 watch
-loop keeps routing after an iteration raised (both from the integration
-poll and from the routing callback).
+WindowGrabber.on_active_window_changed must guard active_page, which is
+legitimately None mid-startup or mid-hotplug, or a window change in that
+window aborts routing for every remaining deck. The X11 watch loop must catch
+per iteration, or the first escaping exception ends the thread.
 """
 import fixtures  # noqa: F401  (must be imported first: isolates DATA_PATH)
 
@@ -32,7 +17,7 @@ from src.backend.WindowGrabber.Window import Window
 
 
 # ===================================================================== #
-# Stubs: exactly what on_active_window_changed dereferences
+# Stubs. Exactly what on_active_window_changed dereferences
 # ===================================================================== #
 
 class StubPage:
@@ -84,13 +69,13 @@ class StubWGDeckController:
 
 
 # ===================================================================== #
-# Part 1: pageless deck must not abort routing for the other decks
+# Part 1. Pageless deck must not abort routing for the other decks
 # ===================================================================== #
 
 def check_pageless_deck_routing() -> None:
     deck_manager = fixtures.install_stub_globals()
 
-    # First in the list: a deck mid-startup/hotplug -- no page yet, but a
+    # First in the list. A deck mid-startup/hotplug -- no page yet, but a
     # previous auto-load left page_auto_loaded set, so the pre-fix code
     # walks into the stay-on-page branch and derefs active_page.json_path.
     pageless = StubWGDeckController("HOTPLUG", active_page=None,
@@ -127,10 +112,10 @@ def check_pageless_deck_routing() -> None:
 
 
 # ===================================================================== #
-# Part 1b: the None-guard itself, isolated from the per-deck try/except
+# Part 1b. The None-guard itself, isolated from the per-deck try/except
 # ===================================================================== #
 
-def check_pageless_guard_is_a_clean_noop() -> None:
+def check_pageless_guard_is_noop() -> None:
     """Part 1 routes through on_active_window_changed, whose per-deck
     try/except (the per-deck restructure) also swallows the pre-fix
     active_page.json_path deref -- so Part 1 alone stays green even if the
@@ -138,7 +123,7 @@ def check_pageless_guard_is_a_clean_noop() -> None:
 
     This calls _apply_auto_change directly (the isolated per-deck body, with
     no surrounding try/except) so the guard's own effect is what is under
-    test: with the guard, a pageless deck is a clean no-op; without it the
+    test. With the guard, a pageless deck is a clean no-op; without it the
     deref raises straight out to here. Flips red iff the None-guard
     specifically is removed, independent of that per-deck isolation."""
     deck_manager = fixtures.install_stub_globals()
@@ -159,7 +144,7 @@ def check_pageless_guard_is_a_clean_noop() -> None:
     grabber = WindowGrabber.__new__(WindowGrabber)
 
     try:
-        # No try/except around this: only the None-guard can keep it from
+        # No try/except around this. Only the None-guard can keep it from
         # raising AttributeError: 'NoneType' object has no attribute
         # 'json_path' (both at the match branch's active_page.json_path and
         # in the stay-on-page restore branch reached via page_auto_loaded).
@@ -176,7 +161,7 @@ def check_pageless_guard_is_a_clean_noop() -> None:
 
 
 # ===================================================================== #
-# Part 2: the X11 watch loop must survive raising iterations
+# Part 2. The X11 watch loop must survive raising iterations
 # ===================================================================== #
 
 class ScriptedX11:
@@ -220,7 +205,7 @@ def check_x11_watcher_survives() -> None:
     scripted = ScriptedX11(
         script=[
             None,                            # consumed by __init__'s priming call
-            crasher,                         # routing raises (pre-fix: thread dies)
+            crasher,                         # routing raises (pre-fix. Thread dies)
             RuntimeError("xprop exploded"),  # poll itself raises
             survivor,                        # must still arrive post-fix
         ],
@@ -255,7 +240,7 @@ def check_gnome_install_extension_uuid() -> None:
     equal to any entry of get_installed_extensions() either, so the
     already-installed short-circuit could not fire. Dormant when fixed (no
     call sites; onboarding drives gl.gnome_extensions directly), which is
-    exactly why it needs a guard: the next caller to wire it up must not
+    exactly why it needs a guard. The next caller to wire it up must not
     inherit a method that cannot work.
 
     `self` is untouched by the method, so no D-Bus proxy is built here."""
@@ -287,7 +272,7 @@ def check_gnome_install_extension_uuid() -> None:
             f"signature takes, got {type(uuid).__name__}: {uuid!r}"
         )
 
-        # Already installed: the same value must match what the shell lists.
+        # Already installed. The same value must match what the shell lists.
         gl.gnome_extensions = RecordingExtensions([uuid])
         Gnome.install_extension(types.SimpleNamespace())
         assert gl.gnome_extensions.requested == [], (
@@ -303,7 +288,7 @@ def check_gnome_install_extension_uuid() -> None:
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_window_watcher_robustness")
     check_pageless_deck_routing()
-    check_pageless_guard_is_a_clean_noop()
+    check_pageless_guard_is_noop()
     check_x11_watcher_survives()
     check_gnome_install_extension_uuid()
     print("PASS: scenario_window_watcher_robustness")

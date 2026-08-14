@@ -1,28 +1,20 @@
 """
-Regression fence: no dbus-python anywhere in the tree.
+Regression fence against dbus-python anywhere in the tree.
 
-The dependency swap removed dbus-python entirely (Gio for
-bus work, dasbus where a proxy layer is wanted); dbus-python's implicit
-main-loop integration (its GLib mainloop glue class) and abandoned upstream
-are exactly what those issues paid to leave behind. Upstream's logind
-detector still imports it -- a verbatim port is the likeliest way it comes
-back, and this fence is what would have caught one.
-
-Scans every tracked *.py (`git ls-files`) for the module's import forms and
-its GLib mainloop glue class. Word-boundary matching, so `dasbus` and
-`dbus_next`-style names pass. The needles are assembled at runtime from
-fragments so this file never matches itself.
+The tree uses Gio for bus work and dasbus where a proxy layer helps. The scan
+matches the import forms and the GLib mainloop glue class, on word boundaries,
+in every tracked *.py. It assembles the needles at runtime, so this file never
+matches itself.
 """
 import os
 import re
 import subprocess
 
-import fixtures  # must be first: isolates DATA_PATH
+import fixtures  # must be first, to isolate DATA_PATH
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-# Assembled, never written literally, so the fence's own (tracked) source
-# does not trip the scan.
+# Assembled, never literal, so this tracked file does not trip its own scan.
 MODULE = "d" + "bus"
 PATTERNS = [
     re.compile(r"\bimport\s+" + MODULE + r"\b"),
@@ -30,9 +22,8 @@ PATTERNS = [
     re.compile("DBusG" + "MainLoop"),
 ]
 
-# Tripwire against a vacuous pass (same rationale as
-# scenario_no_mutable_defaults): the tree has ~380 tracked *.py files; well
-# under that means the listing broke, not that the tree shrank.
+# Tripwire against a vacuous pass. The tree holds about 380 tracked *.py
+# files. A much lower count means the git listing broke.
 MIN_SCANNED = 300
 
 

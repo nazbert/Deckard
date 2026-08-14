@@ -1,44 +1,10 @@
 """
-Plugin settings on the settings store: ONE heal, the envelope kept, and an
-unreadable file that no longer takes the settings UI down with it.
+Plugin settings on the settings store.
 
-Plugin settings used to carry a second, parallel copy of the loader's
-corrupt-file handling -- one in PluginBase, one reaching back into it from the
-asset manager -- while the app's other settings files were healed by the store.
-Two implementations of one policy is two policies waiting to disagree, and they
-already had: the asset manager's SAVE path guarded a decode failure but not a
-READ failure, so a settings file that was present but unreadable (permissions,
-a dead mount) raised out of five live plugin-settings UI paths.
-
-Pins, all against the real code paths (no GTK window, no hardware):
-
-1. ONE LOADER -- every one of the four entry points (get_settings,
-   set_settings, load_assets, save_assets) quarantines a corrupt file through
-   the STORE's quarantine, exactly once per corrupt read. Intercepting the
-   store's own quarantine intercepts all four, which is only true if there is
-   one implementation left; the parallel one is gone from both modules.
-2. UNREADABLE IS NOT FATAL, AND IS NOT CORRUPTION -- a present-but-unreadable
-   settings file makes every one of the four return empty and log, never
-   raise, and is never quarantined (moving a healthy file aside over a
-   transient EACCES is how a plugin loses settings nobody can get back).
-   save_assets is the one that used to raise.
-3. THE ENVELOPE IS THE APP'S, THE KEYS ARE THE PLUGIN'S -- reads unwrap
-   `settings`, a pre-envelope file is migrated on first read (including an
-   EMPTY one, which is a real file), an absent or corrupt one is NOT
-   materialized by a read, and a write keeps whatever else the file holds.
-4. THE ASSET OVERRIDES SHARE THAT FILE -- settings and assets survive each
-   other's writes in both orders.
-5. SERIALIZED, AND ONE LOCK ORDER -- the per-plugin lock still makes each
-   accessor's own read-modify-write of the file indivisible (never two at
-   once), and the plugin path takes that lock plus the store's leaf cache lock
-   and nothing else: never the store's per-file edit lock, so the one nesting
-   that exists has one direction. The surface stays uncached, too -- a
-   plugin's settings never enter the shared content cache.
-
-The asset manager's two methods deliberately do NOT take that lock, exactly as
-before: they run their overrides through observer callbacks, and a callback
-that reached back into get_settings under a plain (non-reentrant) lock would
-deadlock the plugin rather than protect it.
+All four entry points, get_settings, set_settings, load_assets and
+save_assets, heal a corrupt file through the store's quarantine, and an
+unreadable file reads as empty rather than raising. The file-version envelope
+round-trips, and the per-plugin lock serializes each read-modify-write.
 """
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 
@@ -61,8 +27,8 @@ def settings_path(plugin_id: str = PLUGIN_ID) -> str:
 
 
 def make_plugin(plugin_id: str = PLUGIN_ID):
-    """A PluginBase with nothing but a settings file -- the settings accessors
-    touch nothing else, and building one for real needs a plugin tree."""
+    """A PluginBase with nothing but a settings file. The settings accessors
+    touch nothing else, and a real one needs a whole plugin tree."""
     from src.backend.PluginManager.PluginBase import PluginBase
     from src.backend.PluginManager.PluginSettings.PluginAssetManager import AssetManager
 
@@ -87,8 +53,8 @@ def read_raw(path: str) -> str:
 
 
 def corrupt(path: str, marker: str) -> str:
-    """Truncated mid-token, but identifiable: which bytes were preserved is
-    what proves the corrupt file was not simply overwritten."""
+    """Truncated mid-token but identifiable. The preserved bytes prove the
+    corrupt file was not simply overwritten."""
     return write_raw(path, f'{{"file-version": "2.0", "marker": "{marker}", "settings": {{"a')
 
 
@@ -103,7 +69,7 @@ def sidecars(path: str) -> list[str]:
 
 @contextlib.contextmanager
 def unreadable(path: str):
-    """`path` present but unreadable -- the EACCES shape, restored after."""
+    """path present but unreadable, the EACCES shape, restored afterwards."""
     if os.geteuid() == 0:
         # root ignores the permission bits, so raise the same errno at the
         # syscall the loader makes instead.
@@ -157,7 +123,7 @@ def check_one_loader() -> None:
         calls.append(file_path)
         return real_quarantine(file_path)
 
-    # Patched at the STORE. On a tree with two implementations this intercepts
+    # Patched at the store. With two implementations this would intercept
     # nothing the plugin does.
     with mock.patch.object(settings_store, "quarantine_corrupt_file", counting_quarantine):
         for label, drive in (
@@ -173,17 +139,17 @@ def check_one_loader() -> None:
                 f"{label} did not heal through the store's loader (calls={calls})"
             )
 
-    # Four quarantines, and the retention bound the loader applies to its own
-    # sidecars: three kept, oldest pruned.
+    # Four quarantines, and the loader's retention bound keeps three sidecars
+    # and prunes the oldest.
     assert len(sidecars(path)) == 3, (
         f"one sidecar per corrupt read, retention-bounded, got {sidecars(path)}"
     )
     print("PASS(1): every plugin-settings entry point heals through the one loader")
 
 
-def check_unreadable_is_not_fatal() -> None:
-    """The gap: save_assets' read guarded a decode failure and not a read one,
-    so an EACCES settings file raised out of the plugin settings UI."""
+def check_unreadable_not_fatal() -> None:
+    """save_assets reads before it writes, so an EACCES settings file must
+    not raise out of the plugin settings UI."""
     from src.backend.PluginManager.PluginSettings.Asset import Color
 
     plugin, am = make_plugin("com_test_unreadable")
@@ -200,7 +166,7 @@ def check_unreadable_is_not_fatal() -> None:
             f"{sidecars(path)}"
         )
 
-        # THE red proof: five UI paths reach this one.
+        # Five live UI paths reach this call.
         am.colors.add_override("accent", Color(color=(1, 2, 3, 4)), skip_asset_check=True)
         am.save_assets()
 
@@ -210,8 +176,8 @@ def check_unreadable_is_not_fatal() -> None:
         f"save_assets did not write the override it was given: {content}"
     )
 
-    # A write over an unreadable file replaces it, which is what the settings
-    # writer has always done -- what must not happen is the raise.
+    # A write over an unreadable file replaces it, as the settings writer
+    # always does. The raise is what must not happen.
     with unreadable(path):
         plugin.set_settings({"marker": "rewritten"})
     assert plugin.get_settings() == {"marker": "rewritten"}
@@ -223,13 +189,13 @@ def check_envelope_round_trip() -> None:
     plugin, _am = make_plugin("com_test_envelope")
     path = plugin.settings_path
 
-    # Absent: empty settings, and NOTHING written -- a read must not create the
-    # file it did not find.
+    # An absent file gives empty settings and writes nothing. A read must not
+    # create the file it did not find.
     assert plugin.get_settings() == {}
     assert not os.path.exists(path), "a read of an absent settings file created one"
 
-    # Pre-envelope: the whole file was the settings. Migrated on first read,
-    # and the settings themselves come back untouched.
+    # In a pre-envelope file the whole file is the settings. The first read
+    # migrates it and returns the settings untouched.
     write_raw(path, json.dumps({"host": "10.0.0.2", "token": "abc"}))
     assert plugin.get_settings() == {"host": "10.0.0.2", "token": "abc"}
     assert json.loads(read_raw(path)) == {
@@ -240,14 +206,14 @@ def check_envelope_round_trip() -> None:
         "the second read of a migrated file lost the settings"
     )
 
-    # An EMPTY object is a real pre-envelope file, not an absent one.
+    # An empty object is a real pre-envelope file, not an absent one.
     write_raw(path, "{}")
     assert plugin.get_settings() == {}
     assert json.loads(read_raw(path)) == {"file-version": "2.0", "settings": {}}, (
         f"an empty pre-envelope file was not migrated: {read_raw(path)}"
     )
 
-    # A write keeps what else the file holds...
+    # A write keeps whatever else the file holds.
     write_raw(path, json.dumps({"file-version": "2.0", "assets": {"colors": {}}, "settings": {}}))
     plugin.set_settings({"volume": 42})
     assert json.loads(read_raw(path)) == {
@@ -256,13 +222,13 @@ def check_envelope_round_trip() -> None:
         "settings": {"volume": 42},
     }, f"set_settings dropped a sibling key: {read_raw(path)}"
 
-    # ...and a pre-envelope file's own keys ARE the settings being replaced, so
-    # the wrapping write is a replacement, as it has always been.
+    # A pre-envelope file's own keys are the settings being replaced, so the
+    # wrapping write is a replacement.
     write_raw(path, json.dumps({"volume": 1, "assets": {"colors": {}}}))
     plugin.set_settings({"volume": 2})
     assert json.loads(read_raw(path)) == {"file-version": "2.0", "settings": {"volume": 2}}
 
-    # Corrupt: quarantined, empty settings, and no file conjured in its place.
+    # A corrupt file is quarantined, reads as empty, and is not recreated.
     corrupt(path, "envelope")
     assert plugin.get_settings() == {}
     assert not os.path.exists(path), (
@@ -270,15 +236,15 @@ def check_envelope_round_trip() -> None:
     )
     assert len(sidecars(path)) == 1
 
-    # Valid JSON that is not an object: empty settings, left exactly where it
-    # is -- it decoded, so there is nothing to preserve from a save.
+    # Valid JSON that is not an object reads as empty and stays where it is.
+    # It decoded, so a save has nothing to preserve.
     body = write_raw(path, '["not", "an", "object"]')
     assert plugin.get_settings() == {}
     assert read_raw(path) == body and len(sidecars(path)) == 1
     print("PASS(3): the file-version envelope round-trips, migrations included")
 
 
-def check_assets_share_the_file() -> None:
+def check_assets_share_file() -> None:
     from src.backend.PluginManager.PluginSettings.Asset import Color
 
     plugin, am = make_plugin("com_test_shared_file")
@@ -303,12 +269,9 @@ def check_assets_share_the_file() -> None:
 
 def check_serialized_and_lock_order() -> None:
     """The per-plugin lock makes each accessor's own read-modify-write of the
-    FILE indivisible -- actions of one plugin run on_ready in parallel, and a
-    save that read the document before another save wrote it would drop
-    whatever that one added beside the settings.
-
-    It does not span two calls: a caller's own get-mutate-set cycle is its own
-    business, exactly as before."""
+    file indivisible, because actions of one plugin run on_ready in parallel.
+    The lock does not span two calls. The asset manager's methods take no
+    lock, because their observer callbacks reach back into get_settings."""
     from src.backend import settings_store
 
     plugin, _am = make_plugin("com_test_serialized")
@@ -329,8 +292,8 @@ def check_serialized_and_lock_order() -> None:
                 in_flight += 1
                 peak = max(peak, in_flight)
             try:
-                # Wide enough that unserialized cycles overlap: without the
-                # lock every thread is inside this at once.
+                # Wide enough that unserialized cycles overlap. Without the
+                # lock every thread sits inside this at once.
                 time.sleep(0.01)
                 return real(self, *args, **kwargs)
             finally:
@@ -346,7 +309,7 @@ def check_serialized_and_lock_order() -> None:
             else:
                 plugin.set_settings({"writer": i})
         except Exception as e:
-            # Reported on the main thread: an assert in here would only kill
+            # Reported on the main thread. An assert here would only kill
             # this worker.
             errors.append(e)
 
@@ -390,9 +353,9 @@ def main() -> None:
     fixtures.start_watchdog(90, label="scenario_plugin_settings_store")
 
     check_one_loader()
-    check_unreadable_is_not_fatal()
+    check_unreadable_not_fatal()
     check_envelope_round_trip()
-    check_assets_share_the_file()
+    check_assets_share_file()
     check_serialized_and_lock_order()
 
     print("PASS: scenario_plugin_settings_store")

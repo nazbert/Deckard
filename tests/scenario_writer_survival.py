@@ -1,41 +1,12 @@
 """
-Scenario: the sole-writer media
-thread must survive render-path exceptions.
+The sole-writer media thread must survive a render-path exception.
 
-Before the fix, run() had no guard around the loop body (the commented-out
-@log.catch would have logged once and let the thread DIE); any uncaught
-exception from a tick — screensaver input-swap KeyError, background-video
-None race, composite failure — permanently froze the deck: no paints, no
-brightness, no Clear, close() only via timeout.
-
-Three legs, each over its own stub controller + REAL MediaPlayerThread
-(fixtures constructs it unstarted):
-
-  guard survival (the original leg):
-    1. poisons one tick via _needs_key_ticks -> thread survives, and a paint
-       submitted afterwards lands on the FaultyFakeDeck journal;
-    2. poisons persistently -> the guard's local rate limiter emits at most
-       one traceback record per 5s window (plus suppression summary), not
-       one per ~4Hz retry;
-    3. while STILL raising every tick, stop() joins cleanly (the guard's
-       except path honors _stop -- a failing body must not strand close()).
-
-  batch recovery (review round 1, MEDIUM 1): a non-TransportError from one
-  key's device write mid-batch loses the batch's SIBLING frames too (the
-  tick already popped image_tasks) -- the guard's except path must arm
-  _schedule_full_repaint() so the surviving keys eventually repaint, not
-  keep stale imagery silently forever.
-
-  control drain (review round 1, MEDIUM 2): the control-queue drain must run
-  FIRST in the tick, before anything that can raise into the guard -- a
-  persistent pre-drain failure (here: a poisoned check_resume_gap) must not
-  starve SetBrightnessMsg, and a terminal ClearAndCloseMsg must still blank
-  + close the deck and stop the loop.
-
-Vector regressions for (a) build-then-swap live in the existing screensaver
-scenarios; this file owns the guard's contract.
+A guard around the loop body keeps the thread alive, rate-limits its
+tracebacks, and still honors stop(). A failed device write mid-batch arms a
+full repaint, so the surviving keys repaint. The control-queue drain runs
+first in the tick, so a pre-drain failure starves no control message.
 """
-import fixtures  # must be first: isolates DATA_PATH before any src import
+import fixtures  # must be first. Isolates DATA_PATH before any src import
 
 import threading
 import time
@@ -66,7 +37,7 @@ def leg_guard_survival() -> None:
     page = controller.active_page
     gen = controller._page_load_generation
 
-    # Poison the tick path: _needs_key_ticks is called every iteration's
+    # Poison the tick path. _needs_key_ticks runs in every iteration's
     # animated-content check, inside the guarded body.
     poison = {"count": 0, "active": True}
     real_needs = media_player._needs_key_ticks
@@ -91,7 +62,7 @@ def leg_guard_survival() -> None:
             "the log record must carry the full traceback, not just the message"
         )
 
-        # 2. Rate limiter: at ~4 retries/s a 1.2s window sees ~5 failures but
+        # 2. Rate limiter. At ~4 retries/s a 1.2s window sees ~5 failures but
         # must log at most one full record per 5s window.
         records.clear()
         time.sleep(1.2)
@@ -101,7 +72,7 @@ def leg_guard_survival() -> None:
         )
         assert media_player.is_alive(), "writer must still be alive under persistent failure"
 
-        # 3. Writes resume once the failure clears: submit a paint, assert it
+        # 3. Writes resume once the failure clears. Submit a paint, assert it
         # lands on the device journal.
         poison["active"] = False
         img = fixtures.make_native_image(fill=7)
@@ -125,7 +96,7 @@ def leg_guard_survival() -> None:
             "True makes every later stop() burn its full join timeout"
         )
     finally:
-        # Belt-and-braces: never leave the writer running on a failed assert.
+        # Belt-and-braces. Never leave the writer running on a failed assert.
         poison["active"] = False
         media_player._stop = True
         media_player._wake_event.set()
@@ -136,7 +107,7 @@ def leg_guard_survival() -> None:
 
 
 def leg_batch_recovery() -> None:
-    """Review round 1, MEDIUM 1: a caught tick exception mid-batch must not
+    """Review round 1, MEDIUM 1. A caught tick exception mid-batch must not
     silently strand the batch's sibling frames. perform_media_player_tasks
     pops image_tasks BEFORE running them, so when key 1's write raises a
     non-TransportError (only TransportError is handled at the task level),
@@ -163,7 +134,7 @@ def leg_batch_recovery() -> None:
 
     # Queue the whole multi-key batch BEFORE the loop starts so one tick
     # drains it as a single perform_media_player_tasks batch (0 -> 1 -> 2 in
-    # dict insertion order: key 0 lands, key 1 raises, key 2 is dropped).
+    # dict insertion order. Key 0 lands, key 1 raises, key 2 is dropped).
     for i in range(3):
         media_player.add_image_task(
             i, fixtures.make_native_image(fill=10 + i), page=page, config_gen=gen)
@@ -174,7 +145,7 @@ def leg_batch_recovery() -> None:
         assert media_player.is_alive(), (
             "writer thread died on a mid-batch non-TransportError"
         )
-        # The recovery contract: the guard scheduled a full repaint, and the
+        # The recovery contract. The guard scheduled a full repaint, and the
         # repaint's re-enqueue painted the dropped sibling. Nothing else can
         # repaint key 2 here -- its task was popped with the failed batch,
         # and the stub's inputs are quiet (no animation ticks).
@@ -199,7 +170,7 @@ def leg_batch_recovery() -> None:
 
 
 def leg_control_drain() -> None:
-    """Review round 1, MEDIUM 2: the control-queue drain must run before
+    """Review round 1, MEDIUM 2. The control-queue drain must run before
     anything in the tick that can raise. A persistently failing pre-drain
     stage (poisoned check_resume_gap -- in the pre-fix order it ran ahead of
     the drain) must not starve SetBrightnessMsg, and the terminal
@@ -230,7 +201,7 @@ def leg_control_drain() -> None:
         )
         assert deck.last_op_for("brightness")[2] == "set_brightness"
 
-        # The terminal message is the quit path: still under persistent
+        # The terminal message is the quit path. Still under persistent
         # failure, ClearAndCloseMsg must blank + close the device and stop
         # the loop -- this is exactly the "deck not blanked/closed on quit"
         # starvation the review confirmed.

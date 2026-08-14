@@ -1,30 +1,10 @@
 """
-Scenario: the engine->UI port contract.
+The engine-to-UI port contract, observed through a recording implementation.
 
-Before the port there was no way to observe what the engine wanted to tell a UI
-without building a GTK widget tree -- the only headless-visible trace was the
-dirty-marker dict, i.e. the "nothing was shown" path. With the port, a test
-can attach a RECORDING implementation and assert the positive direction:
-which inputs got mirrored, when the sidebar was asked to re-render, and that
-an accepting UI means the engine does NOT dirty-mark.
-
-Covers:
-  (a) with an accepting port attached, a page load pushes an image for every
-      key identifier AND the touchscreen, and ui_image_changes_while_hidden
-      stays EMPTY (the exact inverse of scenario_hidden_window_markers).
-  (b) on_page_changed fires with the page's actions already initialized --
-      the ordering load_page deliberately arranges (the sidebar's
-      ActionManager can only render actions that exist).
-  (c) install(None) restores the null port and pushes dirty-mark again.
-  (d) every port method is callable from a headless process without raising,
-      on the null port AND on a GtkUIAdapter with no window attached. This is
-      the class of bug that used to be real: update_state_switcher reached
-      gl.app.main_win.sidebar unguarded, and FlatpakDeckDisconnectThread
-      called check_for_errors() with no window -- both AttributeError crashes
-      before the window existed.
-  (e) the GtkUIAdapter's mirror slots coalesce: N pushes against a blocked
-      main loop cost one paint, carrying the newest frame, with the
-      conversion still on the producer.
+With an accepting port attached, a page load pushes an image for every key
+and for the touchscreen, and nothing dirty-marks. on_page_changed fires with
+the page's actions already initialized. Every port method is callable
+headless, and the adapter's mirror slots coalesce to one paint.
 """
 import itertools
 import os
@@ -58,7 +38,7 @@ class RecordingPort(ui_port.UIPort):
         self.availability_refreshes = 0
         self.page_list_changes = 0
         self.plugin_problems: list = []
-        # Set by the test: snapshotted whenever on_page_changed fires.
+        # Set by the test. Snapshotted whenever on_page_changed fires.
         self.page_change_probe = lambda: None
 
     def push_input_image(self, controller, identifier, image) -> bool:
@@ -120,7 +100,7 @@ def check_accepted_pushes_suppress_markers(port) -> None:
         )
         print("PASS: an accepting port receives every input and suppresses dirty markers")
 
-        # (c) Detach: pushes must dirty-mark again, exactly as headless does.
+        # (c) Detach. Pushes must dirty-mark again, exactly as headless does.
         ui_port.install(None)
         keys[0].update(force=True)
         assert fixtures.wait_until(
@@ -185,7 +165,7 @@ class _RaisingButton:
 
 
 class _RecordingMirror:
-    """Stands in for a KeyButton / ScreenBarImage: conversion on the producer,
+    """Stands in for a KeyButton / ScreenBarImage. Conversion on the producer,
     paint on the main loop, each half recorded separately."""
 
     def __init__(self):
@@ -232,13 +212,13 @@ def check_mirror_pushes_coalesce() -> None:
     """N producer pushes against a blocked main loop must cost ONE main-loop
     CALLBACK and one paint, and that paint must carry the LAST frame.
 
-    The key mirror used to convert and GLib.idle_add per frame: a stalled loop
+    The key mirror used to convert and GLib.idle_add per frame. A stalled loop
     accumulated one queued callback and one retained pixbuf per frame per key,
     then painted every superseded frame in turn once it caught up. Both
     mirrors now hand frames to a per-input latest-wins slot, so the backlog is
     one frame per input whatever the producer does.
 
-    Counting the drains, not just the paints, is the point: a slot that armed
+    Counting the drains, not just the paints, is the point. A slot that armed
     a callback per push would still paint once (the first drain empties it)
     and would look identical from the widget's side while re-creating exactly
     the main-loop pressure this exists to remove.
@@ -253,7 +233,7 @@ def check_mirror_pushes_coalesce() -> None:
     adapter.bind(controller, _fake_mirror_child(button, strip))
     adapter._window_mapped = True
 
-    # Every scheduled callback lands here first: push_input_image resolves
+    # Every scheduled callback lands here first. Push_input_image resolves
     # self._drain_mirror at schedule time, so an instance attribute wins.
     drains: list = []
     real_drain = adapter._drain_mirror
@@ -305,7 +285,7 @@ def check_mirror_pushes_coalesce() -> None:
         f"painted: {controller.ui_image_changes_while_hidden!r}"
     )
 
-    # The touchscreen mirror runs on the same slot, plus an interval: its
+    # The touchscreen mirror runs on the same slot, plus an interval. Its
     # preview is as wide as the deck, so it is rate-limited on purpose -- and
     # a frame the interval holds back must still land once it expires, or the
     # last frame of a burst (a scroll that stops) is lost.
@@ -321,7 +301,7 @@ def check_mirror_pushes_coalesce() -> None:
     for frame in held:
         assert adapter.push_input_image(controller, ts_ident, frame) is True
     pump()
-    # The deadline is the slot's own: it starts at the drain that painted
+    # The deadline is the slot's own. It starts at the drain that painted
     # "strip-first", not at the pushes above.
     slot = adapter._mirror_slots[(controller, ts_ident)]
     if time.monotonic() < slot._last_drain + TOUCHSCREEN_UI_INTERVAL_S:
@@ -354,10 +334,10 @@ def check_mirror_pushes_coalesce() -> None:
     print("PASS: mirror pushes coalesce to one paint of the newest frame per input")
 
 
-def check_unbind_tolerates_a_concurrent_drain() -> None:
+def check_unbind_tolerates_concurrent_drain() -> None:
     """unbind() must survive its slots being deleted underneath it.
 
-    It is not the only writer and it does not run on the main loop: deck
+    It is not the only writer and it does not run on the main loop. Deck
     removal arrives on the USB monitor / boot rescan / flatpak poll threads,
     while the GTK loop runs the drains still armed for that deck -- and each
     of those pops its own slot the moment the child is gone. An unlucky
@@ -366,7 +346,7 @@ def check_unbind_tolerates_a_concurrent_drain() -> None:
     the deck's media thread and USB handle were left running with nothing
     holding them.
 
-    Deterministic stand-in for the thread race: a registry that runs the
+    Deterministic stand-in for the thread race. A registry that runs the
     adapter's REAL drains while unbind is snapshotting its keys, which is
     exactly the window the race lands in.
     """
@@ -414,9 +394,9 @@ def check_unbind_tolerates_a_concurrent_drain() -> None:
     print("PASS: unbind tolerates slots a concurrent drain already removed")
 
 
-def check_dial_preview_rides_the_strip_payload() -> None:
+def check_dial_preview_rides_strip_payload() -> None:
     """The sidebar's dial preview is a crop of the strip frame, so it travels
-    IN that frame's payload: converted on the producer, painted by the same
+    IN that frame's payload. Converted on the producer, painted by the same
     main-loop callback, with no callback of its own.
 
     Handing the crop to IconSelector.set_image instead puts one uncoalesced
@@ -469,7 +449,7 @@ def check_dial_preview_rides_the_strip_payload() -> None:
     strip.paint_mirror_frame = lambda payload: ScreenBarImage.paint_mirror_frame(
         strip, payload)
 
-    # Recording stand-in for the module's GLib: prepare/paint must not reach
+    # Recording stand-in for the module's GLib. Prepare/paint must not reach
     # for the loop at all, and set_image must reach for it exactly once.
     scheduled: list = []
     real_glib, real_app = screenbar_mod.GLib, gl.app
@@ -518,7 +498,7 @@ def check_dial_preview_rides_the_strip_payload() -> None:
             f"set_image scheduled {len(scheduled)} callbacks, expected 1"
         )
 
-        # No dial selected: nothing rides along.
+        # No dial selected. Nothing rides along.
         gl.app.main_win.sidebar.active_identifier = Input.Key("0x0")
         assert ScreenBarImage.prepare_mirror_frame(strip, frame)[2] is None, (
             "a strip frame carried a dial preview with no dial selected"
@@ -528,15 +508,15 @@ def check_dial_preview_rides_the_strip_payload() -> None:
     print("PASS: the dial preview rides the strip's payload instead of its own idle")
 
 
-def check_every_port_method_is_headless_safe() -> None:
-    """No window, no gl.app: every method must be a quiet no-op."""
+def check_port_methods_headless_safe() -> None:
+    """No window, no gl.app. Every method must be a quiet no-op."""
     from src.windows.ui_adapter import GtkUIAdapter
 
     identifier = Input.Key("0x0")
     controller = object()
 
     # Anything the adapter logs at WARNING+ is a failure for the quiet-no-op
-    # half below: push_input_image's broad except REPORTS through the log, so
+    # half below. Push_input_image's broad except REPORTS through the log, so
     # without this sink a guard that silently degraded into the except path
     # would look identical to a guard that worked.
     warnings: list = []
@@ -582,11 +562,11 @@ def check_every_port_method_is_headless_safe() -> None:
 
     # The adapter's public sync methods are thin GLib.idle_add wrappers, and
     # pygobject SWALLOWS exceptions raised inside idle callbacks -- so the
-    # exercise() pass above proves almost nothing about them: with no main
+    # exercise() pass above proves almost nothing about them. With no main
     # loop the _run_* bodies (which hold every real guard) never execute at
     # all. Call those bodies directly.
     #
-    # Each must also return False: a GLib idle/timeout callback that returns
+    # Each must also return False. A GLib idle/timeout callback that returns
     # anything truthy re-arms itself forever.
     run_bodies = [
         ("_run_page_changed", (controller,)),
@@ -613,7 +593,7 @@ def check_every_port_method_is_headless_safe() -> None:
             "GLib idle/timeout callback that returns truthy re-arms forever"
         )
 
-    # An unknown aspect is a programming error, not a crash: it logs and
+    # An unknown aspect is a programming error, not a crash. It logs and
     # returns, so it is checked separately from the no-warning assertion.
     assert adapter._run_input_visuals_changed(controller, identifier, 0, "bogus") is False
 
@@ -651,10 +631,10 @@ def main() -> None:
     ui_port.install(port)
     check_accepted_pushes_suppress_markers(port)
     check_page_change_follows_action_init()
-    check_every_port_method_is_headless_safe()
+    check_port_methods_headless_safe()
     check_mirror_pushes_coalesce()
-    check_unbind_tolerates_a_concurrent_drain()
-    check_dial_preview_rides_the_strip_payload()
+    check_unbind_tolerates_concurrent_drain()
+    check_dial_preview_rides_strip_payload()
 
     print("PASS: scenario_ui_port_events")
 

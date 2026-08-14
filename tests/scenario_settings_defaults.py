@@ -1,27 +1,16 @@
 """
 Pins the app-settings DEFAULTS table.
 
-Every default used to be inlined at its call site, so the same key could --
-and did -- carry different defaults in different modules. SettingsManager
-now owns one DEFAULTS table and AppSettings reads/writes through it. This
-scenario locks each entry to the value the old inline call sites used, so a
-transcription slip in the table (which would silently change runtime
-behavior) fails here instead of in the field.
-
-Two entries are deliberately NOT a straight transcription:
-
-  * store.custom-stores defaulted to ``{}`` in StoreBackend.get_stores and
-    to ``[]`` in the Settings dialog. The table says ``[]`` -- the value the
-    writer actually appends to.
-  * system.keep-running has no default at all: ``None`` means "never asked"
-    and is what makes mainWindow.on_close raise the KeepRunningDialog. The
-    accessor must keep returning None on a missing key, not False.
+SettingsManager owns one DEFAULTS table and AppSettings reads and writes
+through it, so a transcription slip fails here. store.custom-stores defaults
+to a list, the value the writer appends to, and system.keep-running has no
+default, so None means never asked.
 """
 import fixtures  # noqa: F401  (isolates gl.DATA_PATH before anything reads it)
 import globals as gl
 
-# Resolve the lazy font fallback up front: touching gl.fallback_font for
-# real would run a full system font scan.
+# Resolve the lazy font fallback up front. A real gl.fallback_font read runs
+# a full system font scan.
 gl.fallback_font = "HarnessFallbackFont"
 
 from src.backend.SettingsManager import (  # noqa: E402
@@ -31,13 +20,12 @@ from src.backend.SettingsManager import (  # noqa: E402
     SettingsManager,
 )
 
-# A real SettingsManager rooted at the harness temp dir. No controller and
-# no fixture tier are needed here -- only the settings file is touched.
+# A real SettingsManager rooted at the harness temp dir. Only the settings
+# file is touched, so no controller and no fixture tier are needed.
 gl.settings_manager = SettingsManager()
 
-# The value each inline call site used before the conversion, by
-# (section, key). Kept as a literal second copy on purpose: a typo in
-# DEFAULTS has to disagree with something.
+# The expected value per (section, key). A literal second copy, so a typo in
+# DEFAULTS disagrees with something.
 EXPECTED_DEFAULTS = {
     ("general", "hold-time"): 0.5,
     ("general", "rolling-labels"): True,
@@ -73,7 +61,7 @@ EXPECTED_FONT_DEFAULTS = {
     "font-weight": 400,
     "font-style": "normal",
     "font-color": (255, 255, 255, 255),
-    "outline-color": (0, 0, 0, 255),  # opaque since the alpha scale fix
+    "outline-color": (0, 0, 0, 255),  # opaque, as the alpha scale requires
     "outline-width": 2,
 }
 
@@ -163,7 +151,7 @@ def check_table_matches_expectations() -> None:
 
 
 def check_empty_settings_read_as_defaults() -> None:
-    """An empty settings dict must produce exactly the old inline defaults."""
+    """An empty settings dict must produce the pinned defaults."""
     app = AppSettings({})
     for name, (section, key) in PROPERTIES.items():
         got = getattr(app, name)
@@ -182,9 +170,9 @@ def check_empty_settings_read_as_defaults() -> None:
     print("PASS: empty settings read back as the pinned defaults")
 
 
-def check_custom_stores_is_a_list() -> None:
-    """The concrete bug this table fixes: StoreBackend defaulted
-    store.custom-stores to {} while the Settings dialog appended to []."""
+def check_custom_stores_is_list() -> None:
+    """StoreBackend and the Settings dialog must agree on the type. The
+    dialog appends to a list, so the default is a list."""
     app = AppSettings({})
     assert isinstance(app.custom_stores, list), (
         f"custom-stores default is {type(app.custom_stores).__name__}, must be list"
@@ -194,8 +182,8 @@ def check_custom_stores_is_a_list() -> None:
 
 
 def check_keep_running_tri_state() -> None:
-    """None (never asked) must survive as None -- it is what raises the
-    KeepRunningDialog in mainWindow.on_close."""
+    """None means never asked and must survive as None. It is what raises
+    the KeepRunningDialog in mainWindow.on_close."""
     app = AppSettings({})
     assert app.keep_running is None, f"missing keep-running gave {app.keep_running!r}"
 
@@ -211,8 +199,8 @@ def check_keep_running_tri_state() -> None:
 
 
 def check_mutable_defaults_are_not_shared() -> None:
-    """A miss must never hand out the table's own container -- mutating the
-    result (font_defaults does exactly that) would poison every later read."""
+    """A miss must never hand out the table's own container. font_defaults
+    mutates the result, which would poison every later read."""
     a = AppSettings({})
     b = AppSettings({})
 
@@ -226,9 +214,9 @@ def check_mutable_defaults_are_not_shared() -> None:
     print("PASS: mutable defaults are copied per read")
 
 
-def check_round_trip_through_the_underlying_dict() -> None:
-    """Setters must write straight through to the wrapped dict (no parallel
-    store), using the section/key the old raw writers used."""
+def check_round_trip_through_dict() -> None:
+    """Setters must write straight through to the wrapped dict, with no
+    parallel store, using the section and key the raw writers use."""
     data: dict = {}
     app = AppSettings(data)
 
@@ -242,18 +230,16 @@ def check_round_trip_through_the_underlying_dict() -> None:
         )
         assert getattr(app, name) == SAMPLES[name], f"{name} did not read back"
 
-    # A second wrapper over the same dict sees the writes -- the accessor is
-    # a view, not a copy.
+    # A second wrapper over the same dict sees the writes, because the
+    # accessor is a view.
     assert AppSettings(data).hold_time == SAMPLES["hold_time"]
     print("PASS: accessors read/write through the wrapped dict")
 
 
 def check_unknown_keys_rejected_both_ways() -> None:
-    """DEFAULTS is the schema on writes too: get() already raised KeyError
-    for a (section, key) outside the table, but set() silently wrote a
-    misspelled key that no reader would ever find. Both directions must
-    trip; the runtime-computed keys CustomContentGroup actually uses must
-    keep working."""
+    """DEFAULTS is the schema on writes as well as reads. A misspelled key
+    must raise on set() as it does on get(), and the runtime-computed keys
+    CustomContentGroup uses must keep working."""
     app = AppSettings({})
 
     for section, key in (("general", "hold-tmie"), ("nope", "hold-time")):
@@ -277,7 +263,7 @@ def check_unknown_keys_rejected_both_ways() -> None:
     print("PASS: unknown keys raise KeyError on get and set")
 
 
-def check_wraps_the_shared_and_snapshot_dicts() -> None:
+def check_wraps_shared_dict() -> None:
     """SettingsManager.app() must wrap the shared cached dict itself, so a
     write through the accessor is visible to raw readers before the save."""
     shared = gl.settings_manager.get_app_settings()
@@ -299,10 +285,10 @@ def check_wraps_the_shared_and_snapshot_dicts() -> None:
 if __name__ == "__main__":
     check_table_matches_expectations()
     check_empty_settings_read_as_defaults()
-    check_custom_stores_is_a_list()
+    check_custom_stores_is_list()
     check_keep_running_tri_state()
     check_mutable_defaults_are_not_shared()
-    check_round_trip_through_the_underlying_dict()
+    check_round_trip_through_dict()
     check_unknown_keys_rejected_both_ways()
-    check_wraps_the_shared_and_snapshot_dicts()
+    check_wraps_shared_dict()
     print("\nALL PASS: scenario_settings_defaults")

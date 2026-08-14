@@ -1,17 +1,10 @@
 """
-Regression test: page import via the PageManager menu raised
-NameError.
+Regression test for page import through the PageManager menu.
 
-MenuButton.import_page_name_selected_callback derived the new page's name
-from `page_path` -- a local that is only assigned two lines LATER (by
-add_page) -- instead of from its `name` parameter, so every import through
-the menu died with `NameError: name 'page_path' is not defined` before the
-page was ever written.
-
-The callback is driven unbound with a duck-typed `self` (a real MenuButton
-is a Gtk widget and would need a display); everything it touches beyond
-`self` -- gl.page_manager.add_page, gl.signal_manager, the source JSON on
-disk -- is real.
+MenuButton.import_page_name_selected_callback must derive the new page's name
+from its name parameter, not from page_path, which add_page assigns two lines
+later. The callback runs unbound with a duck-typed self, and everything else
+it touches is real.
 """
 import json
 import os
@@ -21,7 +14,7 @@ import globals as gl
 
 
 class FakeFile:
-    """Gio.File stand-in: the callback only calls get_path()."""
+    """Gio.File stand-in. The callback only calls get_path()."""
 
     def __init__(self, path: str):
         self._path = path
@@ -49,7 +42,7 @@ class FakePageEditor:
 
 
 class FakeMenuButtonSelf:
-    """Duck-typed `self` exposing exactly what the callback dereferences:
+    """Duck-typed self that exposes what the callback dereferences,
     .selected_file and .pageEditor.page_manager.page_selector."""
 
     def __init__(self, selected_file: FakeFile):
@@ -74,7 +67,7 @@ def main() -> None:
     with open(src_path, "w") as f:
         json.dump(page_dict, f)
 
-    # --- Import under a fresh name (both dialog and direct path end here).
+    # Import under a fresh name. Both the dialog and the direct path end here.
     fake_self = FakeMenuButtonSelf(FakeFile(src_path))
     MenuButton.import_page_name_selected_callback(fake_self, "ImportedPage")
 
@@ -90,17 +83,16 @@ def main() -> None:
     assert fake_self.selected_file is None, "selected_file was not cleared after import"
     assert gl.page_manager.find_matching_page_path("ImportedPage") == expected_path
 
-    # --- Importing onto an existing name must return cleanly (FileExistsError
-    # is caught), not touch the selector, and not raise.
+    # Importing onto an existing name must return cleanly, without touching
+    # the selector and without raising. FileExistsError is caught.
     fake_self2 = FakeMenuButtonSelf(FakeFile(src_path))
     MenuButton.import_page_name_selected_callback(fake_self2, "ImportedPage")
     assert fake_self2.pageEditor.page_manager.page_selector.added_paths == [], (
         "duplicate-name import must not add a selector row"
     )
 
-    # --- A dotted name typed in the rename dialog must be preserved, not
-    # truncated at the first dot. (splitext(basename("backup.v2"))[0] would
-    # have yielded "backup" -- silently renaming the user's page.)
+    # A dotted name typed in the rename dialog must survive whole. Truncation
+    # at the first dot would rename the user's page to "backup".
     fake_self3 = FakeMenuButtonSelf(FakeFile(src_path))
     MenuButton.import_page_name_selected_callback(fake_self3, "backup.v2")
 

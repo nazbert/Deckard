@@ -1,19 +1,10 @@
 """
-Scenario: an exception during a store install/uninstall/update must not wedge
-all store downloads for the session.
+An exception during a store install must not wedge every later download.
 
-perform_download_threaded set currently_downloading=True, ran the operation,
-and reset the flag only on the success path -- @log.catch ate any exception,
-the reset never ran, and every later download click sat in a
-`while currently_downloading: sleep(0.1)` poll forever (spinner spinning).
-The check-then-set on the flag was also non-atomic.
-
-Checks, against the real StorePreview.perform_download_threaded:
-  1. A raising install() leaves currently_downloading False afterwards.
-  2. A download AFTER the failure completes (pre-fix: hangs in the poll --
-     detected via a bounded join on a worker thread).
-  3. Two concurrent downloads never overlap (the lock serializes; observed
-     via a max-concurrency counter inside install()).
+The real StorePreview.perform_download_threaded takes a lock, so the
+currently_downloading flag clears whatever the operation did, a download
+after a failure completes promptly, and two concurrent downloads never
+overlap.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
@@ -27,8 +18,8 @@ from src.windows.Store.Preview import StorePreview
 
 
 def make_preview(store, install_state=0, install=None):
-    """__new__ bypass (house pattern): the widget/GTK half of StorePreview is
-    irrelevant to the download-serialization contract under test."""
+    """A __new__ bypass. The GTK half of StorePreview has no part in the
+    download-serialization contract under test."""
     p = StorePreview.__new__(StorePreview)
     p.store_page = types.SimpleNamespace(store=store)
     p.install_state = install_state
@@ -50,7 +41,7 @@ def main() -> int:
 
     store = make_store()
 
-    # 1) raising install must not latch the flag
+    # 1. A raising install must not latch the flag.
     def boom():
         raise RuntimeError("install exploded")
 
@@ -62,7 +53,7 @@ def main() -> int:
         return 1
     print("PASS: raising install resets currently_downloading")
 
-    # 2) the next download must actually run, promptly
+    # 2. The next download must run, and promptly.
     ran = threading.Event()
     p_ok = make_preview(store, install=lambda: ran.set())
     t = threading.Thread(target=p_ok.perform_download_threaded, daemon=True)
@@ -74,7 +65,7 @@ def main() -> int:
         return 1
     print("PASS: downloads still run after a failed install")
 
-    # 3) concurrent clicks serialize
+    # 3. Concurrent clicks serialize.
     active = [0]
     max_active = [0]
     counter_lock = threading.Lock()

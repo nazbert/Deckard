@@ -1,27 +1,10 @@
 """
 Regression test for SD+ touchscreen swipe dispatch.
 
-Since the event-assigner rework (aadbaa59, in the 1.5.0 betas) touchscreen
-DRAG events travel the whole pipeline -- reader callback ->
-DeckController.touchscreen_event_callback -> ControllerTouchScreen
-.event_callback -> own_actions_event_callback -> ActionCore
-._raw_event_callback -> EventAssigner -- and then die in
-ActionBase.event_callback: the backward-compat mapping there only handles
-Key.DOWN/UP and Dial.DOWN/UP, so for every legacy ActionBase action (which
-is what all real plugins are, incl. DeckPlugin's ChangePage) a swipe is a
-silent no-op. The same rework commit also dropped the pre-existing
-Dial.SHORT_TOUCH_PRESS -> on_key_down mapping, killing strip taps.
-
-Asserts, over a REAL DeckController on a fake SD+ (FaultyFakeDeck fires the
-callbacks exactly like the library reader thread does):
-  1. a legacy action on the touchscreen gets on_key_down() for a left swipe,
-  2. and for a right swipe,
-  3. CONTROL: a legacy action that overrides event_callback receives the raw
-     DRAG events (this always worked -- proves delivery, isolating the
-     compat mapping as the break),
-  4. a strip tap (TouchscreenEventType.SHORT over dial 0) reaches a legacy
-     action on that dial as on_key_down (restores pre-rework behavior),
-  5. key events still map (Key.DOWN -> on_key_down) -- compat table intact.
+A touchscreen DRAG event travels the whole pipeline into
+ActionBase.event_callback, whose compatibility mapping must reach a legacy
+action's on_key_down. The same mapping carries a strip tap and the key
+events. A real DeckController over a fake SD+ fires the callbacks.
 """
 import fixtures
 
@@ -32,8 +15,8 @@ from src.backend.PluginManager.ActionBase import ActionBase
 
 
 class LegacyAction(ActionBase):
-    """ChangePage-alike: plain deprecated ActionBase, only on_key_down/up
-    overridden -- exactly the shape of every shipped plugin action."""
+    """A plain deprecated ActionBase with only on_key_down and on_key_up
+    overridden, which is the shape of every shipped plugin action."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -48,8 +31,8 @@ class LegacyAction(ActionBase):
 
 
 class OverridingLegacyAction(ActionBase):
-    """Legacy action that reroutes events itself (RunCommand-alike): its
-    event_callback override must keep receiving the raw drag events."""
+    """A legacy action that reroutes events itself. Its event_callback
+    override must keep receiving the raw drag events."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -60,12 +43,12 @@ class OverridingLegacyAction(ActionBase):
 
 
 def attach(page, action_cls, ident):
-    """Builds a legacy action and registers it on `page` for `ident` the way
-    load_action_objects would (action_objects[input_type][json_id][state])."""
+    """Builds a legacy action and registers it on page for ident the way
+    load_action_objects does."""
     action = action_cls(
         action_id="test::legacy",
         action_name="LegacyStub",
-        deck_controller=None,  # set right below, like ActionCore's setters do
+        deck_controller=None,  # set below, as ActionCore's setters do
         page=page,
         plugin_base=None,
         state=0,
@@ -95,7 +78,7 @@ def main() -> None:
         observer = attach(page, OverridingLegacyAction, touch_ident)
         observer.deck_controller = controller
 
-        # 1: left swipe (x > x_out) -> legacy on_key_down
+        # 1. A left swipe reaches the legacy on_key_down.
         deck.fire_touchscreen_event(
             TouchscreenEventType.DRAG,
             {"x": 620, "y": 50, "x_out": 120, "y_out": 50},
@@ -105,7 +88,7 @@ def main() -> None:
             "ActionBase.event_callback compat mapping drops touchscreen drags"
         )
 
-        # 2: right swipe (x < x_out) -> legacy on_key_down again
+        # 2. A right swipe reaches the legacy on_key_down again.
         deck.fire_touchscreen_event(
             TouchscreenEventType.DRAG,
             {"x": 120, "y": 50, "x_out": 620, "y_out": 50},
@@ -114,17 +97,17 @@ def main() -> None:
             "DRAG_RIGHT never reached the legacy action's on_key_down"
         )
 
-        # 3: control -- the overriding action saw both raw drag events, so
-        # delivery up to the action layer works; the compat mapping is the
-        # only place a default legacy action can lose them.
+        # 3. The control. The overriding action saw both raw drag events, so
+        # delivery reaches the action layer and only the compatibility
+        # mapping can lose them.
         assert fixtures.wait_until(
             lambda: observer.seen_events.count(Input.Touchscreen.Events.DRAG_LEFT) == 1
             and observer.seen_events.count(Input.Touchscreen.Events.DRAG_RIGHT) == 1,
             timeout=3.0,
         ), f"drag events must reach overriding legacy actions, saw {observer.seen_events}"
 
-        # 4: strip tap over dial 0 -> that dial's legacy action fires
-        # (SHORT_TOUCH_PRESS -> on_key_down, the mapping aadbaa59 removed).
+        # 4. A strip tap over dial 0 fires that dial's legacy action,
+        # through the SHORT_TOUCH_PRESS mapping.
         dial_legacy = attach(page, LegacyAction, Input.Dial("0"))
         dial_legacy.deck_controller = controller
         deck.fire_touchscreen_event(TouchscreenEventType.SHORT, {"x": 50, "y": 50})
@@ -133,7 +116,7 @@ def main() -> None:
             "(SHORT_TOUCH_PRESS compat mapping missing)"
         )
 
-        # 5: key compat table intact -- Key.DOWN still lands.
+        # 5. The key compatibility table is intact, so Key.DOWN lands.
         key_legacy = attach(page, LegacyAction, Input.Key("0x0"))
         key_legacy.deck_controller = controller
         deck.fire_key_event(0, True)

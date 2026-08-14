@@ -1,25 +1,10 @@
 """
-Integration scenario: deleting a page that is some
-controller's _screensaver_pending_page must clear the pending request.
+Deleting a controller's screensaver-pending page clears the pending request.
 
-remove_page() only handled controllers whose ACTIVE page was the deleted
-one; a page stashed as screensaver-pending (load_page's deferral while the
-screensaver owns the deck) was invisible to that check. The pending
-reference was left dangling at a deleted file: hide() then loaded a page
-whose json no longer exists, and the page's first save resurrected the
-deleted file.
-
-Uses the scenario_screensaver_page_change machinery: settle on page A,
-raise the screensaver, request page B (recorded as pending), then DELETE
-page B. The pending slot must clear, B's cache entry must drop, and on
-dismiss the controller must stay on page A without resurrecting B's file.
-
-Second half, same hazard through the other door: a page object that outlives
-the delete of its page can mark that path again, and the mark stands under
-the path rather than under the object. Creating a page of that name next
-finds a fresh file and an outstanding write for it, and the read barrier --
-which exists to make a read see edits the file has not got -- is exactly what
-puts the deleted page back on top of the new one.
+remove_page must clear the pending slot and drop the page's cache entry.
+Otherwise hide() loads a page whose file is gone, and the first save
+resurrects it. A page object that outlives the delete must not mark the path
+back into place over a page created under the same name.
 """
 import json
 import os
@@ -35,10 +20,9 @@ WATCHDOG_SECONDS = 30
 class NoTimers:
     """A timer source that arms nothing.
 
-    The straggler mark below has to still be outstanding when the page is
-    re-created, which is the whole point of it; leaving that to a one-second
-    timer would make the check a race with the machine's load rather than a
-    statement about the barrier.
+    The straggler mark below must still be outstanding when the page is
+    re-created. A one-second timer would make the check a race with the
+    machine's load instead of a statement about the barrier.
     """
 
     def schedule(self, delay_s, callback):
@@ -53,7 +37,7 @@ def read_page(path: str) -> dict:
         return json.load(f)
 
 
-def check_a_recreated_page_is_not_the_deleted_one(controller) -> None:
+def check_recreated_page_is_new(controller) -> None:
     """A straggler's write must not be resurrected onto a page created under
     the same name."""
     original_flush = page_flush.get()
@@ -67,10 +51,9 @@ def check_a_recreated_page_is_not_the_deleted_one(controller) -> None:
         gl.page_manager.remove_page(path)
         assert not os.path.exists(path), "remove_page must delete the file"
 
-        # The object survived the delete -- it is not this controller's
-        # active page, so nothing tore it down -- and saves again. Whatever
-        # holds such a reference (a widget, a screensaver-pending slot, a
-        # plugin thread mid-save) marks the path, not the object.
+        # The object survived the delete, because it is not this
+        # controller's active page, and it saves again. A widget, a pending
+        # slot or a plugin thread mid-save marks the path, not the object.
         straggler.dict["marked-after-the-delete"] = True
         straggler.save()
         assert page_flush.get().pending_source(path) is not None, (
@@ -89,8 +72,8 @@ def check_a_recreated_page_is_not_the_deleted_one(controller) -> None:
             f"{on_disk}"
         )
 
-        # ...and the page every deck reads was corrected too, so the next
-        # edit of it writes the new page rather than putting the old one back.
+        # The page every deck reads was corrected too, so the next edit
+        # writes the new page instead of putting the old one back.
         gl.page_manager.overwrite_brightness_settings(path, brightness=42)
         page_flush.get().flush_path(path)
         after_edit = read_page(path)
@@ -139,7 +122,7 @@ def main() -> None:
             "fixture: the page change during the screensaver must be pending"
         )
 
-        # --- Delete the PENDING page. ---
+        # Delete the pending page.
         gl.page_manager.remove_page(b_path)
 
         assert not os.path.exists(b_path), "remove_page must delete the file"
@@ -153,7 +136,7 @@ def main() -> None:
             "the deleted pending page's cache entry must be dropped"
         )
 
-        # --- Dismiss: the controller stays on page A, B is not resurrected.
+        # On dismiss the controller stays on page A and B is not resurrected.
         controller.screen_saver.hide()
         ok = fixtures.wait_until(lambda: not controller.screen_saver.showing, timeout=5)
         assert ok, "screensaver never hid"
@@ -168,7 +151,7 @@ def main() -> None:
             "dismissed (a dangling pending page saved itself back to disk)"
         )
 
-        check_a_recreated_page_is_not_the_deleted_one(controller)
+        check_recreated_page_is_new(controller)
     finally:
         fixtures.teardown(controller)
 

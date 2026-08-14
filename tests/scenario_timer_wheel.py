@@ -1,24 +1,10 @@
 """
-Unit-tier scenario for the single timer wheel
-(docs/memory-footprint-impl-plan.md P5.3, src/backend/timer_wheel.py).
+Unit-tier scenario for the single timer wheel in src/backend/timer_wheel.py.
 
-Replaces N sleeping threading.Timer threads (screensaver reset-per-keypress,
-overlay hide, key-hold) with one daemon scheduler thread backing a min-heap
-of due times. This is the regression net for that thread-count claim plus
-the handle semantics ported call sites depend on (idempotent cancel, safe
-after fire) and the dispatch-model decision (fired callbacks run off the
-scheduler thread, so a slow one can't delay an unrelated due timer).
-
-Covers:
-  (a) schedule() fires within tolerance of the requested delay.
-  (b) cancel() before fire prevents the callback from ever running.
-  (c) cancel() after fire is a no-op -- doesn't raise, doesn't re-fire.
-  (d) constructing a TimerWheel starts exactly one thread, and 50 concurrent
-      schedule() calls on that one wheel start no additional threads (each
-      one only pushes onto the shared heap under the wheel's Condition).
-  (e) a slow callback (sleeps past a second timer's due time) does not delay
-      that unrelated timer -- proof the scheduler thread only pops+dispatches
-      and never runs a callback inline.
+One daemon scheduler thread backs a min-heap of due times, and 50 concurrent
+schedule calls start no further thread. A cancel is idempotent and safe after
+a fire. A fired callback runs off the scheduler thread, so a slow one cannot
+delay an unrelated due timer.
 """
 import threading
 import time
@@ -38,17 +24,15 @@ def check_fires_within_tolerance() -> None:
 
     assert fixtures.wait_until(lambda: len(fired_at) == 1, timeout=2.0), "timer never fired"
     delta = fired_at[0] - t0
-    # Loose lower bound (didn't fire effectively instantly -- a 0.1s schedule
-    # must impose a real delay) and a generous liveness ceiling. Tight
-    # thresholds around 0.1s are a CI flake candidate (scheduler granularity /
-    # loaded runner); what matters is "delayed, and fired within a sane
-    # window", not the exact 0.1s (flake hardening).
+    # A loose lower bound, because a 0.1s schedule must impose a real delay,
+    # and a generous liveness ceiling. A tight threshold around 0.1s flakes on
+    # scheduler granularity and on a loaded runner.
     assert 0.02 <= delta <= 1.5, f"timer fired outside tolerance: {delta:.3f}s (expected ~0.1s)"
 
     print(f"PASS: schedule() fires within tolerance ({delta:.3f}s for a 0.1s delay)")
 
 
-def check_cancel_before_fire_prevents_it() -> None:
+def check_cancel_before_fire_prevents() -> None:
     wheel = timer_wheel.TimerWheel(name="CancelBeforeWheel")
     fired = threading.Event()
     handle = wheel.schedule(0.1, fired.set, name="should-not-fire")
@@ -77,7 +61,7 @@ def check_cancel_after_fire_is_noop() -> None:
     print("PASS: cancel() after fire is a no-op")
 
 
-def check_one_scheduler_thread_for_many_schedules() -> None:
+def check_one_thread_for_many_schedules() -> None:
     before = set(threading.enumerate())
     wheel = timer_wheel.TimerWheel(name="ConcurrentTestWheel")
     after_construct = set(threading.enumerate())
@@ -91,8 +75,8 @@ def check_one_scheduler_thread_for_many_schedules() -> None:
     assert scheduler_thread.name == "ConcurrentTestWheel"
     assert scheduler_thread.daemon, "the scheduler thread must be a daemon thread"
 
-    # 50 threads racing to schedule on the SAME wheel at once. Delay is long
-    # enough that none of them fire (and so spawn a dispatch thread) before
+    # 50 threads racing to schedule on one wheel at once. The delay is long
+    # enough that none of them fires, and so spawns a dispatch thread, before
     # the thread count is sampled below.
     barrier = threading.Barrier(50)
     handles = []
@@ -126,7 +110,7 @@ def check_one_scheduler_thread_for_many_schedules() -> None:
     print("PASS: one TimerWheel == one scheduler thread, even under 50 concurrent schedule() calls")
 
 
-def check_slow_callback_does_not_delay_unrelated_timer() -> None:
+def check_slow_callback_delays_nothing() -> None:
     wheel = timer_wheel.TimerWheel(name="SlowCallbackWheel")
     timeline = []
     timeline_lock = threading.Lock()
@@ -143,9 +127,9 @@ def check_slow_callback_does_not_delay_unrelated_timer() -> None:
         with timeline_lock:
             timeline.append(("fast", time.monotonic()))
 
-    # slow_cb is due first and blocks for 0.5s; fast_cb is due 0.1s later and
-    # must fire on schedule regardless -- if the scheduler thread ran
-    # callbacks inline, fast_cb couldn't fire until slow_cb returns (~0.55s).
+    # slow_cb is due first and blocks for 0.5s. fast_cb is due 0.1s later and
+    # must fire on schedule. A scheduler thread that ran callbacks inline
+    # would hold fast_cb until slow_cb returns.
     wheel.schedule(0.05, slow_cb, name="slow")
     wheel.schedule(0.15, fast_cb, name="fast")
 
@@ -153,8 +137,8 @@ def check_slow_callback_does_not_delay_unrelated_timer() -> None:
         lambda: any(name == "fast" for name, _ in timeline), timeout=2.0
     ), "the unrelated fast timer never fired"
 
-    # Let the slow callback finish so both events are on the timeline and its
-    # dispatch thread doesn't outlive the assertions below.
+    # Let the slow callback finish, so both events are on the timeline and
+    # its dispatch thread does not outlive the assertions below.
     assert fixtures.wait_until(
         lambda: any(name == "slow_end" for name, _ in timeline), timeout=2.0
     ), "the slow callback never finished"
@@ -162,13 +146,10 @@ def check_slow_callback_does_not_delay_unrelated_timer() -> None:
     fast_ts = next(ts for name, ts in timeline if name == "fast")
     slow_end_ts = next(ts for name, ts in timeline if name == "slow_end")
 
-    # The real claim is an ORDERING one: the unrelated fast timer must fire
-    # while the slow callback is still blocked -- i.e. strictly BEFORE the slow
-    # callback returns -- which can only happen if callbacks dispatch off the
-    # scheduler thread rather than inline. Asserting the event order directly
-    # (rather than a wall-clock threshold on fast_delay) proves exactly that
-    # and can't flake on a loaded runner (flake hardening). A generous
-    # liveness ceiling on the fast delay backstops a total scheduler stall.
+    # The claim is about order. The unrelated fast timer must fire while the
+    # slow callback is still blocked, which happens only when a callback
+    # dispatches off the scheduler thread. Asserting the event order rather
+    # than a wall-clock threshold cannot flake on a loaded runner.
     assert fast_ts < slow_end_ts, (
         f"the slow callback delayed the unrelated timer: fast fired at "
         f"{fast_ts - t0:.3f}s, not before the slow callback finished at "
@@ -183,8 +164,8 @@ def check_slow_callback_does_not_delay_unrelated_timer() -> None:
 
 
 def check_module_level_default_wheel_smoke() -> None:
-    """Sanity check on the process-wide singleton the real call sites
-    (ScreenSaver, overlay hide, hold timer) actually use."""
+    """A check on the process-wide singleton the real call sites use, such
+    as the screensaver, the overlay hide and the hold timer."""
     fired = threading.Event()
     handle = timer_wheel.schedule(0.05, fired.set, name="default-wheel-smoke")
     assert fired.wait(timeout=2.0), "module-level schedule() on the default wheel never fired"
@@ -197,10 +178,10 @@ def main() -> None:
     fixtures.start_watchdog(WATCHDOG_SECONDS, label="scenario_timer_wheel")
 
     check_fires_within_tolerance()
-    check_cancel_before_fire_prevents_it()
+    check_cancel_before_fire_prevents()
     check_cancel_after_fire_is_noop()
-    check_one_scheduler_thread_for_many_schedules()
-    check_slow_callback_does_not_delay_unrelated_timer()
+    check_one_thread_for_many_schedules()
+    check_slow_callback_delays_nothing()
     check_module_level_default_wheel_smoke()
 
     print("PASS: scenario_timer_wheel")

@@ -1,13 +1,10 @@
 """
-Scenario: reload_similar_pages(identifier=None) must reload each sibling
-controller's OWN Page object, not the caller's (Page.py passed
-`self` to the other controller's load_page, loading THIS controller's Page
-onto other decks: cross-deck page bleed).
+reload_similar_pages must reload each sibling controller's own Page object.
 
-Also: get_pages_with_same_json must snapshot controller.active_page once. It
-is cleared to None from another thread while a controller (dis)connects, so
-re-reading the field per check raced a non-None guard against a None deref of
-.json_path -- the same class as update_input's guard.
+Passing self to another controller's load_page bleeds this controller's page
+onto other decks. get_pages_with_same_json must also snapshot
+controller.active_page once, because another thread clears it to None while a
+controller connects or disconnects.
 """
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
 
@@ -63,11 +60,11 @@ def main() -> int:
         print(f"FAIL: sibling controller received {got}, expected its own [page_b]")
         return 1
 
-    # --- active_page flips to None mid-scan must not AttributeError --------
+    # An active_page that flips to None mid-scan must not raise AttributeError.
     class FlippingController:
-        """active_page reads non-None once (passing the guard), then None on
-        the next read -- exactly the (dis)connect race. A per-check re-read
-        would then deref None.json_path; a single snapshot is immune."""
+        """active_page reads non-None once, which passes the guard, then None
+        on the next read. That is the connect and disconnect race. A per-check
+        re-read then derefs None.json_path, and a single snapshot does not."""
         def __init__(self, serial, page):
             self.deck = FaultyFakeDeck(serial_number=serial)
             self._page = page

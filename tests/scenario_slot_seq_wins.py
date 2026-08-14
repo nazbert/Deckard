@@ -1,37 +1,10 @@
 """
-Scenario: single-slot assignment must be highest-seq-wins.
+Single-slot assignment must be highest-seq-wins.
 
-add_touchscreen_task/add_image_task used to allocate next_submit_seq() and
-construct the task OUTSIDE _slot_lock; only the slot assignment was locked.
-Two concurrent producers -- the media-tick ControllerTouchScreen.update()
-and a GTK/action-thread dial update() funnelling into the same strip (or two
-writers of the same key slot) -- could therefore allocate seqs in one order
-and reach the locked assignment in the opposite order: the single slot ended
-up holding the LOWER-seq (older) frame and the newer frame was lost
-(one-frame staleness for animated content, outside the drain/clear
-scope).
-
-The fix stamps the seq INSIDE _slot_lock, atomically with the assignment,
-so seq order IS assignment order and the slot always ends with the maximum
-allocated seq.
-
-Detection is DETERMINISTIC (no reliance on the scheduler happening to hit a
-narrow window). next_submit_seq is wrapped so that, after allocating a seq,
-the producer sleeps for a duration that is LONGER the EARLIER its seq was in
-the round: the lowest-seq producer sleeps the most, the highest the least.
-
-  * PRE-FIX: that sleep sits in the allocate->assign window, OUTSIDE
-    _slot_lock. So the highest-seq producer (shortest sleep) assigns first and
-    the lowest-seq producer (longest sleep) assigns LAST, overwriting the slot
-    with the OLDEST frame. Every round inverts (measured 200/200).
-  * FIXED: the sleep runs UNDER _slot_lock (allocation is inside the lock), so
-    producers assign in strict seq order regardless of sleep -- the slot always
-    ends holding the max seq. Every round holds (measured 0/60 inversions).
-
-We run several rounds of N_THREADS concurrent submissions and fail the first
-round whose slot does not end holding that round's maximum allocated seq. The
-inversion is structural on the pre-fix code, so a single round would already
-catch it; the extra rounds are pure margin against scheduling variance.
+add_touchscreen_task and add_image_task stamp the seq inside _slot_lock,
+atomically with the assignment, so seq order is assignment order and the slot
+always ends holding the maximum allocated seq. A seq-ordered sleep after
+allocation makes an inversion deterministic rather than scheduler-dependent.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
@@ -43,21 +16,21 @@ from fixtures import start_watchdog
 N_THREADS = 6
 ROUNDS = 12
 # Base unit for the seq-ordered sleep. The earliest producer of a round sleeps
-# (N_THREADS-1)*STEP, the latest sleeps 0 -- enough separation to force the
-# assign order deterministically without dragging the suite.
+# (N_THREADS-1)*STEP and the latest sleeps 0, which forces the assign order
+# without dragging the suite.
 STEP = 0.001
 WATCHDOG_SECONDS = 60
 
 
 def _run_rounds(media_player, submit_fn, read_slot_seq, label: str) -> int:
-    """Run ROUNDS rounds of N_THREADS concurrent single submissions. Each round
-    installs a fresh recorder that captures that round's allocated seqs and
-    sleeps AFTER allocation for a time that decreases with the seq's position
-    in the round (earliest seq sleeps longest). Fails the first round whose
-    slot does not end holding that round's max seq.
+    """Run ROUNDS rounds of N_THREADS concurrent single submissions.
 
-      submit_fn(thread_index) -- enqueues one frame via the add_* under test.
-      read_slot_seq()         -- current slot's submit_seq (None if empty).
+    Each round installs a recorder that captures the allocated seqs and sleeps
+    after allocation, longest for the earliest seq. The first round whose slot
+    does not end on that round's max seq fails.
+
+      submit_fn(thread_index) enqueues one frame through the add_* under test.
+      read_slot_seq() returns the current slot's submit_seq, or None.
     """
     base_next = media_player.next_submit_seq
 
@@ -73,10 +46,9 @@ def _run_rounds(media_player, submit_fn, read_slot_seq, label: str) -> int:
                 if not round_base:
                     round_base.append(seq)
             position = seq - round_base[0]  # 0 for the earliest producer
-            # Earliest seq sleeps longest, so on pre-fix code (sleep outside
-            # _slot_lock) it assigns LAST and overwrites the slot with the
-            # oldest frame. On fixed code this sleep is under the lock and
-            # cannot change assignment order.
+            # The earliest seq sleeps longest. With the sleep outside
+            # _slot_lock it assigns last and overwrites the slot with the
+            # oldest frame. Under the lock it cannot change assign order.
             time.sleep((N_THREADS - 1 - position) * STEP)
             return seq
 

@@ -1,26 +1,17 @@
 #!/usr/bin/env python3
 """
-soak_driver.py -- drive a running Deckard over its DBus API
-(src/api.py) for a memory soak run (docs/memory-footprint-plan.md Phase 0
-P0.6; see tests/soak/README.md for the full manual soak procedure this
-script is one part of).
+Drive a running Deckard over its DBus API for a memory soak run.
 
-Cycles every connected controller through the configured pages and drops a
-marker line into mem_telemetry.csv (if SC_MEM_TELEMETRY=1 was set for the
-run) so the switches line up against the RSS/thread/fd timeline the
-sampler is recording.
-
-Degrades gracefully: if the app isn't running (no DBus service reachable),
-this prints why and exits 1 instead of raising.
+Cycles every connected controller through the configured pages and writes a
+marker line into mem_telemetry.csv when SC_MEM_TELEMETRY is set, so the
+switches line up against the timeline the sampler records. With no DBus
+service reachable, this prints the reason and exits 1 instead of raising.
 
 Usage:
     .venv/bin/python tests/soak/soak_driver.py [--cycles N] [--interval SECONDS]
 
-Note: brightness and screensaver-force cycling (mentioned alongside page
-switches in the plan) aren't exposed on the DBus API yet -- src/api.py
-currently has only page/icon-pack/window methods. Only page switches are
-driven for now; this script is the obvious place to add the others once
-they land.
+The DBus API carries page, icon-pack and window methods only, so brightness
+and screensaver cycling are not driven yet.
 """
 import argparse
 import os

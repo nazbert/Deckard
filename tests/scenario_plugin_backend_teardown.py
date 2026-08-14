@@ -1,31 +1,10 @@
 """
-Integration scenario: PluginBase backend teardown must not
-block the calling thread, and on_disconnect must null every backend
-reference.
+Integration scenario for PluginBase backend teardown.
 
-Pre-fix, on_disconnect closed the rpyc server and backend connection inline
-and ran terminate_backend_process() (SIGTERM -> wait 3s -> SIGKILL -> wait
-2s) synchronously -- on the uninstall path that's the GTK main thread, up to
-~5s of frozen UI. It also never nulled self.server/self.backend, so a later
-launch_backend() -> start_server() hit the "Server already running,
-skipping..." guard against a dead server: the plugin's backend was
-unrelaunchable until app restart.
-
-The fixed contract (mirroring ActionCore._release_backend_resources):
-
-  (a) on_disconnect returns fast: with a server and a connection whose
-      close() each take 0.75s plus a live child process, the call must
-      return well under the blocking cost (pre-fix: >= 1.5s inline).
-  (b) All four references (server, backend_connection, backend,
-      backend_process) are nulled synchronously, and the connection/process
-      leave the gl.plugin_manager registries synchronously.
-  (c) The teardown really happens, off-thread: both close()s run (on a
-      thread that is not the caller) and the child process is terminated
-      and reaped.
-  (d) Double teardown is idempotent: a second on_disconnect is a no-op
-      (close counts stay 1, no exception).
-  (e) Relaunch works: start_server() after teardown builds a fresh server
-      instead of skipping against a dead one.
+on_disconnect must return fast, null all four backend references and drop the
+gl.plugin_manager registry entries synchronously, then finish the closes and
+the process kill off-thread. A second call is a no-op, and start_server
+afterwards builds a fresh server instead of skipping against a dead one.
 """
 import subprocess
 import sys
@@ -37,17 +16,17 @@ import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
 import globals as gl
 
-# PluginBase dereferences gl.plugin_manager registries during teardown; the
-# harness never installs a real PluginManager (it would import the whole
-# plugin ecosystem), so provide just the two lists teardown touches.
+# PluginBase dereferences gl.plugin_manager registries during teardown. The
+# harness installs no real PluginManager, because that imports the whole
+# plugin ecosystem, so only the two lists teardown touches exist here.
 gl.plugin_manager = types.SimpleNamespace(backends=[], backend_processes=[])
 
 from src.backend.PluginManager.PluginBase import PluginBase  # noqa: E402
 
 
 class _SlowClosable:
-    """Stands in for the rpyc ThreadedServer / Connection: close() blocks
-    (like an rpyc close waiting out an in-flight call) and records who ran
+    """Stands in for the rpyc ThreadedServer and Connection. close() blocks,
+    like an rpyc close waiting out an in-flight call, and records who ran
     it."""
 
     def __init__(self, name: str, delay: float = 0.75):
@@ -63,10 +42,9 @@ class _SlowClosable:
 
 
 def _make_plugin(server, connection, process) -> PluginBase:
-    """A PluginBase with only the backend-teardown state wired up.
-    __init__ is bypassed deliberately: it needs a real plugin directory
-    (locales, manifest, asset manager) that is irrelevant to -- and noisy
-    for -- the teardown contract under test."""
+    """A PluginBase with only the backend-teardown state wired up. __init__
+    is bypassed, because it needs a real plugin directory that the teardown
+    contract never uses."""
     plugin = PluginBase.__new__(PluginBase)
     plugin.server = server
     plugin.backend_connection = connection
@@ -80,8 +58,8 @@ def main() -> None:  # noqa: C901 -- linear scenario script
 
     server = _SlowClosable("server")
     connection = _SlowClosable("connection")
-    # A real child in its own session so terminate_backend_process's
-    # os.killpg path is exercised for real (and the reap can be asserted).
+    # A real child in its own session, so terminate_backend_process runs its
+    # os.killpg path and the reap is observable.
     process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
                                start_new_session=True)
     gl.plugin_manager.backends.append(connection)
@@ -89,7 +67,7 @@ def main() -> None:  # noqa: C901 -- linear scenario script
 
     plugin = _make_plugin(server, connection, process)
 
-    # (a) -- the caller must not pay for the closes or the kill escalation.
+    # The caller must not pay for the closes or the kill escalation.
     caller = threading.current_thread()
     start = time.monotonic()
     plugin.on_disconnect(None)
@@ -101,7 +79,7 @@ def main() -> None:  # noqa: C901 -- linear scenario script
     )
     print(f"PASS: on_disconnect returned in {elapsed*1000:.0f}ms with slow closes pending")
 
-    # (b) -- references nulled and registries dropped synchronously.
+    # References nulled and registries dropped synchronously.
     assert plugin.server is None, "self.server not nulled -- relaunch would skip against a dead server"
     assert plugin.backend_connection is None, "self.backend_connection not nulled"
     assert plugin.backend is None, "self.backend not nulled -- later calls would hit a dead proxy"
@@ -110,7 +88,7 @@ def main() -> None:  # noqa: C901 -- linear scenario script
     assert process not in gl.plugin_manager.backend_processes, "process left in gl.plugin_manager.backend_processes"
     print("PASS: all backend references nulled and registries dropped synchronously")
 
-    # (c) -- the teardown itself still happens, just off-thread.
+    # The teardown itself still happens, off-thread.
     assert fixtures.wait_until(
         lambda: server.close_calls == 1 and connection.close_calls == 1, timeout=10.0
     ), "server/connection close() never ran"
@@ -122,7 +100,7 @@ def main() -> None:  # noqa: C901 -- linear scenario script
             assert t is not caller, f"{closable.name}.close() ran on the calling thread"
     print("PASS: closes and process termination ran to completion off-thread")
 
-    # (d) -- second teardown is a no-op.
+    # A second teardown is a no-op.
     plugin.on_disconnect(None)
     time.sleep(0.2)
     assert server.close_calls == 1 and connection.close_calls == 1, (
@@ -131,14 +109,14 @@ def main() -> None:  # noqa: C901 -- linear scenario script
     )
     print("PASS: double teardown is idempotent")
 
-    # (e) -- with self.server nulled, start_server() must actually start one
-    # (pre-fix it logged 'Server already running, skipping...' forever).
+    # With self.server nulled, start_server() must start a fresh server
+    # instead of skipping against a dead one.
     plugin.start_server()
     assert plugin.server is not None, "start_server() did not build a fresh server after teardown"
     assert plugin.server is not server, "start_server() reused the dead server"
     print("PASS: start_server() relaunches after teardown instead of skipping")
 
-    # Close the real rpyc server this spawned (and give its thread a beat).
+    # Close the real rpyc server this spawned, and give its thread a moment.
     plugin.on_disconnect(None)
     fixtures.wait_until(lambda: plugin.server is None, timeout=5.0)
     time.sleep(0.3)

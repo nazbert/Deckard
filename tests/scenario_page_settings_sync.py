@@ -1,23 +1,9 @@
 """
-Regression test for "auto-switch settings don't persist" (the
-write-clobber half).
+Regression test for auto-switch settings that do not persist.
 
-PageManagerBackend.set_page_settings wrote the page file but only refreshed
-the in-memory dict of pages ACTIVE on a controller. A cached-but-not-active
-Page object (gl.page_manager.pages[controller][path]) kept its pre-edit
-dict, and Page.save() rewrites the whole file from self.dict -- it fires
-constantly (ActionCore.set_settings -> Page.set_action_settings -> save(),
-key/dial/state edits, ...). The first save() from such a stale Page silently
-erased the just-saved settings section (auto-change, screensaver, brightness
-and background overrides) from disk: auto page switching worked right after
-configuring it, then the settings vanished and the Page Editor showed
-defaults on reopen. Deck disable/enable rebuilt the page cache, which is why
-it looked like the only way to "apply" a regex edit.
-
-Deterministic repro: cache a page on a controller WITHOUT making it active,
-write auto-change settings through the same path the Page Editor uses, then
-trigger a plain Page.save() on the cached object -- the auto-change block
-must survive in the file.
+PageManagerBackend.set_page_settings must refresh a cached page's in-memory
+dict as well as the file. Page.save rewrites the whole file from self.dict,
+so a stale cached Page erases the settings section at its next save.
 """
 import json
 
@@ -27,10 +13,9 @@ from src.backend.PageManagement import page_flush
 
 
 def read_json(path: str):
-    # Through the read barrier, like every reader of a page file: a settings
-    # write and a Page.save() are both edits of the page now, marked with the
-    # flush seam and written on its timer, so reading the bytes without
-    # asking for the write reads the page as it was before them.
+    # Read through the barrier, like every reader of a page file. A settings
+    # write and a Page.save are both page edits, marked on the flush seam and
+    # written on its timer, so a raw read shows the page before them.
     page_flush.get().flush_path(path)
     with open(path) as f:
         return json.load(f)
@@ -40,8 +25,8 @@ def main() -> None:
     fixtures.start_watchdog(30, label="scenario_page_settings_sync")
     controller = fixtures.make_headless_controller(serial="pagesync-1")
     try:
-        # A second page, cached for this controller but NOT active
-        # (controller.active_page stays "Main" from the fixture).
+        # A second page, cached for this controller but not active. The
+        # fixture leaves controller.active_page on "Main".
         target_path = fixtures.seed_page("AutoTarget")
         cached_page = gl.page_manager.get_page(target_path, controller)
         assert controller.active_page.json_path != target_path, (
@@ -58,15 +43,15 @@ def main() -> None:
             f"auto-change settings never reached the file: {on_disk}"
         )
 
-        # The cached Page object must have been refreshed too...
+        # The cached Page object must be refreshed as well.
         in_memory = cached_page.dict.get("settings", {}).get("auto-change", {})
         assert in_memory.get("wm-class") == "firefox", (
             f"cached Page.dict is stale after set_page_settings: {in_memory} -- "
             f"the next Page.save() will erase the auto-change settings"
         )
 
-        # ...so that a routine save() (plugin settings write, key edit, ...)
-        # keeps the settings section intact instead of reverting it.
+        # A routine save, from a plugin settings write or a key edit, then
+        # keeps the settings section intact.
         cached_page.save()
         after_save = read_json(target_path).get("settings", {}).get("auto-change", {})
         assert after_save.get("enable") is True and after_save.get("wm-class") == "firefox", (
@@ -75,7 +60,7 @@ def main() -> None:
         )
         print("PASS: auto-change settings survive a save() from a cached page")
 
-        # Same guarantee when the edited page IS the active one.
+        # The same guarantee holds when the edited page is the active one.
         active_path = controller.active_page.json_path
         gl.page_manager.overwrite_auto_change_settings(active_path, enable=True, wm_class="kitty")
         controller.active_page.save()

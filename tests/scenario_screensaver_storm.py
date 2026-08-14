@@ -1,25 +1,10 @@
 """
-Integration scenario (docs/presenter-migration-plan.md §7 "Six-requester
-transition storm", §4 M3): three threads hammer ScreenSaver's transition
-entry points concurrently and repeatedly --
+Integration scenario for a concurrent screensaver transition storm.
 
-  * a timer-like thread calling show() directly (mirrors on_timer_end)
-  * a USB-event-like thread calling on_key_change() (mirrors the reader
-    thread, hides if currently showing)
-  * a settings-like thread calling set_enable(False) then set_enable(True)
-    (mirrors the GTK settings path, which hides if currently showing)
-
-for 30 iterations each, all racing the same controller's screensaver. Pass
-criteria (plan §7): no deadlock (bounded by a watchdog), `showing` consistent
-with the last transition, final journal state coherent (page content OR
-screensaver content, never a mix across keys, never a stuck blank), and no
-exceptions in any thread.
-
-The screensaver media is a static PNG (not a video) here on purpose: the
-video-specific pre-resolution/race path is covered by
-scenario_screensaver_bg_race.py; this scenario is about the *serialization*
-of the transition itself, and keeping each iteration cheap is what makes 30
-iterations x 3 threads finish well inside the watchdog.
+Three threads hammer ScreenSaver's entry points at once, a timer-like show(),
+a USB-event-like on_key_change() and a settings-like set_enable pair. Nothing
+may deadlock or raise, and the final journal must agree with showing on every
+key, with no mix across keys and no stuck blank.
 """
 import os
 import threading
@@ -38,17 +23,11 @@ def main() -> None:
 
     page_png = fixtures.make_test_png(os.path.join(gl.DATA_PATH, "media", "storm_page.png"), color=(200, 20, 20))
     ss_png = fixtures.make_test_png(os.path.join(gl.DATA_PATH, "media", "storm_ss.png"), color=(20, 20, 200))
-    # Pre-seed "Main" with a distinct background AND persisted screensaver
-    # settings BEFORE the controller is constructed (seed_page() inside
-    # make_headless_controller is idempotent and won't overwrite an existing
-    # page file). The screensaver settings matter here specifically because
-    # load_page() always calls load_screensaver(page), which reloads
-    # ScreenSaver.media_path/enable/time_delay FROM THE PAGE on every single
-    # load -- and hide()'s phase 3 IS a load_page() call. Without this, the
-    # very first hide() during the storm would reset media_path to None (no
-    # page ever configured one) and every show() after that would paint a
-    # blank instead of ss_png -- not a concurrency bug, just this reload
-    # contract (see fixtures.seed_page_with_background_and_screensaver).
+    # Pre-seed "Main" with a distinct background and persisted screensaver
+    # settings before the controller exists. load_page always calls
+    # load_screensaver(page), and hide() ends in a load_page, so without this
+    # the first hide() resets media_path to None and later show() calls
+    # paint blank.
     fixtures.seed_page_with_background_and_screensaver(
         "Main", page_png, ss_png, screensaver_time_delay=60
     )
@@ -57,7 +36,7 @@ def main() -> None:
     deck = fixtures.raw_deck(controller)
     key_count = controller.deck.key_count()
 
-    # --- Learn each state's paint signature in isolation, before storming. ---
+    # Learn each state's paint signature in isolation, before the storm.
     def settled():
         return all(deck.last_op_for(f"key:{k}") is not None for k in range(key_count))
 
@@ -82,7 +61,7 @@ def main() -> None:
     ok = fixtures.wait_until(lambda: not controller.screen_saver.showing, timeout=5)
     assert ok, "fixture setup: screensaver never hid"
 
-    # --- The storm. ---
+    # The storm.
     exceptions: list[tuple[str, BaseException]] = []
     exc_lock = threading.Lock()
 
@@ -129,11 +108,11 @@ def main() -> None:
         assert not t.is_alive(), f"{t.name} did not finish within {JOIN_TIMEOUT}s -- possible deadlock"
     assert not exceptions, f"exceptions occurred during the storm: {exceptions!r}"
 
-    # --- Settle and check coherence. ---
+    # Settle, then check coherence.
     ok = fixtures.wait_until(settled, timeout=5)
     assert ok, "deck did not settle after the storm"
-    # Quiescence window: if a straggler transition were still landing frames,
-    # it would show up here as a late change to the last-write hash.
+    # A quiescence window. A straggler transition still landing frames shows
+    # up here as a late change to the last-write hash.
     time.sleep(0.3)
 
     final_showing = controller.screen_saver.showing

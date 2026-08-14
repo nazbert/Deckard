@@ -1,53 +1,10 @@
 """
-Scenario: the settings store -- the one owner of the app's settings files.
+The settings store, the one owner of the app's settings files.
 
-Two things are under test here, and they are different in kind.
-
-THE PRIMITIVE. The store answers four questions for every settings file it
-owns: where it is, what an absent or corrupt one reads as, who may write it,
-and what a write does to anyone holding a cached copy. Each answer is pinned
-below at the store's own surface rather than through whichever caller happens
-to exercise it:
-
-  * heal -- a corrupt file is moved aside to a `.corrupt` sidecar, logged, and
-    read as an empty root, with the corruption reported so a caller holding a
-    backup can heal from the flag rather than from the rename having worked;
-    a second corruption never clobbers the first forensic copy;
-  * list roots -- an absent or corrupt ARRAY-rooted file reads as `[]`, not
-    `{}`. This is not cosmetic: a list-rooted reader handed an empty object
-    silently sees nothing, which is how a fresh install came to be seeded with
-    the wrong shape;
-  * isolation -- a cached surface hands out a deep copy per read, so a caller
-    may mutate what it got (they nearly all do) without reaching the next
-    reader;
-  * invalidation follows the FILE that was written, not the surface the writer
-    thought it was writing. Writing one deck's settings drops that deck's
-    cached copy and nothing else's -- and the store has no entry point that
-    writes without invalidating, which is the property the importer leg below
-    exists to prove. One file means one identity, symlinks resolved, because
-    the atomic writer follows a link and a store that did not would cache
-    under one name and invalidate under another;
-  * a write that lands while a reader is still inside the file is not undone
-    by that reader finishing afterwards. Dropping a cache entry cannot reach a
-    read that has not stored one yet, and once the narrowed invalidation is in
-    place nothing else would ever correct it: an unrelated settings write no
-    longer clears a deck;
-  * `corrupt` describes the read, not the surface -- a cached surface must not
-    keep reporting a quarantine that already happened;
-  * `edit()` serializes a read-modify-write against other edits of the same
-    file, so two of them cannot lose an update. Proved against a control that
-    does the same work without it and loses one every time.
-
-THE CRASH. `Assets.json` -- the custom asset library index -- was the one
-settings surface with no heal path at all: a bare `json.load` inside
-`AssetManagerBackend.__init__`, which the app constructs while it is building
-its global objects. A corrupt index therefore did not degrade anything, it
-took the whole app down before a window ever appeared, and the fix a user
-could apply was "find and delete a file you have never heard of". The library
-legs below are red on that shape: constructing the backend over a poisoned
-index raises out of the constructor. They pass when the index reads as an
-empty library, the corrupt bytes are preserved beside it, and the app carries
-on -- a subsequent add still persists.
+The store answers where each file is, what an absent or corrupt one reads as,
+who may write it, and what a write does to a cached copy. A corrupt
+Assets.json must boot as an empty library rather than take the app down from
+inside AssetManagerBackend.__init__.
 """
 import fixtures  # noqa: F401  (must be first -- see fixtures.py docstring)
 
@@ -84,8 +41,8 @@ def probe_path(name: str) -> str:
 
 
 def write_raw(path: str, text: str) -> None:
-    """Put bytes on disk WITHOUT the store, so the store is reading a file it
-    did not write -- which is the only interesting case for a loader."""
+    """Put bytes on disk without the store, so the store reads a file it did
+    not write. That is the only interesting case for a loader."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write(text)
@@ -103,9 +60,7 @@ def seed_deck(serial: str, settings: dict) -> str:
     return path
 
 
-# --------------------------------------------------------------------- #
-# The primitive                                                          #
-# --------------------------------------------------------------------- #
+# The primitive.
 
 def check_heal_and_quarantine() -> None:
     path = probe_path("heal.json")
@@ -118,8 +73,8 @@ def check_heal_and_quarantine() -> None:
     assert not os.path.exists(path), "the corrupt primary must be moved aside, not left where the next save lands"
     assert read_raw(path + ".corrupt") == GARBAGE, "the corrupt bytes must survive in the sidecar"
 
-    # Second corruption: the first forensic copy is the one a user would send
-    # in, and it must not be destroyed by the next one.
+    # On a second corruption the first forensic copy is the one a user sends
+    # in, so the next corruption must not destroy it.
     write_raw(path, "ALSO NOT JSON")
     data, corrupt = store().load_file(path)
     assert (data, corrupt) == ({}, True), f"second corruption misreported: {(data, corrupt)}"
@@ -165,13 +120,12 @@ def check_list_root() -> None:
     print("PASS: an array-rooted surface reads as a list when absent and when corrupt")
 
 
-def check_corrupt_flag_describes_the_read() -> None:
-    """`corrupt` is a fact about the read, not a property of the surface.
+def check_corrupt_flag_describes_read() -> None:
+    """corrupt is a fact about the read, not a property of the surface.
 
-    On a CACHED surface it would be easy to keep the flag next to the content
-    and hand it back forever; a caller that heals on it -- the shape page
-    loads use -- would then heal on every read of a file that has been fine
-    since the quarantine.
+    A cached surface could keep the flag next to the content and hand it back
+    forever. A caller that heals on the flag, as a page load does, would then
+    heal on every read of a file that has been fine since the quarantine.
     """
     serial = "STORE-FLAG"
     path = os.path.join(DECKS_DIR, f"{serial}.json")
@@ -181,7 +135,7 @@ def check_corrupt_flag_describes_the_read() -> None:
     data, corrupt = store().read_reporting_corruption(settings_store.DECK, serial)
     assert (data, corrupt) == ({}, True), f"the healing read misreported: {(data, corrupt)}"
 
-    # The file is gone now (quarantined), so a re-read finds it absent.
+    # The file is quarantined now, so a re-read finds it absent.
     assert store().read_reporting_corruption(settings_store.DECK, serial) == ({}, False), (
         "the corrupt flag was cached with the content and is now reported forever"
     )
@@ -212,7 +166,7 @@ def check_deepcopy_isolation() -> None:
     print("PASS: every read of a cached surface is an isolated deep copy")
 
 
-def check_invalidation_follows_the_file() -> None:
+def check_invalidation_follows_file() -> None:
     a, b = "STORE-INV-A", "STORE-INV-B"
     path_a = seed_deck(a, {"marker": "a-original"})
     path_b = seed_deck(b, {"marker": "b-original"})
@@ -227,25 +181,25 @@ def check_invalidation_follows_the_file() -> None:
         "a deck's own write did not invalidate its cached copy"
     )
 
-    # ...and reaches nothing else. Deck B's file is changed behind the store's
-    # back so its cached copy is distinguishable from a reload; nothing but
-    # the store writes these files, so the staleness is unreachable in the
-    # app and is used here only to make the SCOPE observable.
+    # It reaches nothing else. Deck B's file changes behind the store's back,
+    # so its cached copy is distinguishable from a reload. Nothing but the
+    # store writes these files, so that staleness only makes the scope
+    # observable here.
     write_raw(path_b, json.dumps({"marker": "b-changed-behind-the-store"}))
     assert gl.settings_manager.get_deck_settings(b)["marker"] == "b-original", (
         "writing one deck's settings cleared another deck's cached copy: invalidation "
         "is supposed to follow the file that was written"
     )
 
-    # A settings write elsewhere in the tree is not a reason to drop a deck
-    # either -- it cannot have changed a deck's file.
+    # A settings write elsewhere in the tree is no reason to drop a deck,
+    # because it cannot have changed a deck's file.
     gl.settings_manager.save_settings_to_file(probe_path("unrelated.json"), {"unrelated": True})
     assert gl.settings_manager.get_deck_settings(b)["marker"] == "b-original", (
         "an unrelated settings write cleared a deck's cached copy"
     )
 
-    # The path-level entry point still invalidates what it lands on: this is
-    # what makes "no write through the store leaves a stale reader" true.
+    # The path-level entry point still invalidates what it lands on, which is
+    # what keeps every write through the store from leaving a stale reader.
     gl.settings_manager.save_settings_to_file(path_b, {"marker": "b-through-the-path-entry"})
     assert gl.settings_manager.get_deck_settings(b)["marker"] == "b-through-the-path-entry", (
         "a write through the path-level entry point left a stale cached copy behind"
@@ -256,31 +210,28 @@ def check_invalidation_follows_the_file() -> None:
     print("PASS: invalidation is keyed by the file written -- exactly that file, and always that file")
 
 
-def check_write_during_a_cold_read_is_not_lost() -> None:
+def check_write_during_cold_read() -> None:
     """A write that lands while a reader is still in the file must not be
     undone by that reader finishing afterwards.
 
-    The window is between a cache miss and the parsed content being stored: a
-    reader that got there first holds the content from BEFORE the write, and
-    caching it makes every later reader see the old settings with nothing left
-    to correct them -- the deck-settings cache is only dropped by writes to
-    that deck's own file, so an unrelated write will not heal it. Reachable in
-    the app as an import editing a deck's settings on a worker thread while
-    the main thread reads that same deck.
+    The window sits between a cache miss and the parsed content being stored.
+    A reader that got there first holds pre-write content, and caching it
+    leaves every later reader on the old settings. Only a write to that
+    deck's own file drops its cache, so nothing else would correct it.
     """
     serial = "STORE-RACE"
     path = seed_deck(serial, {"marker": "before-the-write"})
 
     real_load_file = settings_store.SettingsStore.load_file
-    in_the_file = threading.Event()
+    reader_in_file = threading.Event()
     may_leave = threading.Event()
 
     def stalled_load_file(self, file_path, root=dict):  # type: ignore[no-untyped-def]
         parsed = real_load_file(self, file_path, root=root)
         if os.path.basename(file_path) == f"{serial}.json":
-            # Parsed, not yet cached: exactly where the writer must be able to
-            # get in front of this reader.
-            in_the_file.set()
+            # Parsed but not yet cached, which is where the writer must get
+            # in front of this reader.
+            reader_in_file.set()
             may_leave.wait(timeout=15)
         return parsed
 
@@ -290,7 +241,7 @@ def check_write_during_a_cold_read_is_not_lost() -> None:
         reader = threading.Thread(
             target=lambda: read_result.append(gl.settings_manager.get_deck_settings(serial)))
         reader.start()
-        assert in_the_file.wait(timeout=10), "the stalled reader never reached the file"
+        assert reader_in_file.wait(timeout=10), "the stalled reader never reached the file"
 
         # The write lands while the reader is holding pre-write content.
         gl.settings_manager.save_deck_settings(serial, {"marker": "the-write"})
@@ -312,8 +263,8 @@ def check_write_during_a_cold_read_is_not_lost() -> None:
         f"clears a deck's copy but a write to that deck's own file: {after!r}"
     )
 
-    # And it is not a one-read fluke that a later write would have healed:
-    # nothing else touches this deck's file from here on.
+    # This is not a one-read fluke that a later write would heal. Nothing
+    # else touches this deck's file from here on.
     gl.settings_manager.save_settings_to_file(probe_path("unrelated-after-race.json"), {"x": 1})
     assert gl.settings_manager.get_deck_settings(serial)["marker"] == "the-write", (
         "the cached copy went stale again once an unrelated settings write happened"
@@ -321,15 +272,13 @@ def check_write_during_a_cold_read_is_not_lost() -> None:
     print("PASS: a write landing during a cold read is not undone by that read finishing")
 
 
-def check_symlinked_surface_is_one_file() -> None:
+def check_symlinked_surface_one_file() -> None:
     """A settings file that is a symlink must read, write, cache and
-    invalidate under ONE identity.
+    invalidate under one identity.
 
     The atomic writer follows the link and writes the real file, so a store
     that keyed its cache on the spelling it was handed would cache under the
-    link and invalidate under the target -- two names for one file, and a
-    write through either spelling leaving the other's reader stale. Managed
-    config trees (stow, chezmoi) are exactly this shape.
+    link and invalidate under the target. Managed config trees do this.
     """
     serial = "STORE-LINK"
     link_path = os.path.join(DECKS_DIR, f"{serial}.json")
@@ -343,8 +292,8 @@ def check_symlinked_surface_is_one_file() -> None:
     os.symlink(real_path, link_path)
     store().invalidate_path(real_path)
 
-    # Read via the LINK spelling (the app's own), then write via the TARGET
-    # spelling. One file, so the reader must see the write.
+    # Read through the link spelling, which the app uses, then write through
+    # the target spelling. One file, so the reader must see the write.
     assert gl.settings_manager.get_deck_settings(serial)["marker"] == "through-the-link"
     gl.settings_manager.save_settings_to_file(real_path, {"marker": "through-the-target"})
     assert gl.settings_manager.get_deck_settings(serial)["marker"] == "through-the-target", (
@@ -352,7 +301,8 @@ def check_symlinked_surface_is_one_file() -> None:
         "keying two names to one file"
     )
 
-    # ...and the other way round: write via the link, read via the target.
+    # And the other way round. Write through the link, read through the
+    # target.
     gl.settings_manager.save_deck_settings(serial, {"marker": "back-through-the-link"})
     assert store().load_file(real_path)[0]["marker"] == "back-through-the-link", (
         "the write through the link did not land in the file the link points at"
@@ -362,8 +312,8 @@ def check_symlinked_surface_is_one_file() -> None:
 
 
 def check_importer_write_is_coherent() -> None:
-    """The importer writes a deck's settings mid-session; a reader that has
-    already seen that deck must not keep the version from before the import."""
+    """The importer writes a deck's settings mid-session. A reader that
+    already saw that deck must not keep the version from before it."""
     serial = "SDUIST"
     seed_deck(serial, {"rotation": 90, "brightness": {"value": 20}, "custom": {"keep": 1}})
 
@@ -404,9 +354,9 @@ def check_edit_serializes() -> None:
     serial = "STORE-EDIT"
     threads_n, per_thread, hold = 4, 5, 0.01
 
-    # The control: the same read-modify-write WITHOUT the store's edit block,
-    # arranged so the interleaving is certain rather than likely. If this does
-    # not lose an update, the leg below proves nothing.
+    # The control runs the same read-modify-write without the store's edit
+    # block, arranged so the interleaving is certain. If it loses no update,
+    # the leg below proves nothing.
     control = probe_path("lost-update.json")
     write_raw(control, json.dumps({"counter": 0}))
     gate = threading.Barrier(2)
@@ -432,8 +382,8 @@ def check_edit_serializes() -> None:
         for _ in range(per_thread):
             with store().edit(settings_store.DECK, serial) as data:
                 current = data["counter"]
-                # Hold the block open: without serialization another thread
-                # reads this same value and one of the increments vanishes.
+                # Hold the block open. Without serialization another thread
+                # reads this same value and one increment vanishes.
                 time.sleep(hold)
                 data["counter"] = current + 1
 
@@ -454,7 +404,7 @@ def check_edit_serializes() -> None:
           f"(the same work without edit() loses an update every time)")
 
 
-def check_edit_does_not_write_on_failure() -> None:
+def check_edit_no_write_on_failure() -> None:
     serial = "STORE-EDIT-RAISE"
     seed_deck(serial, {"marker": "original"})
 
@@ -495,9 +445,7 @@ def check_key_discipline() -> None:
     print("PASS: a surface refuses a missing or surplus key instead of guessing a path")
 
 
-# --------------------------------------------------------------------- #
-# The asset library: a corrupt index must not stop the app starting      #
-# --------------------------------------------------------------------- #
+# The asset library. A corrupt index must not stop the app starting.
 
 def library_path() -> str:
     return settings_store.ASSET_LIBRARY.path()
@@ -510,7 +458,7 @@ def check_corrupt_library_boots() -> None:
             os.remove(sidecar)
     write_raw(path, GARBAGE)
 
-    # The boot shape: this constructor runs while the app builds its global
+    # The boot shape. This constructor runs while the app builds its global
     # objects, so anything it raises is an app that never comes up.
     backend = AssetManagerBackend()
 
@@ -521,7 +469,7 @@ def check_corrupt_library_boots() -> None:
         "the rewritten index is not an empty ARRAY -- a list-rooted reader sees nothing in an object"
     )
 
-    # The app carries on: the library still works after the loss.
+    # The app carries on, and the library still works after the loss.
     png = fixtures.make_test_png(probe_path("library-asset.png"), size=(32, 32))
     asset_id = backend.add(png)
     assert asset_id is not None, "adding an asset after the corrupt index was healed failed"
@@ -533,7 +481,8 @@ def check_corrupt_library_boots() -> None:
     )
     assert persisted[0]["id"] == asset_id, "the persisted asset is not the one that was added"
 
-    # A second construction over the healed index sees it -- the reopen path.
+    # A second construction over the healed index sees it, on the reopen
+    # path.
     reopened = AssetManagerBackend()
     assert [a["id"] for a in reopened] == [asset_id], (
         f"a fresh backend did not see the persisted library: {list(reopened)!r}"
@@ -542,8 +491,8 @@ def check_corrupt_library_boots() -> None:
 
 
 def check_pages_surface_edit_and_read() -> None:
-    """The page-manager settings surface: read-modify-write through ``edit()``,
-    plain reads through ``read()``, one file for every caller."""
+    """The page-manager settings surface. Read-modify-write goes through
+    edit(), plain reads through read(), and every caller shares one file."""
     pages_path = settings_store.PAGES.path()
     if os.path.exists(pages_path):
         os.remove(pages_path)
@@ -562,8 +511,8 @@ def check_pages_surface_edit_and_read() -> None:
         f"the two edits did not both land: {got!r}"
     )
 
-    # Concurrent edits of the surface lose nothing (the DECK leg proves the
-    # mechanism; this proves the PAGES surface is wired to the same lock).
+    # Concurrent edits of the surface lose nothing. The DECK leg proves the
+    # mechanism, and this proves the PAGES surface takes the same lock.
     threads_n, per_thread, hold = 3, 4, 0.01
     with store().edit(settings_store.PAGES) as data:
         data["counter"] = 0
@@ -588,21 +537,22 @@ def check_pages_surface_edit_and_read() -> None:
 
 
 def check_ui_asset_manager_schema() -> None:
-    """The asset chooser's UI state: two toggles that default ON, read through
-    the surface schema, written sparse through ``edit()``."""
+    """The asset chooser's UI state holds two toggles that default on. They
+    read through the surface schema and persist sparsely through edit()."""
     ui_path = settings_store.UI_ASSET_MANAGER.path()
     if os.path.exists(ui_path):
         os.remove(ui_path)
 
-    # Absent: both toggles default True, from the schema, without a write.
+    # While the file is absent both toggles default True from the schema,
+    # with no write.
     view = store().view(settings_store.UI_ASSET_MANAGER)
     assert view.get("video-toggle") is True and view.get("image-toggle") is True, (
         "the asset-manager toggles must default ON from the schema"
     )
     assert not os.path.exists(ui_path), "reading the defaults must not create the file"
 
-    # A toggle write is sparse: it stores its own key and leaves the other
-    # following the schema.
+    # A toggle write is sparse. It stores its own key and leaves the other
+    # one following the schema.
     with store().edit(settings_store.UI_ASSET_MANAGER) as data:
         data["video-toggle"] = False
     on_disk = json.loads(read_raw(ui_path))
@@ -616,12 +566,12 @@ def check_ui_asset_manager_schema() -> None:
 
 
 def check_static_surface_roundtrip() -> None:
-    """The static settings surface: the data-path override file, read and
-    written through the store rather than raw.
+    """The static settings surface holds the data-path override file, read
+    and written through the store rather than raw.
 
-    The real static file lives OUTSIDE the data path -- it is the file that
-    CHOOSES the data path -- so this points the surface at an isolated temp
-    file for the duration. It must never touch the user's real one.
+    The real static file lives outside the data path, because it chooses the
+    data path, so this check points the surface at an isolated temp file and
+    must never touch the user's own.
     """
     original = gl.STATIC_SETTINGS_FILE_PATH
     static_path = probe_path("static-settings.json")
@@ -673,14 +623,14 @@ def main() -> int:
     check_heal_and_quarantine()
     check_absent_and_valid()
     check_list_root()
-    check_corrupt_flag_describes_the_read()
+    check_corrupt_flag_describes_read()
     check_deepcopy_isolation()
-    check_invalidation_follows_the_file()
-    check_write_during_a_cold_read_is_not_lost()
-    check_symlinked_surface_is_one_file()
+    check_invalidation_follows_file()
+    check_write_during_cold_read()
+    check_symlinked_surface_one_file()
     check_importer_write_is_coherent()
     check_edit_serializes()
-    check_edit_does_not_write_on_failure()
+    check_edit_no_write_on_failure()
     check_key_discipline()
     check_pages_surface_edit_and_read()
     check_ui_asset_manager_schema()

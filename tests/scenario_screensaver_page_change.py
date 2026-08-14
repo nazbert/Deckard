@@ -1,20 +1,10 @@
 """
-Integration scenario: a page change requested WHILE the screensaver is showing
-must be deferred, not painted.
+A page change requested while the screensaver shows must be deferred.
 
-Bug: load_page() had no screensaver awareness, so switching pages while the
-screensaver was up loaded the new page onto the deck's (screensaver-swapped)
-inputs and painted it -- the new page's icons leaked onto the DEVICE (replacing
-the screensaver) and into the app previews. The fix records the requested page
-as PENDING (without touching active_page -- the media player gates the
-screensaver's background-video animation on `background.video.page is
-active_page`, so changing active_page would freeze the screensaver video) and
-returns; the screensaver keeps showing, and hide() loads the pending page when
-the screensaver is dismissed.
-
-Distinct per-page backgrounds make "did page B land on the deck?" detectable by
-comparing per-key write hashes, the same technique as scenario_switch_storm /
-scenario_screensaver_bg_race.
+load_page records the requested page as pending and leaves active_page alone,
+because the media player gates the screensaver's background video on
+background.video.page is active_page. hide() loads the pending page on
+dismiss. Distinct per-page backgrounds make a leak detectable by hash.
 """
 import os
 import time
@@ -48,8 +38,8 @@ def main() -> None:
     b_png = fixtures.make_test_png(os.path.join(gl.DATA_PATH, "media", "pc_b.png"), color=(200, 10, 10))
     ss_png = fixtures.make_test_png(os.path.join(gl.DATA_PATH, "media", "pc_ss.png"), color=(10, 10, 200))
 
-    # Page A persists the screensaver settings (load_page reloads them from the
-    # page every time -- see fixtures.seed_page_with_background_and_screensaver).
+    # Page A persists the screensaver settings, because load_page reloads
+    # them from the page every time.
     a_path = fixtures.seed_page_with_background_and_screensaver("PC_A", a_png, ss_png, screensaver_time_delay=60)
     b_path = fixtures.seed_page_with_background("PC_B", b_png)
     page_a = gl.page_manager.get_page(a_path, controller)
@@ -72,16 +62,14 @@ def main() -> None:
     for k in range(key_count):
         assert sig_ss[k] != sig_b[k], f"fixture: screensaver and page B produced the same hash for key {k}"
 
-    # --- The change: switch to page B WHILE the screensaver is showing. ---
+    # The change. Switch to page B while the screensaver is showing.
     deck.clear_journal()
     controller.load_page(page_b, allow_reload=True)
 
-    # It must be recorded as PENDING but NOT painted, and active_page must stay
-    # on the screensaver's page: the media player gates the screensaver's
-    # background-video animation on `background.video.page is active_page`
-    # (MediaPlayerThread.run), so changing active_page here would freeze the
-    # screensaver video (it would resume only on switching back). hide() loads
-    # the pending page on dismiss.
+    # It must be recorded as pending and not painted, and active_page must
+    # stay on the screensaver's page. The media player gates the screensaver's
+    # background video on background.video.page is active_page, so a change
+    # here would freeze that video. hide() loads the pending page on dismiss.
     assert controller.active_page is page_a, (
         "a page change during the screensaver must NOT change active_page (that "
         "freezes the screensaver's background video)"
@@ -93,8 +81,8 @@ def main() -> None:
         "the screensaver must keep showing after a page change (not be dismissed)"
     )
 
-    # Give any (wrongful) paint a chance to land, then assert page B did NOT
-    # reach the deck -- the screensaver still owns every key.
+    # Give a wrongful paint a chance to land, then assert page B never
+    # reached the deck. The screensaver still owns every key.
     time.sleep(0.4)
     for k in range(key_count):
         last = deck.last_op_for(f"key:{k}")
@@ -104,7 +92,7 @@ def main() -> None:
                 f"showing (got page-B content) -- the screensaver was overwritten"
             )
 
-    # --- On dismiss, the recorded page B must load. ---
+    # On dismiss the recorded page B must load.
     controller.screen_saver.hide()
     ok = fixtures.wait_until(lambda: not controller.screen_saver.showing and all(
         deck.last_op_for(f"key:{k}") is not None for k in range(key_count)), timeout=5)

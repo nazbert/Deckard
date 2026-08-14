@@ -1,22 +1,10 @@
 """
-Regression test (asset-catalog leg) -- the compatibility gate that
-kept startup auto-update from replacing a working PLUGIN with an incompatible
-build must also cover the icon / wallpaper / SD+ bar catalogs, exercised
-WITHOUT network.
+The auto-update compatibility gate must cover the asset catalogs too.
 
-prepare_icon / prepare_wallpaper / prepare_sd_plus_bar_wallpaper mark an entry
-is_compatible=False through the exact same get_newest_compatible_version->None
-->get_newest_version fallback prepare_plugin uses, and all three run through
-update_everything's auto-update. get_icons_to_update / get_wallpapers_to_update
-/ get_sd_plus_bar_wallpapers_to_update compared only local_sha != commit_sha
-with no compatibility filter, so an installed pack whose only newer store
-version targets a different app major got auto-uninstalled and reinstalled at
-the incompatible version on startup -- and the SD+ leg (added in the same MR)
-freshly wired an un-gated path.
-
-The contract is now uniform across all four asset classes: each *_to_update
-skips (and reports) entries with is_compatible False; only a truly compatible
-outdated pack is offered and counted.
+prepare_icon, prepare_wallpaper and prepare_sd_plus_bar_wallpaper mark an
+entry is_compatible False through the same fallback prepare_plugin uses. Each
+matching *_to_update skips and reports such an entry, so only a compatible
+outdated pack is offered and counted. No network is involved.
 """
 
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
@@ -28,7 +16,7 @@ from src.windows.Store.StoreData import IconData, SDPlusBarWallpaperData, Wallpa
 
 
 def _make_backend() -> StoreBackend:
-    sb = StoreBackend.__new__(StoreBackend)  # skip __init__ (spawns a fetch thread)
+    sb = StoreBackend.__new__(StoreBackend)  # skip __init__, which spawns a fetch thread
     from src.backend.Store.StoreCache import StoreCache
     sb.store_cache = StoreCache()
     return sb

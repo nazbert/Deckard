@@ -1,22 +1,10 @@
 """
-Regression scenario: tray icon registration must not be one-shot.
+Regression scenario. Tray icon registration must not be one-shot.
 
-`StatusNotifierItemService.register()` used to make a single synchronous
-`RegisterStatusNotifierItem` call against `org.kde.StatusNotifierWatcher`:
-
-  * if the watcher appeared late (GNOME's AppIndicator support loading
-    after Deckard), the call raised and the icon never appeared;
-  * if the watcher restarted (plasmashell/waybar crash), the new watcher
-    instance knows nothing about previously registered items -- per the
-    SNI spec items must re-register -- so the icon was permanently lost
-    until app restart.
-
-This scenario spins up an isolated session bus (Gio.TestDBus /
-dbus-daemon), registers the tray icon while NO watcher exists, then:
-
-  1. starts a fake StatusNotifierWatcher -> the item must announce itself;
-  2. kills that watcher's connection (simulated shell crash) and starts a
-     fresh one -> the item must announce itself again.
+A watcher that appears late must still receive the item, and the SNI spec
+requires an item to re-register with a watcher that restarted. This scenario
+runs an isolated session bus, registers the tray icon with no watcher
+present, then starts one, kills it, and starts a fresh one.
 """
 import fixtures  # noqa: F401  (must be imported first: isolates DATA_PATH)
 
@@ -83,7 +71,7 @@ class FakeWatcher:
                    "fake watcher never acquired the well-known name")
 
     def crash(self) -> None:
-        """Drop the well-known name the hard way: close the connection,
+        """Drop the well-known name the hard way. Close the connection,
         like a crashing shell would."""
         self.connection.close_sync(None)
 
@@ -139,10 +127,10 @@ class _StubInterfaceInfo:
 
 
 def check_base_double_register_no_orphan() -> None:
-    """Base class: DBusService.register() with no intervening
-    unregister() must not orphan the previous object registration on the
-    connection -- exactly one live registration after any number of
-    register() calls, and none after unregister()."""
+    """DBusService.register with no intervening unregister must not orphan
+    the previous object registration on the connection. Exactly one live
+    registration survives any number of register calls, and none survives an
+    unregister."""
     from src.backend.trayicon import DBusService
 
     bus = _StubBus()
@@ -162,7 +150,7 @@ def check_base_double_register_no_orphan() -> None:
 
 
 def check_sni_double_register_keeps_menu_live() -> None:
-    """Real TrayIcon path (regression guard): the actual
+    """Real TrayIcon path (regression guard). The actual
     double-register path is TrayIcon.initialize() + the Settings-panel
     start(), which goes through StatusNotifierItemService.register(), NOT
     the bare DBusService. That override registers BOTH the SNI object and
@@ -183,7 +171,7 @@ def check_sni_double_register_keeps_menu_live() -> None:
     orthogonal to the object-registration leak under test, so it is stubbed
     out here.
 
-    Red-test: against the unregister-then-reregister remedy this FAILS
+    Red-test. Against the unregister-then-reregister remedy this FAILS
     (menu.registration_id is None, and the SNI + menu ids churn); with the
     early-return guard it passes."""
     import src.backend.trayicon as trayicon_mod
@@ -218,13 +206,13 @@ def check_sni_double_register_keeps_menu_live() -> None:
             "only re-registers the SNI object, leaving the menu dead. "
             f"registered={bus.registered} unregistered={bus.unregistered}"
         )
-        # Exactly two live registrations: the SNI item + its menu, no orphans.
+        # Exactly two live registrations. The SNI item + its menu, no orphans.
         assert len(bus.live) == 2, (
             f"double register() must keep exactly the SNI + menu objects live "
             f"(no leak, no teardown): registered={bus.registered}, "
             f"unregistered={bus.unregistered}, live={bus.live} (expected 2)"
         )
-        # No-op double-register: each object keeps its original registration
+        # No-op double-register. Each object keeps its original registration
         # id -- nothing was unregistered-then-reregistered (which would both
         # churn the id and, on this path, kill the menu).
         assert sni.registration_id == sni_id, (
@@ -276,7 +264,7 @@ def run_checks(bus_address: str) -> None:
     tray = DBusTrayIcon(menu=menu, app_id="com.example.HarnessTray",
                         title="HarnessTray")
 
-    # 1) Late watcher: registering while no watcher exists must neither
+    # 1) Late watcher. Registering while no watcher exists must neither
     #    raise nor lose the icon -- the announcement must arrive as soon
     #    as a watcher shows up.
     try:
@@ -297,7 +285,7 @@ def run_checks(bus_address: str) -> None:
         f"got {watcher.registrations}"
     )
 
-    # 2) Watcher restart: a fresh watcher instance knows nothing about
+    # 2) Watcher restart. A fresh watcher instance knows nothing about
     #    previously registered items; the item must re-announce itself.
     watcher.crash()
     reborn = FakeWatcher(bus_address)

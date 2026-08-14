@@ -1,14 +1,10 @@
 """
-Scenario (the tier-mixing guard): the unit tier (install_stub_globals /
-make_stub_controller) and the integration tier (make_headless_controller /
-_install_integration_globals) install different, incompatible gl.* graphs.
-Mixing them in one process used to be silently order-dependent. Each installer
-must now refuse loudly (RuntimeError) when the OTHER tier is already live.
+Scenario for the tier-mixing guard.
 
-This scenario proves both directions fire. It manipulates fixtures' internal
-tier flags directly to test the second direction in the same process without a
-real DeckController -- something no normal scenario does (normal scenarios pick
-one tier and never touch these flags).
+The unit tier and the integration tier install different, incompatible gl.*
+graphs, so each installer raises RuntimeError when the other tier is already
+live. This scenario sets the fixtures tier flags directly to drive both
+directions in one process, which no ordinary scenario does.
 """
 import fixtures
 

@@ -1,29 +1,10 @@
 """
-Scenario (the "late-failure marker channel"): a frame that
-push_input_image ACCEPTED but the UI later dropped must still be recorded in
-`controller.ui_image_changes_while_hidden`.
+A frame the UI drops after acceptance must still reach the dirty marker.
 
-`push_input_image` answers True as soon as a frame is in the input's mirror
-slot -- the engine therefore does NOT dirty-mark it. But the window can unmap
-(or a rebuild orphan the widget) before that paint runs, and by then there is
-no engine call left to return False through. Both drop sites route to
-`ui_adapter.mark_dirty` instead:
-
-  * `GtkUIAdapter._drain_mirror` -- the slot's main-loop drain, when the
-    window unmapped before it ran, the widget is gone, or the paint raises;
-  * `KeyButton.paint_mirror_frame` -- the mapped-guard that refuses to paint
-    a button unmapped between queuing and running the idle, and its paint
-    except.
-
-Without the marker, `KeyGrid/ScreenBar.load_from_changes` has nothing to
-replay on remap and the preview stays stale until something else repaints it
--- the exact "the window only updates when re-opened" symptom.
-
-Headless tier: no widget is constructed. The KeyButton half calls the REAL
-`paint_mirror_frame`/`_mark_dropped` against a stand-in `self`, which is what
-makes it a test of that code rather than of a reimplementation. An ACCEPTING
-port is installed for the whole run so the engine's own media ticks never
-write markers -- every marker asserted below is one the ADAPTER wrote.
+push_input_image answers True as soon as a frame is in the input's mirror
+slot, so the engine does not dirty-mark it. The window can unmap before that
+paint runs, and both drop sites route to ui_adapter.mark_dirty instead, or
+load_from_changes has nothing to replay on remap.
 """
 from types import SimpleNamespace
 
@@ -35,7 +16,7 @@ from src.windows.ui_adapter import GtkUIAdapter, _MirrorSlot, mark_dirty
 
 
 class AcceptingPort(ui_port.UIPort):
-    """Keeps the engine quiet: accepted pushes are never dirty-marked, so the
+    """Keeps the engine quiet. Accepted pushes are never dirty-marked, so the
     marker dict below contains only what the adapter put there."""
 
     def push_input_image(self, controller, identifier, image) -> bool:
@@ -89,7 +70,7 @@ def check_touchscreen_drain_drops(controller, ts_ident) -> None:
     )
     assert adapter._drain_mirror(controller, ts_ident) is False
     assert len(image_widget.painted) == 1, "the drain never painted the accepted frame"
-    # Immediately again: inside the mirror interval, so it is held in the slot
+    # Immediately again. Inside the mirror interval, so it is held in the slot
     # and answered True while a delayed drain is armed for it.
     assert adapter.push_input_image(controller, ts_ident, object()) is True
     assert len(image_widget.painted) == 1, "the interval let a second frame through"
@@ -97,7 +78,7 @@ def check_touchscreen_drain_drops(controller, ts_ident) -> None:
     assert len(image_widget.painted) == 2, "the delayed drain never painted the held frame"
     assert not markers, f"a SUCCESSFUL drain dirty-marked: {markers!r}"
 
-    # 2. Unmapped before the drain runs: the accepted frame never lands, so
+    # 2. Unmapped before the drain runs. The accepted frame never lands, so
     # the drop has to be recorded here or it is lost entirely.
     markers.clear()
     adapter.push_input_image(controller, ts_ident, object())
@@ -129,7 +110,7 @@ def check_touchscreen_drain_drops(controller, ts_ident) -> None:
 
     # 4. A drain that finds the widget gone (a rebuild between push and paint)
     # is the last drop shape that is worth MARKING. One more exists and is
-    # deliberately silent: unbind() drops the slot, so a drain queued before
+    # silent by design. unbind() drops the slot, so a drain queued before
     # it finds no payload and returns without marking. That is correct -- the
     # deck is gone, and a marker on a controller nothing will ever re-map is
     # only a reference to it.
@@ -167,7 +148,7 @@ def check_key_paint_drop(controller, key_ident) -> None:
         stand_in._mark_dropped = lambda: KeyButton._mark_dropped(stand_in)
         return stand_in
 
-    # 1. Mapped: the paint lands and nothing is marked.
+    # 1. Mapped. The paint lands and nothing is marked.
     markers.clear()
     painted = []
     ok = make_stand_in(True, SimpleNamespace(set_from_pixbuf=painted.append))
@@ -200,8 +181,8 @@ def check_key_paint_drop(controller, key_ident) -> None:
     print("PASS: KeyButton.paint_mirror_frame drops (unmapped + raise) reach the marker dict")
 
 
-def check_mark_dirty_survives_a_dead_controller() -> None:
-    """mark_dirty runs on the main loop, off the engine's call stack: it must
+def check_mark_dirty_survives_dead_controller() -> None:
+    """mark_dirty runs on the main loop, off the engine's call stack. It must
     never raise into a GLib callback for a controller torn down mid-flight."""
 
     class _Dead:
@@ -223,7 +204,7 @@ def main() -> None:
 
         check_touchscreen_drain_drops(controller, ts_ident)
         check_key_paint_drop(controller, key_ident)
-        check_mark_dirty_survives_a_dead_controller()
+        check_mark_dirty_survives_dead_controller()
     finally:
         ui_port.install(None)
         fixtures.teardown(controller)

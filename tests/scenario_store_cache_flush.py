@@ -1,21 +1,10 @@
 """
-Regression test -- StoreCache rewrote the WHOLE files.json
-index (json.dump of every entry, fsync'd, on the calling thread) on every
-cache READ, just to renew the entry's last-use clock. A warm store browse
-that opened N catalog files performed N full index dumps.
+Regression test for the deferred StoreCache index flush.
 
-Now the read path (and the first sighting of a cache string) mutates the
-in-memory entry and marks the index dirty; one daemon timer flushes the
-whole index once, FLUSH_DEBOUNCE_S later. The synchronous half is
-deliberately NOT deferred: a committed blob write stamps the index before
-_AtomicCacheWriter.close() returns, because a lost "path"/"fetched" record
-orphans the blob forever (remove_old_cache_files only walks index entries),
-whereas a lost "date" renewal just makes an entry look a couple of seconds
-older against a 3-day eviction bound.
-
-Writes are counted by wrapping StoreCache's atomic_write_json reference; the
-debounce is shortened per instance instead of sleeping the production 2s.
-All network-free.
+A read, and the first sighting of a cache string, marks the index dirty, and
+one daemon timer flushes the whole index once, FLUSH_DEBOUNCE_S later. A
+committed blob write stays synchronous, because a lost path or fetched
+record orphans the blob forever. No network is involved.
 """
 import atexit
 import json
@@ -31,14 +20,12 @@ from src.backend.Store.StoreCache import StoreCache
 
 REPO = "https://github.com/StreamController/StreamController-Store"
 
-# Short enough to keep the scenario fast, long enough that the "no write
-# happened YET" assertions cannot be raced by the timer on a loaded machine
-# (run_all.py runs scenarios in parallel subprocesses).
+# Short enough to keep the scenario fast, and long enough that the timer
+# cannot race the "no write yet" assertions on a loaded machine.
 DEBOUNCE = 1.0
 SETTLE = DEBOUNCE * 1.5  # comfortably past an armed window
 
-# Size of the simulated store browse: this many cache hits used to mean this
-# many full files.json dumps.
+# Size of the simulated store browse, in cache hits.
 BURST = 12
 
 
@@ -100,9 +87,8 @@ def _on_disk(cache: StoreCache) -> dict:
         return json.load(f)
 
 
-def test_read_burst_writes_the_index_once() -> None:
-    """(a) N reads => ZERO immediate index writes, then exactly one flush.
-    Before the deferred index this was N writes, all synchronous on the caller."""
+def test_read_burst_writes_index_once() -> None:
+    """N reads make zero immediate index writes, then exactly one flush."""
     cache = _new_cache()
     names = [f"Catalog{i}.json" for i in range(BURST)]
     _seed(cache, names)
@@ -118,18 +104,17 @@ def test_read_burst_writes_the_index_once() -> None:
     assert fixtures.wait_until(lambda: COUNTER.count >= 1, timeout=5.0), (
         "the debounced flush must land after the window"
     )
-    # Let a second (wrongly armed) timer have time to fire before asserting.
+    # Give a second, wrongly armed timer time to fire before asserting.
     time.sleep(SETTLE)
     assert COUNTER.count == 1, (
         f"the whole burst must collapse into exactly ONE index write, got {COUNTER.count}"
     )
 
 
-def test_deferral_is_real_and_renewed_date_lands() -> None:
-    """(e) The flush actually carries the renewed last-use clock -- and
-    before it fires, the on-disk "date" is still the OLD one (proof the
-    deferral is real, not just write-count bookkeeping). "fetched" must not
-    be blurred into "date" by any of this."""
+def test_deferral_lands_renewed_date() -> None:
+    """The flush carries the renewed last-use clock, and before it fires the
+    on-disk "date" is still the old one. "fetched" must stay separate from
+    "date" through all of it."""
     cache = _new_cache()
     _seed(cache, ["Renewed.json"])
     key = cache.generate_cache_string(REPO, "Renewed.json")
@@ -158,8 +143,8 @@ def test_deferral_is_real_and_renewed_date_lands() -> None:
 
 
 def test_committed_write_stamps_synchronously() -> None:
-    """(b) The content half stays synchronous: the index records the blob
-    before close() returns, so a crash right after can never orphan it."""
+    """The content half stays synchronous. The index records the blob before
+    close() returns, so a crash right after cannot orphan it."""
     cache = _new_cache()
     COUNTER.reset()
 
@@ -189,8 +174,8 @@ def test_committed_write_stamps_synchronously() -> None:
 
 
 def test_second_burst_rearms() -> None:
-    """(c) The timer is not one-shot-per-process: reads after a flush arm a
-    fresh one, and collapse into a single write again."""
+    """The timer is not one-shot per process. Reads after a flush arm a
+    fresh one and collapse into a single write again."""
     cache = _new_cache()
     names = [f"Rearm{i}.json" for i in range(4)]
     _seed(cache, names)
@@ -209,24 +194,20 @@ def test_second_burst_rearms() -> None:
         )
 
 
-def test_read_burst_arms_exactly_one_timer() -> None:
-    """(f) The debounce dedupes: a burst arms ONE timer, not one per read.
+def test_read_burst_arms_one_timer() -> None:
+    """The debounce dedupes, so a burst arms one timer rather than one per
+    read.
 
-    The write-count checks above cannot see this on their own -- N timers
-    all firing inside the same window still collapse to one write once the
-    first has cleared the dirty flag. What N timers do cost is N *threads*
-    per burst, which is the regression this pins: the debounce runs on a
-    threading.Timer, so dropping the "already pending" guard turns a warm
-    catalog browse into a thread storm.
-
-    Debounce long enough that nothing can fire mid-burst, so every timer
-    this leg arms is still countable at the end."""
+    The write counts cannot see this alone, because many timers firing inside
+    one window still collapse to one write. What they cost is one thread per
+    read, which turns a warm catalog browse into a thread storm. The debounce
+    here is long enough that nothing fires mid-burst."""
     def _armed_flush_threads() -> list:
         return [t for t in threading.enumerate()
                 if t.name == "store-cache-index-flush" and t.is_alive()]
 
-    # The earlier legs ran on a ~1s debounce and have all fired by now; wait
-    # the last of those threads out so the count below is absolute.
+    # The earlier legs ran on a 1s debounce and have all fired. Wait the last
+    # of those threads out, so the count below is absolute.
     assert fixtures.wait_until(lambda: not _armed_flush_threads(), timeout=5.0), (
         f"stale flush timers from an earlier check: {_armed_flush_threads()!r}"
     )
@@ -256,17 +237,17 @@ def test_read_burst_arms_exactly_one_timer() -> None:
     assert cache._flush_timer is None
 
 
-def test_exit_hook_drains_a_dirty_index() -> None:
-    """(d) A quit inside the debounce window still persists the renewals:
-    the module's atexit hook (and the explicit flush the app's os._exit path
-    calls) drains every live cache."""
-    # A debounce no test can outwait, so ONLY the exit hook can flush here.
+def test_exit_hook_drains_dirty_index() -> None:
+    """A quit inside the debounce window still persists the renewals. The
+    module's atexit hook, and the explicit flush on the app's os._exit path,
+    drain every live cache."""
+    # A debounce no check can outwait, so only the exit hook flushes here.
     cache = _new_cache(debounce=600.0)
     _seed(cache, ["Draining.json"])
     key = cache.generate_cache_string(REPO, "Draining.json")
 
-    # Settle any dirt left by earlier caches in this process (they share one
-    # files.json), so the counts below are attributable to this one.
+    # Settle any dirt left by earlier caches in this process, which share one
+    # files.json, so the counts below belong to this cache.
     store_cache_mod._flush_live_caches()
     time.sleep(0.05)
     COUNTER.reset()
@@ -290,15 +271,12 @@ def test_exit_hook_drains_a_dirty_index() -> None:
     assert cache._flush_timer is None, "flush_index must clear the armed timer"
 
 
-def test_exit_hook_is_registered_with_atexit() -> None:
-    """(g) ...and that drain is actually wired into interpreter exit.
+def test_exit_hook_registered_with_atexit() -> None:
+    """The drain is wired into interpreter exit.
 
-    The check above calls _flush_live_caches() directly, so it stays green
-    even if the @atexit.register decorator is dropped -- at which point a
-    plain CLI/harness exit silently loses every deferred renewal (the GTK app
-    has its own explicit flush in on_quit, which os._exit(0) forces it to
-    need). atexit exposes no way to enumerate its table, so probe it: an
-    unregister that actually removes something is proof it was in there.
+    The check above calls _flush_live_caches directly, so it stays green even
+    with the atexit registration dropped. atexit exposes no way to enumerate
+    its table, so an unregister that removes something proves it was there.
     """
     before = atexit._ncallbacks()
     atexit.unregister(store_cache_mod._flush_live_caches)
@@ -317,13 +295,13 @@ def test_exit_hook_is_registered_with_atexit() -> None:
 
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_store_cache_flush")
-    test_read_burst_writes_the_index_once()
-    test_deferral_is_real_and_renewed_date_lands()
+    test_read_burst_writes_index_once()
+    test_deferral_lands_renewed_date()
     test_committed_write_stamps_synchronously()
     test_second_burst_rearms()
-    test_read_burst_arms_exactly_one_timer()
-    test_exit_hook_drains_a_dirty_index()
-    test_exit_hook_is_registered_with_atexit()
+    test_read_burst_arms_one_timer()
+    test_exit_hook_drains_dirty_index()
+    test_exit_hook_registered_with_atexit()
     print("scenario_store_cache_flush: PASS")
 
 

@@ -1,39 +1,10 @@
 """
-Scenario: the active-window watcher runs only while a page actually wants it.
+The active-window watcher runs only while a page wants it.
 
-Watching the foreground window costs a permanent background poll on most
-desktops -- the X11 integration spawns several xprop processes every 200 ms,
-the KDE and Sway ones shell out just as often -- and that cost buys nothing
-unless some page carries an enabled window auto-change rule. WindowGrabber
-therefore gates the watcher on exactly that: nothing starts at boot without a
-rule, the first rule starts it, the last rule's removal stops and reaps it.
-
-Scope: this drives WindowGrabber's own gating and stop path against a stub
-integration injected through the pure `select_integration_class` selector. The
-five real integrations' stop paths (xprop/kdotool/swaymsg polls, the Hyprland
-socket, the GNOME subscription) need a live desktop and are NOT covered here;
-what is covered is that WindowGrabber asks for a stop at the right moments and
-that the watcher thread does then end, within a bounded wait.
-
-Asserts:
-
-  * zero rules at boot -- no integration is even CONSTRUCTED (the probe/proxy
-    an integration builds in __init__ is part of the cost being avoided) and
-    nothing is watching;
-  * a rule already on disk at boot -- watching, with a live watcher thread;
-  * the first rule added at runtime, through the page-editor write path
-    (overwrite_auto_change_settings) -- starts the watcher;
-  * a page IMPORT carrying rules -- the importer writes page files wholesale,
-    past every settings setter, and must still re-gate;
-  * the last rule switched off, and separately the last rule's page deleted
-    -- stops the watcher and reaps its thread within a bounded wait;
-  * a deck sitting on an auto-switched page is returned to its manual page
-    when the gate goes off, since no further window change will do it;
-  * start and stop are both idempotent, and a stopped watcher restarts;
-  * a burst of rule writes settles on the state the last write asked for;
-  * one-shot window queries still work while gated off -- the page editor's
-    matching-window list is what the user reaches BEFORE the first rule
-    exists, so it must not depend on the watcher running.
+Watching the foreground window costs a permanent background poll, so
+WindowGrabber gates the watcher on an enabled window auto-change rule.
+Nothing starts at boot without a rule, the first rule starts it, and the last
+rule's removal stops and reaps it. A stub integration stands in.
 """
 import fixtures  # noqa: F401  (must be imported first: isolates DATA_PATH)
 
@@ -52,7 +23,7 @@ REAP_TIMEOUT_S = 5.0
 
 
 # ===================================================================== #
-# Stub integration: a real thread, so "reaped" means something
+# Stub integration. A real thread, so "reaped" means something
 # ===================================================================== #
 
 class StubIntegration(Integration):
@@ -67,7 +38,7 @@ class StubIntegration(Integration):
         self.stop_calls = 0
         self._thread: threading.Thread | None = None
         # Survives stop_watching() clearing _thread. Asserting on the live
-        # field instead would make every "reaped" assertion vacuous: it
+        # field instead would make every "reaped" assertion vacuous. It
         # reads None the moment stop nulls it, whether or not the thread
         # ever actually ended.
         self._last_thread: threading.Thread | None = None
@@ -141,11 +112,11 @@ def _settle(grabber: WindowGrabber) -> None:
 
 
 # ===================================================================== #
-# Deck stubs: exactly what the gate-off restore pass dereferences
+# Deck stubs. Exactly what the gate-off restore pass dereferences
 # ===================================================================== #
 
 class StubPage:
-    """Only json_path: writing a page's settings refreshes the one document
+    """Only json_path. Writing a page's settings refreshes the one document
     that holds its content, not the Page objects reading through it."""
 
     def __init__(self, json_path: str):
@@ -280,7 +251,7 @@ def check_no_rules_starts_nothing() -> None:
     )
 
 
-def check_rule_at_boot_starts_the_watcher() -> None:
+def check_rule_at_boot_starts_watcher() -> None:
     _clear_pages()
     _write_page("Armed", auto_change=_enabled_rule())
 
@@ -304,7 +275,7 @@ def check_rule_at_boot_starts_the_watcher() -> None:
 # Dynamic start / stop through the page-settings write path
 # ===================================================================== #
 
-def check_first_rule_starts_and_last_rule_stops() -> None:
+def check_first_rule_starts_last_stops() -> None:
     _clear_pages()
     page_path = _write_page("Editable")
     grabber = _fresh_grabber()
@@ -342,7 +313,7 @@ def check_first_rule_starts_and_last_rule_stops() -> None:
     )
 
 
-def check_second_rule_does_not_restart_and_last_removal_stops() -> None:
+def check_second_rule_no_restart() -> None:
     _clear_pages()
     first = _write_page("First", auto_change=_enabled_rule("firefox"))
     second = _write_page("Second")
@@ -412,7 +383,7 @@ def check_start_stop_idempotence() -> None:
     assert grabber.is_watching is False
     assert _wait_until(lambda: not integration.watcher_alive)
 
-    # Restart after a stop: the same integration is reused, with a new thread
+    # Restart after a stop. The same integration is reused, with a new thread
     # (a Thread object cannot be started twice).
     grabber.start_watching()
     assert grabber.is_watching is True
@@ -500,7 +471,7 @@ def check_gate_off_restores_auto_loaded_decks() -> None:
     page_path = _write_page("Armed", auto_change={
         "enable": True, "wm-class": "firefox", "title": ".*",
         # The restore is opt-in per page, exactly as it is on the no-match
-        # path: a page asking to stay is left alone either way.
+        # path. A page asking to stay is left alone either way.
         "stay-on-page": False, "decks": ["SERIAL"],
     })
     grabber = _fresh_grabber()
@@ -511,8 +482,8 @@ def check_gate_off_restores_auto_loaded_decks() -> None:
     controller.page_auto_loaded = True
     controller.last_manual_loaded_page_path = manual_path
     gl.deck_manager.deck_controller.append(controller)
-    # Pre-seed the page cache so the restore's get_page() is a cache hit:
-    # a miss would construct a real Page against this stub deck.
+    # Pre-seed the page cache, so the restore's get_page is a cache hit. A
+    # miss would construct a real Page against this stub deck.
     gl.page_manager.pages[controller] = {
         manual_path: {"page": StubPage(manual_path), "page_number": 0},
     }
@@ -534,7 +505,7 @@ def check_gate_off_restores_auto_loaded_decks() -> None:
         gl.page_manager.pages.pop(controller, None)
 
 
-def check_write_burst_settles_on_the_last_write() -> None:
+def check_write_burst_settles_last_write() -> None:
     """Gate passes are serialized and each one re-reads the rules, so a burst
     of writes -- and writes landing while a pass is in flight -- must converge
     on what the final write asked for, not on whichever pass happened to run
@@ -610,12 +581,12 @@ def main() -> None:
 
     check_rule_query()
     check_no_rules_starts_nothing()
-    check_rule_at_boot_starts_the_watcher()
-    check_first_rule_starts_and_last_rule_stops()
-    check_second_rule_does_not_restart_and_last_removal_stops()
+    check_rule_at_boot_starts_watcher()
+    check_first_rule_starts_last_stops()
+    check_second_rule_no_restart()
     check_import_regates()
     check_gate_off_restores_auto_loaded_decks()
-    check_write_burst_settles_on_the_last_write()
+    check_write_burst_settles_last_write()
     check_start_stop_idempotence()
     check_window_query_works_while_gated_off()
     check_reset_rebuilds_and_regates()

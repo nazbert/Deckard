@@ -1,26 +1,10 @@
 """
-Regression test for the one-time rename migration (rebrand_migration.py,
-docs/rename-deckard-plan.md Phase 2): the whole pre-rename var-app tree
-moves to the new id with a compat symlink left behind, guarded against
-every state the ordering audit found:
+Regression test for the one-time rename migration in rebrand_migration.py.
 
-  * the "new dir missing" check must survive the import-time makedirs
-    skeleton (globals.py / mp4_tile_cache.py create empty dirs on every
-    invocation before main() runs);
-  * never merge or delete when both roots hold real files;
-  * a crash between rename and symlink is healed on the next start via the
-    pending marker (which is written into the OLD root and travels with the
-    rename);
-  * foreign or broken symlinks at the old root abort rather than being
-    replaced;
-  * a live pre-rename instance (old bus name owned) aborts before any
-    filesystem mutation;
-  * --data overrides skip the migration entirely;
-  * completion removes the stale autostart entries under the old identity.
-
-Deliberately does NOT import fixtures: the module under test is stdlib-only
-and must stay importable before `import globals`; this scenario proves that
-property too (globals must never enter sys.modules here).
+The whole pre-rename var-app tree moves to the new id and leaves a compat
+symlink behind. The migration never merges when both roots hold real files,
+heals a crash between the rename and the symlink through the pending marker,
+and aborts on a foreign symlink or a live pre-rename instance.
 """
 import os
 import shutil
@@ -31,8 +15,8 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-# Redirect HOME before importing the module: the autostart cleanup resolves
-# ~/.config/autostart at call time via expanduser.
+# Redirect HOME before importing the module. The autostart cleanup resolves
+# ~/.config/autostart at call time through expanduser.
 HOME = tempfile.mkdtemp(prefix="rebrand_home_")
 os.environ["HOME"] = HOME
 
@@ -93,27 +77,27 @@ def expect_exit(fn):
     raise AssertionError("expected SystemExit(1)")
 
 
-# --- 1. fresh install: neither root exists -> no-op --------------------
+# 1. A fresh install has neither root, so nothing happens.
 old, new = fresh_roots()
 rm.migrate(old, new, argv=["main.py"])
 assert not os.path.lexists(old) and not os.path.lexists(new)
 print("1. fresh install no-op: OK")
 
-# --- 2. normal move -----------------------------------------------------
-# (stale-autostart cleanup now lives in autostart.remove_legacy_autostart_
-# entries, covered by scenario_autostart_disable.py.)
+# 2. The normal move. The stale-autostart cleanup lives in
+# autostart.remove_legacy_autostart_entries, covered by
+# scenario_autostart_disable.py.
 old, new = fresh_roots()
 make_old_tree(old)
 rm.migrate(old, new, argv=["main.py"])
 assert_migrated(old, new)
 print("2. normal move: OK")
 
-# --- 3. idempotent re-run ----------------------------------------------
+# 3. An idempotent re-run.
 rm.migrate(old, new, argv=["main.py"])
 assert_migrated(old, new)
 print("3. idempotent re-run: OK")
 
-# --- 4. skeleton-poisoned new root (import-time makedirs residue) ------
+# 4. A new root poisoned by the import-time makedirs skeleton.
 old, new = fresh_roots()
 make_old_tree(old)
 make_skeleton(new)
@@ -122,7 +106,7 @@ assert_migrated(old, new)
 assert not os.path.exists(os.path.join(new, "data", "cache", "videos")), "skeleton merged instead of replaced"
 print("4. skeleton-poisoned new root: OK")
 
-# --- 5. both roots hold real files -> abort, nothing touched -----------
+# 5. Both roots hold real files, so the migration aborts and touches nothing.
 old, new = fresh_roots()
 make_old_tree(old)
 os.makedirs(os.path.join(new, "data", "logs"))
@@ -134,7 +118,7 @@ assert os.path.isfile(os.path.join(old, "data", "settings", "settings.json"))
 assert os.path.isfile(os.path.join(new, "data", "logs", "logs.log"))
 print("5. both-have-files abort: OK")
 
-# --- 6. foreign symlink at old root -> abort ----------------------------
+# 6. A foreign symlink at the old root aborts the migration.
 old, new = fresh_roots()
 elsewhere = tempfile.mkdtemp(prefix="elsewhere_", dir=HOME)
 os.makedirs(os.path.dirname(old), exist_ok=True)
@@ -143,25 +127,25 @@ expect_exit(lambda: rm.migrate(old, new, argv=["main.py"]))
 assert os.path.realpath(old) == os.path.realpath(elsewhere), "foreign symlink replaced"
 print("6. foreign symlink abort: OK")
 
-# --- 7. broken symlink at old root -> abort -----------------------------
+# 7. A broken symlink at the old root aborts the migration.
 old, new = fresh_roots()
 os.makedirs(os.path.dirname(old), exist_ok=True)
 os.symlink(os.path.join(HOME, "does-not-exist"), old)
 expect_exit(lambda: rm.migrate(old, new, argv=["main.py"]))
 print("7. broken symlink abort: OK")
 
-# --- 8. repair mode: crashed between rename and symlink -----------------
+# 8. Repair mode after a crash between the rename and the symlink.
 old, new = fresh_roots()
 make_old_tree(old)
 os.makedirs(os.path.dirname(new), exist_ok=True)
 with open(os.path.join(old, rm.MARKER_NAME), "w") as f:
     f.write(rm._STATE_PENDING + "\n")
-os.rename(old, new)  # the crash point: renamed, no symlink, marker pending
+os.rename(old, new)  # the crash point, renamed with no symlink and marker pending
 rm.migrate(old, new, argv=["main.py"])
 assert_migrated(old, new)
 print("8. repair after rename/symlink crash: OK")
 
-# --- 9. pending marker but old root reappeared as a real dir ------------
+# 9. A pending marker with the old root reappeared as a real dir.
 old, new = fresh_roots()
 make_old_tree(old)
 with open(os.path.join(old, rm.MARKER_NAME), "w") as f:
@@ -173,7 +157,7 @@ assert marker_state(new) == rm._STATE_PENDING, "completed despite blocked symlin
 assert os.path.isdir(os.path.join(old, "data")), "reappeared old tree deleted"
 print("9. pending + reappeared old root stays pending: OK")
 
-# --- 10. --data override skips everything -------------------------------
+# 10. A --data override skips everything.
 old, new = fresh_roots()
 make_old_tree(old)
 rm.migrate(old, new, argv=["main.py", "--data", "/tmp/custom"])
@@ -182,7 +166,7 @@ rm.migrate(old, new, argv=["main.py", "--data=/tmp/custom"])
 assert os.path.isdir(old) and not os.path.lexists(new)
 print("10. --data override skip: OK")
 
-# --- 11. live pre-rename instance -> abort before any mutation ----------
+# 11. A live pre-rename instance aborts before any mutation.
 old, new = fresh_roots()
 make_old_tree(old)
 rm._old_instance_running = lambda: True
@@ -192,19 +176,18 @@ assert not os.path.lexists(new)
 rm._old_instance_running = lambda: False
 print("11. live old-instance abort: OK")
 
-# --- 12. our symlink already in place but marker missing -> completes ---
+# 12. The compat symlink is already in place but the marker is missing.
 old, new = fresh_roots()
 make_old_tree(old)
 os.rename(old, new)
-os.symlink(new, old)  # migration done by hand / marker write failed earlier
+os.symlink(new, old)  # migration done by hand, or the marker write failed
 rm.migrate(old, new, argv=["main.py"])
 assert marker_state(new) == rm._STATE_COMPLETE
 assert_migrated(old, new)
 print("12. marker backfill on existing symlink: OK")
 
-# --- 14. --data argparse abbreviations also skip ------------------------
-# argparse accepts any unambiguous prefix of --data (only --data/--devel
-# start with --d), so --dat and even --da must be recognised as overrides.
+# 14. argparse accepts any unambiguous prefix of --data, and only --data and
+# --devel start with --d, so --dat and --da are overrides too.
 for abbrev in ("--dat", "--da"):
     old, new = fresh_roots()
     make_old_tree(old)
@@ -212,7 +195,7 @@ for abbrev in ("--dat", "--da"):
     assert os.path.isdir(old) and not os.path.lexists(new), f"{abbrev} did not skip"
 print("14. --data abbreviations (--dat, --da) skip: OK")
 
-# --- 15. dir-symlink in new root is NOT skeleton -> abort, link kept ----
+# 15. A dir-symlink in the new root is not skeleton, so the migration aborts.
 old, new = fresh_roots()
 make_old_tree(old)
 target = tempfile.mkdtemp(prefix="relocation_", dir=HOME)
@@ -223,7 +206,7 @@ assert os.path.islink(os.path.join(new, "data", "plugins")), "relocation symlink
 assert os.path.isdir(old) and not os.path.islink(old), "old tree mutated on abort"
 print("15. dir-symlink not treated as skeleton: OK")
 
-# --- 16. new root is itself a symlink -> abort, not rmtree crash --------
+# 16. A new root that is itself a symlink aborts instead of crashing rmtree.
 old, new = fresh_roots()
 make_old_tree(old)
 elsewhere = tempfile.mkdtemp(prefix="newlink_", dir=HOME)
@@ -233,10 +216,10 @@ expect_exit(lambda: rm.migrate(old, new, argv=["main.py"]))
 assert os.path.islink(new) and os.path.realpath(new) == os.path.realpath(elsewhere)
 print("16. symlinked new root abort: OK")
 
-# --- 17. undurable pending marker write -> abort before rename ----------
+# 17. An undurable pending-marker write aborts before the rename.
 old, new = fresh_roots()
 make_old_tree(old)
-os.chmod(old, 0o500)  # deny file creation in old_root -> pending marker write fails
+os.chmod(old, 0o500)  # deny file creation in old_root, so the marker write fails
 try:
     expect_exit(lambda: rm.migrate(old, new, argv=["main.py"]))
 finally:
@@ -245,7 +228,7 @@ assert os.path.isdir(old) and not os.path.lexists(new), "renamed despite undurab
 assert os.path.isfile(os.path.join(old, "data", "settings", "settings.json"))
 print("17. undurable marker aborts before rename: OK")
 
-# --- 13. pre-globals contract ------------------------------------------
+# 13. The pre-globals contract.
 class _FakeGlobals:  # simulate globals already imported
     pass
 

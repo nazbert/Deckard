@@ -1,17 +1,10 @@
 """
-Regression test -- manifest-controlled asset ids reaching
-rmtree/install path joins, and shell=True install-script invocation.
+Regression test for manifest-controlled asset ids and shell-free installs.
 
-plugin_id/icon_id/wallpaper_id come from a REMOTE manifest.json. Before the
-fix, an id like "../../.." walked `shutil.rmtree`/install targets out of the
-app's data dirs (os.path.join happily traverses, and an absolute id replaces
-the base entirely), and `subprocess.run(f"{sys.executable} {path}",
-shell=True)` both broke on spaces and allowed shell injection via crafted
-path components.
-
-Now StoreBackend.is_safe_asset_id whitelists ids at every join site
-(rejecting, not normalizing), and the install scripts run as argv lists
-without a shell. All network-free: download_repo is stubbed.
+plugin_id, icon_id and wallpaper_id come from a remote manifest.json.
+StoreBackend.is_safe_asset_id whitelists an id at every join site, rejecting
+rather than normalizing, and the install scripts run as argv lists with no
+shell. download_repo is stubbed, so no network is involved.
 """
 import os
 import sys
@@ -63,7 +56,7 @@ def test_validator_cases() -> None:
 
 
 def _make_backend() -> StoreBackend:
-    sb = StoreBackend.__new__(StoreBackend)  # skip __init__ (spawns a fetch thread)
+    sb = StoreBackend.__new__(StoreBackend)  # skip __init__, which spawns a fetch thread
     from src.backend.Store.StoreCache import StoreCache
     sb.store_cache = StoreCache()
     return sb
@@ -99,7 +92,8 @@ def test_uninstall_icon_rejects_traversal_id() -> None:
     sentinel = os.path.join(gl.DATA_PATH, "sentinel")
     os.makedirs(sentinel, exist_ok=True)
 
-    # "icons/.." IS gl.DATA_PATH -- the old code would rmtree the whole data dir.
+    # "icons/.." resolves to gl.DATA_PATH, so an unchecked rmtree takes the
+    # whole data dir.
     result = sb.uninstall_icon(IconData(icon_id=".."))
     assert result == 400, f"traversal icon id must be refused, got {result!r}"
     assert os.path.isdir(gl.DATA_PATH), "data dir must survive a traversal uninstall id"
@@ -199,7 +193,7 @@ def test_ref_and_sha_validator_cases() -> None:
         assert StoreBackend.is_safe_ref_name(clean), (
             f"legitimate ref must be accepted: {clean!r}"
         )
-    # commit sha: exactly 40 hex.
+    # a commit sha is exactly 40 hex characters
     assert StoreBackend.is_safe_commit_sha("a" * 40)
     assert StoreBackend.is_safe_commit_sha("0123456789abcdef0123456789abcdef01234567")
     for bad in ["a" * 39, "a" * 41, "z" * 40, "main; id", "", None, 40,
@@ -209,13 +203,11 @@ def test_ref_and_sha_validator_cases() -> None:
         )
 
 
-def test_clone_repo_rejects_injection_and_never_shells() -> None:
-    """The devel clone path used to os.system(f'... git switch {branch}') /
-    'git reset --hard {sha}' with REMOTE-catalog values. A branch of
-    'main; touch <marker>' would have run the injected command. Assert:
-    (1) a metachar branch/sha is refused (400) before any git call, and the
-    injected side effect never happens; (2) git is only ever invoked as an
-    argv list (never a shell string)."""
+def test_clone_repo_rejects_injection() -> None:
+    """The devel clone path passes remote-catalog values to git. A branch of
+    'main; touch <marker>' must be refused with 400 before any git call, the
+    injected side effect must never happen, and git must only ever run as an
+    argv list."""
     sb = _make_backend()
 
     marker = os.path.join(gl.DATA_PATH, "mr16_injection_marker")
@@ -226,19 +218,18 @@ def test_clone_repo_rejects_injection_and_never_shells() -> None:
 
     def fake_subp_call(args):
         calls.append(args)
-        # A correct fix passes argv lists; a regression to a shell string
-        # would show up here as a str, which we forbid outright.
+        # A shell string would show up here as a str, which this forbids.
         assert isinstance(args, list), f"git must be invoked as argv list, got {args!r}"
-        # Stand in for `git clone`, which is what actually creates the
-        # staging dir (clone_repo clones into cache/ and swaps at the end)
-        # -- so the later VERSION write and swap work.
+        # Stand in for git clone, which creates the staging dir. clone_repo
+        # clones into cache/ and swaps at the end, so the later VERSION write
+        # and swap both work.
         if len(args) >= 2 and args[1] == "clone":
             os.makedirs(args[-1], exist_ok=True)
         return 0
 
     sb.subp_call = fake_subp_call
 
-    # 1) Injected branch: refused, no git call, no side effect.
+    # 1. An injected branch is refused, with no git call and no side effect.
     injected_branch = f"main; touch {marker}"
     result = sb.clone_repo("https://github.com/evil/evil",
                            os.path.join(gl.PLUGIN_DIR, "victim"),
@@ -249,7 +240,7 @@ def test_clone_repo_rejects_injection_and_never_shells() -> None:
     assert calls == [], f"no git call may happen for an injected branch, got {calls}"
     assert not os.path.exists(marker), "injected command must never create its marker"
 
-    # 2) Injected commit sha: refused likewise.
+    # 2. An injected commit sha is refused as well.
     result = sb.clone_repo("https://github.com/evil/evil",
                            os.path.join(gl.PLUGIN_DIR, "victim"),
                            commit_sha=f"deadbeef; touch {marker}", branch_name=None)
@@ -258,12 +249,11 @@ def test_clone_repo_rejects_injection_and_never_shells() -> None:
     )
     assert not os.path.exists(marker), "injected command must never create its marker"
 
-    # 3) A CLEAN branch reaches git only as an argv list (no shell). git is
-    #    fully stubbed above (fake_subp_call), so this needs no real binary
-    #    and asserts the exact argv shape. `git checkout` is the token we
-    #    care about (checkout, not switch, so tag refs work);
-    #    shutil.which("git") inside clone_repo is monkeypatched so the
-    #    "git not installed" 404 branch can't fire on a git-less box.
+    # 3. A clean branch reaches git only as an argv list. git is fully
+    #    stubbed above, so this needs no real binary and asserts the argv
+    #    shape. checkout is the token that matters, because it handles a tag
+    #    ref. shutil.which is patched, so the "git not installed" branch
+    #    cannot fire on a machine without git.
     calls.clear()
     import src.backend.Store.StoreBackend as backend_module
     real_which = backend_module.shutil.which
@@ -278,9 +268,9 @@ def test_clone_repo_rejects_injection_and_never_shells() -> None:
     checkout_calls = [c for c in calls if len(c) >= 4 and c[3] == "checkout"]
     assert checkout_calls, f"expected an argv 'git checkout' call, got {calls}"
     argv = checkout_calls[0]
-    # The clone is prepared in a staging dir under cache/ and
-    # swapped into local_path afterwards -- the -C target is the staging
-    # tree. The property under test is unchanged: argv list, no shell.
+    # The clone is prepared in a staging dir under cache/ and swapped into
+    # local_path afterwards, so the -C target is the staging tree. The
+    # property under test is the argv list with no shell.
     assert argv[:2] == ["git", "-C"] and argv[3] == "checkout", f"unexpected argv {argv!r}"
     assert argv[2].startswith(os.path.join(gl.DATA_PATH, "cache") + os.sep), (
         f"clone must be prepared in the cache staging area, got {argv[2]!r}"
@@ -291,9 +281,9 @@ def test_clone_repo_rejects_injection_and_never_shells() -> None:
     )
 
 
-def test_download_repo_refuses_zip_slip_member() -> None:
-    """Defense-in-depth: a downloaded archive with a traversal/absolute
-    member is refused before shutil.unpack_archive writes anything."""
+def test_download_repo_refuses_zip_slip() -> None:
+    """A downloaded archive with a traversal or absolute member is refused
+    before shutil.unpack_archive writes anything."""
     import zipfile
     sb = _make_backend()
 
@@ -325,8 +315,8 @@ def main() -> None:
     test_install_plugin_rejects_traversal_id()
     test_uninstall_icon_rejects_traversal_id()
     test_install_script_runs_without_shell()
-    test_clone_repo_rejects_injection_and_never_shells()
-    test_download_repo_refuses_zip_slip_member()
+    test_clone_repo_rejects_injection()
+    test_download_repo_refuses_zip_slip()
     print("scenario_store_id_sanitizer: PASS")
 
 

@@ -1,28 +1,10 @@
 """
-Regression test -- three ways the store tab froze or built garbage
-URLs, exercised WITHOUT network:
+Regression test for three ways the store tab froze or built garbage URLs.
 
-1. get_official_store_branch returned the NoConnectionError INSTANCE when
-   versions.json couldn't be fetched (and the cache was too stale);
-   get_stores appended it verbatim to its (url, branch) tuples and build_url
-   interpolated the object's repr into request URLs and cache keys. Now the
-   branch contract is str-only, falling back to STORE_BRANCH (uncached, so a
-   later successful fetch still corrects it).
-
-2. json.loads(versions_file) was unguarded: a truncated cached versions.json
-   (served by 782a1dac's stale-cache fallback) raised JSONDecodeError through
-   the page's load(), the @log.catch swallowed it with the spinner still up,
-   and StorePage._loaded=True blocked any retry until the window was
-   recreated. Now the parse is guarded AND StorePage re-arms itself
-   (_loaded=False + error page) whenever a load fails.
-
-3. A custom store/plugin url that names no GitHub repository raised an
-   opaque "x not in list" out of the cache-key helper. For a custom STORE
-   that came through fetch_and_parse_store_json, which only catches json
-   errors, so it escaped the whole catalog load: one bad settings entry
-   blanked every store page, once per refresh. Now an unusable url is
-   skipped -- at the settings row that would store it, and again at every
-   store path that reads one -- and both sides decide with the same parse.
+get_official_store_branch answers a str and falls back to STORE_BRANCH,
+uncached. The versions.json parse is guarded and StorePage re-arms itself
+after a failed load. A url that names no GitHub repository is skipped
+everywhere, through one shared parse. No network is involved.
 """
 import threading
 import time
@@ -37,8 +19,8 @@ from src.backend.Store.store_result import StoreFetchError
 from src.backend.Store.StoreURL import parse_repo_url
 
 
-# Urls the store cannot turn into an owner/repository pair, and so must
-# never act on: free text, a non-GitHub host, an owner with no repository.
+# Urls the store cannot turn into an owner and repository pair, and so must
+# never act on. Free text, a non-GitHub host, an owner with no repository.
 UNUSABLE_URLS = (
     "not a url at all",
     "https://gitlab.example.com/someone/plugin",
@@ -47,7 +29,7 @@ UNUSABLE_URLS = (
 
 
 def _make_backend() -> StoreBackend:
-    sb = StoreBackend.__new__(StoreBackend)  # skip __init__ (spawns a fetch thread)
+    sb = StoreBackend.__new__(StoreBackend)  # skip __init__, which spawns a fetch thread
     from src.backend.Store.StoreCache import StoreCache
     sb.store_cache = StoreCache()
     sb.official_store_branch_cache = None
@@ -62,7 +44,7 @@ def _fetch_fail(url):
     raise StoreFetchError(url, "offline")
 
 
-def test_branch_is_str_when_offline_and_uncached() -> None:
+def test_branch_is_str_when_offline() -> None:
     fixtures.install_stub_globals()
     sb = _make_backend()
     sb.request_from_url = _fetch_fail
@@ -81,17 +63,17 @@ def test_branch_is_str_when_offline_and_uncached() -> None:
         assert isinstance(b, str) and b, f"get_stores yielded non-str branch {b!r} for {url}"
 
 
-def test_branch_survives_truncated_cached_versions_json() -> None:
+def test_branch_survives_truncated_versions() -> None:
     fixtures.install_stub_globals()
     sb = _make_backend()
 
-    # Seed the cache with a TRUNCATED versions.json (what a crash mid-write
-    # used to leave behind), stamped fresh...
+    # Seed the cache with a truncated versions.json, stamped fresh, as a
+    # crash mid-write leaves behind.
     with sb.store_cache.open_cache_file(
         url=StoreBackend.STORE_REPO_URL, branch="versions", path="versions.json", mode="w"
     ) as f:
-        f.write('{"1.5.0-beta')  # deliberately truncated/invalid JSON
-    # ...then fail the live fetch so the stale fallback serves it.
+        f.write('{"1.5.0-beta')  # truncated, invalid JSON
+    # Then fail the live fetch, so the stale fallback serves it.
     sb.request_from_url = _fetch_fail
 
     branch = sb.get_official_store_branch()
@@ -122,7 +104,7 @@ def test_custom_store_entries_are_sanitized() -> None:
 
 
 class _Item:
-    """Stands in for PluginData -- process_store_data filters by data_class."""
+    """Stands in for PluginData. process_store_data filters by data_class."""
     def __init__(self, url: str):
         self.url = url
 
@@ -134,7 +116,7 @@ class _EmptyCatalog:
 
 
 def test_catalog_survives_unparseable_custom_urls() -> None:
-    """End to end through process_store_data: the unusable entries are
+    """End to end through process_store_data. The unusable entries are
     skipped, the healthy ones are prepared, and nothing raises."""
     fixtures.install_stub_globals(app_settings={
         "store": {
@@ -186,7 +168,7 @@ def test_catalog_survives_unparseable_custom_urls() -> None:
     assert [item.url for item in results] == ["https://github.com/someone/plugin"]
 
 
-def test_prepare_plugin_skips_unparseable_catalog_url() -> None:
+def test_prepare_plugin_skips_bad_url() -> None:
     """A catalog entry (not just a settings one) with an unusable url is
     dropped before anything is fetched for it."""
     sb = _make_backend()
@@ -202,11 +184,11 @@ def test_prepare_plugin_skips_unparseable_catalog_url() -> None:
         assert result is None, f"prepare_plugin({url!r}) returned {result!r}"
 
 
-def test_settings_row_refuses_what_the_store_would_skip() -> None:
-    """Drives the REAL CustomContentEntry.refresh_url_validity on a
-    duck-typed stand-in (no GTK widget construction in this headless
-    harness). The row and the store share one parse, so a url the row
-    accepts can never be one the catalog has to skip."""
+def test_settings_row_refuses_bad_url() -> None:
+    """Drives the real CustomContentEntry.refresh_url_validity on a
+    duck-typed stand-in, because this headless harness builds no GTK widget.
+    The row and the store share one parse, so a url the row accepts is never
+    one the catalog has to skip."""
     from src.windows.Settings.Settings import CustomContentEntry
 
     gl.lm = SimpleNamespace(get=lambda key, fallback=None: key)
@@ -258,9 +240,9 @@ def test_settings_row_refuses_what_the_store_would_skip() -> None:
 
 
 def test_store_page_rearms_after_failed_load() -> None:
-    """Drives the REAL StorePage.ensure_loaded/_load_guarded/
-    show_connection_error methods on a duck-typed stand-in (no GTK widget
-    construction in this headless harness)."""
+    """Drives the real StorePage.ensure_loaded, _load_guarded and
+    show_connection_error on a duck-typed stand-in, because this headless
+    harness builds no GTK widget."""
     from src.windows.Store.StorePage import StorePage
     from gi.repository import GLib
 
@@ -286,7 +268,7 @@ def test_store_page_rearms_after_failed_load() -> None:
 
     page = FakePage()
 
-    # 1. Failing load: must re-arm (_loaded False) and show the error page.
+    # 1. A failing load must re-arm and show the error page.
     page.ensure_loaded()
     assert fixtures.wait_until(lambda: page.load_calls == 1 and not page._loaded), (
         "failed load must reset _loaded so the tab can retry"
@@ -299,7 +281,7 @@ def test_store_page_rearms_after_failed_load() -> None:
         "failed load must land on the error page"
     )
 
-    # 2. Retry after the failure: ensure_loaded must actually load again.
+    # 2. After the failure, ensure_loaded must load again.
     page.fail = False
     page.ensure_loaded()
     assert fixtures.wait_until(lambda: page.load_calls == 2), (
@@ -307,7 +289,7 @@ def test_store_page_rearms_after_failed_load() -> None:
     )
     assert page._loaded is True
 
-    # 3. And a loaded tab stays a no-op.
+    # 3. A loaded tab stays a no-op.
     page.ensure_loaded()
     time.sleep(0.1)
     assert page.load_calls == 2, "an already-loaded tab must not reload"
@@ -315,12 +297,12 @@ def test_store_page_rearms_after_failed_load() -> None:
 
 def main() -> None:
     fixtures.start_watchdog(30, label="scenario_store_branch_contract")
-    test_branch_is_str_when_offline_and_uncached()
-    test_branch_survives_truncated_cached_versions_json()
+    test_branch_is_str_when_offline()
+    test_branch_survives_truncated_versions()
     test_custom_store_entries_are_sanitized()
     test_catalog_survives_unparseable_custom_urls()
-    test_prepare_plugin_skips_unparseable_catalog_url()
-    test_settings_row_refuses_what_the_store_would_skip()
+    test_prepare_plugin_skips_bad_url()
+    test_settings_row_refuses_bad_url()
     test_store_page_rearms_after_failed_load()
     print("scenario_store_branch_contract: PASS")
 

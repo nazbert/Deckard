@@ -1,25 +1,10 @@
 """
-Scenario: on_ready ordering guarantees.
+on_ready ordering guarantees, against the real dispatch code.
 
-Three defects, all against the REAL dispatch code (no replicas):
-
-  (a) tick-before-ready: own_actions_tick gated on on_ready_called, which is
-      set at *schedule* time -- on_tick could run before on_ready started.
-      Post-fix it gates on on_ready_finished.
-  (b) settings clobber: get_settings' v1->v2 conversion write raced a
-      concurrent set_settings (both unlocked) -- a stale conversion could
-      overwrite a fresh save. Post-fix a per-plugin RLock serializes the
-      accessors. Also: set_settings' own read used to raise on a corrupt
-      file (same class get_settings already guards).
-  (c) concurrent double on_ready: own_actions_update dispatched on_update
-      mid-initialization; the default on_update calls on_ready (compat), so
-      a second on_ready ran concurrently with the pool's initial one
-      (duplicate backend processes). Post-fix updates are skipped until
-      on_ready_finished; the initial ready sequence ends with its own
-      on_update, so nothing is lost.
-
-Plus: a raising on_ready must still open the gates (on_ready_finished set in
-a finally) -- otherwise the action is silently dead for the page's lifetime.
+own_actions_tick and own_actions_update gate on on_ready_finished, so no tick
+and no second on_ready runs beside the initial one. A per-plugin RLock
+serializes get_settings against set_settings. A raising on_ready still opens
+the gates, so the action does not stay dead for the page's lifetime.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
@@ -37,8 +22,8 @@ from src.backend.PluginManager.PluginBase import PluginBase
 
 
 class GatedAction(ActionCore):
-    """on_ready blocks on an Event and records concurrency; on_tick/on_update
-    count deliveries."""
+    """on_ready blocks on an Event and records concurrency. on_tick and
+    on_update count deliveries."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -111,20 +96,19 @@ def check_gates() -> int:
             return 1
         state_obj = input_obj.states[0]
 
-        # Schedule the ready callbacks on the pool; on_ready blocks on the
-        # gate. The controller's own background tick loop is live here and
-        # hammers own_actions_tick too -- which makes the gated-phase
-        # assertions stronger, not weaker.
+        # Schedule the ready callbacks on the pool. on_ready blocks on the
+        # gate. The controller's background tick loop is live and calls
+        # own_actions_tick too, which strengthens the gated-phase assertions.
         page.initialize_actions()
         if not action.entered_ready.wait(timeout=5):
             print("FAIL: on_ready never started")
             return 1
 
-        # (a) ticks while on_ready is in flight must be skipped.
+        # Ticks while on_ready is in flight must be skipped.
         for _ in range(3):
             state_obj.own_actions_tick()
-        # (c) an update while on_ready is in flight must be skipped -- pre-fix
-        # it ran on_update -> on_ready concurrently with the pool's on_ready.
+        # An update while on_ready is in flight must be skipped. Otherwise
+        # on_update runs the compat on_ready beside the pool's on_ready.
         state_obj.own_actions_update()
         time.sleep(0.1)  # give the background tick loop a few laps
 
@@ -154,7 +138,7 @@ def check_gates() -> int:
             print(f"FAIL(c): {action.ready_concurrent_max} concurrent on_ready (trailing)")
             return 1
 
-        # Gates open now (>= because the background tick loop counts too).
+        # The gates are open now. The background tick loop counts too.
         updates_before = action.update_calls
         state_obj.own_actions_tick()
         state_obj.own_actions_update()
@@ -174,10 +158,9 @@ def check_gates() -> int:
         ident = Input.Key("0x0")
         action2 = make_action(RaisingReadyAction, controller2, page2, ident)
         state_obj2 = controller2.get_input(ident).states[0]
-        # on_ready deliberately raises here; _run_ready_callbacks logs that
-        # traceback. It fires before on_ready_finished is set, so silencing
-        # loguru until wait_until observes completion suppresses the expected
-        # noise without hiding a real failure.
+        # on_ready raises here and _run_ready_callbacks logs the traceback.
+        # Silence loguru until wait_until sees completion, so the expected
+        # noise stays out of the run.
         _log.disable("")
         try:
             page2.initialize_actions()
@@ -198,14 +181,14 @@ def check_gates() -> int:
 
 
 def make_plugin(settings_path: str) -> PluginBase:
-    """__init__ bypassed (house pattern, see scenario_plugin_backend_teardown):
-    it needs a real plugin dir; only the settings accessors are under test."""
+    """__init__ is bypassed because it needs a real plugin dir, and only the
+    settings accessors are under test."""
     plugin = PluginBase.__new__(PluginBase)
     plugin.settings_path = settings_path
     plugin.plugin_name = "OnReadyOrderingTest"
     plugin.PATH = settings_path
-    # _settings_lock deliberately NOT set: exercises the lazy
-    # _get_settings_lock path used by __new__-built instances.
+    # _settings_lock stays unset, to exercise the lazy _get_settings_lock
+    # path that __new__-built instances take.
     return plugin
 
 
@@ -214,22 +197,22 @@ def check_settings_serialization() -> int:
     settings_path = os.path.join(gl.DATA_PATH, "settings", "plugins", "onready_test", "settings.json")
     os.makedirs(os.path.dirname(settings_path), exist_ok=True)
 
-    # Seed the OLD (v1) format so get_settings takes the conversion-write path.
+    # Seed the v1 format so get_settings takes the conversion-write path.
     with open(settings_path, "w") as f:
         json.dump({"old-key": 1}, f)
 
     plugin = make_plugin(settings_path)
 
     in_window = threading.Event()
-    # The plugin accessors persist through the settings store, so the
-    # conversion write to hold open is the store's.
+    # The plugin accessors persist through the settings store, so the write
+    # to hold open is the store's.
     real_write = settings_store.atomic_write_json
     first_call = [True]
 
     def slow_first_write(path, content):
-        # First write = get_settings' v1->v2 conversion. Hold it open long
-        # enough for the racing set_settings to (pre-fix) slip in between
-        # the stale read and this write.
+        # The first write is the v1 to v2 conversion. Hold it open long
+        # enough for the racing set_settings to slip between the stale read
+        # and this write.
         if first_call[0]:
             first_call[0] = False
             in_window.set()
@@ -266,8 +249,8 @@ def check_settings_serialization() -> int:
     print("PASS: conversion write serialized against concurrent set_settings")
 
     # set_settings over a corrupt existing file must not raise. The guarded
-    # read logs the caught JSONDecodeError; that traceback is expected here,
-    # so silence loguru around the deliberate corruption to keep CI clean.
+    # read logs the caught JSONDecodeError, so silence loguru around the
+    # corruption.
     from loguru import logger as _log
     with open(settings_path, "w") as f:
         f.write('{"trunc')

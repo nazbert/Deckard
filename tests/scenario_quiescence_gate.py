@@ -1,28 +1,10 @@
 """
-The media loop's quiescence gate, over a REAL MediaPlayerThread.
+The media loop's quiescence gate, over a real MediaPlayerThread.
 
-A background-video page is the worst case the gate exists for: it decodes,
-composites and writes every key at 30 FPS forever, whether or not anyone is
-looking. With the presence monitor reporting the user away, this scenario
-pins that:
-
-  (a) with the DEFAULT pause mode nothing gates, even with the screen locked
-      -- the opt-in property, asserted at the DeckController seam,
-  (b) gated: ZERO device writes and a ~2 Hz loop cadence (gated_ticks
-      advancing, media_ticks advancing with it) -- no decode, no composite,
-      no tick,
-  (c) the deck stays FUNCTIONAL while gated: a control message (brightness)
-      and an interactive paint (add_image_task) both still reach the device,
-  (d) a page change landing while gated repaints the whole page -- including
-      the transparent keys whose device paint update_all_inputs() delegates
-      to the video loop -- and then quiets again (the page-generation watch;
-      without it the deck would show the previous page's imagery on every
-      transparent key for the entire away window),
-  (d2) that render window is bounded in WALL CLOCK: a steady producer keeps
-      the task queues non-empty forever, and the window's tick countdown
-      re-arms on exactly that -- so without the deadline one busy plugin
-      pins the loop un-gated at full FPS for the whole away window,
-  (e) restoring presence resumes animation within the 500ms acceptance bound.
+A background-video page decodes, composites and writes every key at 30 FPS
+forever. With the user away the gate stops every animation write, still lands
+control messages and interactive paints, repaints once on a page change, and
+resumes animation within 500ms of a presence return.
 """
 import itertools
 import os
@@ -52,12 +34,12 @@ def animation_writes(deck, since: int = 0) -> list:
 
 
 def wait_until_quiet(deck, quiet_for: float = 0.5, timeout: float = 10.0) -> bool:
-    """Waits until no device write has landed for `quiet_for` seconds.
+    """Waits until no device write has landed for quiet_for seconds.
 
-    Deliberately not a fixed sleep: the settle window's length depends on how
-    fast the page-load tasks drain, which under a loaded machine is not a
-    constant. The invariant being pinned is "it goes quiet", not "it goes
-    quiet in exactly N milliseconds"."""
+    The settle window's length depends on how fast the page-load tasks drain,
+    which is not a constant on a loaded machine. The invariant is that the
+    loop goes quiet, not that it goes quiet in a fixed number of
+    milliseconds."""
     deadline = time.monotonic() + timeout
     seen = len(deck.journal())
     stable_since = time.monotonic()
@@ -73,11 +55,11 @@ def wait_until_quiet(deck, quiet_for: float = 0.5, timeout: float = 10.0) -> boo
 
 
 def _window_closed(media_player, for_s: float = 0.25) -> bool:
-    """True once the settle window has stopped rendering ticks for `for_s`.
+    """True once the settle window has stopped rendering ticks for for_s.
 
-    `gate_window_ticks` is the loop's own count of ticks the window rendered
+    gate_window_ticks is the loop's own count of ticks the window rendered
     instead of gating, so this reads the mechanism directly rather than
-    inferring it from device writes (which a producer is generating anyway)."""
+    inferring it from device writes a producer generates anyway."""
     seen = media_player.gate_window_ticks
     deadline = time.monotonic() + for_s
     while time.monotonic() < deadline:
@@ -88,7 +70,7 @@ def _window_closed(media_player, for_s: float = 0.25) -> bool:
 
 
 def set_locked(monitor, locked: bool) -> None:
-    """What LockScreenManager.lock() does: publish, then notify."""
+    """What LockScreenManager.lock does. Publish, then notify."""
     gl.screen_locked = locked
     monitor.on_lock_changed(locked)
 
@@ -123,8 +105,8 @@ def main() -> None:
         controller.load_page(page_a, allow_reload=True)
         wait_for_playback(deck, "page A")
 
-        # (a) the default mode is inert -- this is what makes the whole
-        # feature opt-in, and it must hold at the seam the media loop reads.
+        # The default mode is inert, which is what makes the feature opt-in.
+        # It must hold at the seam the media loop reads.
         assert controller.animations_gated() is False, (
             "nothing may gate before a presence monitor exists"
         )
@@ -137,7 +119,7 @@ def main() -> None:
         set_locked(monitor, False)
         monitor.stop()
 
-        # Opt in, then lock: gating engages.
+        # Opt in, then lock. Gating engages.
         monitor = PresenceMonitor(mode=MODE_SYSTEM_IDLE, minutes=1, idle_detector=False)
         gl.presence_monitor = monitor
         signature_a = {k: deck.last_op_for(f"key:{k}") for k in range(key_count)}
@@ -149,10 +131,10 @@ def main() -> None:
             "the media loop never gated a tick"
         )
         # Let the page-generation watch's settle window finish before
-        # measuring: entering the gate legitimately renders a few frames.
+        # measuring. Entering the gate renders a few frames.
         time.sleep(0.4)
 
-        # (b) gated: no animation reaches the device, and the loop idles.
+        # While gated no animation reaches the device and the loop idles.
         deck.clear_journal()
         ticks_before = media_player.media_ticks
         gated_before = media_player.gated_ticks
@@ -176,8 +158,8 @@ def main() -> None:
         print(f"PASS: gated -- 0 animation writes, {ticks / OBSERVE_S:.1f} Hz, "
               f"{gated}/{ticks} ticks gated")
 
-        # (c) the deck is paused, not dead: control ops and interactive
-        # paints must still land.
+        # The deck is paused, not dead. Control ops and interactive paints
+        # must still land.
         seq = deck.current_seq()
         media_player.submit_control(SetBrightnessMsg(value=42))
         assert fixtures.wait_until(
@@ -193,10 +175,10 @@ def main() -> None:
         assert media_player.gated_ticks > gated_before, "still gated after those"
         print("PASS: brightness + interactive paints still land while gated")
 
-        # (c2) a full repaint armed while gated -- suspend/resume, or the 2s
-        # retry after write failures -- bumps no generation but goes through
-        # the same update_all_inputs(), so it has the same transparent-key
-        # blind spot and must open the render window too.
+        # A full repaint armed while gated, from a resume or from the 2s
+        # retry after write failures, bumps no generation. It goes through the
+        # same update_all_inputs(), so it shares the transparent-key blind
+        # spot and must open the render window too.
         deck.clear_journal()
         controller._schedule_full_repaint()
         assert fixtures.wait_until(
@@ -216,8 +198,8 @@ def main() -> None:
         )
         print("PASS: a full repaint while gated paints once, then re-gates")
 
-        # (d) a page change while gated must paint the NEW page once --
-        # transparent keys included -- and then go quiet again.
+        # A page change while gated must paint the new page once, transparent
+        # keys included, and then go quiet again.
         deck.clear_journal()
         controller.load_page(page_b, allow_reload=True)
         assert fixtures.wait_until(
@@ -256,28 +238,19 @@ def main() -> None:
         assert media_player.gated_ticks > gated_before
         print("PASS: a gated page change paints the new page once, then re-gates")
 
-        # (d2) the render window is bounded in wall clock, not only in quiet
-        # ticks. Its countdown re-arms whenever the task queues are non-empty
-        # -- and that is a STEADY STATE for a producer running at the loop's
-        # own rate (a plugin looping set_media; the touchscreen latest-wins
-        # re-queue under a low DECKARD_VIDEO_WRITE_HZ, which refills the slot
-        # from inside the loop itself). Without the deadline such a producer
-        # holds the window open at full FPS for the entire away window and
-        # the gate silently does nothing at all -- verified: with
-        # GATE_WINDOW_MAX_S neutered this leg hangs open past its timeout.
-        # The producer at MediaPlayerThread.FPS is what makes that
-        # deterministic; at half the loop rate the countdown still finds its
-        # three consecutive quiet ticks and closes on its own.
-        # The producer's own paints must keep landing throughout -- that
-        # traffic is interactive by design and the gate never touches it.
+        # The render window is bounded in wall clock, not only in quiet
+        # ticks. Its countdown re-arms whenever the task queues are non-empty,
+        # which a producer at the loop's own rate holds forever. The
+        # producer's own paints keep landing, because that traffic is
+        # interactive by design and the gate never touches it.
         stop_producer = threading.Event()
         fills = itertools.count(11)
 
         def produce():
             while not stop_producer.is_set():
-                # A fresh fill every frame: identical payloads are dedup-
-                # skipped at the enqueue point and would not keep the queue
-                # non-empty, which is the whole mechanism under test.
+                # A fresh fill every frame. Identical payloads are
+                # dedup-skipped at the enqueue point and would not keep the
+                # queue non-empty, which is the mechanism under test.
                 media_player.add_image_task(0, fixtures.make_native_image(fill=next(fills) % 251))
                 stop_producer.wait(1 / media_player.FPS)
 
@@ -290,9 +263,9 @@ def main() -> None:
                 lambda: media_player.gate_window_ticks > window_before, timeout=3
             ), "the page change never opened the render window at all"
 
-            # Bound: the window opens on the tick that observes the new
-            # generation and must close GATE_WINDOW_MAX_S later. Allow ~1s of
-            # slack for the observation itself and a loaded machine.
+            # The window opens on the tick that observes the new generation
+            # and must close GATE_WINDOW_MAX_S later. The timeout allows slack
+            # for the observation and for a loaded machine.
             assert fixtures.wait_until(
                 lambda: _window_closed(media_player, for_s=0.25), timeout=3
             ), (
@@ -311,8 +284,8 @@ def main() -> None:
             assert media_player.gated_ticks > gated_before, (
                 "the loop is not gating again after the window closed"
             )
-            # Animation is off, but the producer is not: every write in that
-            # observation is its own key-0 paint.
+            # Animation is off but the producer is not. Every write in that
+            # observation is the producer's own key-0 paint.
             foreign = [e for e in animation_writes(deck) if e[3] != "key:0"]
             assert not foreign, (
                 f"{len(foreign)} animation write(s) beyond the producer's own key "
@@ -327,7 +300,7 @@ def main() -> None:
             producer.join(timeout=2)
         print("PASS: the render window closes on its deadline under a full-rate producer")
 
-        # (e) presence restored -> animation back within the acceptance bound.
+        # A restored presence brings animation back within the bound.
         deck.clear_journal()
         gl.screen_locked = False
         started = time.monotonic()

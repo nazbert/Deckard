@@ -1,26 +1,10 @@
 """
-Unit-tier scenario for the file-level tile-cache registry
-(docs/memory-footprint-impl-plan.md P2.1, mp4_tile_cache.py).
+Unit-tier scenario for the file-level tile-cache registry.
 
-The registry's whole reason to exist is the rejected v1 design it replaces:
-sharing one Mp4FrameCache *instance* across consumers was measured to break
-the build (interleaved frame requests abort the writer) and seek-thrash
-playback afterward. This scenario drives the real registry
-(acquire()/release(), KeyVideoCache, the detached builder thread) end to
-end against small synthetic mp4 sources, covering the plan's P2.1 Verify
-list:
-
-  (a) two consumers acquiring the same (md5, size, saturation) share one
-      cache file and one builder thread, each with its own VideoCapture.
-  (b) the detached builder completes and promotes the cache file while a
-      consumer is still playing directly from the source; the consumer
-      then switches over on its next get_frame() call.
-  (c) releasing both consumers (refcount -> 0) closes their captures and
-      drops the registry bookkeeping entry.
-  (d) a decode failure partway through a build clamps n_frames and
-      releases the builder's source capture instead of leaking it (the
-      deleted key_video_cache.py's bug 17 class must not be reproduced).
-  (e) performance.cache-videos=false starts no builder thread at all.
+Two consumers that acquire the same (md5, size, saturation) share one cache
+file and one builder thread, each with its own VideoCapture. The detached
+builder promotes the cache while a consumer plays from the source, and the
+consumer switches over on its next get_frame. Releasing both drops the entry.
 """
 import os
 import threading
@@ -46,9 +30,8 @@ def _make_test_video(path: str, n_frames: int = 30, size=(160, 120), fps: int = 
 
 
 def _make_bogus_video(path: str) -> None:
-    """A file cv2 can open-attempt but never successfully decode a frame
-    from -- exercises the "decode failure" path without needing a
-    genuinely truncated/corrupt mp4 byte-for-byte."""
+    """A file cv2 can attempt to open but never decode a frame from. It
+    drives the decode-failure path without a byte-for-byte corrupt mp4."""
     with open(path, "wb") as f:
         f.write(b"not a real video container")
 
@@ -69,19 +52,19 @@ def check_shared_file_one_builder() -> None:
         assert r1 is not r2, "each consumer must get its own reader instance"
         assert r1._registry_entry is r2._registry_entry, "both readers must share one registry entry"
         assert r1.cache_path == r2.cache_path == entry.path, "both readers must target the same cache file"
-        # Each consumer owns its own VideoCapture (or None pre-open) -- never
-        # the same object -- so one consumer's seeks/reads can't perturb the
-        # other's decode position.
+        # Each consumer owns its own VideoCapture, or None before the open,
+        # so one consumer's seeks and reads cannot move the other's decode
+        # position.
         assert r1.cap is not r2.cap or r1.cap is None, "consumers must not share a VideoCapture"
 
         assert entry.builder_thread is not None, "first acquire with no promoted cache must start a builder"
-        builder_thread_from_r1_acquire = entry.builder_thread
+        builder_thread_from_first_acquire = entry.builder_thread
 
-        # A third consumer while the builder is still running must NOT start
-        # a second builder thread for the same key.
+        # A third consumer, while the builder still runs, must not start a
+        # second builder thread for the same key.
         r3 = mp4_tile_cache.acquire(video_path, size, 1.0)
         try:
-            assert entry.builder_thread is builder_thread_from_r1_acquire, (
+            assert entry.builder_thread is builder_thread_from_first_acquire, (
                 "a second acquire on the same in-flight key must not start a second builder"
             )
         finally:
@@ -96,12 +79,11 @@ def check_shared_file_one_builder() -> None:
     print("PASS: two consumers share one cache file and one builder thread")
 
 
-def check_builder_promotes_while_consumer_plays_from_source() -> None:
+def check_builder_promotes_during_playback() -> None:
     fixtures.install_stub_globals()
     video_path = os.path.join(gl.DATA_PATH, "promote_while_playing.mp4")
-    # A slower fps than the previous check buys more wall-clock time for the
-    # assertions below to observe the "still building" state before the
-    # (very fast, tiny-frame) builder finishes.
+    # A slower fps than the previous check buys wall-clock time to observe
+    # the still-building state before the tiny-frame builder finishes.
     _make_test_video(video_path, n_frames=200, size=(320, 240))
 
     size = (64, 64)
@@ -110,10 +92,9 @@ def check_builder_promotes_while_consumer_plays_from_source() -> None:
         key = mp4_tile_cache._registry_key(video_path, size, 1.0)
         entry = mp4_tile_cache._registry[key]
 
-        # Drive the consumer from frame 0 immediately: unless the builder
-        # already raced ahead and promoted, this must come from the
-        # consumer's own direct source decode, not the (not yet existing)
-        # cache file.
+        # Drive the consumer from frame 0 at once. Unless the builder raced
+        # ahead and promoted, this comes from the consumer's own source
+        # decode rather than a cache file that does not exist yet.
         first_frame = reader.get_frame(0)
         assert first_frame is not None
         if not entry.ready:
@@ -124,9 +105,9 @@ def check_builder_promotes_while_consumer_plays_from_source() -> None:
 
         assert fixtures.wait_until(lambda: entry.ready, timeout=10.0), "builder never promoted the cache file"
 
-        # The consumer's own instance hasn't necessarily noticed yet (it only
-        # checks on the next get_frame() call) -- drive one more frame and
-        # confirm it switched over.
+        # The consumer's own instance may not have noticed yet, because it
+        # checks on the next get_frame call. Drive one more frame and confirm
+        # it switched over.
         reader.get_frame(1)
         assert reader.is_cache_complete(), "consumer must adopt the promoted cache on its next get_frame() call"
         assert reader.cap is None, "the now-unneeded source capture must be released on switch-over"
@@ -136,40 +117,34 @@ def check_builder_promotes_while_consumer_plays_from_source() -> None:
     print("PASS: consumer plays from source until the detached builder promotes, then switches over")
 
 
-def check_plays_from_source_in_forced_window() -> None:
-    """check_builder_promotes_while_consumer_plays_from_source guards
-    its from-source assertion behind `if not entry.ready:` -- on a fast
-    machine the tiny-frame builder promotes before the consumer's first
-    get_frame(), so the assertion is skipped and the "plays from source while
-    building" claim passes vacuously.
+def check_plays_from_source_forced_window() -> None:
+    """The sibling check guards its from-source assertion behind a ready
+    test, and on a fast machine the tiny-frame builder promotes first, so
+    that assertion is skipped.
 
-    Force the window deterministically with a test seam instead of hoping the
-    builder loses the race: monkeypatch _run_builder with a wrapper that
-    blocks on a barrier until the test has driven a from-source read, THEN
-    runs the real builder. Inside that held window entry.ready is guaranteed
-    False, so the from-source assertion runs UNCONDITIONALLY -- it can no
-    longer be skipped."""
+    A wrapper around _run_builder blocks on a barrier until a from-source
+    read has run, then runs the real builder. Inside that window entry.ready
+    is False, so the from-source assertion always runs."""
     fixtures.install_stub_globals()
-    # Distinctive frame count/size so this source's md5 -- and thus its cache
-    # filename -- can't collide with any other check's video in the shared
-    # data dir (install_stub_globals reuses one DATA_PATH per process; a
-    # byte-identical video would md5 to an already-promoted cache path,
-    # leaving entry.ready True and starting no builder to hold).
+    # A distinctive frame count and size, so this source's md5, and its
+    # cache filename, cannot collide with another check's video in the shared
+    # data dir. A byte-identical video would md5 to an already-promoted cache
+    # path, leaving entry.ready True and starting no builder to hold.
     video_path = os.path.join(gl.DATA_PATH, "forced_window.mp4")
     _make_test_video(video_path, n_frames=57, size=(176, 132))
     size = (56, 56)
 
     real_run_builder = mp4_tile_cache._run_builder
-    hold = threading.Event()          # test -> builder: you may proceed
-    builder_entered = threading.Event()  # builder -> test: I'm holding
+    hold = threading.Event()          # the check lets the builder proceed
+    builder_entered = threading.Event()  # the builder reports that it holds
 
     def _held_run_builder(entry, source_path, out_size, saturation):
-        # Announce we're in the builder thread but have not yet promoted, then
-        # block here so the consumer is guaranteed to see entry.ready == False
-        # for its first reads. Bounded wait so a bug can't wedge the suite.
+        # Announce the builder thread before it promotes, then block, so the
+        # consumer sees entry.ready False for its first reads. The wait is
+        # bounded, so a defect cannot wedge the suite.
         builder_entered.set()
         if not hold.wait(timeout=15):
-            return  # test never released us -- fail loud via the assertions
+            return  # never released, so the assertions report it
         real_run_builder(entry, source_path, out_size, saturation)
 
     mp4_tile_cache._run_builder = _held_run_builder
@@ -178,14 +153,14 @@ def check_plays_from_source_in_forced_window() -> None:
         try:
             entry = reader._registry_entry
 
-            # The builder thread must have started and parked in our hold.
+            # The builder thread must have started and parked in the hold.
             assert builder_entered.wait(timeout=5), "builder thread never started"
-            # Deterministically inside the window: not promoted yet.
+            # Inside the window, so nothing is promoted yet.
             assert entry.ready is False, "forced window invariant: builder must not have promoted yet"
 
-            # UNCONDITIONAL from-source assertions (no `if not entry.ready`
-            # guard): the consumer must decode straight from source and must
-            # not have adopted a cache that does not exist yet.
+            # These from-source assertions run unconditionally. The consumer
+            # must decode straight from the source and must not have adopted
+            # a cache that does not exist yet.
             first_frame = reader.get_frame(0)
             assert first_frame is not None, "consumer must decode from source inside the forced window"
             assert not reader.is_cache_complete(), (
@@ -202,15 +177,14 @@ def check_plays_from_source_in_forced_window() -> None:
             )
 
             # Release the builder and let it promote, then confirm the
-            # consumer switches over on its next get_frame() -- the tail the
-            # original check already covered, re-verified here end to end.
+            # consumer switches over on its next get_frame call.
             hold.set()
             assert fixtures.wait_until(lambda: entry.ready, timeout=10.0), "builder never promoted after release"
             reader.get_frame(1)
             assert reader.is_cache_complete(), "consumer must adopt the promoted cache on its next get_frame()"
             assert reader.cap is None, "the source capture must be released on switch-over"
         finally:
-            hold.set()  # ensure the builder is never left parked
+            hold.set()  # never leave the builder parked
             mp4_tile_cache.release(reader)
     finally:
         mp4_tile_cache._run_builder = real_run_builder
@@ -240,9 +214,9 @@ def check_release_to_zero_closes_captures() -> None:
     assert key not in mp4_tile_cache._registry, "registry entry must be dropped once refcount reaches 0"
     assert r2.cap is None and r2._cache_cap is None, "a released reader's captures must be closed"
 
-    # A fresh acquire after full release must work cleanly (no stale state
-    # left behind by the dropped entry) -- either finds the promoted file
-    # from the earlier builder or starts a fresh one.
+    # A fresh acquire after a full release must work cleanly, with no stale
+    # state behind. It finds the earlier builder's promoted file or starts a
+    # fresh builder.
     r3 = mp4_tile_cache.acquire(video_path, size, 1.0)
     try:
         assert r3.get_frame(0) is not None
@@ -252,7 +226,7 @@ def check_release_to_zero_closes_captures() -> None:
     print("PASS: release to refcount zero closes captures and drops the registry entry")
 
 
-def check_decode_failure_during_build_clamps_and_releases() -> None:
+def check_decode_failure_clamps_and_releases() -> None:
     fixtures.install_stub_globals()
     video_path = os.path.join(gl.DATA_PATH, "bogus_source.mp4")
     _make_bogus_video(video_path)
@@ -262,9 +236,9 @@ def check_decode_failure_during_build_clamps_and_releases() -> None:
     builder = mp4_tile_cache.KeyVideoCache(video_path, size, 1.0, cache_path=cache_path, is_builder=True)
     try:
         assert builder.n_frames == 0, "an unreadable source must report zero frames, not raise"
-        # Force a decode attempt anyway (mirrors _run_builder calling
-        # get_frame(last_frame_index + 1) once more before it notices
-        # n_frames <= 0) -- must clamp and release, never raise, never hang.
+        # Force a decode attempt, as _run_builder does once more before it
+        # notices n_frames is not positive. It must clamp and release, and
+        # must never raise or hang.
         payload = builder.get_frame(0)
         assert payload is None
         assert not builder.is_cache_complete()
@@ -279,7 +253,7 @@ def check_decode_failure_during_build_clamps_and_releases() -> None:
     print("PASS: decode failure during build clamps n_frames and releases the capture")
 
 
-def check_cache_videos_disabled_starts_no_builder() -> None:
+def check_disabled_cache_starts_no_builder() -> None:
     fixtures.install_stub_globals(app_settings={"performance": {"cache-videos": False}})
     video_path = os.path.join(gl.DATA_PATH, "disabled.mp4")
     _make_test_video(video_path, n_frames=15, size=(120, 90))
@@ -291,7 +265,7 @@ def check_cache_videos_disabled_starts_no_builder() -> None:
         entry = mp4_tile_cache._registry[key]
         assert entry.builder_thread is None, "cache-videos=false must never start a builder"
 
-        # Direct source decode must still work (permanent uncached playback).
+        # A direct source decode must still work, as uncached playback.
         for i in range(5):
             assert reader.get_frame(i) is not None
         assert not reader.is_cache_complete(), "with no builder, the reader must never see a promoted cache"
@@ -302,20 +276,17 @@ def check_cache_videos_disabled_starts_no_builder() -> None:
 
 
 def check_saturation_key_and_path_agree() -> None:
-    """The registry key's saturation component and the
-    cache-file suffix must be pure functions of the SAME rounding. With the
-    old split (`round(sat, 2)` for the key, `int(round(sat * 100))` for the
-    suffix) two acquires whose raw factors round to the same key could share
-    one _TileCacheEntry while the second reader targeted a file the entry's
-    builder never writes -- permanent uncached playback plus a per-frame
-    stat on the never-appearing file."""
+    """The registry key's saturation component and the cache-file suffix must
+    be pure functions of one rounding. Two roundings let two acquires share
+    one entry while the second reader targets a file the builder never
+    writes, which costs uncached playback and a per-frame stat."""
     fixtures.install_stub_globals()
     video_path = os.path.join(gl.DATA_PATH, "sat_agreement.mp4")
     _make_test_video(video_path, n_frames=10, size=(120, 90))
     size = (48, 48)
 
-    # Property: whatever the registry rounds a raw factor to must map to the
-    # same file suffix the raw factor itself maps to.
+    # Whatever the registry rounds a raw factor to must map to the same file
+    # suffix the raw factor itself maps to.
     for raw in (1.0, 1.004, 0.996, 1.0049, 1.005, 0.005, 1.3, 1.25, 2.675, 0.999, 1.001):
         key = mp4_tile_cache._registry_key(video_path, size, raw)
         assert mp4_tile_cache.sat_suffix(key[2]) == mp4_tile_cache.sat_suffix(raw), (
@@ -324,7 +295,7 @@ def check_saturation_key_and_path_agree() -> None:
             f"raw -> {mp4_tile_cache.sat_suffix(raw)!r}"
         )
 
-    # End to end: a second consumer whose raw factor lands in an existing
+    # End to end, a second consumer whose raw factor lands in an existing
     # entry's bucket must target the file that entry's builder wrote.
     r1 = mp4_tile_cache.acquire(video_path, size, 1.0)
     try:
@@ -347,19 +318,17 @@ def check_saturation_key_and_path_agree() -> None:
     print("PASS: registry key and cache-file suffix always agree on the saturation bucket")
 
 
-def check_missing_shared_cache_degrades_and_self_heals() -> None:
-    """Degrade/self-heal: if the registry claims a
-    shared cache is ready but the file cannot be opened (deleted behind the
-    registry's back), the reader must keep playing from the source, and
-    after a bounded number of failed adoption attempts must invalidate the
-    entry (so a future acquire() starts a fresh builder) and detach (so it
-    stops stat-ing the missing file on every frame)."""
+def check_missing_shared_cache_self_heals() -> None:
+    """When the registry claims a shared cache is ready but the file cannot
+    be opened, the reader keeps playing from the source. After a bounded
+    number of failed adoptions it invalidates the entry, so a later acquire
+    starts a fresh builder, and detaches from the missing file."""
     fixtures.install_stub_globals()
     video_path = os.path.join(gl.DATA_PATH, "vanishing.mp4")
     _make_test_video(video_path, n_frames=20, size=(120, 90))
     size = (48, 48)
 
-    # Build + promote once, then drop the registry entry (file stays on disk).
+    # Build and promote once, then drop the registry entry. The file stays.
     r0 = mp4_tile_cache.acquire(video_path, size, 1.0)
     entry0 = r0._registry_entry
     assert fixtures.wait_until(lambda: entry0.ready, timeout=10.0), "builder never promoted"
@@ -367,11 +336,11 @@ def check_missing_shared_cache_degrades_and_self_heals() -> None:
     mp4_tile_cache.release(r0)
     assert os.path.isfile(path)
 
-    # Deterministic re-creation of the race: an entry that stat'ed the file
-    # as ready, whose file then vanishes before a reader can adopt it.
+    # A deterministic re-creation of the race. The entry stat'ed the file as
+    # ready, and the file then vanished before a reader could adopt it.
     entry = mp4_tile_cache._TileCacheEntry(path)
     assert entry.ready
-    entry.builder_thread = threading.Thread(target=lambda: None)  # finished-builder stand-in
+    entry.builder_thread = threading.Thread(target=lambda: None)  # a finished builder
     os.remove(path)
 
     reader = mp4_tile_cache.KeyVideoCache(video_path, size, 1.0, cache_path=path, is_builder=False)
@@ -390,11 +359,10 @@ def check_missing_shared_cache_degrades_and_self_heals() -> None:
 
 
 class _HandoffLock:
-    """Context-manager drop-in for Mp4FrameCache.lock that widens the race
-    window deterministically: when the designated frame thread RELEASES the
-    lock, it blocks until close() has fully run on another thread. If the
-    decoded payload is published outside the lock (the bug), the frame
-    thread's tail then re-retains the frame close() just dropped."""
+    """A drop-in for Mp4FrameCache.lock that widens the race window. When the
+    designated frame thread releases the lock, it blocks until close() has
+    run on another thread. A payload published outside the lock then
+    re-retains the frame close() just dropped."""
 
     def __init__(self):
         self._inner = threading.Lock()
@@ -414,11 +382,10 @@ class _HandoffLock:
         return False
 
 
-def check_close_does_not_retain_last_payload() -> None:
-    """get_frame() used to publish `last_payload` after
-    releasing the lock, so a close() that ran in that window had its
-    `last_payload = None` overwritten -- one decoded frame retained for the
-    life of the (supposedly closed) cache object."""
+def check_close_drops_last_payload() -> None:
+    """get_frame must publish last_payload under the lock. A publish after
+    the release lets a close() in that window have its None overwritten,
+    which retains one decoded frame for the life of the closed cache."""
     fixtures.install_stub_globals()
     video_path = os.path.join(gl.DATA_PATH, "close_race.mp4")
     _make_test_video(video_path, n_frames=10, size=(120, 90))
@@ -434,7 +401,7 @@ def check_close_does_not_retain_last_payload() -> None:
     frame_thread.start()
     assert lock.frame_thread_released.wait(timeout=5.0), "frame thread never released the cache lock"
     cache.close()          # clears last_payload under the lock
-    lock.close_done.set()  # only now may get_frame's tail run
+    lock.close_done.set()  # only now may get_frame's tail run on
     frame_thread.join(timeout=5.0)
     assert not frame_thread.is_alive(), "frame thread wedged"
 
@@ -447,8 +414,8 @@ def check_close_does_not_retain_last_payload() -> None:
 
 
 def check_md5_memo_bounded() -> None:
-    """The (path, size, mtime) -> md5 memo grew one entry
-    per source-file version forever; it must be a small bounded LRU."""
+    """The memo from (path, size, mtime) to md5 must be a small bounded LRU,
+    rather than one entry per source-file version forever."""
     fixtures.install_stub_globals()
     original_cap = mp4_tile_cache._MD5_MEMO_MAX
     mp4_tile_cache._MD5_MEMO_MAX = 8
@@ -466,7 +433,7 @@ def check_md5_memo_bounded() -> None:
             memo_len = len(mp4_tile_cache._md5_memo)
         assert memo_len <= 8, f"memo must stay bounded, has {memo_len} entries"
 
-        # Eviction must never affect correctness -- an evicted key simply
+        # Eviction never affects correctness, because an evicted key
         # re-hashes.
         import hashlib
         expected = hashlib.md5(bytes([0]) * 64).hexdigest()
@@ -482,14 +449,14 @@ def main() -> None:
     fixtures.start_watchdog(WATCHDOG_SECONDS, label="scenario_tile_cache")
 
     check_shared_file_one_builder()
-    check_builder_promotes_while_consumer_plays_from_source()
-    check_plays_from_source_in_forced_window()
+    check_builder_promotes_during_playback()
+    check_plays_from_source_forced_window()
     check_release_to_zero_closes_captures()
-    check_decode_failure_during_build_clamps_and_releases()
-    check_cache_videos_disabled_starts_no_builder()
+    check_decode_failure_clamps_and_releases()
+    check_disabled_cache_starts_no_builder()
     check_saturation_key_and_path_agree()
-    check_missing_shared_cache_degrades_and_self_heals()
-    check_close_does_not_retain_last_payload()
+    check_missing_shared_cache_self_heals()
+    check_close_drops_last_payload()
     check_md5_memo_bounded()
 
     print("PASS: scenario_tile_cache")

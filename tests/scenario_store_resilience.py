@@ -1,26 +1,10 @@
 """
-Regression test for "the store fails to load/display" -- the two backend
-failure modes that blanked the page, exercised WITHOUT network:
+Regression test for the two backend failure modes that blanked the store.
 
-1. process_store_data used to let ONE raising store entry kill the whole
-   catalog; the exception then died in the page's @log.catch load(),
-   leaving the spinner up forever. Now each prepare_* future is collected
-   individually and filtered -- the healthy entries survive.
-
-2. get_remote_file(force_refetch=True) had no fallback: a failed fetch
-   (offline, or raw.githubusercontent 429 rate limiting -- observed live on
-   2026-07-08) returned NoConnectionError even when a perfectly good cached
-   copy existed, turning a throttled catalog fetch into an error page /
-   silently dropped items. Now it serves the cached copy, bounded by the
-   entry's FETCHED age (the "date" field is a last-use clock that every read
-   renews, so it cannot bound staleness).
-
-Also pinned here:
-3. request_from_url calls must overlap up to the fetch limiter's cap --
-   otherwise the catalog's prepare_* tasks serialize behind each
-   request's latency (measured as a 30s+ store spinner on a cold cache).
-4. prepare_plugin must list a plugin WITHOUT an image when only its
-   thumbnail fetch fails.
+process_store_data collects each prepare_* future on its own and filters, so
+one raising entry cannot kill the catalog. get_remote_file with force_refetch
+falls back to the cached copy, bounded by the entry's fetched age. Fetches
+overlap up to the limiter's cap, and a failed thumbnail lists without image.
 """
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -35,7 +19,7 @@ from src.backend.Store.store_result import StoreFetchError
 
 
 class Item:
-    """Stands in for PluginData -- process_store_data filters by data_class."""
+    """Stands in for PluginData. process_store_data filters by data_class."""
     def __init__(self, name):
         self.name = name
 
@@ -78,21 +62,21 @@ def test_remote_file_falls_back_to_cache() -> None:
     def fetch_fail(url):
         raise StoreFetchError(url, "429 rate limit")
 
-    # Seed the cache through a successful force_refetch...
+    # Seed the cache through a successful force_refetch.
     sb.request_from_url = fetch_ok
     first = sb.get_remote_file(repo, "Plugins.json", "main", force_refetch=True)
     assert first == '[{"cached": "catalog"}]'
 
-    # ...then fail every subsequent fetch (e.g. 429 rate limit).
+    # Then fail every later fetch, as a 429 rate limit does.
     sb.request_from_url = fetch_fail
     second = sb.get_remote_file(repo, "Plugins.json", "main", force_refetch=True)
     assert second == '[{"cached": "catalog"}]', (
         f"failed refetch must serve the cached copy, got {second!r}"
     )
 
-    # With no cached copy at all, the failure now propagates as a raise -- the
-    # fetch layer raises, and get_remote_file re-raises only a genuine
-    # no-cache failure (the stale-cache path above still returns bytes).
+    # With no cached copy the failure propagates as a raise. The fetch layer
+    # raises, and get_remote_file re-raises only a genuine no-cache failure,
+    # because the stale-cache path above still returns bytes.
     try:
         sb.get_remote_file(repo, "Missing.json", "main", force_refetch=True)
         raise AssertionError("uncached failure must raise StoreFetchError")
@@ -122,7 +106,7 @@ def test_fallback_respects_content_age() -> None:
     date0 = sb.store_cache.files[key]["date"]
     time.sleep(0.05)
 
-    # A plain cached read renews only the last-use clock, never the fetched one.
+    # A plain cached read renews the last-use clock, never the fetched one.
     cached = sb.get_remote_file(repo, "AgeBound.json", "main")
     assert cached == "fresh-content"
     assert sb.store_cache.files[key]["fetched"] == fetched0, (
@@ -131,12 +115,12 @@ def test_fallback_respects_content_age() -> None:
     )
     assert sb.store_cache.files[key]["date"] >= date0
 
-    # Failed refetch with fresh content: served from cache.
+    # A failed refetch with fresh content is served from the cache.
     sb.request_from_url = fetch_fail
     assert sb.get_remote_file(repo, "AgeBound.json", "main", force_refetch=True) == "fresh-content"
 
-    # Failed refetch with content older than the bound: refused -- and a refusal
-    # with no fresh cache is now a raise, not a returned sentinel.
+    # A failed refetch with content older than the bound is refused, and a
+    # refusal with no fresh cache raises.
     sb.store_cache.files[key]["fetched"] = time.time() - (StoreCache.DAYS_TO_KEEP * 24 * 3600 + 60)
     sb.store_cache.set_files(sb.store_cache.files)
     try:
@@ -210,11 +194,9 @@ def test_fetches_run_concurrently() -> None:
         sb_module.http_client.get = real_get
 
     assert all(isinstance(r, FakeResponse) for r in results)
-    # Liveness/non-serialization ceiling, deliberately generous: what this
-    # proves is that the 10 x 0.2s blocking fetches did NOT serialize behind
-    # the limiter (fully serial would be >=2.0s). Any ceiling comfortably
-    # under 2.0s preserves that proof; 1.8s buys headroom against a loaded
-    # CI runner without ever admitting a serialized run (flake hardening).
+    # A generous non-serialization ceiling. Ten 0.2s blocking fetches take
+    # 2.0s or more when serialized, so any ceiling below that proves they
+    # overlapped. 1.8s leaves headroom for a loaded runner.
     assert elapsed < 1.8, (
         f"10 x 0.2s fetches took {elapsed:.2f}s -- fetches are "
         f"serializing (fully serial would be >=2.0s)"

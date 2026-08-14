@@ -1,48 +1,9 @@
-"""Scenario: the fetched-not-yet-activated window in the page cache.
+"""The fetched-not-yet-activated window in the page cache.
 
-get_page() hands back a Page that nothing references yet: it is not any
-controller's active_page, not a screensaver-pending page, and the caller has
-not reached its load_page() call. Cache pressure in that window used to tear
-the page down anyway -- its action objects gutted and its cache slot popped --
-so the caller activated a corpse and the next fetch minted a duplicate Page
-for the same (controller, path).
-
-An ownership pin closes it: every fetch reserves what it returns, eviction
-refuses to tear down anything reserved, and the reservation is retired when
-the page is installed on its deck. The reservation is deliberately bounded to
-ONE per deck: a caller can abandon a fetched page or raise before activating
-it, and a bound is the only release that does not depend on such a caller
-behaving. So an abandoned fetch costs one unevictable page on that deck until
-its next fetch or load, never an accumulating leak.
-
-Legs:
-  1. fetch-then-pressure: the fetched page survives, is not gutted, and a
-     re-fetch returns the SAME object (no twin mint).
-  2. abandoned fetches do not accumulate: N fetches abandoned by an exception
-     leave at most one page unevictable, and eviction reclaims the rest.
-  3. installing the page retires its reservation (the release itself, pinned
-     against being dropped).
-  4. a page deferred by the screensaver keeps its reservation across the
-     stash, because the hand-off back is a window of its own.
-  5. bracketed work is counted, not flagged: overlapping brackets on one page
-     cannot end each other's protection early, unmatched releases are clamped
-     rather than driving the count negative, and a bracket whose body raises
-     still releases.
-  6. the screensaver hand-off end to end: the deferred page survives cache
-     pressure in the gap between hide() popping it and the load installing
-     it, with the stash's own reservation already retired by a later fetch.
-  7. the tick loop's bracket releases its page even when the tick body
-     raises -- the second bracket site, which cannot use the context manager.
-  8. deleting a page that a deck is holding as its screensaver-pending change
-     retires that deck's reservation: the request is dropped, so nothing will
-     ever install the page and no other release names it.
-  9. deleting the last page retires it too, on the branch where there is no
-     replacement to install -- installing a page is what normally retires a
-     reservation, and that branch installs nothing.
-
-Legs 1-2 and 8-9 run on lightweight stub controllers plus the REAL
-PageManagerBackend over gl, the pattern scenario_eviction_revalidate.py uses.
-Legs 3-5 need a real DeckController: the releases live on the load path.
+get_page hands back a Page that nothing references yet, so an ownership pin
+covers that window. Eviction spares a reserved page, and installing the page
+retires the reservation. One reservation per deck bounds an abandoned fetch
+to one unevictable page, retired by that deck's next fetch or load.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
@@ -64,9 +25,9 @@ class StubController:
 
 
 def reset_world() -> None:
-    """Isolate a leg: legs share the singleton page manager, so a prior leg's
-    controllers and cached pages would otherwise inflate `total` and displace
-    this leg's evictions."""
+    """Isolate a leg. The legs share the singleton page manager, so a prior
+    leg's controllers and cached pages would inflate total and displace this
+    leg's evictions."""
     gl.deck_manager.deck_controller.clear()
     gl.page_manager.pages.clear()
     gl.page_manager._loads_in_flight.clear()
@@ -79,9 +40,9 @@ def fresh_controller(serial: str) -> StubController:
 
 
 def arm(page) -> None:
-    """Inject a sentinel action object: the seeded pages carry no actions, so
-    this is what makes a teardown observable (clear_action_objects empties
-    every state dict)."""
+    """Inject a sentinel action object. The seeded pages carry no actions, so
+    this is what makes a teardown observable, because clear_action_objects
+    empties every state dict."""
     page.action_objects["sentinel"] = {"0x0": {0: {0: object()}}}
 
 
@@ -89,10 +50,8 @@ def actions_alive(page) -> bool:
     return bool(page.action_objects.get("sentinel"))
 
 
-# ---------------------------------------------------------------------------
-# Leg 1: a page fetched but not yet activated survives eviction pressure, is
-# not gutted, and is still the cache's page for its key.
-# ---------------------------------------------------------------------------
+# Leg 1. A page fetched but not yet activated survives eviction pressure,
+# stays whole, and is still the cache's page for its key.
 def leg_fetched_page_survives_pressure() -> int:
     reset_world()
     controller = fresh_controller("pin-fetch")
@@ -105,8 +64,8 @@ def leg_fetched_page_survives_pressure() -> int:
     fillers = [gl.page_manager.get_page(seed_page(f"PinFiller{i}"), controller)
                for i in range(2)]
 
-    # The page under test: fetched LAST, so this is exactly the state a caller
-    # is in between `page = get_page(...)` and `controller.load_page(page)`.
+    # The page under test is fetched last, so this is the state a caller sits
+    # in between get_page and load_page.
     target_path = seed_page("PinTarget")
     target = gl.page_manager.get_page(target_path, controller)
     arm(target)
@@ -114,9 +73,9 @@ def leg_fetched_page_survives_pressure() -> int:
         print("FAIL(1-setup): the cache was not seeded")
         return 1
 
-    # total = 4, budget 1 -> excess 3, and exactly 3 entries are evictable
-    # (everything but the active page). Without a pin the fetched page is one
-    # of them: born evictable, referenced by nobody the cache can see.
+    # With total 4 and budget 1 the excess is 3, and 3 entries are evictable.
+    # Without a pin the fetched page is one of them, because the cache sees no
+    # reference to it.
     gl.page_manager.max_pages = 1
     gl.page_manager.clear_old_cached_pages()
 
@@ -130,16 +89,16 @@ def leg_fetched_page_survives_pressure() -> int:
               "from the cache")
         return 1
 
-    # And the consequence the caller sees: a re-fetch must be the SAME object.
-    # A twin Page for one (controller, path) means two sets of action objects
-    # registering live event handlers for one key.
+    # The caller then sees the consequence. A re-fetch must return the same
+    # object, because a twin Page for one (controller, path) registers two
+    # sets of live event handlers for one key.
     again = gl.page_manager.get_page(target_path, controller)
     if again is not target:
         print("FAIL(1): re-fetching the evicted page minted a twin Page for "
               "one (controller, path)")
         return 1
 
-    # Non-vacuous: the pressure was real -- the unreserved fillers went.
+    # The pressure was real, because the unreserved fillers went.
     survivors = set(gl.page_manager.pages.get(controller, {}))
     if any(f.json_path in survivors for f in fillers):
         print("FAIL(1): no eviction happened at all -- the guard is vacuous")
@@ -149,13 +108,10 @@ def leg_fetched_page_survives_pressure() -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Leg 2: abandoned fetches are bounded, not accumulated. A caller that raises
-# between the fetch and the load never runs a release, so the bound is the
-# only thing standing between this and a cache that fills with unevictable
-# pages: one reservation per deck, retired by that deck's next fetch.
-# ---------------------------------------------------------------------------
-def leg_abandoned_fetches_do_not_accumulate() -> int:
+# Leg 2. Abandoned fetches are bounded, not accumulated. A caller that raises
+# between the fetch and the load runs no release, so the bound of one
+# reservation per deck is what stops the cache filling with pinned pages.
+def leg_abandoned_fetches_bounded() -> int:
     reset_world()
     controller = fresh_controller("pin-abandon")
     gl.page_manager.max_pages = 100
@@ -172,8 +128,8 @@ def leg_abandoned_fetches_do_not_accumulate() -> int:
         except RuntimeError:
             pass
 
-    # total = 4, budget 1 -> excess 3. Only the newest fetch is still
-    # reserved, so two of the three abandoned pages must go.
+    # With total 4 and budget 1 the excess is 3. Only the newest fetch is
+    # still reserved, so two of the three abandoned pages must go.
     gl.page_manager.max_pages = 1
     gl.page_manager.clear_old_cached_pages()
 
@@ -186,8 +142,8 @@ def leg_abandoned_fetches_do_not_accumulate() -> int:
               f"one per fetch")
         return 1
 
-    # And the last one is not special either: the deck's next fetch retires
-    # its reservation, so it becomes evictable like the rest.
+    # The last one is not special. The deck's next fetch retires its
+    # reservation, so it becomes evictable like the rest.
     gl.page_manager.max_pages = 100
     gl.page_manager.get_page(seed_page("AbandonNext"), controller)
     gl.page_manager.max_pages = 1
@@ -202,11 +158,8 @@ def leg_abandoned_fetches_do_not_accumulate() -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Leg 3: installing the page releases the reservation. This is the release
-# itself under test, so nothing else may retire the reservation in between --
-# no second fetch, which would retire it by the bound instead.
-# ---------------------------------------------------------------------------
+# Leg 3. Installing the page releases the reservation. Nothing else may
+# retire it in between, so this leg makes no second fetch.
 def leg_install_releases_reservation(controller) -> int:
     pins = gl.page_manager.pins
     page = gl.page_manager.get_page(seed_page("PinInstall"), controller)
@@ -224,12 +177,9 @@ def leg_install_releases_reservation(controller) -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Leg 4: the screensaver hand-off. A page change while the screensaver shows
-# is stashed, not installed, so its reservation must NOT be released there --
-# the stash and the reservation together are what carry it until hide() gets
-# to install it for real.
-# ---------------------------------------------------------------------------
+# Leg 4. The screensaver hand-off. A page change while the screensaver shows
+# is stashed, not installed, so its reservation must survive. The stash and
+# the reservation together carry the page until hide() installs it.
 def leg_screensaver_pending_keeps_reservation(controller) -> int:
     pins = gl.page_manager.pins
     page = gl.page_manager.get_page(seed_page("PinPending"), controller)
@@ -259,11 +209,9 @@ def leg_screensaver_pending_keeps_reservation(controller) -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Leg 5: bracketed work is counted, not flagged. The tick loop and a key
-# gesture bracket the same page routinely; with a flag the first release ends
-# the protection the second is still relying on.
-# ---------------------------------------------------------------------------
+# Leg 5. Bracketed work is counted, not flagged. The tick loop and a key
+# gesture bracket the same page routinely, and with a flag the first release
+# ends the protection the second still relies on.
 def leg_brackets_are_counted(controller) -> int:
     pins = gl.page_manager.pins
     page = gl.page_manager.get_page(seed_page("PinBracket"), controller)
@@ -288,8 +236,8 @@ def leg_brackets_are_counted(controller) -> int:
               f"holders left over")
         return 1
 
-    # Unmatched releases are clamped: they must not drive the count negative,
-    # where a later real holder's pin would read as already released.
+    # Unmatched releases clamp at zero. A negative count would make a later
+    # holder's pin read as already released.
     controller.mark_page_ready_to_clear(True, page)
     controller.mark_page_ready_to_clear(True, page)
     controller.mark_page_ready_to_clear(False, page)
@@ -299,11 +247,9 @@ def leg_brackets_are_counted(controller) -> int:
         return 1
     controller.mark_page_ready_to_clear(True, page)
 
-    # A bracket whose body raises must still release. A count, unlike the flag
-    # it replaced, does not heal on the next bracket: one skipped release pins
-    # the page for the life of the process, and a caller that swallows the
-    # traceback (an emulated press dispatched on the GTK loop) repeats it
-    # every time.
+    # A bracket whose body raises must still release. A count does not heal
+    # on the next bracket, so one skipped release pins the page for the life
+    # of the process, once per raising call.
     base = pins.count(page)
     for _ in range(3):
         try:
@@ -321,14 +267,11 @@ def leg_brackets_are_counted(controller) -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Leg 6: the screensaver hand-off, driven end to end. hide() pops the pending
-# page under the load lock and installs it after releasing that lock, so in
-# between the page is neither pending nor active. The stash's own reservation
-# does not cover it either: this deck fetched again while the screensaver was
-# up (window cycling does exactly that), which retires the older reservation.
-# The re-reservation hide() takes at the pop is all that is left.
-# ---------------------------------------------------------------------------
+# Leg 6. The screensaver hand-off, end to end. hide() pops the pending page
+# under the load lock and installs it after releasing that lock, so in between
+# the page is neither pending nor active. A second fetch during the
+# screensaver retires the stash's own reservation, which leaves only the
+# re-reservation hide() takes at the pop.
 def leg_screensaver_handoff_survives_pressure(controller) -> int:
     saver = controller.screen_saver
     deferred = gl.page_manager.get_page(seed_page("PinHandoff"), controller)
@@ -340,12 +283,12 @@ def leg_screensaver_handoff_survives_pressure(controller) -> int:
         if controller._screensaver_pending_page is not deferred:
             print("FAIL(6-setup): the page change was not deferred")
             return 1
-        # Another fetch on this deck, exactly as window cycling produces:
-        # the deferred page's own reservation is retired by it.
+        # Another fetch on this deck, as window cycling produces. It retires
+        # the deferred page's own reservation.
         gl.page_manager.get_page(seed_page("PinHandoffOther"), controller)
 
-        # Squeeze the cache in the hand-off gap: after hide() has popped the
-        # pending page, before the follow-up installs it.
+        # Squeeze the cache in the hand-off gap, after hide() popped the
+        # pending page and before the follow-up installs it.
         real_followup = saver._hide_followup
 
         def pressure_then_install(*args, **kwargs):
@@ -377,21 +320,18 @@ def leg_screensaver_handoff_survives_pressure(controller) -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Leg 7: the tick loop's bracket is a hand-written pair rather than a `with`,
-# because the liveness probe other scenarios hang off it counts both calls. So
-# its release lives in a `finally`: a tick body that raises would otherwise
-# leave the page it marked pinned for good. Driven on a throwaway deck,
-# because the raise ends that deck's ticking.
-# ---------------------------------------------------------------------------
+# Leg 7. The tick loop brackets by hand rather than with a context manager,
+# because the liveness probe other scenarios hang off it counts both calls.
+# Its release lives in a finally, so a tick body that raises still releases.
+# A throwaway deck runs this, because the raise ends that deck's ticking.
 def leg_tick_bracket_releases_on_error() -> int:
     pins = gl.page_manager.pins
     controller = fixtures.make_headless_controller(serial="pin-tick",
                                                    page_name="PinTickHome")
     try:
         page = controller.active_page
-        # A clean baseline: the active page carries no reservation once it is
-        # installed, but the tick loop brackets it on its own clock.
+        # A clean baseline. The active page carries no reservation once it is
+        # installed, and the tick loop brackets it on its own clock.
         if page is None or not fixtures.wait_until(lambda: pins.count(page) == 0):
             print("FAIL(7-setup): the deck's page never settled unpinned")
             return 1
@@ -399,9 +339,9 @@ def leg_tick_bracket_releases_on_error() -> int:
         def boom():
             raise RuntimeError("a tick body blew up")
 
-        # Restored as soon as the tick thread is gone: the media thread reads
-        # the same states, and its log.catch would swallow this on every
-        # frame for as long as the injection stands.
+        # Restore as soon as the tick thread is gone. The media thread reads
+        # the same states, and its log.catch would swallow this on every frame
+        # for as long as the injection stands.
         patched = [i for input_list in controller.inputs.values()
                    for i in input_list]
         originals = [i.get_active_state for i in patched]
@@ -430,25 +370,17 @@ def leg_tick_bracket_releases_on_error() -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Legs 8-9: deleting a page retires the deck's outstanding fetch on the two
-# branches of remove_page that install nothing in its place. Installing a page
-# is what normally retires a reservation, so a branch that never installs one
-# leaves the deleted page reserved -- unevictable on that deck until it
-# happens to fetch again, and the fetch it is reserving is a page whose file
-# has just been removed.
-#
-# The two branches are mutually exclusive per controller (the pending drop
-# `continue`s before the active-page handling), so each leg exercises exactly
-# one release and stays red for exactly one deleted line.
-# ---------------------------------------------------------------------------
+# Legs 8 and 9. Deleting a page retires the deck's outstanding fetch on the
+# two branches of remove_page that install nothing in its place. Installing a
+# page is what normally retires a reservation, so such a branch would leave
+# the deleted page reserved and unevictable. The two branches are mutually
+# exclusive per controller, so each leg drives exactly one release.
 def reservation_of(controller):
     """The deck's outstanding fetch, resolved. None when it has none.
 
-    Reaching into the table on purpose: `count` says the page is not held any
-    more, this says the deck is no longer reserving it -- a release that
-    unpinned without retiring the entry would leave a stale deck->page slot
-    for a later release to unpin a second time."""
+    This reads the reservation table directly. count reports that the page is
+    no longer held, and this reports that the deck no longer reserves it. A
+    release that unpins without retiring the entry leaves a stale slot."""
     reference = gl.page_manager.pins._reservations.get(controller)
     return reference() if reference is not None else None
 
@@ -459,9 +391,9 @@ def leg_delete_pending_page_retires_reservation() -> int:
     pins = gl.page_manager.pins
     gl.page_manager.max_pages = 100
 
-    # The deck is showing something else; the doomed page is fetched LAST, so
-    # it is the deck's one outstanding reservation -- the state load_page's
-    # screensaver deferral leaves behind (leg 4 pins that it is kept there).
+    # The deck shows something else and the doomed page is fetched last, so
+    # it is the deck's one outstanding reservation. Leg 4 pins that the
+    # screensaver deferral keeps it there.
     controller.active_page = gl.page_manager.get_page(seed_page("RmPendingHome"),
                                                       controller)
     doomed_path = seed_page("RmPendingDoomed")
@@ -503,11 +435,10 @@ def leg_delete_last_page_retires_reservation() -> int:
         print("FAIL(9-setup): the page is not the deck's outstanding fetch")
         return 1
 
-    # The branch under test is "no page left to switch to". Every other leg
-    # seeds pages into the shared data dir, so the emptiness has to be stated
-    # here rather than arranged on disk; the deck has no default page, so
-    # remove_page takes the fallback and finds this list empty once it has
-    # taken the doomed path out of it.
+    # The branch under test is "no page left to switch to". Other legs seed
+    # pages into the shared data dir, so this states the emptiness instead of
+    # arranging it on disk. The deck has no default page, so remove_page takes
+    # the fallback and finds the list empty.
     real_get_pages = gl.page_manager.get_pages
     gl.page_manager.get_pages = lambda *args, **kwargs: [doomed_path]
     try:
@@ -532,7 +463,7 @@ def main() -> int:
 
     rc = 0
     rc |= leg_fetched_page_survives_pressure()
-    rc |= leg_abandoned_fetches_do_not_accumulate()
+    rc |= leg_abandoned_fetches_bounded()
     rc |= leg_delete_pending_page_retires_reservation()
     rc |= leg_delete_last_page_retires_reservation()
 

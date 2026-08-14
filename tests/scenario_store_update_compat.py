@@ -1,19 +1,10 @@
 """
-Regression test -- auto-update could replace an installed plugin
-with an incompatible version, exercised WITHOUT network:
+Auto-update must not replace an installed plugin with an incompatible build.
 
 When no compatible version exists, prepare_plugin pins the newest
-INCOMPATIBLE commit and marks the entry is_compatible=False (so the store
-can still list it in the incompatible section). get_plugins_to_update
-compared only local_sha != commit_sha with no compatibility filter, so
-startup auto-update (update_everything -> update_all_plugins) uninstalled a
-working plugin and installed a build pinned for a different app major. The
-store UI had the same hole: such plugins showed install state 2 ("update
-available") and the update button ran the same unguarded install.
-
-The contract is now: get_plugins_to_update skips (and reports) entries with
-is_compatible False, and PluginPreview.get_install_state_for reads an
-installed-but-incompatibly-outdated plugin as state 1 (installed), never 2.
+incompatible commit and marks the entry is_compatible False, so the store can
+still list it. get_plugins_to_update skips and reports such an entry, and
+get_install_state_for reads it as installed rather than update-available.
 """
 
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
@@ -25,7 +16,7 @@ from src.windows.Store.StoreData import PluginData
 
 
 def _make_backend() -> StoreBackend:
-    sb = StoreBackend.__new__(StoreBackend)  # skip __init__ (spawns a fetch thread)
+    sb = StoreBackend.__new__(StoreBackend)  # skip __init__, which spawns a fetch thread
     from src.backend.Store.StoreCache import StoreCache
     sb.store_cache = StoreCache()
     return sb
@@ -96,9 +87,9 @@ def test_update_all_plugins_never_installs_incompatible() -> None:
 
 
 def test_install_state_for_incompatible_update_reads_installed() -> None:
-    """The store UI derives the install button from the same verdict: an
-    installed plugin whose only newer pinned version is incompatible must
-    read 'installed' (1), never 'update available' (2)."""
+    """The store UI derives the install button from the same verdict. An
+    installed plugin whose only newer pinned version is incompatible reads
+    as installed, never as update-available."""
     from src.windows.Store.Plugins.PluginPage import PluginPreview
 
     state_for = PluginPreview.get_install_state_for

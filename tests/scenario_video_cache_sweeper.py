@@ -1,18 +1,10 @@
 """
-Unit-tier scenario for the startup video-cache sweep
-(video_cache_sweeper.py), covering two strands:
+Unit-tier scenario for the startup video-cache sweep.
 
-  (a) a cache whose source video is referenced ONLY from a plugin's own
-      settings JSON (settings/plugins/<id>/settings.json) must survive the
-      sweep -- the old scan only read deck settings and pages, so these
-      were deleted while their in-process registry entries said ready=True.
-  (b) a cache file a live tile-cache registry entry points at must survive
-      the sweep even when the reference scan can't see its source; once the
-      last consumer releases it (and nothing references it), it is swept.
-  (c) stale .satNNN saturation variants of a still-referenced video are
-      swept; the variant matching a deck's CURRENT display.saturation and
-      the unsuffixed default cache are kept.
-  (d) regression guard: unreferenced caches are still swept.
+A cache whose source is referenced only from a plugin's settings JSON
+survives, and so does one a live tile-cache registry entry points at. A stale
+.satNNN variant of a still-referenced video is swept, while the variant
+matching the deck's current saturation and the unsuffixed cache are kept.
 """
 import json
 import os
@@ -135,7 +127,7 @@ def check_stale_sat_variants_swept() -> None:
     print("PASS: stale saturation variants of referenced videos are swept, current+default kept")
 
 
-def check_out_of_range_saturation_protects_clamped_variant() -> None:
+def check_out_of_range_saturation_protects_variant() -> None:
     """A persisted display.saturation outside the
     valid [1.0, 1.5] range (corruption or a hand-edit) is clamped by the
     runtime before it derives a cache filename, so playback writes the
@@ -183,7 +175,7 @@ def check_tmp_age_gate() -> None:
     young = _seed_cache_file("keys_64x64", "deadbeef.tmp.mp4")
     old = _seed_cache_file("keys_64x64", "cafebabe.tmp.mp4")
     # Age `old` well past the 24h gate; leave `young` at its just-written
-    # mtime (now). Determinism: the gate compares mtime to a fixed threshold,
+    # mtime (now). Determinism. The gate compares mtime to a fixed threshold,
     # not to wall-clock jitter -- push `old` a full hour past the boundary.
     old_mtime = time.time() - (video_cache_sweeper.TMP_MAX_AGE_S + 3600)
     os.utime(old, (old_mtime, old_mtime))
@@ -205,15 +197,12 @@ def check_tmp_age_gate() -> None:
 
 
 def check_legacy_dir_sweep_idempotent() -> None:
-    """Legacy-dir sweep idempotence. The two legacy top-level dirs
-    (`single_key/`, `key: <n>/`) that the deleted key_video_cache.py's
-    JPEG-per-frame format wrote are UNCONDITIONALLY dead -- removed even when
-    the source video's hash is still referenced, because nothing can decode
-    those frames anymore. Assert: (1) both are removed on first sweep even
-    with a referenced stem, (2) a normal layout dir with the same referenced
-    content survives (the legacy sweep is scoped to the two dir shapes only),
-    (3) a SECOND sweep is a clean no-op (idempotent -- os.listdir stops
-    finding them)."""
+    """Legacy-dir sweep idempotence.
+
+    The two legacy top-level dirs the old JPEG-per-frame format wrote are
+    dead whatever else holds, so they go even when the source video's hash is
+    still referenced. A normal layout dir with the same referenced content
+    survives, and a second sweep is a clean no-op."""
     # Reference a video so its hash is in `referenced`; the legacy dirs must
     # STILL be swept despite that (their frames are dead regardless).
     video_path = os.path.join(gl.DATA_PATH, "legacy_referenced_video.mp4")
@@ -246,7 +235,7 @@ def check_legacy_dir_sweep_idempotent() -> None:
         "legacy dir shapes only"
     )
 
-    # Idempotence: a second sweep with the legacy dirs already gone must be a
+    # Idempotence. A second sweep with the legacy dirs already gone must be a
     # clean no-op -- must not raise, and must not touch the survivor.
     video_cache_sweeper.sweep_stale_video_caches()
     assert os.path.isfile(survivor), "a second sweep must remain a no-op over the surviving current cache"
@@ -255,15 +244,15 @@ def check_legacy_dir_sweep_idempotent() -> None:
 
 
 def check_entry_name_parsing() -> None:
-    """The `entry.split(".")[0]` hash parse and the per-branch name
-    dispatch. Assert the EXACT split across every branch in one dir:
+    """The entry.split(".")[0] hash parse and the per-branch name dispatch,
+    asserted as the exact split across every branch in one dir:
       - `.cache` legacy pickle -> swept (unreadable format).
       - `<hash>.satNNN.mp4` -> hash parsed from `split(".")[0]`, so a
         referenced video's CURRENT-suffix variant is kept while a stale-suffix
         one is swept -- isolating that the hash (not the whole filename) is
         what's matched against `referenced`.
       - a garbage/non-cache name (no recognized extension) -> left untouched
-        (the sweep's final `else: continue`).
+        (the sweep's final `else. Continue`).
     """
     video_path = os.path.join(gl.DATA_PATH, "name_parse_video.mp4")
     _make_test_video(video_path)
@@ -274,7 +263,7 @@ def check_entry_name_parsing() -> None:
     # ".sat110", which NO deck seeded by this scenario produces (earlier legs
     # leave decks at 1.3/1.5 on disk in the shared decks dir; the sweep reads
     # ALL of them). This isolates the parse contract from cross-leg deck
-    # state: only the hash match + suffix membership decide kept vs swept.
+    # state. Only the hash match + suffix membership decide kept vs swept.
     decks_dir = os.path.join(gl.DATA_PATH, "settings", "decks")
     os.makedirs(decks_dir, exist_ok=True)
     with open(os.path.join(decks_dir, "NAMEPARSEDECK.json"), "w") as f:
@@ -313,7 +302,7 @@ def main() -> None:
     check_plugin_settings_reference_protects_cache()
     check_live_registry_entry_protects_cache()
     check_stale_sat_variants_swept()
-    check_out_of_range_saturation_protects_clamped_variant()
+    check_out_of_range_saturation_protects_variant()
     check_tmp_age_gate()
     check_legacy_dir_sweep_idempotent()
     check_entry_name_parsing()

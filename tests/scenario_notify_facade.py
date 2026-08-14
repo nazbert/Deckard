@@ -1,34 +1,10 @@
 """
-Pins the gl.notify facade and the send_notification threading fix
-that sits under it.
+Pins the gl.notify facade and the send_notification threading contract.
 
-Before the facade, every caller that wanted to tell the user something
-carried its own guard: some checked `gl.app`, some checked `main_win`, some
-marshalled onto the main thread and some did not, and none of them checked
-whether the window was actually VISIBLE -- a toast raised while the app sat
-hidden in the tray went onto an overlay nobody was looking at, replacing a
-desktop notification the user would have seen.
-
-Guards:
-  1. From a worker thread with a visible main window, info()/error() reach
-     show_info_toast/show_error_toast -- and touch NOTHING until the main
-     context is drained (no GTK work on the caller's thread).
-  2. A main window that exists but is not visible falls back to the desktop
-     notification, with the error/info icon and the caller's title (or the
-     app name when the caller gave none).
-  3. An app with no main_win at all falls back the same way.
-  4. Before gl.app exists, delivery is queued on gl.app_loading_finished_tasks
-     -- the list App.on_activate drains on the main thread -- and lands once
-     that drain happens.
-  5. The routing decision is made on the main thread: the facade must not
-     read is_visible() at call time. Proven by flipping visibility after the
-     call but before the drain and observing the LATE value win.
-  6. App.send_notification runs its whole body on the main thread: neither
-     the settings read nor the Gio.Notification construction may happen on
-     the caller's thread (only the final super() call used to be marshalled).
-
-No GTK widgets and no display: the window and app are duck-typed, the
-GLib.idle_add trampoline and the real facade/App code under test are not.
+The facade toasts a report when the main window is visible, and sends a
+desktop notification when the window is hidden or absent. It decides on the
+main thread, queues a call made before gl.app exists, and delivers once. The
+app and the window are stubs here, with no GTK widgets and no display.
 """
 import threading
 import types
@@ -62,8 +38,8 @@ class Recorder:
         self.notifications: list[tuple[str, str, str, threading.Thread]] = []
         self.visible = visible
         if with_main_win:
-            # Not set at all when absent: App only grows .main_win in
-            # on_activate, so the attribute genuinely does not exist before it.
+            # App adds main_win in on_activate, so the attribute does not
+            # exist before that.
             self.main_win = types.SimpleNamespace(
                 is_visible=lambda: self.visible,
                 show_info_toast=lambda text: self.toasts.append(
@@ -99,8 +75,7 @@ def check_visible_window_gets_toasts(notify) -> None:
     call_from_worker(notify.error, "plugins failed to load")
     call_from_worker(notify.info, "3 assets updated")
 
-    # 1. Nothing may have happened yet -- the whole point is that the GTK
-    # work waits for the main context.
+    # Nothing happens yet. The GTK work waits for the main context.
     assert app.toasts == [], (
         f"the facade touched the window from the calling thread: {app.toasts}"
     )
@@ -124,7 +99,7 @@ def check_visible_window_gets_toasts(notify) -> None:
 
 
 def check_hidden_window_falls_back(notify) -> None:
-    # Window exists but is hidden (closed to the tray / behind onboarding).
+    # The window exists but is hidden, behind the tray or behind onboarding.
     app = Recorder(visible=False)
     gl.app = app
 
@@ -178,8 +153,8 @@ def check_pre_app_deferral(notify) -> None:
         f"drain, got {gl.app_loading_finished_tasks}"
     )
 
-    # Now do exactly what App.on_activate does: publish the app, then drain
-    # by atomic pop (this mirrors app.py -- keep the two in sync).
+    # Do what App.on_activate does. Publish the app, then drain by atomic
+    # pop. Keep this in step with app.py.
     app = Recorder(visible=True)
     gl.app = app
     while gl.app_loading_finished_tasks:
@@ -190,9 +165,8 @@ def check_pre_app_deferral(notify) -> None:
         ("error", "1 plugin failed to load -- check the logs")
     ], f"the deferred report never landed: {app.toasts}"
 
-    # A task that appends another task while the drain runs must get the
-    # nested task drained too -- the old iterate-then-clear drain silently
-    # discarded it (cleared unrun).
+    # A task that appends another task during the drain must have the nested
+    # task drained too. An iterate-then-clear drain discards it unrun.
     ran: list[str] = []
     gl.app_loading_finished_tasks.append(
         lambda: (ran.append("outer"),
@@ -208,10 +182,9 @@ def check_pre_app_deferral(notify) -> None:
 
 
 class _FlipOnAppend(list):
-    """Simulates the racing interleaving deterministically: the moment the
-    facade appends its deferred task, on_activate has already published the
-    app (and, in the drain_owns variant, drains before the facade can take
-    the task back)."""
+    """Makes the race deterministic. When the facade appends its deferred
+    task, on_activate already published the app. With drain_before_remove the
+    drain also runs before the facade can reclaim the task."""
 
     def __init__(self, app, drain_before_remove: bool = False):
         super().__init__()
@@ -219,27 +192,26 @@ class _FlipOnAppend(list):
         self._drain_before_remove = drain_before_remove
 
     def append(self, task):
-        gl.app = self._app  # on_activate's publish, racing our append
+        gl.app = self._app  # on_activate publishes here, against the append
         super().append(task)
 
     def remove(self, task):
         if self._drain_before_remove:
-            # The drain wins the race to the task: pop-and-run everything
-            # before the facade's reclaim attempt goes through.
+            # The drain wins the race. It pops and runs everything before
+            # the facade reclaims the task.
             while self:
                 self.pop(0)()
         super().remove(task)
 
 
 def check_drain_race_exactly_once(notify) -> None:
-    """The append-vs-drain TOCTOU: gl.app flips between the
-    facade's None-check and its append. Whichever side ends up owning the
-    task, the report must be delivered exactly once -- the pre-fix facade
-    stranded it in the list forever (silent loss of boot-time reports)."""
+    """In the append-and-drain race, gl.app flips between the facade's None
+    check and its append. Whichever side owns the task, the report lands
+    exactly once."""
     original_tasks = gl.app_loading_finished_tasks
 
-    # Interleaving A: the drain has already finished when the append lands.
-    # The facade must notice and reclaim the task itself.
+    # In interleaving A the drain finished before the append lands. The
+    # facade notices and reclaims the task.
     app = Recorder(visible=True)
     gl.app = None
     gl.app_loading_finished_tasks = _FlipOnAppend(app)
@@ -253,8 +225,8 @@ def check_drain_race_exactly_once(notify) -> None:
             ("error", "boot-window report")
         ], f"reclaimed delivery wrong or missing: {app.toasts}"
 
-        # Interleaving B: the drain pops the task before the facade's
-        # reclaim. The reclaim must back off -- exactly one delivery, not two.
+        # In interleaving B the drain pops the task before the reclaim. The
+        # reclaim backs off, so exactly one delivery happens.
         app2 = Recorder(visible=True)
         gl.app = None
         gl.app_loading_finished_tasks = _FlipOnAppend(app2, drain_before_remove=True)
@@ -269,11 +241,10 @@ def check_drain_race_exactly_once(notify) -> None:
     print("PASS: append-vs-drain race delivers exactly once (both interleavings)")
 
 
-def check_decision_is_made_on_the_main_thread(notify) -> None:
-    # The window is visible when the call is made and hidden by the time the
-    # idle callback runs. If the facade decided at call time it would toast
-    # (and the toast would be invisible); deciding inside the callback picks
-    # the notification. This is the TOCTOU the per-caller guards all had.
+def check_routing_decided_on_main_thread(notify) -> None:
+    # The window is visible at call time and hidden when the idle callback
+    # runs. A decision at call time raises an invisible toast. The decision
+    # inside the callback picks the desktop notification.
     app = Recorder(visible=True)
     gl.app = app
 
@@ -290,7 +261,7 @@ def check_decision_is_made_on_the_main_thread(notify) -> None:
         f"{app.notifications}"
     )
 
-    # And the mirror case: hidden at call time, visible at delivery.
+    # The mirror case is hidden at call time and visible at delivery.
     app = Recorder(visible=False)
     gl.app = app
     call_from_worker(notify.info, "late-shown")
@@ -304,12 +275,11 @@ def check_decision_is_made_on_the_main_thread(notify) -> None:
     print("PASS: toast/notification routing is decided on the main thread")
 
 
-def check_send_notification_is_fully_idle() -> None:
-    """The facade's fallback leg calls App.send_notification from wherever the
-    idle callback runs, but plenty of code still calls it directly from worker
-    threads (asset updates, store installs). Its ENTIRE body must be
-    marshalled -- it used to read the settings and build the Gio.Notification
-    on the caller's thread and marshal only the final super() call."""
+def check_send_notification_marshalled() -> None:
+    """The facade's fallback leg calls App.send_notification from the idle
+    callback, and store installs and asset updates call it from worker
+    threads. The settings read, the Gio.Notification construction and the
+    super() call all run on the main thread."""
     from src.app import App
 
     settings_reads: list[threading.Thread] = []
@@ -319,21 +289,20 @@ def check_send_notification_is_fully_idle() -> None:
         settings_reads.append(threading.current_thread())
         return {"ui": {"show-notifications": True}}
 
-    # The stub mirrors SettingsManager's real shape: app() is an AppSettings
-    # view over get_app_settings(), so the read-tracking still observes every
-    # settings access whichever door the code under test uses.
+    # The stub matches SettingsManager's shape. app() is an AppSettings view
+    # over get_app_settings(), so the counter sees every settings read.
     from src.backend.SettingsManager import AppSettings
     gl.settings_manager = types.SimpleNamespace(
         get_app_settings=get_app_settings,
         app=lambda: AppSettings(get_app_settings()))
-    # super().send_notification resolves through the MRO to Gio.Application;
-    # patching it there keeps the real method body under test while giving us
-    # somewhere to observe the delivery (a real send needs a registered app).
+    # super().send_notification resolves through the MRO to Gio.Application.
+    # The patch there keeps the real method body under test and records the
+    # delivery. A real send needs a registered application.
     Gio.Application.send_notification = lambda self, app_id, notif: sends.append(
         threading.current_thread())
 
-    # A bare instance: App.__init__ needs a display, and none of it is needed
-    # to exercise the method's threading contract.
+    # A bare instance is enough. App.__init__ needs a display, and the
+    # threading contract does not.
     app = App.__new__(App)
 
     call_from_worker(App.send_notification, app, "dialog-error-symbolic", "T", "B")
@@ -354,7 +323,7 @@ def check_send_notification_is_fully_idle() -> None:
         f"the notification must be sent exactly once, on the main thread: {sends}"
     )
 
-    # The opt-out still works, and is also evaluated on the main thread.
+    # The opt-out also runs on the main thread.
     settings_reads.clear()
     sends.clear()
     gl.settings_manager = types.SimpleNamespace(
@@ -379,8 +348,8 @@ def main() -> None:
         check_no_main_win_falls_back(notify)
         check_pre_app_deferral(notify)
         check_drain_race_exactly_once(notify)
-        check_decision_is_made_on_the_main_thread(notify)
-        check_send_notification_is_fully_idle()
+        check_routing_decided_on_main_thread(notify)
+        check_send_notification_marshalled()
     finally:
         gl.app = None
         gl.app_loading_finished_tasks.clear()

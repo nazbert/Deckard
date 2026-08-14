@@ -1,16 +1,10 @@
 """
-Regression test for the check_required_version off-by-one:
+Regression test for the minimum-app-version gate.
 
-The store's minimum-app-version gate existed as four near-identical copies
-(StorePage, PluginPage, StorePreview, PluginPreview), every one comparing
-with a strict `min_version < app_version` -- an asset requiring EXACTLY the
-running app version was flagged incompatible (red border in the store).
-
-Now there is a single implementation (StoreData.is_min_app_version_satisfied,
-inclusive `<=`); StorePreview delegates to it and the dead/duplicate copies
-on StorePage / PluginPage / PluginPreview are gone, so the logic cannot
-diverge again. Headless: no GTK widgets are instantiated -- class-level
-checks and unbound calls only (the method never touches self).
+StoreData.is_min_app_version_satisfied is the one implementation, and it
+compares inclusively, so an asset requiring exactly the running version is
+compatible. StorePreview delegates to it. No GTK widget is built here,
+because the method never touches self.
 """
 import fixtures  # noqa: F401  (isolated --data tempdir; import first)
 import globals as gl
@@ -33,19 +27,17 @@ def test_helper_gate_semantics() -> None:
     assert is_min_app_version_satisfied(newer) is False, "newer requirement -> incompatible"
 
     # A garbage version string from a remote catalog must not raise out of
-    # the preview build; fail open like the None case, with a warning.
+    # the preview build. It fails open like the None case, with a warning.
     assert is_min_app_version_satisfied("not-a-version") is True
 
 
 def test_verdict_matches_runtime_gate_on_suffixed_versions() -> None:
-    """The displayed store badge must agree with what the runtime plugin
-    loader (PluginBase.is_minimum_version_ok) will actually decide, which
-    compares BASE versions (pre/post/dev/local suffixes stripped).
+    """The store badge must agree with the runtime plugin loader.
 
-    A raw parsed compare diverged: running a pre-release like 1.5.0-beta.15,
-    an asset pinned to the release 1.5.0 is loadable at runtime (base 1.5.0
-    == base 1.5.0) but a raw compare (1.5.0b15 < 1.5.0) flagged it
-    incompatible -- the badge lied.
+    PluginBase.is_minimum_version_ok compares base versions, with the
+    pre-release, post-release, dev and local suffixes stripped. A raw parsed
+    compare diverges on a pre-release build, where an asset pinned to the
+    release loads at runtime but reads as incompatible.
     """
     running = version.parse(gl.app_version)
     base = running.base_version  # e.g. "1.5.0" for a "1.5.0-beta.15" build
@@ -59,7 +51,7 @@ def test_verdict_matches_runtime_gate_on_suffixed_versions() -> None:
         return app_base >= min_base
 
     for minimum in (
-        base,             # the plain release: the headline divergence on a beta build
+        base,             # the plain release, where a beta build diverges
         f"{base}.post1",  # post-release suffix
         f"{base}rc1",     # pre-release suffix on the same base
         "0.0.1",
@@ -70,9 +62,9 @@ def test_verdict_matches_runtime_gate_on_suffixed_versions() -> None:
             f"(running {gl.app_version!r})"
         )
 
-    # And spell out the concrete headline case so a regression names itself:
-    # on a pre-release build, requiring exactly the release must display
-    # compatible (it loads at runtime), NOT incompatible.
+    # Spell out the concrete case, so a regression names itself. On a
+    # pre-release build, requiring exactly the release must display as
+    # compatible, because it loads at runtime.
     if running.is_prerelease:
         assert is_min_app_version_satisfied(base) is True, (
             f"on pre-release build {gl.app_version!r}, an asset requiring the "
@@ -83,8 +75,8 @@ def test_verdict_matches_runtime_gate_on_suffixed_versions() -> None:
 def test_preview_delegates_to_helper() -> None:
     from src.windows.Store.Preview import StorePreview
 
-    # The method never dereferences self -- call it unbound so no GTK widget
-    # has to exist. Equality must now pass (strict `<` returned False here).
+    # The method never dereferences self, so an unbound call needs no GTK
+    # widget. Equality must pass, where a strict comparison returns False.
     assert StorePreview.check_required_version(None, gl.app_version) is True
     assert StorePreview.check_required_version(None, None) is True
     app = version.parse(gl.app_version)

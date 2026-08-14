@@ -1,20 +1,10 @@
 """
-Integration scenario (docs/presenter-migration-plan.md §7 "Screensaver
-entry during old-page video" / "exit repaint completeness", scoped down to
-a static-image screensaver for M0 -- video screensavers are covered once
-M4's animation-counter work lands):
+Integration scenario for screensaver entry and exit with a static image.
 
-  1. ScreenSaver.show() must clear the deck (blank) before repainting with
-     the screensaver's media (image after blank, never wiped back to blank).
-  2. ScreenSaver.hide() must repaint every key with the real page's content
-     afterwards (no blank survivors).
-
-Blank-vs-content comparisons use hashes captured up front (the bootstrap
-clear() in DeckController.__init__ is deterministic) rather than "whatever
-the journal's last entry happens to be right after a call returns" --
-show()'s clear() is synchronous but its background repaint is queued and
-drained by the media thread asynchronously, so racing the exact interleaving
-would make the scenario flaky.
+ScreenSaver.show must clear the deck before it repaints with the screensaver
+media, and hide must repaint every key with the page's content. The blank
+reference hash comes from the deterministic bootstrap clear, so no assertion
+races show()'s asynchronous background repaint.
 """
 import os
 import time
@@ -29,9 +19,9 @@ def main() -> None:
     deck = fixtures.raw_deck(controller)
     key_count = controller.deck.key_count()
 
-    # DeckController.__init__'s bootstrap clear() (before load_default_page
-    # even runs) is a deterministic blank/alpha image -- capture its hash as
-    # the "blank" reference before anything else changes it.
+    # DeckController.__init__ runs a bootstrap clear before load_default_page,
+    # which paints a deterministic blank image. Capture its hash as the blank
+    # reference before anything else changes it.
     blank_hash = next(e[4] for e in deck.journal() if e[3] == "key:0")
 
     # Let the default page's real content land before measuring the
@@ -51,10 +41,9 @@ def main() -> None:
     controller.screen_saver.show()
 
     def repainted_with_screensaver_content():
-        # ALL keys must carry post-show screensaver content before the state
-        # assertions below run: bulk batches write keys one at a time (with
-        # inter-write yields since the §9.2 pacing change), so checking only
-        # key:0 would race the assertion loop against a mid-flight batch.
+        # Every key must carry post-show screensaver content before the
+        # assertions below run. A bulk batch writes keys one at a time, so a
+        # check of key:0 alone would race a mid-flight batch.
         for k in range(key_count):
             e = deck.last_op_for(f"key:{k}")
             if e is None or e[1] <= seq_before_show or e[4] in (blank_hash, pre_show_hash):
@@ -64,8 +53,8 @@ def main() -> None:
     ok = fixtures.wait_until(repainted_with_screensaver_content, timeout=5)
     assert ok, "screensaver content never repainted on every key after show()"
 
-    # Blank-then-content: somewhere after show() started, key:0 must have
-    # actually been blanked (not skipped straight from old content to new).
+    # After show() started, key:0 must have been blanked, rather than moving
+    # straight from the old content to the new.
     blank_landed = any(
         e[3] == "key:0" and e[1] > seq_before_show and e[4] == blank_hash
         for e in deck.journal()
@@ -80,7 +69,7 @@ def main() -> None:
             f"got hash {final[4]}"
         )
 
-    # --- hide(): every key must repaint with the real page's content ---
+    # On hide() every key must repaint with the real page's content.
     seq_before_hide = deck.current_seq()
     controller.screen_saver.hide()
 

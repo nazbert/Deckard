@@ -1,27 +1,19 @@
 #!/usr/bin/env python3
 """
-mem_census.py -- bucket a process's anonymous VMAs by size class, and read
-its swap footprint.
+Bucket a process's anonymous VMAs by size class, and read its swap footprint.
 
-Reads /proc/<pid>/smaps and prints a table of anonymous-mapping counts and
-total RSS *and Swap* per size-class bucket, plus the process-wide VmRSS/
-VmSwap from /proc/<pid>/status. This is the view that surfaces glibc
-arena shapes: the live process examined in docs/memory-footprint-plan.md
-§2 showed "anonymous regions of 61, 59, 57.6x3, 32MB -- the 57.6MB
-triplets are classic glibc per-thread arena shapes", which a flat RSS
-number can't distinguish from genuine content growth.
-
-Swap matters because the field symptom (README.md "2+ hour idle") was RSS
-regrowth accompanied by ~463MB VmSwap -- reading Rss alone under-reports it.
+Reads /proc/<pid>/smaps and prints anonymous-mapping counts with total RSS
+and swap per size-class bucket, plus the process-wide VmRSS and VmSwap. That
+view surfaces glibc per-thread arena shapes, which a flat RSS number cannot
+tell apart from content growth. Swap alone under-reports an idle regrowth.
 
 Usage:
     .venv/bin/python tests/soak/mem_census.py [pid]
     .venv/bin/python tests/soak/mem_census.py [pid] --max-rss-mb 800 --max-swap-mb 200
 
-If no pid is given, scans /proc for a process whose cmdline mentions
-main.py and Deckard. With --max-rss-mb / --max-swap-mb, exits 1 if
-the process-wide VmRSS / VmSwap exceeds the given threshold -- so a soak can
-fail mechanically instead of needing a human to eyeball the table.
+With no pid, this scans /proc for a process whose cmdline mentions main.py
+and Deckard. With --max-rss-mb or --max-swap-mb it exits 1 when the
+process-wide figure passes the threshold, so a soak can fail mechanically.
 """
 import argparse
 import os
@@ -73,7 +65,7 @@ def census(pid: int) -> dict[str, dict[str, int]]:
     anon regions; excludes file-backed mappings like .so's and mp4 cache
     files, and the kernel's [vdso]/[vvar]/[vsyscall]).
 
-    Swap is summed per bucket alongside Rss: an anonymous region paged out to
+    Swap is summed per bucket alongside Rss. An anonymous region paged out to
     swap has a small Rss but a large Swap, so an Rss-only view under-reports
     where the memory actually went (the field symptom this tool exists for)."""
     buckets = {label: {"count": 0, "rss_kb": 0, "swap_kb": 0} for label, _ in SIZE_CLASSES_KB}
@@ -167,7 +159,7 @@ def main() -> int:
     print()
     print(f"process-wide: VmRSS {vm['VmRSS'] / 1024:.1f} MB, VmSwap {vm['VmSwap'] / 1024:.1f} MB")
 
-    # Threshold gate (opt-in): let a soak fail mechanically on a breach.
+    # Threshold gate (opt-in). Let a soak fail mechanically on a breach.
     breaches = []
     if args.max_rss_mb is not None and vm["VmRSS"] / 1024 > args.max_rss_mb:
         breaches.append(f"VmRSS {vm['VmRSS'] / 1024:.1f} MB > --max-rss-mb {args.max_rss_mb:g}")

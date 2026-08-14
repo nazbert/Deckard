@@ -1,44 +1,10 @@
 """
-Scenario: two writers of one page file, and neither loses.
+Two writers of one page file, and neither loses.
 
-A page could be changed two ways at once. A deck's Page mutated its dict and
-saved; the page-settings writers (every override row in the Page Editor, the
-whole-page editor, the asset sweep) read the whole page FILE, changed the
-dict they got back, and wrote the whole file again. The two shared no lock
-and no dict, so an edit landing between the settings writer's read and its
-write was written over -- and once the settings writer told the page to
-re-read itself, the page's own copy was overwritten too. Whichever of the two
-edits the interleaving picked was gone from the file AND from memory, with no
-error anywhere. Every override row and every plugin `set_settings` re-rolled
-the dice.
-
-There is no read-modify-write of a page file left to lose one. Both writers
-now change the same dict -- the page's content, held once per file -- under
-the same per-file lock, and the file is written from that content by the one
-seam that writes page files at all.
-
-THE INTERLEAVING, MADE DETERMINISTIC
-
-The window is the settings write's own body, so the pause has to go where
-that write commits -- and that differs between the two mechanisms this
-closes, because the defect IS the gap between reading and writing: an
-implementation without one has no gap to pause in. Both commit points are
-hooked here and the first to fire opens the window:
-
-  * the whole-file write (`save_settings_to_file`), which is where the old
-    mechanism has just finished reading the file and is about to overwrite
-    it, and
-  * the flush seam's write, which is where the new one hands the page's
-    content to its file.
-
-The window opens, a plugin thread lands the save that `ActionCore.set_settings`
-makes, and the window closes. Afterwards BOTH edits must be on the page and
-in the file -- they touch different parts of the page, so there is no version
-of "correct" in which one of them is missing.
-
-Timers are disarmed for the whole scenario: every write here is one the test
-asks for by name, so what interleaves with what is the test's choice and not
-the wheel's.
+A deck's Page and the page-settings writers change one dict, held once per
+file, under one per-file lock. A plugin save that lands inside a settings
+write must leave both edits on the page and in the file. Timers stay
+disarmed, so every write here is one a check asks for by name.
 """
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
 
@@ -76,7 +42,7 @@ class NoTimers:
 def fresh_flush() -> None:
     """A flush seam that writes only when told, installed process-wide.
 
-    Every production caller reaches the seam through `page_flush.get()`, so
+    Every production caller reaches the seam through page_flush.get(), so
     replacing the singleton is the injection point for the whole process.
     """
     page_flush._flush = page_flush.PageFlush(scheduler=NoTimers())
@@ -88,7 +54,8 @@ def read_file(path: str) -> dict:
 
 
 def seed_page_with_action(name: str) -> str:
-    """A page carrying one action with settings -- what a plugin writes to."""
+    """A page carrying one action with settings, which is what a plugin
+    writes to."""
     path = os.path.join(gl.page_manager.PAGE_PATH, f"{name}.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
@@ -119,15 +86,14 @@ def action_settings(content: dict) -> dict:
 class Window:
     """The pause the plugin thread's save lands in.
 
-    One-shot: the settings write commits once, and the writes that follow it
-    (the pending save going out, the final settle) must not stall on a
-    handshake nobody is waiting on the other end of.
+    It fires once. The settings write commits once, and the writes that
+    follow must not stall on a handshake with nobody at the other end.
     """
 
     def __init__(self, path: str):
         self.path = os.path.realpath(path)
         self.open_now = threading.Event()      # the plugin thread may edit
-        self.edit_done = threading.Event()     # ...and has
+        self.edit_done = threading.Event()     # the plugin thread finished
         self.fired = False
         self._guard = threading.Lock()
 
@@ -163,9 +129,9 @@ def remove_commit_hooks(saved) -> None:
     page_flush.atomic_write_json = saved[1]
 
 
-def check_a_plugin_save_and_a_settings_write_both_survive(controller) -> int:
-    """The traced interleaving: a plugin thread saves the page while the
-    page's settings are being written."""
+def check_plugin_save_and_settings_write_survive(controller) -> int:
+    """A plugin thread saves the page while the page's settings are
+    written."""
     fresh_flush()
     path = seed_page_with_action("LostUpdate")
     page = gl.page_manager.get_page(path, controller)
@@ -175,11 +141,10 @@ def check_a_plugin_save_and_a_settings_write_both_survive(controller) -> int:
     install_commit_hooks(window)
 
     def plugin_thread() -> None:
-        # What ActionCore.set_settings reaches: the action's settings inside
-        # the page, changed in place, and then Page.save(). Written out here
-        # rather than called through Page.set_action_dict because that needs
-        # a live action object, which needs a plugin manager this harness
-        # deliberately has no room for.
+        # This is what ActionCore.set_settings reaches, the action's settings
+        # inside the page changed in place, then Page.save().
+        # Page.set_action_dict needs a live action object, and that needs a
+        # plugin manager this harness has no room for.
         try:
             if not window.open_now.wait(HANDOFF_TIMEOUT_S):
                 return
@@ -193,8 +158,8 @@ def check_a_plugin_save_and_a_settings_write_both_survive(controller) -> int:
     try:
         # The Page Editor's screensaver row.
         gl.page_manager.overwrite_screensaver_settings(path, enable=True)
-        # The new mechanism commits at the flush rather than inside the call
-        # above, so ask for the write the user's next page switch would.
+        # The write commits at the flush, not inside the call above, so ask
+        # for the write a page switch would.
         page_flush.get().flush_path(path)
         if not window.fired:
             window.open_now.set()
@@ -217,8 +182,8 @@ def check_a_plugin_save_and_a_settings_write_both_survive(controller) -> int:
               f"landed around it: {action_settings(on_disk)}")
         return 1
 
-    # ...and the page in memory says the same thing, which is the half that
-    # decides what the NEXT save writes.
+    # The page in memory must say the same thing, because that is what the
+    # next save writes.
     if page.dict.get("settings", {}).get("screensaver", {}).get("enable") is not True:
         print(f"FAIL: the page lost the settings write: {page.dict.get('settings')}")
         return 1
@@ -230,15 +195,12 @@ def check_a_plugin_save_and_a_settings_write_both_survive(controller) -> int:
     return 0
 
 
-def check_whole_page_replace_outlives_a_pending_edit(controller) -> int:
+def check_page_replace_outlives_pending_edit(controller) -> int:
     """The whole-page editor against an edit that has not reached the file.
 
-    Replacing a page means the caller's content wins -- but it has to win in
-    the page and in the file together. Writing the file alone left the page
-    holding what it held before, so the edit still on its timer wrote the
-    pre-replacement page straight back over the replacement, and the page
-    manager's own re-read then adopted it. No thread needed: the mark is the
-    other writer.
+    A replacement must win on the page and in the file together. A file-only
+    write leaves the page holding the old content, and the edit still on its
+    timer then writes that content back over the replacement.
     """
     fresh_flush()
     path = seed_page_with_action("ReplaceCross")
@@ -280,16 +242,11 @@ def check_whole_page_replace_outlives_a_pending_edit(controller) -> int:
 
 
 def check_no_loss_under_contention(controller) -> int:
-    """The same two writers, unsynchronised, with writes going out underneath
-    them: the file must end up saying exactly what the page says.
+    """The same two writers, unsynchronised, with writes going out under them.
 
-    An invariant net rather than a second reproducer -- the window the checks
-    above open by hand is sub-microsecond when nobody holds it open, so this
-    one is not expected to catch the defect. What it does catch is the cost
-    of closing it: three parties now contend for one lock per page file, and
-    a settings edit, a page save and a write of the same page running flat
-    out against each other must neither deadlock nor leave the file and the
-    page disagreeing.
+    Three parties contend for one lock per page file. A settings edit, a page
+    save and a write of the same page, all running flat out, must neither
+    deadlock nor leave the file and the page disagreeing.
     """
     fresh_flush()
     path = seed_page_with_action("Contention")
@@ -357,15 +314,12 @@ def check_no_loss_under_contention(controller) -> int:
     return 0
 
 
-def check_asset_sweep_edits_the_page_it_finds(controller) -> int:
+def check_asset_sweep_edits_held_page(controller) -> int:
     """Deleting an asset strips it out of a page a deck is showing.
 
-    The sweep is the third writer of a page file, and the only one that walks
-    every page rather than one: for the pages this process is holding it goes
-    through the page, and for the rest it still reads and writes the file --
-    there is nothing else to hold those. The page it finds must end up
-    stripped in memory and in its file, and an edit of that page still on its
-    timer must survive being swept.
+    The sweep walks every page. It goes through the page for the ones this
+    process holds and through the file for the rest. A swept page must end up
+    stripped in memory and in its file, and a pending edit must survive.
     """
     fresh_flush()
     asset = os.path.join(gl.DATA_PATH, "asset.png")
@@ -423,9 +377,9 @@ def main() -> int:
     failures = 0
     try:
         for check in (
-            check_a_plugin_save_and_a_settings_write_both_survive,
-            check_whole_page_replace_outlives_a_pending_edit,
-            check_asset_sweep_edits_the_page_it_finds,
+            check_plugin_save_and_settings_write_survive,
+            check_page_replace_outlives_pending_edit,
+            check_asset_sweep_edits_held_page,
             check_no_loss_under_contention,
         ):
             failures += check(controller)

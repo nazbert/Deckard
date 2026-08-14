@@ -1,20 +1,10 @@
 """
-Regression test: update_all_inputs must still sync the IN-APP key previews when
-there is a background video.
+update_all_inputs must sync the in-app key previews under a background video.
 
-Before the fix, update_all_inputs() early-returned after the dials whenever
-`background.video` was set ("so as not to affect the video"), skipping every
-key. That protects the DEVICE video (the per-frame media loop paints the deck),
-but it also skipped set_ui_key_image, so opaque keys -- whose per-frame render
-the video loop ALSO skips -- were never repainted in the app. The in-app grid
-then diverged from the deck: a mix of stale and black key previews on
-video-background pages, while the device itself was correct.
-
-Headless tier: no UI is attached, so the null UIPort refuses the push and
-set_ui_key_image stores a dirty MARKER in
-ui_image_changes_while_hidden per key -- observable proof the UI push happened
-(the real GTK-side replay needs a live widget tree the harness never builds; see
-scenario_hidden_window_markers).
+An early return after the dials skips set_ui_key_image for every key, and the
+video loop skips an opaque key's per-frame render as well, so the in-app grid
+diverges from the deck. No UI is attached here, so the null port refuses each
+push and set_ui_key_image stores a dirty marker per key instead.
 """
 import fixtures
 from src.backend.DeckManagement.InputIdentifier import Input

@@ -1,32 +1,10 @@
 """
-Scenario: dying inside a DEFERRED page write costs the burst, never the page.
+Dying inside a deferred page write costs the burst, never the page.
 
-Page writes no longer happen in the mutator that made the edit -- they happen
-about a second later, on a timer thread. That moves the fsync pair off the
-GTK main thread, and it moves the crash window with it: the process can now
-die *during* a write nobody asked for at that moment. What that must cost is
-exactly the unwritten burst, and nothing else.
-
-The technique is scenario_atomic_settings' (`os.fsync` replaced with one that
-`os._exit(9)`s, in a child with its own data dir), aimed at the deferred
-write instead of an inline one. The child makes its pre-burst state durable,
-arms the trap, edits, and then does nothing at all -- so the fatal fsync can
-only come from the debounce timer firing on its own. That the child prints
-"MARKED" before dying is itself the proof the write was deferred: with an
-inline save it would have died in `save()`, before that line.
-
-Afterwards the parent inspects the child's surviving data dir:
-
-  * the page file is the complete pre-burst JSON -- not truncated, not the
-    half-serialized burst,
-  * the only residue is the writer's own never-renamed temp, under the
-    `.save-*.tmp` prefix a later write to that target reaps -- nothing
-    partial under the page's real name,
-  * `pages/backups/<page>.json`, which `get_page_data` heals a corrupt page
-    from, still holds the complete page this session found on disk. The copy
-    is taken once, before the session's first write, so a crash inside a
-    later write is not in it and cannot be half of it -- a crashed flush
-    leaves the recovery path exactly as it found it.
+A page write happens about a second after the edit, on a timer thread, so the
+process can die during a write nobody asked for. A child makes its pre-burst
+state durable, arms a fatal fsync, edits, and waits for the debounce timer.
+The parent then reads the page, the residue and the backup it left behind.
 """
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
 
@@ -62,14 +40,14 @@ def run_child() -> None:
 
     fixtures._install_integration_globals()
     path = fixtures.seed_page("Crash")
-    # The state the session opens with: what the backup taken before this
-    # session's first write has to hold afterwards.
+    # The state the session opens with. The backup taken before this
+    # session's first write must hold it afterwards.
     with open(path) as f:
         opening = json.load(f)
     page = Page(json_path=path, deck_controller=StubController("flush-crash-1"))
 
-    # Pre-burst state, made durable the ordinary way: mark, then ask for the
-    # flush like every synchronous flush site does.
+    # Make the pre-burst state durable the ordinary way. Mark the page, then
+    # ask for the flush like every synchronous flush site does.
     page.dict["flush-marker"] = "pre-burst"
     page.save()
     page_flush.get().flush_path(path)
@@ -80,9 +58,9 @@ def run_child() -> None:
     print("PRE_BURST " + json.dumps(pre_burst), flush=True)
     print("OPENING " + json.dumps(opening), flush=True)
 
-    # Armed BEFORE the edits, so there is no window in which a write could
-    # slip through: from here on the first fsync anywhere is fatal, and the
-    # pre-burst state above is the last thing that reached the disk.
+    # Armed before the edits, so no write can slip through. From here on the
+    # first fsync anywhere is fatal, and the pre-burst state above is the
+    # last thing that reached the disk.
     real_fsync = os.fsync
 
     def dying_fsync(fd):
@@ -95,7 +73,7 @@ def run_child() -> None:
         page.dict["flush-marker"] = f"burst-{i}"
         page.save()
 
-    # Reaching this line at all is the point: the edits above did not write.
+    # Reaching this line proves the edits above wrote nothing.
     print("MARKED", flush=True)
 
     # Nothing left to do but let the debounce timer come round. It fires on
@@ -148,7 +126,7 @@ def main() -> None:
         # 1. The primary is the previous complete page, byte-for-byte the
         #    state that was durable before the burst.
         with open(page_path) as f:
-            on_disk = json.load(f)   # raises -> the file was truncated, which is the point
+            on_disk = json.load(f)   # a raise here means the file was truncated
         assert on_disk == pre_burst, (
             f"the page file is no longer the pre-burst state after a crash "
             f"inside the deferred write: {on_disk}")
@@ -156,8 +134,8 @@ def main() -> None:
             "a burst edit reached the primary even though the write never "
             "completed")
 
-        # 2. Residue: the writer's own temp, nothing else. A partial file
-        #    under the page's real name is what atomicity exists to prevent.
+        # 2. The only residue is the writer's own temp. A partial file under
+        #    the page's real name is what atomicity exists to prevent.
         pages_dir = os.path.dirname(page_path)
         basename = os.path.basename(page_path)
         temps = glob.glob(os.path.join(pages_dir, f".save-{basename}.*.tmp"))
@@ -173,7 +151,7 @@ def main() -> None:
             "something quarantined the page: a crashed write must leave the "
             "primary loadable, so nothing has cause to")
 
-        # 3. The heal path is untouched: get_page_data recovers a corrupt
+        # 3. The heal path is untouched. get_page_data recovers a corrupt
         #    page from this file, and it still holds the complete page this
         #    session found on disk. The copy is taken once, before the
         #    session's first write, so the crashed write is neither in it nor

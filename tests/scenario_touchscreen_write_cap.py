@@ -1,23 +1,10 @@
 """
 Regression test for uncapped touchscreen writes.
 
-_video_write_hz used to gate ONLY background.video repaints. Dial-state
-videos and scrolling labels re-render the shared touchscreen from the
-media tick at loop FPS (30Hz), so the same HID-starvation vector the cap
-was built for (a back-to-back write flood out-racing the 20Hz HID read
-poll on the transport's single mutex -- see the field-verified
-dial-input-starvation fix) survived via a different content type.
-
-The fix rate-caps ALL touchscreen writes at the write point in
-perform_media_player_tasks, sharing the _video_write_hz budget with
-latest-wins semantics: an over-budget frame goes back into the single
-task slot and the next iteration writes the freshest composite --
-content is delayed by at most one budget window, never lost.
-
-Unit tier: the media thread is never started; the scenario drives
-perform_media_player_tasks() directly, so write counts are deterministic
-up to wall-clock elapsed (asserted against the measured window with
-margin, not a fixed count).
+Every touchscreen write is rate-capped at the write point in
+perform_media_player_tasks, on the shared _video_write_hz budget with
+latest-wins semantics. An over-budget frame goes back into the single task
+slot, so content is delayed by at most one budget window and never lost.
 """
 import time
 
@@ -68,7 +55,7 @@ def main() -> None:
     )
     print(f"PASS: flood capped ({len(writes)} writes in {elapsed:.3f}s @ {hz}Hz budget)")
 
-    # --- 2. Latest-wins: a deferred frame is delayed, never lost. ---
+    # --- 2. Latest-wins. A deferred frame is delayed, never lost. ---
     final_payload = b"\xab" * 64
     media_player.add_touchscreen_task(
         final_payload,

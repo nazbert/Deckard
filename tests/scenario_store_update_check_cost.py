@@ -1,46 +1,10 @@
 """
-Regression test -- the boot update check cost a full store browse, and
-identity by catalog sha silently stopped updating everything, exercised
-WITHOUT network:
+Regression test for the cost and the identity of the boot update check.
 
-1. update_everything() (startup auto-update, and the "update all assets"
-   action) drove the very same prepare fan-out the store WINDOW uses. For
-   every catalog entry -- installed or not -- it fetched manifest.json,
-   fetched attribution.json, downloaded the thumbnail and PIL-decoded it,
-   just to decide whether the handful of INSTALLED assets need an update.
-   Three requests and an image decode per entry, on every launch, for
-   entries the user never installed.
-
-2. Deciding instead that "an entry is installed when one of the commits it
-   lists is on disk" is wrong for the store as it is actually maintained:
-   almost every entry carries a SINGLE version key whose sha is REPLACED in
-   place when the asset is bumped. The sha an install sits on therefore
-   stops being listed at exactly the moment an update exists, so the entry
-   reads as not installed and auto-update becomes a permanent silent no-op.
-
-The link the catalog cannot supply is which repository an installed
-directory came from: entries name repositories, install directories are
-named after manifest ids. So install_* stamps the origin repository into
-the tree next to VERSION, and identity is that stamp. Installs that predate
-it are identified once through their manifest -- bounded by the number of
-installs, not the size of the catalog -- and stamped as they are.
-
-The contract is now:
-  * an update check fetches the catalog files and nothing else once the
-    installs are stamped -- no thumbnail is fetched or decoded at all, and
-    an entry that is not installed costs no request of its own;
-  * an install whose catalog sha was rewritten in place is still detected
-    and updated;
-  * a directory copied aside under another name never claims an entry, and
-    is never installed over (that download is doomed by the staged-id
-    check);
-  * two entries that share a commit resolve to their own installs;
-  * an install with no readable sha is repaired, except a symlinked one,
-    which belongs to whoever made the link;
-  * a branch-pinned entry still resolves its tip, because no version map
-    exists to match -- but not its manifest when that tip is installed;
-  * the store WINDOW's full prepare (include_images=True) is untouched, and
-    backfills the stamp for what it identifies.
+install_* stamps the origin repository into the tree beside VERSION, and
+identity is that stamp, because the catalog cannot say which repository an
+install came from. Once the installs are stamped, an update check fetches the
+catalog files and nothing else. No network is involved.
 """
 
 import io
@@ -69,8 +33,8 @@ STORE_BRANCH = "1.5.0"
 
 
 def _sha(seed: str) -> str:
-    """A 40 hex char stand-in for a commit sha, derived from a name so
-    failures name the entry they came from."""
+    """A 40 hex char stand-in for a commit sha, derived from a name, so a
+    failure names the entry it came from."""
     body = "".join(c for c in seed.lower() if c in "0123456789abcdef") or "a"
     return (body * 40)[:40]
 
@@ -78,10 +42,10 @@ def _sha(seed: str) -> str:
 class _Entry:
     """One catalog entry plus the local state that decides its verdict.
 
-    `installed` is which sha the install directory holds ("old", "new" or
-    None for not installed); `lists_old_sha` mirrors the two shapes the real
-    store produces -- one version key whose sha is replaced in place
-    (default), or a version map that still lists the older release.
+    installed names which sha the install directory holds, "old", "new" or
+    None. lists_old_sha mirrors the two shapes the real store produces, one
+    version key whose sha is replaced in place, or a map that still lists
+    the older release.
     """
 
     def __init__(self, repo: str, asset_id: str, installed: str | None = None,
@@ -93,8 +57,8 @@ class _Entry:
         self.repo = repo
         self.asset_id = asset_id
         self.url = f"https://github.com/acme/{repo}"
-        # What the ORIGIN file says, when that is not the entry's own url:
-        # a repository that was renamed or transferred leaves the tree
+        # What the ORIGIN file says, when that differs from the entry's own
+        # url. A repository that was renamed or transferred leaves the tree
         # stamped with the name it was installed under.
         self.stamped_url = stamped_url
         # Serves something that is not json where the manifest should be.
@@ -127,10 +91,9 @@ class _Entry:
         return {"url": self.url, "commits": commits}
 
     def install(self, base_dir: str, as_name: str | None = None) -> str | None:
-        """Put the entry on disk the way install_* leaves it: a directory
-        named after the asset id, holding the manifest, a VERSION file
-        stamped with the commit it was installed at, and the ORIGIN stamp
-        naming the repository it came from."""
+        """Put the entry on disk the way install_* leaves it. A directory
+        named after the asset id holds the manifest, a VERSION file stamped
+        with the commit, and the ORIGIN stamp naming the repository."""
         if self.installed is None:
             return None
         os.makedirs(base_dir, exist_ok=True)
@@ -174,7 +137,7 @@ THUMBNAIL_BYTES = _png_bytes()
 
 
 class _Answer:
-    """What request_from_url hands back: get_remote_file reads .text for a
+    """What request_from_url hands back. get_remote_file reads .text for a
     text fetch and .content for a binary one."""
 
     def __init__(self, text: str = "", content: bytes = b""):
@@ -184,7 +147,7 @@ class _Answer:
 
 class _FakeStore:
     """Serves the given catalogs, plus manifests, attributions and
-    thumbnails, from memory -- and counts every request by kind."""
+    thumbnails, from memory, and counts every request by kind."""
 
     def __init__(self, catalogs: dict):
         self.catalogs = catalogs
@@ -199,9 +162,9 @@ class _FakeStore:
         with self._lock:
             self.urls.append(url)
         path = url.split("/", 5)[-1] if url.count("/") >= 5 else url
-        # Exact filename, not a suffix: "SDPlusBarWallpapers.json" ends with
-        # "Wallpapers.json", and serving the wrong catalog for it hid a whole
-        # asset class from the count.
+        # Match the exact filename, not a suffix. "SDPlusBarWallpapers.json"
+        # ends with "Wallpapers.json", and serving the wrong catalog for it
+        # hides a whole asset class from the count.
         entries = self.catalogs.get(path.rsplit("/", 1)[-1])
         if entries is not None:
             return _Answer(text=json.dumps([e.catalog_json() for e in entries]))
@@ -210,8 +173,8 @@ class _FakeStore:
             if entry is None:
                 raise StoreFetchError(url, "not found")
             if entry.bad_manifest:
-                # What a truncated write or a proxy error page serves where
-                # json is expected.
+                # What a truncated write or a proxy error page serves in
+                # place of json.
                 with self._lock:
                     self.manifest_fetches += 1
                 return _Answer(text="<html>504 Gateway Timeout</html>")
@@ -224,8 +187,8 @@ class _FakeStore:
                 "thumbnail": "store/Thumbnail.png",
             }))
         if path.endswith("attribution.json"):
-            # Optional in the real store, so most entries 404 -- which still
-            # costs the request that this scenario is here to count.
+            # Optional in the real store, so most entries answer 404, which
+            # still costs the request this scenario counts.
             raise StoreFetchError(url, "not found")
         if path.endswith(".png"):
             with self._lock:
@@ -267,8 +230,8 @@ def _asset_dirs(sb: StoreBackend) -> tuple[str, ...]:
 
 
 def _reset_local_state() -> None:
-    """Every test starts from a known disk: no installs, no store cache
-    (a cached manifest would hide a fetch this scenario counts)."""
+    """Every check starts from a known disk, with no install and no store
+    cache. A cached manifest would hide a fetch this scenario counts."""
     sb = StoreBackend.__new__(StoreBackend)
     for base_dir in _asset_dirs(sb) + (os.path.join(gl.DATA_PATH, "checkouts"),):
         shutil.rmtree(base_dir, ignore_errors=True)
@@ -277,14 +240,14 @@ def _reset_local_state() -> None:
 
 
 def _make_backend(store: _FakeStore) -> StoreBackend:
-    sb = StoreBackend.__new__(StoreBackend)  # skip __init__ (spawns a fetch thread)
+    sb = StoreBackend.__new__(StoreBackend)  # skip __init__, which spawns a fetch thread
     from src.backend.Store.StoreCache import StoreCache
     sb.store_cache = StoreCache()
     # What __init__ would have built for the catalog fan-out.
     sb._fetch_limiter = threading.Semaphore(StoreBackend.MAX_CONCURRENT_REQUESTS)
     sb._prepare_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="store-prepare")
     sb.official_authors = []
-    # Pin the branch so the versions.json lookup is not part of the count.
+    # Pin the branch, so the versions.json lookup stays out of the count.
     sb.official_store_branch_cache = STORE_BRANCH
     sb.request_from_url = store.request_from_url
     return sb
@@ -292,8 +255,8 @@ def _make_backend(store: _FakeStore) -> StoreBackend:
 
 class _Offline:
     """Nothing in this scenario may reach the network. request_from_url is
-    stubbed per backend, but get_last_commit and download_to_file call the
-    shared session directly -- so the session itself is made to refuse."""
+    stubbed per backend, and get_last_commit and download_to_file call the
+    shared session directly, so the session itself refuses."""
 
     def __enter__(self):
         self._get = store_backend_module.http_client.get
@@ -331,9 +294,9 @@ class _CountingDecodes:
         return False
 
 
-# The fields install_* actually reads off the data object it is handed. An
-# update-check view that leaves any of them unset installs nothing (or
-# installs the wrong thing), so the stubs below refuse instead of counting.
+# The fields install_* reads off the data object it is handed. An
+# update-check view that leaves any of them unset installs nothing, or
+# installs the wrong thing, so the stubs below refuse rather than count.
 INSTALL_FIELDS = {
     "plugin": ("github", "plugin_id", "commit_sha"),
     "icon": ("github", "icon_id", "commit_sha"),
@@ -343,8 +306,8 @@ INSTALL_FIELDS = {
 
 
 def _recording_installs(sb: StoreBackend) -> list[tuple[str, str]]:
-    """Stubs every install_* to record (asset id, commit sha) after
-    asserting the data object carries everything the real one dereferences."""
+    """Stubs every install_* to record (asset id, commit sha), after it
+    asserts the data object carries what the real one dereferences."""
     installed: list[tuple[str, str]] = []
 
     def record(kind: str, data, ok):
@@ -372,10 +335,10 @@ def _stub_globals(**kwargs) -> None:
     gl.lm = SimpleNamespace(get_custom_translation=lambda translations: None)
 
 
-# 6 uninstalled + 2 installed plugins, plus a smaller spread of the other
-# three asset classes. The outdated ones carry the shape the real store
-# produces: ONE version key whose sha was replaced in place, so the sha the
-# install sits on is no longer listed anywhere in the catalog.
+# Six uninstalled and two installed plugins, plus a smaller spread of the
+# other three asset classes. The outdated ones carry the shape the real store
+# produces, one version key whose sha was replaced in place, so the installed
+# sha is no longer listed anywhere in the catalog.
 def _main_catalogs() -> dict:
     plugins = [_Entry(f"Uninstalled{i}Plugin", f"com_acme_Uninstalled{i}Plugin") for i in range(6)]
     plugins += [
@@ -411,7 +374,7 @@ def _install_catalogs(sb: StoreBackend, catalogs: dict) -> None:
             entry.install(base_dir)
 
 
-def test_update_everything_stays_off_the_network_for_uninstalled_entries() -> None:
+def test_update_check_skips_uninstalled() -> None:
     _stub_globals()
     _reset_local_state()
 
@@ -435,9 +398,8 @@ def test_update_everything_stays_off_the_network_for_uninstalled_entries() -> No
         f"{store.image_fetches} image fetches, {store.image_decodes} image decodes"
     )
 
-    # The identity regression: every outdated entry here had its sha
-    # replaced in place under the same version key, which is what the real
-    # store does on a bump.
+    # Every outdated entry here had its sha replaced in place under the same
+    # version key, which is what the real store does on a bump.
     assert isinstance(n_updated, Ok) and n_updated.value == 3, (
         f"the three outdated installed assets must be updated -- an install "
         f"whose sha the catalog replaced in place is still that install, "
@@ -476,11 +438,11 @@ def test_update_everything_stays_off_the_network_for_uninstalled_entries() -> No
     )
 
 
-def test_backup_directory_never_claims_the_entry() -> None:
+def test_backup_directory_never_claims() -> None:
     """A directory copied aside carries the same ORIGIN stamp as the real
-    install. It must never be the one an entry resolves to: its name is not
-    the id its manifest claims, so installing over it would download an
-    archive on every launch only for the staged-id check to refuse it."""
+    install, and must never be the one an entry resolves to. Its name is not
+    the id its manifest claims, so an install over it downloads an archive
+    that the staged-id check then refuses."""
     _stub_globals()
     _reset_local_state()
 
@@ -502,7 +464,7 @@ def test_backup_directory_never_claims_the_entry() -> None:
         f"the copy kept aside must never be installed over, got {installed}"
     )
 
-    # And with ONLY the copy present there is nothing safe to update.
+    # With only the copy present there is nothing safe to update.
     _reset_local_state()
     store = _FakeStore(catalogs)
     sb = _make_backend(store)
@@ -516,10 +478,10 @@ def test_backup_directory_never_claims_the_entry() -> None:
     )
 
 
-def test_two_entries_sharing_a_commit_resolve_to_their_own_install() -> None:
-    """A fork republished at the same commit gives two entries the same
-    sha. Identity is the repository each install came from, so each entry
-    resolves to its own directory and neither claims the other's."""
+def test_shared_commit_resolves_own_install() -> None:
+    """A fork republished at the same commit gives two entries one sha.
+    Identity is the repository each install came from, so each entry resolves
+    to its own directory and neither claims the other's."""
     _stub_globals()
     _reset_local_state()
 
@@ -546,11 +508,10 @@ def test_two_entries_sharing_a_commit_resolve_to_their_own_install() -> None:
         )
 
 
-def test_legacy_install_is_identified_once_and_then_stamped() -> None:
-    """An install made before the stamp existed is identified the old way --
-    one manifest fetch, matched against the directory names -- and stamped
-    as it is, so the cost is one fetch per surviving legacy install, once,
-    and nothing on any later launch."""
+def test_legacy_install_identified_once() -> None:
+    """An install made before the stamp existed is identified through one
+    manifest fetch, matched against the directory names, and stamped as it
+    is. The cost is one fetch per legacy install, once."""
     _stub_globals()
     _reset_local_state()
 
@@ -584,7 +545,8 @@ def test_legacy_install_is_identified_once_and_then_stamped() -> None:
     with open(origin) as f:
         assert f.read().strip() == legacy.url
 
-    # Second launch, cold store cache: the stamp answers, so nothing is fetched.
+    # On a second launch with a cold store cache the stamp answers, so
+    # nothing is fetched.
     shutil.rmtree(os.path.join(gl.DATA_PATH, "Store"), ignore_errors=True)
     store = _FakeStore(catalogs)
     sb = _make_backend(store)
@@ -599,15 +561,15 @@ def test_legacy_install_is_identified_once_and_then_stamped() -> None:
     )
 
 
-def test_symlinked_install_is_left_to_its_owner() -> None:
-    """A symlinked install points at a working tree the user manages.
-    Installing over it replaces the link with a downloaded copy, so
-    auto-update leaves it alone -- deliberately, not by accident."""
+def test_symlinked_install_left_alone() -> None:
+    """A symlinked install points at a working tree the user manages. An
+    install over it replaces the link with a downloaded copy, so auto-update
+    leaves it alone."""
     _stub_globals()
     _reset_local_state()
 
-    # A link whose target was once installed carries the stamp, so the
-    # entry resolves to it and the symlink guard is what stops the update.
+    # A link whose target was once installed carries the stamp, so the entry
+    # resolves to it and the symlink guard stops the update.
     linked = _Entry("Linked", "com_acme_Linked", installed="old", symlink=True)
     catalogs = _catalogs(plugins=[linked])
     store = _FakeStore(catalogs)
@@ -623,7 +585,7 @@ def test_symlinked_install_is_left_to_its_owner() -> None:
         f"a stamped symlinked install must not be auto-updated, got {to_update}"
     )
 
-    # An unstamped link is not a pending legacy install either: it is never
+    # An unstamped link is not a pending legacy install either. It is never
     # looked up, and nothing is written into the tree behind it.
     _reset_local_state()
     unstamped = _Entry("Linked", "com_acme_Linked", installed="old", symlink=True, stamped=False)
@@ -645,10 +607,9 @@ def test_symlinked_install_is_left_to_its_owner() -> None:
     )
 
 
-def test_install_with_unreadable_sha_is_repaired() -> None:
-    """Neither .git nor VERSION: a half-written or hand-copied tree. It
-    compares unequal to every commit, so it is reinstalled -- the repair the
-    old manifest-id identity performed and that must not be lost."""
+def test_install_unreadable_sha_repaired() -> None:
+    """A tree with neither .git nor VERSION is half-written or hand-copied.
+    It compares unequal to every commit, so it is reinstalled."""
     _stub_globals()
     _reset_local_state()
 
@@ -667,10 +628,10 @@ def test_install_with_unreadable_sha_is_repaired() -> None:
     )
 
 
-def test_branch_pinned_entry_resolves_its_tip_but_not_its_manifest() -> None:
-    """A custom plugin names a branch, not a version map, so its tip has to
-    be resolved. Identity still comes from the stamp, so the manifest that
-    would only restate the id is never fetched."""
+def test_branch_pinned_entry_resolves_tip() -> None:
+    """A custom plugin names a branch rather than a version map, so its tip
+    has to be resolved. Identity still comes from the stamp, so the manifest
+    that would only restate the id is never fetched."""
     _reset_local_state()
     _stub_globals(app_settings={
         "store": {
@@ -709,11 +670,10 @@ def test_branch_pinned_entry_resolves_its_tip_but_not_its_manifest() -> None:
     )
 
 
-def test_store_window_still_gets_the_full_prepare() -> None:
-    """The store window builds its rows from the same prepare functions
-    with include_images=True: those still fetch the manifest, the
-    attribution and the thumbnail for every entry, installed or not -- and
-    stamp what they identify, so the update check need not."""
+def test_store_window_gets_full_prepare() -> None:
+    """The store window builds its rows from the same prepare functions with
+    include_images True. Those still fetch the manifest, the attribution and
+    the thumbnail for every entry, and stamp what they identify."""
     _stub_globals()
     _reset_local_state()
 
@@ -727,7 +687,7 @@ def test_store_window_still_gets_the_full_prepare() -> None:
     with _Offline(), _CountingDecodes(store):
         result = sb.get_all_plugins()
 
-    # get_all_* is the typed read boundary now: Ok carrying the catalog list.
+    # get_all_* is the typed read boundary, an Ok carrying the catalog list.
     assert isinstance(result, Ok)
     plugins = result.value
     assert len(plugins) == len(plugins_catalog), (
@@ -753,20 +713,18 @@ def test_store_window_still_gets_the_full_prepare() -> None:
     )
 
 
-def test_one_bad_entry_does_not_abort_the_identification_pass() -> None:
-    """The pre-pass walks REMOTE data: a manifest that is not json (a
-    truncated write, a proxy error page) and a catalog whose version keys
-    are not versions both raise. It runs before the fan-out and outside its
-    collect loop, so a raise there used to abort update_everything with all
-    four legs silently doing nothing -- and every existing install is
-    unresolved on the first launch after the stamp ships, so the pass runs
-    for everyone.
+def test_bad_entry_does_not_abort_pass() -> None:
+    """The pre-pass walks remote data, so a manifest that is not json and a
+    catalog whose version keys are not versions both raise.
+
+    It runs before the fan-out and outside its collect loop, so a raise there
+    aborts update_everything with all four legs doing nothing.
     """
     _stub_globals()
     _reset_local_state()
 
     legacy = _Entry("Legacy", "com_acme_Legacy", installed="old", stamped=False)
-    # Claimed by nothing, so the walk covers the whole catalog including the
+    # Nothing claims it, so the walk covers the whole catalog, including the
     # entries that raise.
     orphan = _Entry("Orphan", "com_acme_Orphan", installed="old", stamped=False)
     broken_manifest = _Entry("BrokenManifest", "com_acme_BrokenManifest", bad_manifest=True)
@@ -794,7 +752,7 @@ def test_one_bad_entry_does_not_abort_the_identification_pass() -> None:
         "the pass state must be cleared however the pass ends"
     )
 
-    # And the orphan nothing claimed is not walked for again this session.
+    # The orphan nothing claimed is not walked for again this session.
     fetches_after_first_walk = store.manifest_fetches
     with _Offline():
         sb.update_all_plugins()
@@ -804,11 +762,10 @@ def test_one_bad_entry_does_not_abort_the_identification_pass() -> None:
     )
 
 
-def test_stamp_naming_a_repository_the_catalog_dropped_is_re_resolved() -> None:
+def test_stamp_naming_dropped_repo_re_resolved() -> None:
     """A repository that was renamed or transferred leaves the tree stamped
-    with a name no entry claims. That is the original silent-no-update shape
-    again, so such a stamp is not trusted: the install is identified through
-    the manifest like an unstamped one, and the stamp is rewritten."""
+    with a name no entry claims. Such a stamp is not trusted, so the install
+    is identified through the manifest and the stamp is rewritten."""
     _stub_globals()
     _reset_local_state()
 
@@ -833,7 +790,7 @@ def test_stamp_naming_a_repository_the_catalog_dropped_is_re_resolved() -> None:
         )
 
 
-def test_stamp_matches_the_catalog_case_insensitively() -> None:
+def test_stamp_matches_catalog_case_insensitive() -> None:
     """GitHub owner and repository names are case-insensitive, so a tree
     stamped Acme/Widget is the same install the catalog spells acme/Widget
     -- and must not be identified all over again."""
@@ -860,17 +817,17 @@ def test_stamp_matches_the_catalog_case_insensitively() -> None:
 
 def main() -> None:
     fixtures.start_watchdog(90, label="scenario_store_update_check_cost")
-    test_update_everything_stays_off_the_network_for_uninstalled_entries()
-    test_backup_directory_never_claims_the_entry()
-    test_two_entries_sharing_a_commit_resolve_to_their_own_install()
-    test_legacy_install_is_identified_once_and_then_stamped()
-    test_symlinked_install_is_left_to_its_owner()
-    test_install_with_unreadable_sha_is_repaired()
-    test_branch_pinned_entry_resolves_its_tip_but_not_its_manifest()
-    test_store_window_still_gets_the_full_prepare()
-    test_one_bad_entry_does_not_abort_the_identification_pass()
-    test_stamp_naming_a_repository_the_catalog_dropped_is_re_resolved()
-    test_stamp_matches_the_catalog_case_insensitively()
+    test_update_check_skips_uninstalled()
+    test_backup_directory_never_claims()
+    test_shared_commit_resolves_own_install()
+    test_legacy_install_identified_once()
+    test_symlinked_install_left_alone()
+    test_install_unreadable_sha_repaired()
+    test_branch_pinned_entry_resolves_tip()
+    test_store_window_gets_full_prepare()
+    test_bad_entry_does_not_abort_pass()
+    test_stamp_naming_dropped_repo_re_resolved()
+    test_stamp_matches_catalog_case_insensitive()
     print("scenario_store_update_check_cost: PASS")
 
 

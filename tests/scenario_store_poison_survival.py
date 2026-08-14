@@ -1,18 +1,10 @@
 """
-Regression test -- poison-entry survival stopped at plugins,
-exercised WITHOUT network:
+Regression test for poison-entry survival across all four preparers.
 
-prepare_plugin lists a plugin with `image = None` when only its thumbnail
-fetch fails (pinned by scenario_store_resilience), but prepare_icon,
-prepare_wallpaper and prepare_sd_plus_bar_wallpaper still returned the
-NoConnectionError -- process_store_data's `isinstance(result, data_class)`
-filter then dropped the whole pack from the tab. Under a partial 429 storm
-the Icons/Wallpapers/SD+ catalogs silently thinned out, and an all-fail page
-showed "Nothing here" instead of the connection-error page.
-
-The contract is now uniform across all four preparers: a failed
-thumbnail/asset fetch lists the entry without an image; only a failed
-MANIFEST (no id/name to list) still drops it.
+A failed thumbnail or asset fetch lists the entry with image None, and only a
+failed manifest, which leaves no id or name to list, still drops it. Under a
+partial 429 storm the catalogs must therefore keep their entries rather than
+thin out silently. No network is involved.
 """
 from types import SimpleNamespace
 
@@ -25,7 +17,7 @@ from src.windows.Store.StoreData import IconData, SDPlusBarWallpaperData, Wallpa
 
 def _make_backend() -> StoreBackend:
     from concurrent.futures import ThreadPoolExecutor
-    sb = StoreBackend.__new__(StoreBackend)  # skip __init__ (spawns a fetch thread)
+    sb = StoreBackend.__new__(StoreBackend)  # skip __init__, which spawns a fetch thread
     from src.backend.Store.StoreCache import StoreCache
     sb.store_cache = StoreCache()
     sb.official_authors = []
@@ -37,8 +29,8 @@ def _make_backend() -> StoreBackend:
 
 
 def _stub_asset_fetches(sb: StoreBackend, manifest: dict) -> None:
-    """Stubs every remote fetch a prepare_* coroutine performs, with the
-    thumbnail fetch failing like a 429/offline does."""
+    """Stubs every remote fetch a prepare_* call performs, with the thumbnail
+    fetch failing as a 429 or an offline run does."""
     def fake_manifest(url, commit):
         return dict(manifest)
 
@@ -54,7 +46,7 @@ def _stub_asset_fetches(sb: StoreBackend, manifest: dict) -> None:
     gl.lm = SimpleNamespace(get_custom_translation=lambda d: None)
 
 
-# One entry per catalog: a store-JSON item pinned to a compatible version.
+# One entry per catalog, a store-JSON item pinned to a compatible version.
 _ENTRY = {"url": "https://github.com/Example/TestPack", "commits": {"1.5.0": "abc123"}}
 _MANIFEST = {"id": "com_example_TestPack", "name": "Test Pack",
              "version": "1.0", "thumbnail": "store/thumb.png"}
@@ -98,8 +90,8 @@ def test_prepare_sd_plus_bar_wallpaper_survives_failed_thumbnail() -> None:
 
 
 def test_catalog_keeps_entry_with_failed_thumbnail() -> None:
-    """End-to-end through process_store_data: the poison entry must survive
-    NEXT TO the healthy one instead of being filtered out of the tab."""
+    """End to end through process_store_data. The poison entry must survive
+    beside the healthy one rather than be filtered out of the tab."""
     fixtures.install_stub_globals()
     sb = _make_backend()
 

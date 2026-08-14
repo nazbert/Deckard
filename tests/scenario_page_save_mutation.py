@@ -1,15 +1,10 @@
 """
-Scenario: Page.save() must persist a consistent snapshot.
+Page.save must persist a consistent snapshot.
 
-Three properties:
-  A. save() while another thread mutates page.dict must not raise
-     (`RuntimeError: dictionary changed size during iteration` used to abort
-     the dump and lose the save) and must always leave valid JSON on disk.
-  B. Stripping "object" from action entries must not mutate the LIVE dict --
-     the shallow copy() meant `del action["object"]` hit the originals.
-  C. Saves for the same json_path must serialize ACROSS Page objects (two
-     controllers showing one page each hold their own Page; the old
-     per-object semaphore never ordered their writes).
+A save while another thread mutates page.dict must not raise, and must leave
+valid JSON on disk. Stripping "object" from action entries must not touch the
+live dict. Saves for one json_path serialize across Page objects, which two
+controllers showing one page hold separately.
 """
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
 
@@ -43,8 +38,8 @@ def main() -> int:
     path = seed_page("SaveMutation")
     page = Page(json_path=path, deck_controller=StubController("save-mut-1"))
 
-    # Populate a big live dict so the serialization window is wide, with a
-    # live (non-serializable) "object" on every action like at runtime.
+    # A large live dict widens the serialization window. Every action carries
+    # a live, non-serializable "object", as it does at runtime.
     sentinel = object()
     page.dict.setdefault("keys", {})
     for i in range(1500):
@@ -52,13 +47,13 @@ def main() -> int:
             "states": {"0": {"actions": [make_action(sentinel)]}}
         }
 
-    # --- A: save under concurrent mutation ------------------------------
+    # A. Save under concurrent mutation.
     stop = threading.Event()
 
     def mutator():
-        # Batches (not single add/del pairs) so the dict's size differs from
-        # its iteration-start size for most of each GIL slice -- a lone
-        # add+del restores the size before the reader usually gets to look.
+        # Batches, not single add and delete pairs, so the dict size differs
+        # from its iteration-start size for most of each GIL slice. A lone
+        # add and delete restores the size before the reader looks.
         i = 0
         while not stop.is_set():
             batch = [f"mut-{i}-{j}x9" for j in range(25)]
@@ -73,10 +68,9 @@ def main() -> int:
     try:
         for i in range(100):
             try:
-                # save() marks; the serialization -- and so the RuntimeError
-                # this pins -- happens in the flush, asked for here so the
-                # property is checked 100 times rather than once when a timer
-                # gets round to it.
+                # save() marks the page. The serialization, and the
+                # RuntimeError this pins, happen in the flush, asked for here
+                # so every round checks the property.
                 page.save()
                 page_flush.get().flush_path(path)
             except RuntimeError as e:
@@ -87,12 +81,12 @@ def main() -> int:
         t.join(timeout=5)
 
     with open(path) as f:
-        saved = json.load(f)  # raises -> harness failure, which is the point
+        saved = json.load(f)  # a raise here means the file is not valid JSON
     if "keys" not in saved:
         print("FAIL: saved page lost its keys section")
         return 1
 
-    # --- B: live dict keeps its "object" entries -------------------------
+    # B. The live dict keeps its "object" entries.
     live_action = page.dict["keys"]["0x0"]["states"]["0"]["actions"][0]
     if "object" not in live_action:
         print("FAIL: save() stripped 'object' from the LIVE action dict (mutated original)")
@@ -101,7 +95,7 @@ def main() -> int:
         print("FAIL: 'object' leaked into the serialized page")
         return 1
 
-    # --- C: same-path saves serialize across Page objects ----------------
+    # C. Same-path saves serialize across Page objects.
     path2 = seed_page("SaveShared")
     page_a = Page(json_path=path2, deck_controller=StubController("save-shared-a"))
     page_b = Page(json_path=path2, deck_controller=StubController("save-shared-b"))
@@ -111,10 +105,9 @@ def main() -> int:
     in_critical = threading.Event()
 
     def instrument(page_obj, name):
-        # Hooked on the snapshot, which every flush takes under the save
-        # lock -- not on the backup, which is taken once per file per
-        # session, so the second flush of this one path never reaches it and
-        # there would be no second critical section left to observe.
+        # Hook the snapshot, which every flush takes under the save lock.
+        # The backup is taken once per file per session, so a second flush
+        # never reaches it and leaves no second critical section to observe.
         orig = page_obj.get_without_action_objects
 
         def probe():
@@ -133,11 +126,10 @@ def main() -> int:
     instrument(page_b, "b")
 
     def saver(page_obj, wait_for_the_other):
-        # One pending record per path, so the second marker must arrive
-        # while the first flush is ALREADY inside the critical section --
-        # otherwise the two can coalesce into a single write and there is no
-        # ordering left to observe. Gating on the first probe's entry makes
-        # that interleaving the one the test always gets.
+        # One pending record exists per path, so the second marker must
+        # arrive while the first flush is already inside the critical
+        # section. Otherwise the two coalesce into one write and leave no
+        # ordering to observe. The gate on the first probe forces that order.
         if wait_for_the_other and not in_critical.wait(timeout=10):
             raise AssertionError("the first save never reached its critical section")
         page_obj.save()
@@ -153,7 +145,7 @@ def main() -> int:
             print("FAIL: concurrent same-path save hung")
             return 1
 
-    # Critical sections may not overlap: between one page's enter and exit
+    # Critical sections may not overlap. Between one page's enter and exit
     # there must be no other page's enter.
     spans = {}
     for name, kind, ts in events:

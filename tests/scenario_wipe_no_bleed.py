@@ -1,27 +1,10 @@
 """
-Scenario (half 1 of 2): the no-bleed contract.
+The no-bleed contract, the first half of the wipe-restore behavior.
 
-Switching to a page whose key has NO action must CLEAR that slot -- the
-framework must not leave the previous page's action-owned image on a key that
-no action owns on the new page.
-
-This is the currently-CORRECT half of the wipe-restore behavior:
-a cross-page load builds a *different* action object, so any future
-stash-and-restore fix (gated on action identity) will not restore into it ->
-no bleed. Committed as an always-on regression net so that fix can't regress
-into bleeding the previous page's image.
-
-The source-page image is established via a DETERMINISTIC SEAM -- once the page
-load has settled (on_ready_finished), a direct set_media() on the now-stable
-state reliably paints the key. This avoids the racy on_ready-paint-vs-state-
-recreation timing (see scenario_wipe_restore.py) so that the
-no-bleed check is a real "image present -> must clear" transition and never
-vacuous (an image that was never established would make "no bleed" trivially
-true).
-
-Drives the REAL DeckController/Page/ControllerKey/ActionCore machinery with a
-LatchAction injected via a stub plugin_manager (fixtures helpers). Graduated
-from the untracked diag_wipe_contract.py.
+Switching to a page whose key has no action must clear that slot, so the
+previous page's action-owned image never survives. A cross-page load builds a
+different action object, so the stash-and-restore, which gates on action
+identity, never restores into it. The source image is set through a seam.
 """
 import os
 
@@ -64,7 +47,7 @@ def main() -> None:
 
         bleeds = []
         for i in range(TRIALS):
-            # Establish an action-owned image DETERMINISTICALLY: load the
+            # Establish an action-owned image DETERMINISTICALLY. Load the
             # action page, wait for it to settle, then force a fresh paint on
             # the stabilized state.
             action_page = gl.page_manager.get_page(
@@ -84,7 +67,7 @@ def main() -> None:
                 "-- the no-bleed check that follows would be vacuous"
             )
 
-            # Switch to a page whose same key has NO action: the slot must
+            # Switch to a page whose same key has NO action. The slot must
             # clear. A cross-page load builds a different action object, so
             # nothing owns the old image -> it must not survive.
             controller.load_page(empty_page, allow_reload=True)

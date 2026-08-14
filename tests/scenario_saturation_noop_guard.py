@@ -1,27 +1,10 @@
 """
-Unit-tier scenario: opening deck settings with saturation !=
-1.0 must not trigger a page reload.
+Opening deck settings at a non-default saturation must not reload the page.
 
-The settings pane's Saturation row (src/windows/mainWindow/elements/
-DeckSettings/DeckGroup.py) defers load_default() to "map", which runs AFTER
-value-changed is connected -- so set_value(<stored factor>) fires the
-handler, and DeckController.set_display_saturation() used to apply
-unconditionally: a full load_page(..., allow_reload=True) ~300ms after the
-pane maps (visible flicker + full reload cost on every settings open), for
-a value that didn't change.
-
-Drives the REAL DeckController.set_display_saturation (unbound, on a stub
-exposing exactly what it reads/calls: display_saturation, get_deck_settings,
-deck.get_serial_number, active_page, load_page) and asserts the same-value
-short-circuit:
-
-  (a) echoing the current factor is a complete no-op: no load_page call and
-      no settings write (the settings-open case).
-  (b) sub-rounding jitter (the method rounds to 2 decimals; the Gtk.Scale
-      shows 2 digits) counts as the same value.
-  (c) a real change still persists + reloads exactly once, and updates the
-      cached factor.
-  (d) a real change with no active page persists without reloading.
+The Saturation row defers load_default to "map", which runs after
+value-changed is connected, so set_value re-emits the stored factor.
+DeckController.set_display_saturation therefore short-circuits on the same
+value, and rounds to two decimals before it compares and persists.
 """
 import fixtures
 
@@ -72,7 +55,7 @@ def main() -> None:
 
     page = object()
 
-    # (a) settings-open echo: the pane re-emits the loaded value.
+    # The settings-open echo, where the pane re-emits the loaded value.
     c = _StubSetterController(current=1.3, active_page=page)
     DeckController.set_display_saturation(c, 1.3)
     assert c.load_page_calls == [], (
@@ -83,14 +66,14 @@ def main() -> None:
     )
     assert c.display_saturation == 1.3
 
-    # (b) sub-rounding jitter is the same value (the method rounds to 2
-    # decimals before comparing/persisting).
+    # Sub-rounding jitter is the same value. The method rounds to 2 decimals
+    # before it compares and persists.
     DeckController.set_display_saturation(c, 1.3000004)
     assert c.load_page_calls == [] and settings_manager.save_calls == [], (
         "sub-rounding jitter must hit the same-value short-circuit"
     )
 
-    # (c) a real change still applies exactly once.
+    # A real change still applies exactly once.
     DeckController.set_display_saturation(c, 1.4)
     assert c.load_page_calls == [(page, True)], (
         f"a real change must reload the active page once (allow_reload=True), "
@@ -100,11 +83,11 @@ def main() -> None:
     assert c.display_saturation == 1.4
     assert c._settings["display"]["saturation"] == 1.4
 
-    # ...and echoing the NEW value is again a no-op.
+    # Echoing the new value is a no-op again.
     DeckController.set_display_saturation(c, 1.4)
     assert len(c.load_page_calls) == 1 and len(settings_manager.save_calls) == 1
 
-    # (d) a real change with no active page persists without reloading.
+    # A real change with no active page persists without reloading.
     c_no_page = _StubSetterController(current=1.0, active_page=None)
     DeckController.set_display_saturation(c_no_page, 1.2)
     assert c_no_page.load_page_calls == []

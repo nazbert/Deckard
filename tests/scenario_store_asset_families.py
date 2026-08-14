@@ -1,42 +1,10 @@
-"""Equivalence matrix for the four store prepare families collapsed to one.
+"""Equivalence matrix for the four store prepare families.
 
-prepare_plugin / prepare_icon / prepare_wallpaper /
-prepare_sd_plus_bar_wallpaper are now thin wrappers over a single
-_prepare_asset, selected by an AssetTypeDescriptor. This scenario drives all
-four public wrappers through ONE identical stubbed fetch layer and asserts
-the constructed *Data field-for-field against a literal expected table -- the
-proof standard for a pure-refactor collapse is mutation-grade equivalence,
-not red->green. Both views are covered (the full store-window view with
-include_image=True, and the update-check view with include_image=False),
-plus the error legs (a failed manifest fetch raises and propagates; an
-unparseable url and a url-less plugin entry become None; no compatible version
-also becomes None, which process_store_data filters out).
-
-Two structural properties are pinned here on purpose:
-
-  * The fetch layer is stubbed as INSTANCE ATTRIBUTES (``sb.get_manifest``,
-    ``sb.get_web_image``, ``sb.get_attribution`` ...). _prepare_asset reaches
-    every one of them through ``self`` / ``getattr(self, ...)``, never a bound
-    callable captured in the descriptor -- so these stubs are honoured. The
-    image assertion IS that proof: the constructed image is exactly the object
-    the stub returned, which cannot happen if the descriptor had frozen a
-    reference to the original get_web_image.
-
-  * The literal expected tables below hard-code each type's id/name/version
-    field names. They are NOT read off the descriptor, so a descriptor whose
-    field names drift disagrees with them and the matrix goes red.
-
-The same collapse now also drives install/uninstall, get_*_to_update and
-update_all_* off one descriptor. Those legs are pinned here too: the
-five-branch update decision per type, update_all_* counting only real
-successes across both success dialects (True for plugins, 200 for the three),
-update_everything summing every leg by its public name, the per-type install
-directory and expected_id handed to download_repo, and the canonical
-asset_id/asset_name/asset_version property trio. These reddens the two
-declared descriptor mutations -- flipping an install_ok and swapping two
-base_dir_attrs.
-
-All network-free.
+prepare_plugin, prepare_icon, prepare_wallpaper and
+prepare_sd_plus_bar_wallpaper are thin wrappers over one _prepare_asset,
+selected by an AssetTypeDescriptor. All four run through one stubbed fetch
+layer, and the constructed Data is asserted field for field against a literal
+table. The same descriptor drives install, uninstall and the update legs.
 """
 import dataclasses
 import json
@@ -71,20 +39,19 @@ COMMIT_SHA = "c0ffee" + "0" * 34
 INCOMPAT_SHA = "dead" + "b" * 36
 BRANCH_SHA = "b12345" + "a" * 34
 
-# The one manifest and attribution every type is fed. version resolution keys
-# off the commit map, so the manifest's own "version" is deliberately a
-# distinct value: a collapse that confused the commit sha with the manifest
-# version would be caught here.
+# The one manifest and attribution every type is fed. Version resolution keys
+# off the commit map, so the manifest's own "version" is a distinct value and
+# a confusion between the commit sha and the manifest version shows up here.
 MANIFEST = {
     "id": "com_acme_Widget",
     "name": "Widget",
     "version": "9.9.9",
     "thumbnail": "store/Thumbnail.png",
-    # Fallbacks used only when a translation is absent; the translation stub
-    # below echoes "en", so these are shadowed and the translated values win.
+    # Fallbacks used only when a translation is absent. The translation stub
+    # below echoes "en", so the translated values win.
     "description": "long fallback (unused)",
     "short-description": "short fallback (unused)",
-    # Deliberately distinct strings so a swap of the long/short pairing shows.
+    # Distinct strings, so a swap of the long and short pairing shows.
     "descriptions": {"en": "translated LONG"},
     "short-descriptions": {"en": "translated SHORT"},
     "tags": ["util", "demo"],
@@ -102,7 +69,7 @@ IMAGE = Image.new("RGB", (4, 4), (0, 128, 255))
 
 
 # (key, wrapper method name, data_cls, id_field, name_field, version_field, is_plugin).
-# Literal -- the descriptor table is NOT consulted to build this.
+# Literal, so the descriptor table is never consulted to build this.
 TYPES = [
     ("plugin", "prepare_plugin", PluginData, "plugin_id", "plugin_name", "plugin_version", True),
     ("icon", "prepare_icon", IconData, "icon_id", "icon_name", "icon_version", False),
@@ -111,11 +78,9 @@ TYPES = [
      "id", "name", "version", False),
 ]
 
-# The install/update side of the collapse. The public method names are
-# hard-coded here, NOT read off the descriptor: a descriptor whose *_attr
-# drifts breaks the dispatch these drive and reddens the matrix. Every install
-# now answers the single Ok(None) success value -- the old True/200 dialect
-# split is gone -- so the success column is one value for all four types.
+# The install and update side. The public method names are hard-coded here
+# and never read off the descriptor, so a descriptor whose attr drifts breaks
+# the dispatch these drive. Every install answers one Ok(None) success value.
 # (key, data_cls, id_field, get_all, get_to_update, update_all, install, install_success).
 UPDATE_TYPES = [
     ("plugin", PluginData, "plugin_id", "get_all_plugins", "get_plugins_to_update",
@@ -129,14 +94,10 @@ UPDATE_TYPES = [
      "install_sd_plus_bar_wallpaper", Ok(None)),
 ]
 
-# The five update-decision branches, exercised against one fixture set per
-# type. Only the last -- installed, a newer known sha, compatible -- is offered
-# for update. The "no known target" branch (installed, commit_sha None) is
-# reachable for EVERY type -- a non-plugin entry with a "branch" key or a null
-# version map reaches it through check_entry_for_update -- but non-observable:
-# a None target can never install successfully, so skipping it (rather than
-# attempting a doomed download) leaves the count and on-disk state unchanged.
-# It is pinned for every type.
+# The five update-decision branches, against one fixture set per type. Only
+# the last one, installed with a newer known sha and compatible, is offered
+# for update. The no-known-target branch is reachable for every type but is
+# not observable, because a None target can never install successfully.
 # (tag, local_sha, commit_sha, is_compatible, offered_for_update).
 DECISION_FIXTURES = [
     ("not_installed", None, "newsha", True, False),
@@ -149,15 +110,15 @@ DECISION_FIXTURES = [
 
 def _stub_globals() -> None:
     fixtures.install_stub_globals()
-    # Echo the "en" translation so the long/short descriptions carry distinct
-    # values through _translate_descriptions -- pinning that pairing, which a
-    # None-returning stub would leave invisible.
+    # Echo the "en" translation, so the long and short descriptions carry
+    # distinct values through _translate_descriptions. A None-returning stub
+    # would leave that pairing invisible.
     gl.lm = SimpleNamespace(get_custom_translation=lambda translations: (translations or {}).get("en"))
 
 
 def _make_backend() -> StoreBackend:
-    """A backend with __init__ skipped (it spawns an authors-fetch thread) and
-    exactly the attributes the prepare path and process_store_data touch."""
+    """A backend with __init__ skipped, because it spawns an authors-fetch
+    thread, and only the attributes the prepare path touches."""
     sb = StoreBackend.__new__(StoreBackend)
     sb.store_cache = StoreCache()
     sb._fetch_limiter = threading.Semaphore(StoreBackend.MAX_CONCURRENT_REQUESTS)
@@ -175,8 +136,8 @@ def _reset_dirs(sb: StoreBackend) -> None:
 
 def _stub_fetch_layer(sb: StoreBackend, *, manifest=MANIFEST, attribution=ATTRIBUTION,
                       image=IMAGE, last_commit=BRANCH_SHA) -> None:
-    """Stub exactly the fetch layer _prepare_asset sits on, as instance
-    attributes -- the same shape every standing store scenario uses."""
+    """Stub the fetch layer _prepare_asset sits on, as instance attributes,
+    in the shape every store scenario uses."""
     sb.get_manifest = lambda url, commit: manifest
     sb.get_attribution = lambda url, commit: attribution
     sb.get_web_image = lambda url, path, branch="main": image
@@ -198,13 +159,13 @@ def _assert_data_equal(actual, expected, label: str) -> None:
 
 
 def _expected_full(data_cls, id_field, name_field, version_field, *, verified: bool):
-    """The full store-window row every type must build from MANIFEST +
-    ATTRIBUTION, differing only in the three id/name/version field names."""
+    """The full store-window row every type builds from the manifest and the
+    attribution, differing only in the three field names."""
     kwargs = {
         "github": URL,
         "descriptions": MANIFEST["descriptions"],
         "short_descriptions": MANIFEST["short-descriptions"],
-        # The translated values (echoed "en"), which win over the fallbacks.
+        # The translated values, echoed from "en", win over the fallbacks.
         "description": MANIFEST["descriptions"]["en"],
         "short_description": MANIFEST["short-descriptions"]["en"],
         "author": "acme",
@@ -232,8 +193,8 @@ def _expected_full(data_cls, id_field, name_field, version_field, *, verified: b
 
 
 def _expected_update(data_cls, id_field, *, verified: bool):
-    """The update-check row: only what get_*_to_update reads. Every display
-    field is left at the dataclass default."""
+    """The update-check row holds only what get_*_to_update reads. Every
+    display field stays at the dataclass default."""
     return data_cls(**{
         "github": URL,
         "author": "acme",
@@ -246,9 +207,9 @@ def _expected_update(data_cls, id_field, *, verified: bool):
     })
 
 
-def test_full_view_matrix_is_identical_across_types() -> None:
-    """include_image=True: all four wrappers build the same row from the same
-    manifest/attribution/thumbnail, field for field."""
+def test_full_view_matrix_identical() -> None:
+    """With include_image True, all four wrappers build the same row from the
+    same manifest, attribution and thumbnail, field for field."""
     _stub_globals()
     sb = _make_backend()
     _reset_dirs(sb)
@@ -258,14 +219,14 @@ def test_full_view_matrix_is_identical_across_types() -> None:
         actual = getattr(sb, method)(_catalog_entry(), include_image=True, verified=True)
         expected = _expected_full(data_cls, id_field, name_field, version_field, verified=True)
         _assert_data_equal(actual, expected, f"full/{key}")
-        # The image came from the instance stub, not a captured callable: this
-        # is the getattr-dispatch guarantee in one assertion.
+        # The image came from the instance stub rather than a captured
+        # callable, which is the getattr dispatch in one assertion.
         assert actual.image is IMAGE, f"full/{key}: image must be the stubbed object"
 
 
-def test_update_view_matrix_is_identical_across_types() -> None:
-    """include_image=False: the update-check row, nothing installed, field for
-    field -- and no display field is fetched or set."""
+def test_update_view_matrix_identical() -> None:
+    """With include_image False the update-check row is built field for
+    field, with nothing installed and no display field fetched or set."""
     _stub_globals()
     sb = _make_backend()
     _reset_dirs(sb)
@@ -279,7 +240,7 @@ def test_update_view_matrix_is_identical_across_types() -> None:
 
 def test_incompatible_entry_flags_but_still_builds() -> None:
     """A version map with no release for this app major flags the row
-    incompatible and pins the newest available commit -- for every type."""
+    incompatible and pins the newest available commit, for every type."""
     _stub_globals()
     sb = _make_backend()
     _reset_dirs(sb)
@@ -298,8 +259,8 @@ def test_incompatible_entry_flags_but_still_builds() -> None:
 
 
 def test_plugin_branch_arm_resolves_and_records_branch() -> None:
-    """A branch-pinned plugin entry (no version map) resolves its tip through
-    get_last_commit and carries the branch -- the plugin-only prepare arm."""
+    """A branch-pinned plugin entry with no version map resolves its tip
+    through get_last_commit and carries the branch."""
     _stub_globals()
     sb = _make_backend()
     _reset_dirs(sb)
@@ -314,9 +275,9 @@ def test_plugin_branch_arm_resolves_and_records_branch() -> None:
     )
 
 
-def test_branch_field_is_gated_by_is_plugin() -> None:
+def test_branch_field_gated_by_is_plugin() -> None:
     """check_entry_for_update resolves a branch key for any type, but only a
-    plugin row carries it -- the other three drop it, exactly as before."""
+    plugin row carries it. The other three drop it."""
     _stub_globals()
     sb = _make_backend()
     _reset_dirs(sb)
@@ -334,15 +295,15 @@ def test_branch_field_is_gated_by_is_plugin() -> None:
         assert row.branch is None, (
             f"{key} update row must not carry a branch (is_plugin gate), got {row.branch!r}"
         )
-        # The tip was still resolved for the commit target, so the gate is on
-        # the field, not the resolution.
+        # The tip is still resolved for the commit target, so the gate sits
+        # on the field rather than on the resolution.
         assert row.commit_sha == BRANCH_SHA, f"{key}: commit target still resolves"
 
 
 def test_failed_thumbnail_lists_without_image() -> None:
-    """A thumbnail fetch that fails (offline / rate-limited) must not drop the
-    row -- it is listed with image=None, for every type. This is the whole
-    reason _fetch_thumbnail exists as the single image guard."""
+    """A thumbnail fetch that fails must not drop the row. It is listed with
+    image None, for every type, which is why _fetch_thumbnail is the single
+    image guard."""
     _stub_globals()
     sb = _make_backend()
     _reset_dirs(sb)
@@ -359,11 +320,10 @@ def test_failed_thumbnail_lists_without_image() -> None:
         )
 
 
-def test_all_three_fetches_receive_the_resolved_ref() -> None:
-    """manifest, thumbnail and attribution are all fetched at the ONE resolved
-    ref -- the commit sha for a version-map entry, the branch tip for the
-    plugin branch arm. This pins ref_for_fetch, the single local that replaced
-    four `commit or branch` expressions feeding all three fetches."""
+def test_fetches_receive_resolved_ref() -> None:
+    """The manifest, thumbnail and attribution are all fetched at one
+    resolved ref, the commit sha for a version-map entry and the branch tip
+    for the plugin branch arm. This pins ref_for_fetch."""
     _stub_globals()
     sb = _make_backend()
     _reset_dirs(sb)
@@ -373,15 +333,16 @@ def test_all_three_fetches_receive_the_resolved_ref() -> None:
     sb.get_web_image = lambda url, path, branch="main": (refs["image"].append(branch), IMAGE)[1]
     sb.get_last_commit = lambda url, branch="main": BRANCH_SHA
 
-    # Version-map path: the resolved commit sha feeds all three fetches.
+    # On the version-map path the resolved commit sha feeds all three
+    # fetches.
     sb.prepare_icon(_catalog_entry(), include_image=True, verified=False)
     assert refs["manifest"] == [COMMIT_SHA], f"manifest fetched at {refs['manifest']!r}, want {COMMIT_SHA!r}"
     assert refs["attribution"] == [COMMIT_SHA], f"attribution fetched at {refs['attribution']!r}, want {COMMIT_SHA!r}"
     assert refs["image"] == [COMMIT_SHA], f"thumbnail fetched at {refs['image']!r}, want {COMMIT_SHA!r}"
 
-    # Plugin branch arm: the resolved branch TIP (a sha), not the branch name,
-    # feeds all three -- this is where `commit or branch` vs `branch or commit`
-    # diverges (commit=tip sha, branch="main" both truthy).
+    # On the plugin branch arm the resolved branch tip, a sha, feeds all
+    # three rather than the branch name. Both are truthy, so the order of a
+    # "commit or branch" expression decides which one wins.
     for bucket in refs.values():
         bucket.clear()
     sb.prepare_plugin({"url": URL, "branch": "main"}, include_image=True, verified=False)
@@ -390,11 +351,10 @@ def test_all_three_fetches_receive_the_resolved_ref() -> None:
     assert refs["image"] == [BRANCH_SHA], f"branch-arm thumbnail fetched at {refs['image']!r}, want {BRANCH_SHA!r}"
 
 
-def test_full_prepare_backfills_the_origin_stamp() -> None:
-    """A full prepare identifies an install the expensive way (its manifest),
-    so it records the origin link for the update check to reuse. An install
-    directory with no ORIGIN stamp gets one written, naming the entry's url --
-    for both an install dir and a directory-per-type resolution."""
+def test_prepare_backfills_origin_stamp() -> None:
+    """A full prepare identifies an install through its manifest, which is
+    the expensive way, so it records the origin link for the update check to
+    reuse. An install directory with no ORIGIN stamp gets one written."""
     _stub_globals()
     sb = _make_backend()
     _reset_dirs(sb)
@@ -424,8 +384,8 @@ def test_full_prepare_backfills_the_origin_stamp() -> None:
 
 def test_manifest_fetch_error_propagates() -> None:
     """A StoreFetchError from the manifest fetch propagates unchanged out of
-    every wrapper -- process_store_data's per-future collect drops just that
-    entry (the raising contract that replaced the returned sentinel)."""
+    every wrapper, so process_store_data's per-future collect drops just that
+    entry."""
     _stub_globals()
     sb = _make_backend()
     _reset_dirs(sb)
@@ -445,9 +405,9 @@ def test_manifest_fetch_error_propagates() -> None:
 
 
 def test_unparseable_url_and_missing_url_become_none() -> None:
-    """An entry whose url names no repository is dropped as None -- and the
-    url-guard now covers plugins too, so a url-less plugin entry is a
-    logged skip (None), not a KeyError."""
+    """An entry whose url names no repository is dropped as None. The url
+    guard covers plugins too, so a url-less plugin entry is a logged skip
+    rather than a KeyError."""
     _stub_globals()
     sb = _make_backend()
     _reset_dirs(sb)
@@ -459,23 +419,23 @@ def test_unparseable_url_and_missing_url_become_none() -> None:
             f"bad-url/{key}: an unparseable url must become None"
         )
 
-    # The reconciliation: plugin gained the "url" not in entry guard.
+    # The plugin arm carries the same "url not in entry" guard.
     assert sb.prepare_plugin({"commits": {COMPATIBLE_VERSION: COMMIT_SHA}},
                              include_image=True, verified=False) is None, (
         "a url-less plugin entry must be a logged skip (None), not a KeyError"
     )
 
 
-def test_no_compatible_version_is_filtered_by_process_store_data() -> None:
-    """When no version resolves at all, prepare returns None and
-    process_store_data's isinstance filter drops it, so the catalog list simply
+def test_no_compatible_version_filtered() -> None:
+    """When no version resolves, prepare returns None and
+    process_store_data's isinstance filter drops it, so the catalog list
     omits the entry."""
     _stub_globals()
     sb = _make_backend()
     _reset_dirs(sb)
     _stub_fetch_layer(sb)
-    # Force version resolution to yield nothing (both instance-stubbed, so this
-    # also re-confirms getattr dispatch reaches them).
+    # Force version resolution to yield nothing. Both are instance stubs, so
+    # this also confirms the getattr dispatch reaches them.
     sb.get_newest_compatible_version = lambda versions: None
     sb.get_newest_version = lambda versions: None
 
@@ -484,8 +444,8 @@ def test_no_compatible_version_is_filtered_by_process_store_data() -> None:
         "no resolvable version must drop the entry (prepare returns None)"
     )
 
-    # And driven through the real process_store_data, the sentinel is filtered.
-    # get_all_* now returns a StoreResult: the filtered catalog is Ok([]).
+    # Driven through the real process_store_data, the None is filtered.
+    # get_all_* returns a StoreResult, so the filtered catalog is Ok([]).
     sb.get_stores = lambda: [(URL, "main")]
     sb.fetch_and_parse_store_json = lambda url, filename, branch, n_errors=0: ([entry], n_errors)
     result = sb.get_all_icons()
@@ -494,10 +454,10 @@ def test_no_compatible_version_is_filtered_by_process_store_data() -> None:
     )
 
 
-def test_canonical_properties_map_to_per_type_fields() -> None:
-    """The asset_id/asset_name/asset_version property trio reads each type's own
-    id/name/version fields -- the single name shared backend code and log lines
-    now use instead of getattr-ing the per-type field name."""
+def test_canonical_properties_map_fields() -> None:
+    """The asset_id, asset_name and asset_version properties read each type's
+    own fields. Shared backend code and log lines use those names instead of
+    getattr on a per-type field name."""
     cases = [
         (PluginData(plugin_id="pi", plugin_name="pn", plugin_version="pv"), "pi", "pn", "pv"),
         (IconData(icon_id="ii", icon_name="in", icon_version="iv"), "ii", "in", "iv"),
@@ -514,11 +474,9 @@ def test_canonical_properties_map_to_per_type_fields() -> None:
 
 
 def test_update_decision_matrix_per_type() -> None:
-    """The five-branch update decision -- not-installed / up-to-date /
-    no-known-target / incompatible / update -- run against one fixture set for
-    every type through the real get_*_to_update. Only the compatible, newer,
-    known-sha entry is offered; the identity is read back off the canonical
-    asset_id property, pinning it too."""
+    """The five-branch update decision, run against one fixture set for every
+    type through the real get_*_to_update. Only the compatible, newer entry
+    with a known sha is offered, and its identity is read off asset_id."""
     _stub_globals()
     sb = _make_backend()
 
@@ -538,11 +496,9 @@ def test_update_decision_matrix_per_type() -> None:
 
 
 def test_update_all_counts_only_successful_installs() -> None:
-    """update_all_* counts a reinstall only when the install answers Ok -- the
-    single success value now that the True/200 dialect is gone. BOTH failure
-    legs return an Err, and an Err is TRUTHY: a `if result:` regression would
-    count one, so this pins narrowing (isinstance Err), not truthiness, as the
-    protocol -- the truthy failure is the load-bearing leg here."""
+    """update_all_* counts a reinstall only when the install answers Ok. Both
+    failure legs return an Err, and an Err is truthy, so a truthiness check
+    would count one. The protocol is narrowing on the result type."""
     _stub_globals()
     sb = _make_backend()
 
@@ -562,8 +518,8 @@ def test_update_all_counts_only_successful_installs() -> None:
             if data is _good:
                 return _s
             if data is _bhard:
-                # A TRUTHY failure -- an Err is truthy, so it is counted iff the
-                # check is truthiness rather than narrowing on Ok.
+                # A truthy failure. An Err is truthy, so a truthiness check
+                # counts it and a narrowing check does not.
                 return Err(ErrReason.INSTALL_FAILED, "404-shaped")
             return Err(ErrReason.NO_CONNECTION, "offline")
 
@@ -579,10 +535,10 @@ def test_update_all_counts_only_successful_installs() -> None:
         )
 
 
-def test_update_everything_dispatches_every_update_all_leg() -> None:
+def test_update_everything_dispatches_legs() -> None:
     """update_everything sums every class's update_all_* leg, reached by its
-    public name in ASSET_TYPES order -- pinning the loop, its order (plugins
-    reload first), and each descriptor's update_all_attr wiring."""
+    public name in ASSET_TYPES order. That pins the loop, its order with
+    plugins reloading first, and each descriptor's update_all_attr."""
     _stub_globals()
     sb = _make_backend()
 
@@ -604,11 +560,10 @@ def test_update_everything_dispatches_every_update_all_leg() -> None:
     )
 
 
-def test_install_passes_right_dir_and_expected_id_per_type() -> None:
+def test_install_passes_dir_and_expected_id() -> None:
     """Every installer hands download_repo the per-type install directory and
-    the asset id as expected_id. This is what scenario_store_b06_pack_survival
-    pins for two types, now for all four -- and it reddens a base_dir_attr swap
-    (the directory would name the wrong type's tree)."""
+    the asset id as expected_id. A swapped base_dir_attr names the wrong
+    type's tree and fails here."""
     _stub_globals()
     sb = _make_backend()
 
@@ -617,7 +572,8 @@ def test_install_passes_right_dir_and_expected_id_per_type() -> None:
     def fake_download(**kwargs):
         captured.clear()
         captured.update(kwargs)
-        # Err early-return -- keeps the plugin body off the reload path.
+        # An Err returns early, which keeps the plugin body off the reload
+        # path.
         return Err(ErrReason.NO_CONNECTION, "offline")
 
     sb.download_repo = fake_download
@@ -643,10 +599,9 @@ def test_install_passes_right_dir_and_expected_id_per_type() -> None:
         )
 
 
-def test_install_refuses_unsafe_id_and_missing_url_per_type() -> None:
-    """The three data-only installers reject a traversal id and a url-less entry
-    with Err(INVALID_ASSET), before any download -- the shared guard the
-    collapse must keep."""
+def test_install_refuses_unsafe_id_and_url() -> None:
+    """The three data-only installers reject a traversal id and a url-less
+    entry with Err(INVALID_ASSET), before any download."""
     _stub_globals()
     sb = _make_backend()
 
@@ -674,10 +629,9 @@ def test_install_refuses_unsafe_id_and_missing_url_per_type() -> None:
         )
 
 
-def test_uninstall_removes_right_dir_and_preserves_returns() -> None:
+def test_uninstall_removes_dir_keeps_returns() -> None:
     """The three data-only uninstallers rmtree the per-type directory and
-    return None, or 400 (touching nothing) for an unsafe id -- the 400-vs-None
-    contract kept byte-identical, and another base_dir_attr-swap tripwire."""
+    return None. An unsafe id returns 400 and touches nothing."""
     _stub_globals()
     sb = _make_backend()
     _reset_dirs(sb)
@@ -709,24 +663,24 @@ def test_uninstall_removes_right_dir_and_preserves_returns() -> None:
 
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_store_asset_families")
-    test_full_view_matrix_is_identical_across_types()
-    test_update_view_matrix_is_identical_across_types()
+    test_full_view_matrix_identical()
+    test_update_view_matrix_identical()
     test_incompatible_entry_flags_but_still_builds()
     test_plugin_branch_arm_resolves_and_records_branch()
-    test_branch_field_is_gated_by_is_plugin()
+    test_branch_field_gated_by_is_plugin()
     test_failed_thumbnail_lists_without_image()
-    test_all_three_fetches_receive_the_resolved_ref()
-    test_full_prepare_backfills_the_origin_stamp()
+    test_fetches_receive_resolved_ref()
+    test_prepare_backfills_origin_stamp()
     test_manifest_fetch_error_propagates()
     test_unparseable_url_and_missing_url_become_none()
-    test_no_compatible_version_is_filtered_by_process_store_data()
-    test_canonical_properties_map_to_per_type_fields()
+    test_no_compatible_version_filtered()
+    test_canonical_properties_map_fields()
     test_update_decision_matrix_per_type()
     test_update_all_counts_only_successful_installs()
-    test_update_everything_dispatches_every_update_all_leg()
-    test_install_passes_right_dir_and_expected_id_per_type()
-    test_install_refuses_unsafe_id_and_missing_url_per_type()
-    test_uninstall_removes_right_dir_and_preserves_returns()
+    test_update_everything_dispatches_legs()
+    test_install_passes_dir_and_expected_id()
+    test_install_refuses_unsafe_id_and_url()
+    test_uninstall_removes_dir_keeps_returns()
     print("scenario_store_asset_families: PASS")
 
 

@@ -1,21 +1,10 @@
 """
-Scenario: onboarding and store-page loaders must not construct GTK widgets
-on their worker threads.
+Onboarding and store loaders must not build GTK on worker threads.
 
-The trap in the store pages was subtle: `GLib.idle_add(section.append_child,
-XPreview(...))` marshals the APPEND, but the widget tree is built as the
-argument -- on the loader thread. PluginRecommendations.load() built whole
-rows on a plain thread; onboarding's install worker read CheckButton state
-directly; CustomAssetChooser.build() built the asset flow box + browse
-button on its worker.
-
-Four checks, one per site: store previews, recommendation rows, the
-onboarding selection read, and the custom-asset chooser build.
-
-Technique: the real loader methods run on a worker thread with the preview/
-row classes monkeypatched to thread-recording stubs; the main thread pumps
-the GLib context. Post-fix every construction records the main thread;
-pre-fix they record the worker.
+GLib.idle_add(section.append_child, XPreview(...)) marshals the append but
+builds the widget as its argument, on the loader thread. The four sites here
+are store previews, recommendation rows, the onboarding selection read and
+the custom-asset chooser build. Stubs record the constructing thread.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
@@ -153,8 +142,8 @@ def check_selection_read() -> int:
         read_threads.append(threading.current_thread())
         return []
 
-    # Drive the real install worker body up to the selection read, then
-    # bail out (empty selection short-circuits the install loop).
+    # Drive the real install worker body to the selection read. An empty
+    # selection short-circuits the install loop.
     page = ow_mod.Recommendations.__new__(ow_mod.Recommendations) \
         if hasattr(ow_mod, "Recommendations") else None
     holder = None
@@ -182,12 +171,10 @@ def check_selection_read() -> int:
         close=lambda *a: None,
         destroy=lambda *a: None,
     )
-    # The tail after the install loop touches more window state (the last
-    # line is GLib.idle_add(gl.app.main_win.show), and gl.app is None in this
-    # harness) -- an empty selection reaches it and raises. Swallow that here:
-    # the assertion only concerns WHERE the selection read ran, and an
-    # unswallowed raise would print a scary traceback under a PASS (thread
-    # exceptions bypass loguru and go straight to the terminal).
+    # The tail after the install loop touches more window state. The last
+    # line is GLib.idle_add(gl.app.main_win.show), and gl.app is None here.
+    # An empty selection reaches it and raises. This check asserts only where
+    # the selection read ran, so the worker swallows that raise.
     def _drive_worker():
         try:
             holder._on_start_button_click(obj)
@@ -212,8 +199,8 @@ def check_chooser() -> int:
 
     recorder = ThreadRecorder()
 
-    # The two widget trees build() constructs: the flow box (a page of
-    # AssetPreviews) and the browse button. Both must land on the main loop.
+    # build() constructs two widget trees, the flow box of asset previews
+    # and the browse button. Both must land on the main loop.
     real_flowbox = ch_mod.CustomAssetChooserFlowBox
     ch_mod.CustomAssetChooserFlowBox = recorder.make_stub_class()
 
@@ -236,15 +223,15 @@ def check_chooser() -> int:
     gl.lm = types.SimpleNamespace(get=lambda k: k)
 
     page = ch_mod.CustomAssetChooser.__new__(ch_mod.CustomAssetChooser)
-    # main_box.remove/append and the toggle set_active all run INSIDE the
-    # marshalled callback -- plain recording stubs on the main loop.
+    # main_box.remove, main_box.append and the toggle set_active all run
+    # inside the marshalled callback, so plain stubs are enough.
     page.main_box = types.SimpleNamespace(
         remove=lambda w: None, append=lambda w: None)
     page.scrolled_window = object()
     page.video_button = types.SimpleNamespace(set_active=lambda v: None)
     page.image_button = types.SimpleNamespace(set_active=lambda v: None)
     page.set_loading = lambda *a: None
-    # _finish_build touches these; give it the real lock so it behaves.
+    # _finish_build touches these. The real lock keeps its behavior.
     page._build_tasks_lock = threading.Lock()
     page.build_task_finished_tasks = []
     page.build_finished = False
@@ -252,10 +239,9 @@ def check_chooser() -> int:
     try:
         worker = threading.Thread(target=page.build, daemon=True)
         worker.start()
-        # build() blocks on run_on_main -- the worker parks until the MAIN
-        # thread pumps its idle callback. So we must keep pumping while the
-        # worker runs (NOT join first, which would deadlock: worker waiting
-        # on main, main waiting on worker).
+        # build() blocks on run_on_main. The worker parks until the main
+        # thread pumps its idle callback. Keep pumping while the worker runs.
+        # A join first deadlocks, because each thread waits on the other.
         pump_until(lambda: not worker.is_alive() and page.build_finished, 8,
                    "build never finished via the main loop")
         worker.join(timeout=5)

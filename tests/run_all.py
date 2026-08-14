@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-Runner for the single-writer migration harness
-(docs/presenter-migration-plan.md §4 M0).
+Runner for the scenario harness (docs/presenter-migration-plan.md).
 
-Runs every tests/scenario_*.py as an independent subprocess (each gets its
-own isolated temp data dir via fixtures.py, and its own interpreter so a
-crash/hang in one scenario can't corrupt process-global state -- gl.*,
-module-level thread pools -- for the next one), and prints a PASS/FAIL
-table. Exits 1 if any non-expected scenario failed.
+Runs each tests/scenario_*.py in its own subprocess and interpreter, with an
+isolated temp data dir from fixtures.py, so one crash or hang cannot corrupt
+the next scenario. Prints a PASS/FAIL table. Exits 1 if a scenario fails.
 
 Usage:
     .venv/bin/python tests/run_all.py [-k SUBSTRING] [--timeout SECONDS]
@@ -24,11 +21,8 @@ from xml.dom import minidom
 
 TESTS_DIR = Path(__file__).resolve().parent
 
-# Scenarios that are known not to pass against today's code because they
-# assert *future* (post-milestone) behavior. Empty for M0 -- every scenario
-# below is written to hold against the current codebase, not the target
-# design. If a later milestone's scenario can't pass yet, add it here with a
-# one-line reason instead of weakening its assertions.
+# Scenarios that assert behavior the current code does not have yet. Add an
+# entry here with a one-line reason instead of weakening its assertions.
 EXPECTED_FAIL_UNTIL_M1: dict[str, str] = {
     # "scenario_example.py": "needs the M1 control queue",
 }
@@ -54,8 +48,8 @@ def run_one(path: Path, timeout: float) -> tuple[bool, str, float]:
         return ok, output, elapsed
     except subprocess.TimeoutExpired as e:
         elapsed = time.monotonic() - start
-        # TimeoutExpired's stdout/stderr are still bytes even with text=True
-        # (they're captured before the text-mode decoding step runs).
+        # TimeoutExpired keeps stdout and stderr as bytes even with
+        # text=True. The capture happens before the text-mode decode step.
         def _decode(b):
             if b is None:
                 return ""
@@ -65,22 +59,22 @@ def run_one(path: Path, timeout: float) -> tuple[bool, str, float]:
 
 
 def _classify(name: str, ok: bool) -> tuple[str, bool]:
-    """Maps a scenario's pass/fail into (status, counts_as_hard_failure),
-    honoring the expected-fail list. Kept as one function so the serial and
-    parallel paths classify identically."""
+    """Map a scenario result to (status, counts_as_hard_failure) through the
+    expected-fail list. One function keeps the serial and parallel paths
+    identical."""
     expected_fail_reason = EXPECTED_FAIL_UNTIL_M1.get(name)
     if ok:
         return "PASS", False
     if expected_fail_reason is not None:
-        return "XFAIL", False  # expected failure -- does not fail the run
+        return "XFAIL", False  # an expected failure does not fail the run
     return "FAIL", True
 
 
 def write_junit(path: Path, results: list) -> None:
-    """Emits a JUnit XML report: one <testsuite>, one <testcase> per scenario.
-    A FAIL/XFAIL testcase carries a <failure> (FAIL) / <skipped> (XFAIL) child;
-    the captured stdout+stderr is attached as <system-out> so a CI viewer shows
-    exactly what run_all.py printed. Plain stdlib xml.etree -- no deps."""
+    """Write a JUnit XML report with one testsuite and one testcase each.
+
+    A FAIL case carries a failure child and an XFAIL case a skipped child. A
+    PASS case attaches the captured stdout and stderr as system-out."""
     total_time = sum(elapsed for _, _, elapsed, _ in results)
     n_fail = sum(1 for _, s, _, _ in results if s == "FAIL")
     n_skip = sum(1 for _, s, _, _ in results if s == "XFAIL")
@@ -144,9 +138,8 @@ def main() -> int:
         print("No scenario_*.py files found/matched.")
         return 1
 
-    # Collect (name, status, elapsed, output). Ordered by discovery (sorted
-    # filename) regardless of completion order, so the table is stable and
-    # identical between serial and parallel runs.
+    # Collect (name, status, elapsed, output). The table follows discovery
+    # order, not completion order, so serial and parallel runs print the same.
     results_by_name: dict[str, tuple] = {}
 
     def _record(path: Path, ok: bool, output: str, elapsed: float) -> None:
@@ -164,9 +157,8 @@ def main() -> int:
             _record(path, ok, output, elapsed)
     else:
         with ThreadPoolExecutor(max_workers=jobs) as pool:
-            # Submit all up front (they run concurrently), then collect in
-            # discovery order -- not completion order -- so the table and any
-            # verbose output stay deterministic and match the serial run.
+            # Submit every scenario, then collect in discovery order, so the
+            # table and the verbose output match the serial run.
             future_for = {path: pool.submit(run_one, path, args.timeout) for path in scenarios}
             for path in scenarios:
                 ok, output, elapsed = future_for[path].result()

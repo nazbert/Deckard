@@ -1,23 +1,10 @@
 """
-Unit-tier scenario (docs/presenter-migration-plan.md §7 "Suspend/resume
-repaint" + §4 M2): the media loop detects a wall-clock gap >=5s between
-iterations -- the signature of a process suspend/resume cycle
-(DetectResumeThread's proven technique, relocated into
-MediaPlayerThread.check_resume_gap now that DetectResumeThread itself is
-deleted, plan §9.1) -- and arms a pending full repaint: dedup hashes
-nulled, every input's update() re-enqueued, fired by the loop on a 2s
-cadence.
+Unit-tier scenario for the suspend and resume repaint.
 
-The crucial property (coordinator review of M2): a repaint whose writes
-FAIL -- because the library's read thread is still reopening the handle --
-must be re-armed and retried, or a fully static page (which generates no
-further writes and therefore no failure->success edge) stays stale
-forever. Failure itself re-arms the pending flag; the 2s cadence spaces
-the retries.
-
-Drives check_resume_gap()/_run_pending_repaint() directly (the unit-tier
-seam -- mirrors drain_control_queue's rationale) instead of spinning
-run(), so the scenario is deterministic.
+MediaPlayerThread.check_resume_gap detects a wall-clock gap of 5s or more
+between iterations and arms a pending full repaint, which nulls the dedup
+hashes and re-enqueues every input. A repaint whose writes fail re-arms
+itself, because a static page produces no other recovery trigger.
 """
 import time
 
@@ -40,7 +27,7 @@ def main() -> None:
     # so the reset is observable.
     seed_hashes(controller)
 
-    # --- (a) a >=5s gap arms a pending repaint; the loop hook fires it. ---
+    # A gap of 5s or more arms a pending repaint, and the loop hook fires it.
     media_player._last_iter_ts = time.time() - 10.0
     gap_detected = media_player.check_resume_gap()
     assert gap_detected, "a >=5s gap must be detected"
@@ -64,8 +51,8 @@ def main() -> None:
         "the touchscreen must also be rewritten by the resume repaint"
     )
 
-    # --- (b) rate limiting defers (never drops): gaps inside the 2s window
-    # keep the flag armed; the repaint fires once the window opens. ---
+    # Rate limiting defers rather than drops. A gap inside the 2s window
+    # keeps the flag armed, and the repaint fires once the window opens.
     media_player._last_iter_ts = time.time() - 10.0
     media_player.check_resume_gap()
     assert not controller._run_pending_repaint(), "inside the 2s window the repaint must be deferred"
@@ -76,10 +63,10 @@ def main() -> None:
     assert controller._run_pending_repaint(), "the deferred repaint must fire once the window opens"
     assert controller.repaint_count == 2
 
-    # --- (c) the static-page recovery property: a repaint whose writes all
-    # FAIL (handle not yet reopened) re-arms itself and retries until its
-    # writes land. ---
-    media_player.perform_media_player_tasks()   # drain (b)'s tasks so (c) starts clean
+    # The static-page recovery property. A repaint whose writes all fail,
+    # with the handle not yet reopened, re-arms itself and retries until its
+    # writes land.
+    media_player.perform_media_player_tasks()   # drain the earlier tasks first
     deck.clear_journal()
     seed_hashes(controller)
 
@@ -87,14 +74,14 @@ def main() -> None:
     media_player.check_resume_gap()
     controller._last_full_repaint_ts = 0.0      # window open
     assert controller._run_pending_repaint()
-    deck.fail_next("set_", count=99)            # handle still closed: everything fails
-    media_player.perform_media_player_tasks()   # repaint burst -> all writes raise
+    deck.fail_next("set_", count=99)            # handle still closed, so everything fails
+    media_player.perform_media_player_tasks()   # the repaint burst makes every write raise
     assert controller._full_repaint_pending, (
         "a repaint whose writes failed must re-arm itself (static pages have "
         "no other recovery trigger)"
     )
 
-    deck.clear_failures()                       # handle reopened: writes succeed again
+    deck.clear_failures()                       # handle reopened, so writes succeed
     controller._last_full_repaint_ts = 0.0      # advance past the 2s cadence
     assert controller._run_pending_repaint(), "the retry must fire"
     media_player.perform_media_player_tasks()
