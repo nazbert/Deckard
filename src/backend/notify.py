@@ -48,9 +48,9 @@ class Notify:
         GLib.idle_add(self._deliver, is_error, text, title)
 
     def _deliver(self, is_error: bool, text: str, title: str | None) -> bool:
-        # Main thread only. Bind gl.app once: _dispatch schedules this callback
-        # only after gl.app is up, but the callback runs later and the
-        # desktop-notification branch below reads it a second time.
+        # Main thread only. Bind gl.app once. _dispatch schedules this
+        # callback only after gl.app is up, but the callback runs later and
+        # the desktop-notification branch below reads it a second time.
         app = gl.app
         main_win = getattr(app, "main_win", None)
         if main_win is not None and main_win.is_visible():

@@ -4,62 +4,18 @@
 arrive from several transports. Those are the D-Bus methods that an external
 tool or a second CLI invocation calls on the running instance, and the argv
 requests that a booting process parks for a deck which has not enumerated yet.
-A copy of the rules per transport drifts. The same-page no-op reached two of
-the three, an unknown page produced a warning, a list of suggestions or
-silence by where the request landed, and the coordinate bounds came from the
-device here and from invented constants in the CLI's own pre-check. This
-module is the one rule set they all ask.
-
-What is a rule and what is a transport
-
-The decision lives here, and the rendering stays at the surface. Every method
-answers with a ControlResult that carries a machine-readable code and the
-human sentence for it, and the caller decides what a sentence becomes, which
-is a log line, a D-Bus return string, or terminal output. Nothing here logs,
-and nothing here touches the toolkit. For the same reason a message names the
-deck only where the failure is about the deck, which is an unknown serial or a
-state changed, and each surface adds its own context.
-
-Two layers, because one caller has no serial to resolve
-
-load_default_page runs inside DeckController.__init__, before anything appends
-the controller to gl.deck_manager.deck_controller. It holds the controller and
-cannot look itself up by serial. So the rules take a controller, in
-change_page_on and change_state_on, and the serial-resolving wrappers,
-change_page and change_state, add a thin lookup for the transports that speak
-serials.
+A copy of the rules per transport drifts apart, so this module is the one rule
+set they all ask. The decision lives here, and the rendering stays at the
+surface. Nothing here logs, and nothing here touches the toolkit.
 
 No blanket except
 
 An invalid request is a result. An unexpected exception, such as a load_page
-that raises or a device gone mid-call, propagates to the caller untouched, and
-that decides a behaviour rather than tidy the code. The boot path peeks a
-parked state request, applies it through here, and resolves it once the apply
-returns, so an exception on the way through leaves the request parked for the
-next load to retry (see src/backend/startup_queue.py). A catch here turns that
-retry into a silent drop.
-
-Thread contract
-
-The caller's thread runs this, whichever it is, which covers the boot thread,
-a USB hotplug thread, the GTK main thread and the D-Bus dispatch. Every
-surface this replaces did the same. load_page serializes itself under the
-controller's page lock, the media thread stays the one device writer, and
-nothing here calls the UI. This snapshots the manager's controller list before
-it walks it, because a hotplug thread appends to it and removes from it.
-
-Imports
-
-globals and the input identifiers at runtime, everything else under
-TYPE_CHECKING, and no gi at all. The deck controller imports this module, so
-it sits inside the render engine's import closure and takes both standing
-guards of that closure, which are the widget-free rule
-(scenario_headless_engine_no_gtk) and the named gl surface
-(scenario_engine_gl_surface, and this module reads deck_manager and
-page_manager and nothing else). The deployment floor runs Python 3.13, which
-evaluates an annotation at definition time, and the future import prevents
-that. scenario_floor_import executes this module body on that interpreter to
-keep it true.
+that raises or a device gone mid-call, propagates to the caller untouched. The
+boot path peeks a parked state request, applies it through here, and resolves
+it once the apply returns, so an exception on the way through leaves the
+request parked for the next load to retry (see src/backend/startup_queue.py).
+A catch here turns that retry into a silent drop.
 """
 from __future__ import annotations
 
@@ -67,6 +23,14 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+# globals and the input identifiers at runtime, everything else under
+# TYPE_CHECKING, and no gi. The deck controller imports this module, so it
+# sits inside the render engine's import closure and takes both guards of that
+# closure, the widget-free rule (scenario_headless_engine_no_gtk) and the
+# named gl surface (scenario_engine_gl_surface, and this module reads
+# deck_manager and page_manager and nothing else). The deployment floor runs
+# Python 3.13, which evaluates an annotation at definition time, and the
+# future import above prevents that.
 import globals as gl
 from src.backend.DeckManagement.InputIdentifier import Input
 
@@ -80,7 +44,9 @@ class ControlResult:
     """The outcome of one control request.
 
     code is the vocabulary a caller branches on. message says the same thing
-    to a person, and every current surface renders that part alone.
+    to a person, and every current surface renders that part alone. A message
+    names the deck only where the failure is about the deck, which is an
+    unknown serial or a state changed, and each surface adds its own context.
 
       ""                      the request applied
       "already-active"        the deck already shows that page, so nothing
@@ -144,9 +110,21 @@ def _no_such_page(page_ref: str, page_manager: PageManagerBackend) -> ControlRes
 class ControlPlane:
     """The rules. This holds no state, and every call reads the gl slots it
     needs, so a controller list or a page store rebound underneath it, which
-    the test harness does, still applies."""
+    the test harness does, still applies.
 
-    # The cores, which take a controller.
+    The caller's thread runs every method, whichever it is, which covers the
+    boot thread, a USB hotplug thread, the GTK main thread and the D-Bus
+    dispatch. load_page serializes itself under the controller's page lock,
+    the media thread stays the one device writer, and nothing here calls the
+    UI. _controllers() snapshots the manager's list before a walk, because a
+    hotplug thread appends to it and removes from it.
+    """
+
+    # The cores, which take a controller. load_default_page runs inside
+    # DeckController.__init__, before anything appends the controller to
+    # gl.deck_manager.deck_controller, so it holds a controller and cannot
+    # look itself up by serial. The wrappers below add that lookup for the
+    # transports that speak serials.
 
     def change_page_on(self, controller: DeckController, page_ref: str) -> ControlResult:
         """Show page_ref, which is a page name or a page path, on controller.

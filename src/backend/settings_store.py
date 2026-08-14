@@ -4,95 +4,15 @@ A settings surface is a JSON file the app owns. The deck settings under
 settings/decks/, the asset library index, the app settings, the page manager's
 bookkeeping and a plugin's settings file are all surfaces. Each one needs the
 same three answers. Where does it live, what happens when it is corrupt, and
-who may write it. This module holds those answers.
+who may write it. SurfaceSpec, load_file and save_file below hold those
+answers.
 
-What a surface is
+A settings file holds what the user chose, and the schema supplies the rest at
+read time. SchemaView applies those defaults; its docstring says why a read
+must never write one back.
 
-A SurfaceSpec states five things about one file, and nothing else knows them.
-
-path_fn gives the path, resolved per call and not at import, so a surface
-follows the data path. A keyed surface takes a key, the deck serial. A keyless
-one refuses a key, so a swapped argument raises instead of creating a file
-named after a serial number.
-
-root gives the type of an empty file. A missing list-rooted file must not read
-as a dict. The asset library index is a JSON array, and a {} handed to its
-reader on a fresh install writes the wrong shape.
-
-cached says whether a read comes from memory. A cached surface hands out a
-deep copy per read, so a caller mutates what it got and reaches nothing else.
-The store drops that entry as soon as it writes the path.
-
-shared says whether a cached surface hands out the cached object itself rather
-than a copy. The app settings are one dict that many holders read, mutate in
-place and save back, and every holder must see one object. With a copy per
-reader, a write through one view stays invisible to the reader that persists
-another. The callers of a surface decide this, not the cost. Only a cached
-surface can be shared.
-
-schema gives the table of defaults its readers fall back to, or None for a
-surface whose keys the app does not describe. A surface with a schema reads
-through a SchemaView below, which applies the defaults at read and refuses an
-unknown key at write. Each surface decides this for itself.
-
-Defaults apply at read, and storage stays sparse
-
-A settings file holds what the user chose. Everything else comes from the
-surface's schema at read time, and never returns to disk. A load path that
-fills a missing key, with setdefault and a save, persists that value. The
-first person to open a settings page then freezes today's default into their
-config, and a later change of the default never reaches them. A load path that
-writes also dimmed a deck to a number nobody chose.
-
-read() therefore returns what sits on disk. Its callers mutate it and save it
-back, and a materialized default would persist the whole table on the next
-save. A SchemaView applies the defaults on the way out. Build a view from one
-read and destructure it, because a question per key costs a read per key.
-
-Corrupt is not fatal, and corrupt is not discarded
-
-load_file is the one read-with-heal. An absent file reads as an empty root. A
-file that exists and does not parse moves to a .corrupt sidecar, which never
-overwrites an older one, gets logged loudly, and reads as an empty root. The
-result reports the corruption, so a caller that holds a backup heals from it.
-The quarantine matters because the caller gets an empty result either way, and
-the next save overwrites the only remaining copy of the user's data. The heal
-must not depend on the rename, so the reported flag is set whether or not the
-file moved.
-
-A file that exists and does not read, from a permission error or a dead mount,
-is not corrupt and stays in place. The read raises, because the content is
-unknown and an empty answer invites a write that destroys it. PluginSettings
-answers differently, and says why. A raise there costs the user the plugin.
-
-Writes go through the atomic writer, and invalidate by path
-
-Every write here lands through atomic_write_json, with a temp file, an fsync
-and a rename, so an interrupted write leaves no truncated settings file.
-Straight afterwards the store drops any cached entry for that resolved path.
-The file that was written keys the invalidation, and not the surface the
-writer had in mind. A write through the generic path-level entry point
-invalidates the cached surface it lands on, so no write through this module
-leaves a stale reader behind.
-
-A drop alone is not enough, because a reader can sit inside the file when the
-write lands. That reader finishes afterwards and re-inserts the content from
-before the write, and no later write to another file corrects it. So each path
-counts its invalidations as well, and a read that missed caches what it parsed
-only while the count stands still. A read that loses that race still answers
-its own caller with what it read, and leaves the cache cold for the next one.
-
-Threading
-
-edit() serializes a read-modify-write against another edit() call on the same
-file, which two concurrent calls need to keep both updates. The cache lock is
-a leaf. No holder keeps it across file I/O, and no holder keeps it across the
-edit lock. Nothing else here blocks.
-
-get() reaches the module singleton, which is no gl slot, because a named
-protocol should shrink the shared namespace. This module imports the standard
-library, globals, the atomic writer and the logger, and no toolkit, so any
-layer can import it.
+This module imports stdlib, globals, the atomic writer and the logger, and no
+toolkit, so any layer can import it.
 """
 from __future__ import annotations
 
@@ -176,9 +96,8 @@ class SurfaceSpec:
 # The registered surfaces.
 
 # Every deck-settings default, defined once. An inline literal per reader
-# drifts. The device once dimmed an idle deck to one number while the page
-# editor showed another, and the settings pane wrote a third into the file on
-# first open.
+# drifts, so the device, the page editor and the settings pane each apply a
+# different number for one key.
 #
 # A name here maps to a section, which holds its own table of keys, or to a
 # top-level setting stored as a bare value.
@@ -196,8 +115,8 @@ DECK_DEFAULTS: dict[str, Any] = {
         # the device for the whole idle window, which freezes the deck. Every
         # media layer already defaults to True (ScreenSaver.loop,
         # Background.set_from_path, Background.prebuild_from_path,
-        # BackgroundVideo and GifBackground), so the toggle now matches the
-        # media.
+        # BackgroundVideo and GifBackground), so the toggle and the media
+        # agree.
         "loop": True,
         "fps": 30,
         # Minutes of no input before it shows.
@@ -326,7 +245,7 @@ def _fallback_font() -> str:
 # fall back on falsy values as well, because an empty family or a zero size is
 # a half-written font rather than a choice, and one value resolves through a
 # call. A schema answers "this key is absent". This table answers "no usable
-# value sits here". A merge of the two would honour a zero size, or give every
+# value sits here". A merge of the two honours a zero size, or gives every
 # schema in the app a second meaning. It sits next to APP_DEFAULTS because it
 # describes the same file, and only AppSettings.font_default reads it.
 APP_FONT_DEFAULTS: dict = {
@@ -374,8 +293,8 @@ PAGES = SurfaceSpec(
 #: a fixed location outside the data path, because it chooses the data path.
 #: Uncached, because a settings pane reads it rarely. The bootstrap read of
 #: this file in globals.py is the one approved reader that skips this module.
-#: It runs before this module, and before anything else, becomes importable,
-#: and it defines gl.DATA_PATH, which every keyed surface resolves against.
+#: It runs before this module or anything else is importable, and it defines
+#: gl.DATA_PATH, which every keyed surface resolves against.
 #: Its quiet fallback on an error suits a bootstrap and stays there.
 STATIC = SurfaceSpec(
     name="static settings",
@@ -409,10 +328,10 @@ UI_ASSET_MANAGER = SurfaceSpec(
 #: One plugin's settings file, keyed by the path the plugin resolved for
 #: itself and not by its id. PluginBase.__init__ decides that path once, and
 #: it moves an old folder-name directory to the manifest-id one. A second
-#: derivation here would give the store another opinion about where a plugin's
+#: derivation here gives the store another opinion about where a plugin's
 #: settings live. It carries no schema, because the app owns the envelope and
 #: nothing inside it. A defaults table could describe only keys that the
-#: plugin knows, and the write-side check would refuse every one of them. It
+#: plugin knows, and the write-side check refuses every one of them. It
 #: stays uncached, because a cache saves a parse that nothing repeats, and
 #: owes a coherence answer for a backend in another process.
 PLUGIN = SurfaceSpec(
@@ -468,6 +387,8 @@ class SettingsStore:
         # heals this. The case to picture is a managed config tree, such as
         # stow or chezmoi, that re-links these files while the app runs.
         self._resolved: dict[str, str] = {}
+        # A leaf lock. No holder keeps it across file I/O, and no holder
+        # keeps it across the edit lock.
         self._cache_lock = threading.Lock()
         # Maps a resolved path to the lock that edit() serializes on. Each
         # lock is built on demand and kept, because a settings file gets
@@ -545,7 +466,7 @@ class SettingsStore:
         This serves a caller that a cache cannot. An editor takes a snapshot,
         changes several things against it, and writes the whole snapshot back
         at the end. It must stay off a shared surface, because every other
-        reader would take its half-finished edits as settled, and it must not
+        reader takes its half-finished edits as settled, and it must not
         get a cache entry, because what it writes must match what it was
         shown. Corruption heals as in any other read, and a cached surface's
         entry stays neither read nor filled.

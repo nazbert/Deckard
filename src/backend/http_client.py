@@ -12,9 +12,10 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-Shared HTTP client: one process-wide requests.Session behind a retrying
-adapter. Every outbound fetch uses it: the store catalog, install archives,
-asset URL imports, and the contributor list of the About dialog.
+The shared HTTP client is one process-wide requests.Session behind a retrying
+adapter. Every outbound fetch uses it, which covers the store catalog, the
+install archives, the asset URL imports, and the contributor list of the About
+dialog.
 
 The session gives connection reuse. A store page load issues about 150 small
 requests to raw.githubusercontent.com. The top-level requests.get() builds a
@@ -49,8 +50,8 @@ _session_lock = threading.Lock()
 def get_session() -> requests.Session:
     """The process-wide session, built on first use.
 
-    Retry policy: 2 retries (3 attempts) on 429, 502 and 503, with a 0.5s
-    backoff factor, and it obeys a server-sent Retry-After. raise_on_status
+    The retry policy is 2 retries (3 attempts) on 429, 502 and 503, with a
+    0.5s backoff factor, and it obeys a server-sent Retry-After. raise_on_status
     stays off, so an exhausted retry budget returns the final response instead
     of raising. Each call site then keeps its own status handling, and the
     store keeps its stale-cache fallback.

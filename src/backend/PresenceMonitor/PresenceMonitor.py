@@ -7,44 +7,22 @@ whole animation section. No background-video decode, no key, dial or
 touchscreen tick, and no scroll-label advance. The control queue and the
 queued interactive paints keep running at full speed.
 
-Three inputs drive it, and every one is event-driven. Nothing polls.
-
-The screen lock. LockScreenManager.lock() publishes gl.screen_locked before
-its lock_on_lock_screen early return, and calls on_lock_changed() right
-after, so the lock stays a usable presence input for a user who keeps the
-decks live on lock.
-
-The system idle state. logind holds IdleHint and IdleSinceHint on the session
-object (see LogindIdleDetector below). A configurable idle delay counts from
-IdleSinceHint.
-
-Deck activity. notify_activity() comes from ScreenSaver.on_key_change(), the
-funnel that every key, dial and touch interaction passes. A deck press never
-reaches the compositor, so without this input the session stays idle while
-the user drums on the deck.
-
-Every input change evaluates this rule.
+Three inputs drive it, and every one is event-driven. Nothing polls. The
+screen lock arrives at on_lock_changed, the logind idle state at
+on_idle_hint_changed, and a deck press at notify_activity. Every input change
+evaluates this rule.
 
     quiescent := mode == "system-idle" and (
         (screen_locked and now - last_deck_activity >= DECK_ACTIVITY_GRACE_S)
         or (idle_hint and now - max(idle_since, last_deck_activity) >= minutes*60)
     )
 
-Deck activity outranks the lock for a short grace. With lock-on-lock-screen
-off the deck stays live and usable while the screen is locked, and a user who
-drums on it is present at it whatever the monitor reports.
-
 The default mode "screensaver" makes this object report False forever, which
-matches the behaviour of an app without this monitor. The deck screensaver's
-own transition already releases the underlying page's media, so nothing more
-needs a gate for a user who does not opt in.
+matches the behaviour of an app without this monitor.
 
-Threading. is_quiescent() reads one attribute. The read is GIL-atomic and
-lock-free, and the media thread's critical path calls it 30 times a second. A
-transition is rare and holds self._lock, and the wake fan-out runs outside
-that lock. Inputs arrive on three threads: the GLib default main context for
-Gio callbacks, timer_wheel dispatch threads for the idle deadline, and deck
-reader threads for notify_activity. This module makes no GTK call.
+Those inputs arrive on three threads, which are the GLib default main context
+for a Gio callback, a timer_wheel dispatch thread for the idle deadline, and a
+deck reader thread for notify_activity. This module makes no GTK call.
 """
 import os
 import threading
@@ -130,10 +108,10 @@ class PresenceMonitor:
         self._deadline: "timer_wheel.TimerHandle | None" = None
 
         # Build the logind detector on demand, for the mode that reads it. In
-        # the default pause mode it would open a system-bus connection on a
-        # startup thread, resolve the session, and hold a PropertiesChanged
-        # subscription for every user who never opted in, all for a signal
-        # that nothing consumes. The deferral loses nothing, because the
+        # the default pause mode an eager build opens a system-bus connection
+        # on a startup thread, resolves the session, and holds a
+        # PropertiesChanged subscription for every user who never opted in,
+        # all for a signal that nothing consumes. The deferral loses nothing, because the
         # detector seeds the monitor from the session's current IdleHint each
         # time it builds (setup_dbus calls read_initial_state), and not at
         # process start alone.
@@ -172,8 +150,10 @@ class PresenceMonitor:
 
     def on_lock_changed(self, active: bool) -> None:
         """Called from LockScreenManager.lock() right after it publishes
-        gl.screen_locked. active carries that same value, and only the log
-        reads it. The evaluation re-reads gl.screen_locked, so this object and
+        gl.screen_locked, which that method does before its
+        lock_on_lock_screen early return, so the lock stays a usable presence
+        input for a user who keeps the decks live on lock. active carries that
+        same value, and only the log reads it. The evaluation re-reads gl.screen_locked, so this object and
         the rest of the app cannot disagree about the lock state. The
         constructor's seeding evaluation has no argument to read."""
         log.debug(f"PresenceMonitor: screen lock -> {active}")
@@ -198,10 +178,11 @@ class PresenceMonitor:
         self._evaluate()
 
     def notify_activity(self) -> None:
-        """A deck input happened. The compositor and the lock state both miss
-        a deck press, so this call is the only signal for a user present at
-        the deck. It clears an idle hint, and it outranks a locked screen for
-        DECK_ACTIVITY_GRACE_S."""
+        """A deck input happened. ScreenSaver.on_key_change() calls this, the
+        funnel that every key, dial and touch interaction passes. The
+        compositor and the lock state both miss a deck press, so this call is
+        the only signal for a user present at the deck. It clears an idle
+        hint, and it outranks a locked screen for DECK_ACTIVITY_GRACE_S."""
         self._last_deck_activity = time.time()
         # Fast path for the default mode. Nothing gates there, so an input
         # needs neither the lock nor the timer wheel. set_mode() rebinds _mode
@@ -364,8 +345,8 @@ class LogindIdleDetector:
             # The real system bus goes on a daemon thread, like
             # LockScreenManager.__init__ does. main() constructs this object
             # on the startup path, and Gio.bus_get_sync plus a synchronous
-            # GetSession round trip would hold app startup behind a wedged
-            # logind for the call's full timeout.
+            # GetSession round trip holds app startup behind a wedged logind
+            # for the call's full timeout.
             threading.Thread(target=self.setup_dbus, name="PresenceIdleSetup",
                              daemon=True).start()
 
@@ -466,7 +447,7 @@ class LogindIdleDetector:
     def read_initial_state(self) -> None:
         """Seeds the monitor from the session's current properties. A process
         that starts into an already-idle session must gate without a wait for
-        the next PropertiesChanged, which can never arrive."""
+        the next PropertiesChanged, which possibly never arrives."""
         hint = bool(self.read_property("IdleHint"))
         self.monitor.on_idle_hint_changed(hint, self._read_idle_since() if hint else None)
 

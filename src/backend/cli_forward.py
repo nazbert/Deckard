@@ -1,69 +1,19 @@
 """The CLI half of the control plane. This decides what an invocation that
 carries --change-page or --change-state does with the requests it was given.
 
-An invocation that names a deck has two different jobs, by whether Deckard
-already runs. With nothing running, and with --close-running, which is about
-to stop whatever runs, the invocation becomes the instance. It parks its
-requests for the deck that has not enumerated yet, and goes on to boot; see
-legs B and C in src/backend/startup_queue.py. With an instance running, the
-requests go over the bus to that instance and this process ends.
+An invocation that names a deck has two jobs, by whether Deckard already runs.
+With nothing running, and with --close-running, which is about to stop what
+runs, the invocation becomes the instance. It parks its requests for the deck
+that has not enumerated yet and boots; see legs B and C in
+src/backend/startup_queue.py. With an instance running, the requests go over
+the bus to that instance and this process ends.
 
-The choice between the two comes before the process knows whether it becomes
-the instance. Parking serves the boot that follows it, so it cannot wait for
-the name to settle. A launch that parks and then loses that race holds
-requests that belong to another process, and forward_parked_requests takes
-them there rather than let them die with this one.
+Parking happens before the process knows which of the two it is, so a launch
+that parks and then loses the race for the application name holds requests
+that belong to another process. forward_parked_requests takes them there.
 
-Why this is not in main.py
-
-Nothing can import main.py, because its module body re-execs the process and
-runs the rebrand migration against the real user directories. Everything that
-lived there was untestable, and it showed. Forwarding returned after the first
-request it sent, so a command that carried several page or state changes
-applied one and dropped the rest. This module is the extraction that makes
-that provable. main.py keeps the two things that cannot leave it, which are
-the argv read and the process exit.
-
-Syntax here, meaning there
-
-This file answers only what needs no device. Do the coordinates read as two
-non-negative integers, and does the state read as a non-negative integer. The
-running instance answers whether (9,9) sits on the deck, whether state 19
-exists on that input, and whether the page or the serial is real, and it
-answers from the device itself. The caps this file once applied, of
-coordinates at most 10 and state at most 20, matched no hardware and rejected
-valid requests for a large deck before anything with a device saw them.
-
-The caller must see a failure
-
-Forwarding once travelled over a Gio action and expected no answer, so a
-mistyped page name produced a line in the running instance's log and silence
-in the terminal that typed it. The bus methods answer with a sentence, and
-those sentences reach the verdict for main.py to print. A failed request does
-not stop the ones behind it. Each one is independent, and a person who asked
-for four changes is better served by three applied and one explained than by
-a prefix.
-
-Version skew, in both directions
-
-Forwarding once travelled over Gio actions, which are gone. A CLI from an
-older install therefore forwards a change_page or change_state action that a
-current instance does not register, and org.gtk.Actions answers an unknown
-action by doing nothing, so that direction fails in silence and this side
-cannot change it. It needs both a current and an older install on one machine,
-it ends as soon as the old install goes, and the parked boot path stays
-correct, so this documents it rather than defends against it. The other
-direction, a current CLI that meets an instance without the methods, can
-speak, and it says SKEW_MESSAGE.
-
-The transport is injectable
-
-forward_cli_requests takes the object that talks to the running instance, so a
-test drives the forwarding rules without a bus, a daemon or a second process.
-The default is the real one, and it imports the toolkit when it is
-constructed rather than at module import, which keeps this module's body
-importable on the deployment floor with the standard library alone.
-scenario_floor_import executes it there.
+Nothing can import main.py, because its module body re-execs the process, so
+this work lives here where a scenario drives it.
 """
 from __future__ import annotations
 
@@ -118,6 +68,13 @@ _METHOD_MISSING = (
     "org.freedesktop.DBus.Error.UnknownInterface",
 )
 
+# What a current CLI says to an instance without the methods. The other
+# direction cannot speak. A CLI from an older install forwards a change_page
+# or change_state Gio action, which a current instance does not register, and
+# org.gtk.Actions answers an unknown action by doing nothing. It needs both
+# installs on one machine, it ends as soon as the old install goes, and the
+# parked boot path stays correct, so this documents it rather than defends
+# against it.
 SKEW_MESSAGE = (
     "The running Deckard is not answering to the page and state methods this "
     "command needs. An older build does not have them at all, and restarting "
@@ -172,8 +129,15 @@ def _parse_state_requests(raw: list) -> tuple[list[tuple[str, str, str, int]],
 
     All or nothing. A command with one malformed group applies none of its
     requests, because a part-applied command costs more than either other
-    outcome. This judges shapes alone; see the module docstring on why it
-    judges no bounds.
+    outcome.
+
+    This judges shape alone, which needs no device. Do the coordinates read as
+    two non-negative integers, and does the state read as a non-negative
+    integer. The running instance answers whether (9,9) sits on the deck,
+    whether state 19 exists on that input, and whether the page or the serial
+    is real, and it answers from the device itself. A cap here, such as
+    coordinates at most 10 and state at most 20, matches no hardware and
+    rejects a valid request for a large deck before a device sees it.
     """
     parsed: list[tuple[str, str, str, int]] = []
     failures: list[str] = []
@@ -245,6 +209,12 @@ def _forward(transport: Transport, page_requests: list,
     request as argv gave them. argparse collects the two flags into two lists,
     so nothing here recovers how they interleaved, and this is the order the
     CLI applies.
+
+    The caller must see a failure. The bus methods answer with a sentence, and
+    those sentences reach the verdict for main.py to print. A failed request
+    does not stop the ones behind it, because each one is independent, and a
+    person who asked for four changes is better served by three applied and
+    one explained than by a prefix.
     """
     failures: list[str] = []
     try:
@@ -333,6 +303,9 @@ def forward_parked_requests(transport: Transport | None = None) -> list[str]:
 
 class _BusTransport:
     """The running instance, over the session bus.
+
+    forward_cli_requests takes this object, so a test drives the forwarding
+    rules without a bus, a daemon or a second process.
 
     The import of the toolkit sits here rather than at module scope, so this
     module's body stays standard-library-only. The deployment floor executes

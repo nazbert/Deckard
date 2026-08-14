@@ -12,10 +12,10 @@ This programm comes with ABSOLUTELY NO WARRANTY!
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
-# One daemon scheduler thread for every delay in the app, which are the
-# screensaver reset per keypress, the overlay hide, and the key-hold delay. A min-heap
-# and a Condition keep exactly one thread asleep, whatever the number of
-# outstanding delays.
+# One daemon scheduler thread for the ported delays: the screensaver reset per
+# keypress, the overlay hide, and the key-hold delay. A min-heap and a
+# Condition keep exactly one thread asleep, whatever the number of outstanding
+# delays.
 #
 # The handles match threading.Timer, so a cancel-and-recreate call site needs
 # only an import change:
@@ -24,8 +24,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 #     cannot un-fire the callback, the same as Timer.cancel().
 #
 # The scheduler thread pops due handles and hands them off. It never runs a
-# callback inline, because a callback is expensive. ScreenSaver.show() hashes the
-# source file and can open a video capture before it takes a lock), and an
+# callback inline, because a callback is expensive. ScreenSaver.show() hashes
+# the source file and can open a video capture before it takes a lock, and an
 # inline run delays every other pending timer in the process. Each fire gets
 # its own short-lived daemon thread, not main_loop's shared @background pool.
 # That pool holds 8 workers for I/O-bound plugin and asset work, and these

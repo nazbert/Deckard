@@ -1,45 +1,10 @@
 """Uniqueness, decided once, before this launch does anything exclusive.
 
-Why this is a module
-
 Nothing can import main.py, because its module body re-execs the process and
-runs the rename migration against the real user directories, so every
-uniqueness decision that lived there was untestable. The bugs showed it, with
-a flat five-second sleep in place of "the other instance let go of the name",
-and a hand-off poll over a window that does not exist. main.py keeps the
-argv read, the wiring and the exit. The decision lives here, where a scenario
-drives it against a real bus daemon.
-
-The order is the design
-
-GApplication's own register() claims the application name, and nothing else in
-the tree does. Everything expensive or exclusive, which is the migrations, the
-plugin load and the deck open, runs after that call returns, on the primary
-alone, so a launch that loses the race performs nothing that collides with the
-winner. establish() therefore does four things, in this order.
-
-1. --close-running first, because a process registers once. An application
-   that registered as a remote can never register as the primary, so the ask
-   to quit, and the wait for the release, must happen before this process
-   registers anything. This is the one hand-rolled step that stays, and it is
-   a probe and a wait. It never requests the name.
-2. publish() before register(). The objects go up on the shared session
-   connection while the name is still unowned, so the moment the daemon grants
-   the name, the object set behind it already answers. Name-owned then implies
-   objects-published, and no window opens for a client to fall into. GDBus
-   keeps a registration per object path and interface, so the application's
-   own org.gtk.* interfaces and the API's interface share one path in either
-   order.
-3. register(), which fails open where that is safe. A launch with no usable
-   session bus still boots, windowed, with the API and uniqueness degraded and
-   logged, rather than die halfway through startup. It never decides that it
-   is the primary while another process owns the name (see
-   _registration_failed). A registration as a remote takes an answer from the
-   owner, an owner that registered and does not yet dispatch its main loop
-   gives none until it does, and past the bus timeout the honest outcome is to
-   stop rather than open the decks the other instance holds.
-4. The verdict. A remote hands off to the primary and exits. The primary sends
-   a pre-rename instance off the Stream Deck before it opens any deck itself.
+runs the rename migration against the real user directories, so a uniqueness
+decision that lives there is untestable. main.py keeps the argv read, the
+wiring and the exit. The decision lives here, where a scenario drives it
+against a real bus daemon, and establish() states the order it decides in.
 
 Why nothing here claims the name first
 
@@ -54,19 +19,6 @@ the other stayed unowned for a whole boot. What stays is an ask rather than a
 claim. A NameHasOwner probe and a release poll own nothing, which leaves
 register() as the one claim in the tree and its verdict as the only one.
 
-What registering also does
-
-register() emits the application's startup signal, so the toolkit's own
-startup chain runs here, before the globals exist, which is the point of
-registering first. The app overrides nothing on that path, and anything that
-starts to override it must hold that constraint or move.
-
-It also makes this process reachable before it answers. A launch that arrives
-while this one still boots joins it as a remote, and that join takes an answer
-that arrives once this process starts to dispatch its main loop. That launch
-therefore waits out the boot, bounded by the measured 25s default of the bus,
-and then presents the window, rather than fail early.
-
 The upgrade window
 
 A build that predates this ordering owns nothing until its main loop starts,
@@ -74,24 +26,6 @@ so a launch of this build that lands while such a build still boots sees an
 unowned name and becomes the primary. Two primaries then run on one machine
 for a moment. It needs a version change and a launch inside one boot window,
 and the next start of either build ends it.
-
-Why the flags are set before registering
-
-g_application_set_flags asserts on an application that already registered. It
-emits a CRITICAL and keeps the old flags, so NON_UNIQUE can only be set while
-registration has not happened, or has failed. This module therefore probes the
-bus itself up front, rather than catch an error out of register().
-GApplication answers an unreachable session bus by proceeding as a non-unique
-application, and it returns True and raises nothing.
-
-Why this module is not on the floor import list
-
-It imports gi at module level, and only main.py and the scenarios that drive
-it consume it. The floor check covers a module that claims "any layer may
-import this, on a bare interpreter". This module claims less, because it runs
-in the one process that already loaded the toolkit, so compileall checks it
-for 3.13 syntax like every other module, and nothing more. The API module
-makes the same trade for the same reason.
 """
 from __future__ import annotations
 
@@ -99,6 +33,9 @@ import time
 from enum import Enum
 from typing import Callable, Protocol
 
+# This module imports gi, so it stays off the floor import list. Only main.py
+# and the scenarios that drive it consume it, and it runs in the one process
+# that already loaded the toolkit.
 from gi.repository import Gio, GLib
 
 from loguru import logger as log
@@ -386,9 +323,9 @@ def _shoo_pre_rename_instance(session_bus: Gio.DBusConnection) -> None:
     that the other instance holds. Probe with NameHasOwner, and never address
     the old name directly. A plain call to a well-known name activates it, and
     for the old id that starts an upstream install through its D-Bus service
-    file, which is the race this call prevents. A NameHasOwner of False, the
-    normal case, also ends this cost. Once nothing owns the old name, this
-    costs one cheap round trip per launch.
+    file, which is the race this call prevents. A NameHasOwner of False is
+    the normal case and is also the end state. Once nothing owns the old name,
+    this check costs one cheap round trip per launch.
 
     The primary alone runs this, and only after registration. A launch that
     hands off to another instance must send nothing away.
@@ -449,6 +386,25 @@ def establish(app: Application, *, publish: Callable[[], None],
               close_running: bool) -> Decision:
     """Decide what this launch is, and leave the application registered.
 
+    GApplication's own register() claims the application name, and nothing
+    else in the tree does. Everything expensive or exclusive, which is the
+    migrations, the plugin load and the deck open, runs after that call
+    returns, on the primary alone, so a launch that loses the race performs
+    nothing that collides with the winner. This function therefore does four
+    things, in this order.
+
+    1. --close-running first, because a process registers once. An
+       application that registered as a remote can never register as the
+       primary, so the ask to quit, and the wait for the release, must happen
+       before this process registers anything. That step is a probe and a
+       wait, and it never requests the name.
+    2. publish() before register(), so the moment the daemon grants the name,
+       the object set behind it already answers.
+    3. register(), which fails open where that is safe. See
+       _registration_failed for the one case it must never call primary.
+    4. The verdict. A remote hands off to the primary and exits. The primary
+       sends a pre-rename instance off the Stream Deck before it opens a deck.
+
     This calls publish once, before registration. publish must contain its
     own failures, as the app's API service does, and nothing here reads its
     result. The caller passes close_running rather than let this module read
@@ -464,12 +420,33 @@ def establish(app: Application, *, publish: Callable[[], None],
         # Record this before the registration, because afterwards nothing
         # can. An application registered without a bus reports itself as the
         # primary, and looks the same as one that owns the name.
+        #
+        # g_application_set_flags asserts on an application that already
+        # registered. It emits a CRITICAL and keeps the old flags, so
+        # NON_UNIQUE only sets while registration has not happened or has
+        # failed. This module therefore probes the bus itself up front, rather
+        # than catch an error out of register(). GApplication answers an
+        # unreachable session bus by proceeding as a non-unique application,
+        # and it returns True and raises nothing.
         app.set_flags(app.get_flags() | Gio.ApplicationFlags.NON_UNIQUE)
 
     # Publish the objects first. From the moment the daemon grants the name
-    # below, everything behind it already answers a call.
+    # below, everything behind it already answers a call. GDBus keeps a
+    # registration per object path and interface, so the application's own
+    # org.gtk.* interfaces and the API's interface share one path in either
+    # order.
     publish()
 
+    # register() emits the application's startup signal, so the toolkit's own
+    # startup chain runs here, before the globals exist, which is the point of
+    # registering first. The app overrides nothing on that path, and anything
+    # that starts to override it must hold that constraint or move.
+    #
+    # It also makes this process reachable before it answers. A launch that
+    # arrives while this one still boots joins it as a remote, and that join
+    # takes an answer that arrives once this process starts to dispatch its
+    # main loop. That launch waits out the boot, bounded by the measured 25s
+    # default of the bus, and then presents the window, rather than fail early.
     try:
         app.register()
     except GLib.Error as e:
@@ -490,7 +467,7 @@ def establish(app: Application, *, publish: Callable[[], None],
     log.info("This launch owns the application name")
     # The primary arm alone runs this. A launch that reached
     # PRIMARY_UNREGISTERED with a working bus, after a daemon refused the name
-    # request, boots without a check for a pre-rename instance, and would then
-    # share the decks with one.
+    # request, boots without a check for a pre-rename instance, and shares
+    # the decks with one.
     _shoo_pre_rename_instance(session_bus)
     return Decision.PRIMARY

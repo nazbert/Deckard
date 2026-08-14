@@ -2,60 +2,26 @@
 
 The gl module is a namespace of late-initialised slots, and well over six
 hundred places read the four hottest of them, which are the locale manager,
-the App, the settings manager and the page manager backend. Each of those
-reads is an invisible dependency edge. gl.lm names nothing a reader follows,
-nothing a rename tracks, and nothing a test substitutes without a reach into
-another module's namespace. This module gives those four reads a name each.
-
-What an accessor buys over the raw read
-
-It is checked. Most raw reads sit in unannotated defs, whose bodies mypy skips.
-An accessor is one annotated function, checked once, and its callers inherit a
-concrete type.
-
-It puts the None guard in one place. main_window() holds the hand-rolled
-"if gl.app is not None and hasattr(gl.app, "main_win")" dance once, and the
-require_* pair turns an AttributeError on NoneType into a named boot-phase
-error that names the construction step which has not run.
-
-It is a seam. The body can change, to an injection, a per-test double or a
-lazily built service, and no caller changes.
-
-It is greppable. "from src.backend.services import tr" is an import edge that
-the language server resolves and a rename follows.
-
-What it is not
+the App, the settings manager and the page manager backend. Each raw read is
+an invisible dependency edge. An accessor is checked once and hands its
+callers a concrete type, holds the None guard in one place, gives a seam a
+test can substitute, and leaves an import edge that a rename follows.
 
 It is no service locator, no registry and no container. Nothing registers here
 and nothing is constructed here. Every function reads the same slot the raw
 expression reads, on every call, so a slot rebound underneath it, which the
-test harness does, still applies. The slots stay where they are, and only the
-protocol gets a name.
-
-Honest optionals
-
-app() and page_manager() return "| None", because running code really does
-find those slots absent, before Main.__init__ publishes the App, and inside
-the None checks of the D-Bus API and of the deck controller teardown. The
-require_* variants serve a site whose None branch cannot run after boot. A
-require_* at a site whose None branch is live deletes a real guard, so the
-pair keeps that choice explicit.
-
-Imports
-
-globals at runtime and nothing else first-party. Every type imports under
-TYPE_CHECKING, and "from __future__ import annotations" makes every annotation
-a string. So any layer can import this, including the render engine's
-widget-free closure, GtkHelper and the windows, with no cycle and no toolkit.
-The deployment floor runs Python 3.13, which evaluates a parameter and return
-annotation at def time, and the future import prevents that.
-scenario_floor_import executes this module body on that interpreter to keep it
-true.
+test harness does, still applies.
 """
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+# globals at runtime and nothing else first-party. Every type imports under
+# TYPE_CHECKING, and the future import above makes every annotation a string,
+# so any layer can import this, including the render engine's widget-free
+# closure, GtkHelper and the windows, with no cycle and no toolkit. The
+# deployment floor runs Python 3.13, which evaluates a parameter and return
+# annotation at def time, and the future import prevents that.
 import globals as gl
 
 if TYPE_CHECKING:
@@ -157,7 +123,7 @@ def main_window() -> MainWindow | None:
     destroyed and truthy window. Code reaches that state, because the AppQuit
     fan-out that runs the plugin teardown hooks comes after the destroy. A
     caller on the quit path must not repaint or present through what it gets
-    here. A cleared slot in the teardown would make the absence honest.
+    here. A cleared slot in the teardown makes the absence honest.
     """
     running = gl.app
     if running is None:

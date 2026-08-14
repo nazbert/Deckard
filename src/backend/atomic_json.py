@@ -26,8 +26,9 @@ import time
 STALE_TMP_MAX_AGE = 60 * 60
 
 # How many .corrupt sidecars to keep per primary file. They hold forensic
-# copies rather than a version history. A file that corrupts again and
-# again fills the config directory.
+# copies rather than a version history. Without the cap, a file that corrupts
+# again and again fills the config directory; three copies are enough for
+# post-mortem.
 CORRUPT_SIDECAR_KEEP = 3
 
 
@@ -82,11 +83,11 @@ def quarantine_corrupt_file(file_path: str) -> tuple[bool, str]:
 
     Returns (moved, dest). moved is False when the rename fails, after a
     read-only filesystem error, a permission error, or a concurrent
-    quarantine that moved the file first. The primary is corrupt either way, so a caller must not gate its
-    recovery on moved. dest is the sidecar on success and the untouched
-    original path on failure.
+    quarantine that moved the file first. The primary is corrupt either way,
+    so a caller must not gate its recovery on moved. dest is the sidecar on
+    success and the untouched original path on failure.
 
-    This takes the first free .corrupt, .corrupt.1 or .corrupt.2 slot and
+    This takes the first free .corrupt, .corrupt.1, .corrupt.2 and so on, and
     keeps an earlier sidecar, so a second corruption cannot destroy the first
     forensic copy. os.replace of the chosen name stays atomic. Two threads can
     pick one free slot; the loser then overwrites an equally corrupt file, or

@@ -102,7 +102,7 @@ def on_main(func):
 # because the GIL serializes pure-Python CPU work.
 #
 # The workers are non-daemon. CPython 3.9 removed daemon threads from
-# ThreadPoolExecutor (bpo-39812) and offers no way back. Exit still works:
+# ThreadPoolExecutor (bpo-39812) and offers no way back. Exit still works.
 # quit ends in os._exit (src/app.py), and a normal interpreter exit wakes idle
 # workers through the atexit queue of concurrent.futures.
 _background_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="background")

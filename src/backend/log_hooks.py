@@ -16,59 +16,20 @@ Central exception hooks.
 
 A function decorated with @log.catch feeds its exceptions into loguru. An
 uncaught exception on any other path reaches stderr alone, and a detached run
-under autostart or flatpak loses it. install_exception_hooks() closes four
-surfaces in one place.
+under autostart or flatpak loses it. install_exception_hooks() closes the four
+surfaces that leak one, and _log_exc() rate-limits what they report.
 
-The main thread and every GLib or Gio callback, which covers idle_add,
-timeout_add, signal handlers and Gio actions. PyGObject routes their uncaught
-exceptions through PyErr_Print, which calls sys.excepthook.
-
-A plain threading.Thread target, through threading.excepthook.
-
-An error inside __del__, a weakref finalizer or a GC sweep, through
-sys.unraisablehook.
-
-The plugin-dispatch asyncio loop, through asyncio_exception_handler, which
-event_dispatch._get_loop wires up.
-
-All four route through loguru, which fans out to every sink that
+Every hook routes through loguru, so a record reaches every sink that
 config_logger() installed, which are logs/logs.log, stderr and the gl.logs
-ring behind the About dialog. Before config_logger() runs, loguru's default
-stderr sink catches them. No re-install follows, because each hook resolves
-the logger's sinks at call time.
+ring behind the About dialog. Loguru's default stderr sink catches a record
+emitted before that call. Each hook resolves the sinks at call time, so no
+re-install follows.
 
-One blind spot stays. An exception inside a ThreadPoolExecutor task sits on
-its Future and never reaches threading.excepthook, so a submit site must
-attach a done-callback, as main_loop.run_in_background and
-DeckController._log_callback_exception do.
-
-_log_exc() rate-limits per failing site, at one record per exception type and
-innermost frame per RATE_LIMIT_WINDOW_S, and reports the suppressed count on
-that site's next record. A raising GTK signal handler on a hot path otherwise
-writes a full diagnose=True traceback into every sink on every emission.
-
-That key has a known bound. Two different failures raised from one line with
-one exception type, such as a raise ValueError(...) that several callers
-reach with different messages, share one budget and can mask each other for a
-window. The message stays out of the key, because a real message carries a
-varying id, path or counter, and a message-keyed guard then throttles
-nothing, which is the failure this guard prevents. The summary line therefore
-reads "N further failures at <site>" and never "N repeats", because the guard
-knows the site and does not know that the failures matched.
-
-SC_NO_ERROR_HOOKS=1 turns install_exception_hooks() and
-redirect_faulthandler() into no-ops, so an operator compares a field anomaly
-that involves the hooks, such as double logging, an exit-path interaction, or
-a hook that fires in the wrong place, against the un-hooked behaviour with an
-environment variable rather than a revert and a rebuild. See
-install_exception_hooks() for the one thing the flag leaves on.
-
-This module must stay importable before globals, which the fixtures.py
-contract of the test harness needs, so it imports stdlib and loguru only, and
-nothing from src/ or globals.py. log_redaction is the one allowed sibling
-import. It follows the same stdlib and loguru contract, and
-install_exception_hooks() installs its scrubbing patcher, so these hooks
-never route an unredacted traceback into the sinks.
+This module stays importable before globals, which the fixtures.py contract
+of the test harness needs, so it imports stdlib and loguru only. log_redaction
+is the one allowed sibling import, on the same contract, and
+install_exception_hooks() installs its scrubbing patcher, so no hook routes an
+unredacted traceback into a sink.
 """
 import atexit
 import faulthandler
@@ -90,9 +51,12 @@ from loguru import logger as _LOG
 from src.backend.log_redaction import install_log_redaction, scrub
 
 # A bisect switch, read once at import, like SC_STRONG_CALLBACKS in
-# src/Signals/weak_callbacks.py. It is a debugging knob and must not change
-# behaviour mid-run, because the hooks are process-global and a mid-run flip
-# leaves half of them installed.
+# src/Signals/weak_callbacks.py. Set to 1 it turns install_exception_hooks()
+# and redirect_faulthandler() into no-ops, so an operator compares a field
+# anomaly that involves the hooks against the un-hooked behaviour with an
+# environment variable rather than a revert and a rebuild. It is a debugging
+# knob and must not change behaviour mid-run, because the hooks are
+# process-global and a mid-run flip leaves half of them installed.
 #
 # The test accepts "1" only, like that precedent. A truth test reads
 # SC_NO_ERROR_HOOKS=false, no or off, which an operator writes to turn a
@@ -122,13 +86,24 @@ _fault_file = None
 # and into the About-dialog ring, so the safety net's first big catch floods
 # the log it reports to.
 #
-# One record per site per window. A further failure inside the window raises a
-# count, which rides on the next record from that same site. The budget covers
-# one site and never the whole process, so a storm on one signal handler
-# cannot mask a one-shot failure elsewhere. A count that gets no next record
-# is flushed rather than dropped, when the prune evicts its entry, when the
-# process exits through atexit, and onto a terminal record. The guard may make
-# a flood quiet, and never invisible.
+# One record per site per window, keyed by exception type and innermost
+# frame. A further failure inside the window raises a count, which rides on
+# the next record from that same site. The budget covers one site and never
+# the whole process, so a storm on one signal handler cannot mask a one-shot
+# failure elsewhere. A count that gets no next record is flushed rather than
+# dropped, when the prune evicts its entry, when the process exits through
+# atexit, and onto a terminal record. The guard may make a flood quiet, and
+# never invisible.
+#
+# That key has a known bound. Two different failures raised from one line with
+# one exception type, such as a raise ValueError(...) that several callers
+# reach with different messages, share one budget and can mask each other for
+# a window. The message stays out of the key, because a real message carries a
+# varying id, path or counter, and a message-keyed guard then throttles
+# nothing, which is the failure this guard prevents. The summary line
+# therefore reads "N further failures at <site>" and never "N repeats",
+# because the guard knows the site and does not know that the failures
+# matched.
 RATE_LIMIT_WINDOW_S = 5.0  # Module-level, so a scenario can shrink the window
 _RATE_LIMIT_MAX_KEYS = 256
 # _log_exc runs on the thread that failed. That is a worker through
@@ -391,7 +366,7 @@ def _log_exc(kind: str, exc_type, exc_value, exc_tb, extra: str = "",
             # The text reads "since the last record" and not "in the last
             # 5s". The gap between two records from one site has no bound. A
             # site that goes quiet for an hour and fires again reports counts
-            # an hour old, and a window-worded summary would misreport exactly
+            # an hour old, and a window-worded summary misreports exactly
             # that slow trickle.
             extra = (
                 f"{extra} ({suppressed} further failures at {label} "
@@ -469,6 +444,19 @@ def asyncio_exception_handler(loop, context) -> None:
 def install_exception_hooks() -> None:
     """Install the sys, threading and unraisable hooks. Idempotent. Call it
     before any code that can throw on a background thread or a GLib callback.
+
+    This closes four surfaces. The main thread and every GLib or Gio callback,
+    which covers idle_add, timeout_add, signal handlers and Gio actions,
+    because PyGObject routes their uncaught exceptions through PyErr_Print,
+    which calls sys.excepthook. A plain threading.Thread target, through
+    threading.excepthook. An error inside __del__, a weakref finalizer or a GC
+    sweep, through sys.unraisablehook. The plugin-dispatch asyncio loop,
+    through asyncio_exception_handler, which event_dispatch._get_loop wires up.
+
+    One blind spot stays. An exception inside a ThreadPoolExecutor task sits
+    on its Future and never reaches threading.excepthook, so a submit site
+    must attach a done-callback, as main_loop.run_in_background and
+    DeckController._log_callback_exception do.
 
     It also installs the redaction patcher. These hooks route a full traceback
     into the sinks, so they must never fire without the scrubbing layer.
