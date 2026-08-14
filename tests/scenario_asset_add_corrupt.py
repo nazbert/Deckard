@@ -1,32 +1,7 @@
-"""
-Corrupt files are refused at asset import time.
+"""Corrupt files are refused at asset import time.
 
-Upstream gates add() on an exception-based is_decodable; our
-generate_thumbnail never raises (it returns a placeholder tagged
-`sc_broken` on any decode failure), so a straight port would be a silent
-always-True. The adapted gate (_decode_for_import) must key off the
-sc_broken marker, run BEFORE the copy (no partial import), and surface as
-the same None sentinel the existing add() failure paths use so
-add_custom_media_set_by_ui can raise its AlertDialog.
-
-Contract under test:
-  (a) a truncated PNG (valid magic, cut body -- the lazy-decode shape) and
-      a garbage-bytes .mp4 are refused: add() returns None, nothing is
-      appended, no file lands in the internal Assets dir, Assets.json is
-      unchanged;
-  (b) a valid PNG still adds (gate must not break the happy path), and a
-      valid video decodes exactly ONCE per add (the gate's decode is reused
-      for the thumbnail, not repeated);
-  (c) _decode_for_import is keyed off the sc_broken marker directly -- a
-      tagged placeholder means None, an untagged image is returned,
-      regardless of exceptions;
-  (d) add_custom_media_set_by_ui shows an AlertDialog on the refusal (the
-      drop must not silently do nothing), with the corrupt case covered in
-      the dialog text.
-
-Deliberately ABSENT (transient-failure policy, restated from the plan):
-no startup pass deletes undecodable files -- an asset on a not-yet-mounted
-dir must never cost the user their files. Pinned in scenario_asset_poison.
+generate_thumbnail never raises; it returns a placeholder tagged sc_broken.
+The import gate keys off that marker and runs before the copy.
 """
 import fixtures  # noqa: F401  (must be first -- see fixtures.py docstring)
 
@@ -55,8 +30,8 @@ INTERNAL_ASSETS_DIR = os.path.join(gl.DATA_PATH, "Assets", "AssetManager", "Asse
 def make_corrupt_files() -> dict:
     os.makedirs(WORK_DIR, exist_ok=True)
 
-    # Truncated png: valid magic + IHDR so Image.open() succeeds, but the
-    # pixel data is cut -- decode only fails at .load() time.
+    # A truncated PNG has valid magic and IHDR, so Image.open() succeeds. The
+    # pixel data is cut, so the decode fails at .load() time.
     full = fixtures.make_test_png(os.path.join(WORK_DIR, "_full.png"), size=(128, 128))
     with open(full, "rb") as f:
         data = f.read()
@@ -106,9 +81,11 @@ def check_valid_still_adds(backend: AssetManagerBackend) -> None:
     print("ok: a valid PNG still adds through the gate")
 
 
-def check_decode_for_import_keys_off_sc_broken(backend: AssetManagerBackend) -> None:
-    """The required adaptation: the gate must read the sc_broken
-    marker, not rely on exceptions -- generate_thumbnail never raises."""
+def check_decode_import_keys_sc_broken(backend: AssetManagerBackend) -> None:
+    """The gate must read the sc_broken marker, not catch an exception.
+
+    generate_thumbnail never raises.
+    """
     real_generate = gl.media_manager.generate_thumbnail
     try:
         broken = Image.new("RGB", (8, 8))
@@ -140,9 +117,11 @@ def make_test_video(path: str, n_frames: int = 8, size=(48, 32), fps: int = 10) 
 
 
 def check_video_add_decodes_once(backend: AssetManagerBackend) -> None:
-    """Cost contract: the gate's decode IS the thumbnail decode -- a
-    video add must run generate_thumbnail exactly once, not once for the
-    gate and again inside save_thumbnail."""
+    """The gate decode is the thumbnail decode.
+
+    A video add runs generate_thumbnail once, not once for the gate and again
+    inside save_thumbnail.
+    """
     video = os.path.join(WORK_DIR, "decode_once.mp4")
     make_test_video(video)
 
@@ -171,9 +150,11 @@ def check_video_add_decodes_once(backend: AssetManagerBackend) -> None:
 
 
 def check_ui_add_shows_alert_dialog(backend: AssetManagerBackend, files: dict) -> None:
-    """A refused drop/import must tell the user (AlertDialog), not silently
-    do nothing. Gtk/GLib are stubbed at the module level -- the harness is
-    headless and only the dialog CONSTRUCTION is under test."""
+    """A refused drop must tell the user with an AlertDialog.
+
+    Gtk and GLib are stubbed at module level. The harness is headless, so only
+    the dialog construction is under test.
+    """
     dialogs: list[dict] = []
     shown: list[tuple] = []
     built_before_idle: list[int] = []
@@ -186,10 +167,10 @@ def check_ui_add_shows_alert_dialog(backend: AssetManagerBackend, files: dict) -
             shown.append(a)
 
     def fake_idle_add(fn, *a):
-        # Record how many dialogs exist when the callback is SCHEDULED: the
-        # calling (worker) thread must not have built any GTK object --
-        # construction belongs inside the main-thread callback (this path
-        # runs on the Chooser's bare import thread, see Chooser.add_files).
+        # Count the dialogs that exist when the callback is scheduled. The
+        # calling worker thread must build no GTK object, because construction
+        # belongs inside the main-thread callback. This path runs on the bare
+        # import thread of the chooser, see Chooser.add_files.
         built_before_idle.append(len(dialogs))
         return fn(*a)
 
@@ -224,7 +205,7 @@ def main() -> None:
 
     check_corrupt_refused_no_partial_copy(backend, files)
     check_valid_still_adds(backend)
-    check_decode_for_import_keys_off_sc_broken(backend)
+    check_decode_import_keys_sc_broken(backend)
     check_video_add_decodes_once(backend)
     check_ui_add_shows_alert_dialog(backend, files)
 

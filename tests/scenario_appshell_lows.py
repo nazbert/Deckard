@@ -1,31 +1,7 @@
-"""
-Regression checks for the grouped LOW app-shell/UI findings
-(docs/deep-audit-2026-07-10.md "App shell").
+"""Regression checks for the grouped low-severity app-shell findings.
 
-All checks drive the real methods UNBOUND on plain stub objects -- no GTK
-widget is instantiated, no display is needed. Each check red-checks against
-the pre-fix code:
-
-  1. app.py on_activate: show_donate must be invoked, not appended-as-result
-     onto MainWindow.on_finished (which drains synchronously during the
-     MainWindow constructor, so appending there is always dead).
-  2. Sidebar.hide_error must target configurator_stack (a real child of
-     main_stack), not key_editor (a child of configurator_stack).
-  3. DeckStack deck-name dedup must suffix "(n)" instead of incrementing the
-     model name's trailing digit ("MK.2" -> "MK.3").
-  4. PageSelector must guard ComboBox.get_active() == -1 (negative index
-     silently selected the LAST page).
-  5. DeckManager USB callbacks must not deref gl.app.main_win unguarded, and
-     the recursive_hasattr "app.main_win." trailing-dot typo (always False)
-     must be gone so add_newly_connected_deck's check_for_errors() runs.
-  6. DeckSettings Brightness/Screensaver rows must tolerate a controller
-     without an active_page.
-  7. Onboarding get_udev_version must use "flatpak-spawn --host" (the old
-     "flatpak run --command udevadm --version" form was malformed, so the
-     udev warning never showed inside flatpak).
-  8. The hidden AssetManager singleton must drop the opener's callback refs
-     at delivery time instead of pinning them until the next open -- on BOTH
-     delivery paths (deliver_selection and the custom-asset FlowBox).
+Every check drives a real method unbound on plain stub objects, so no GTK
+widget is built and no display is needed.
 """
 import fixtures  # noqa: F401  (must be first: isolates the data dir)
 
@@ -51,7 +27,7 @@ class Recorder:
 
 
 class ExplodingModel:
-    """Sentinel standing in for pages_model: any indexing = test failure."""
+    """Sentinel for pages_model. Any indexing fails the test."""
     def __getitem__(self, item):
         raise AssertionError(
             f"pages_model must not be indexed when get_active() == -1 "
@@ -75,7 +51,7 @@ def check_on_activate_defers_show_donate() -> None:
     print("  PASS: on_activate calls show_donate directly (no dead append)")
 
 
-def check_sidebar_hide_error_targets_stack_child() -> None:
+def check_hide_error_targets_stack_child() -> None:
     from src.windows.mainWindow.elements.Sidebar.Sidebar import Sidebar
 
     error_page = object()
@@ -114,8 +90,8 @@ def check_deck_name_dedup() -> None:
             deck_type=lambda: "Stream Deck MK.2",
             get_serial_number=lambda: serial,
         )
-        # get_page_attributes reads the controller's cached serial accessor,
-        # not the device (one read, one truth).
+        # get_page_attributes reads the cached serial accessor of the
+        # controller, not the device.
         return Obj(deck=deck, serial_number=lambda: serial)
 
     _, first = DeckStack.get_page_attributes(stub, make_controller("SN1"))
@@ -163,7 +139,7 @@ def check_deck_manager_usb_callback_guards() -> None:
 
     saved_app = gl.app
 
-    # (a) Disconnect event before the UI exists: must not raise.
+    # A disconnect event before the UI exists must not raise.
     gl.app = None
     stub = Obj(deck_controller=[])
     try:
@@ -178,10 +154,10 @@ def check_deck_manager_usb_callback_guards() -> None:
     finally:
         gl.app = saved_app
 
-    # (b) Trailing-dot typo: add_newly_connected_deck must actually reach the
-    # "re-check whether any deck is available" call (the old
-    # recursive_hasattr(gl, "app.main_win.") was always False). That
-    # is a port call, not a direct main_win poke, so the recorder is a port.
+    # add_newly_connected_deck must reach the call that re-checks whether any
+    # deck is available. A trailing dot in recursive_hasattr(gl, "app.main_win.")
+    # always reads False and skips it. The call goes through a port, not a direct
+    # main_win poke, so the recorder is a port.
     from src.backend import ui_port
 
     class _RecordingPort(ui_port.UIPort):
@@ -205,8 +181,8 @@ def check_deck_manager_usb_callback_guards() -> None:
     dm_mod.DeckController = lambda manager, deck: Obj(deck=deck)
     try:
         # DeckManager wraps the controller construction in
-        # _init_deck_controller_with_retry(); stub it so the method reaches
-        # the availability refresh this test verifies.
+        # _init_deck_controller_with_retry(). Stub it, so the method reaches the
+        # availability refresh this test verifies.
         stub = Obj(
             deck_controller=[],
             fake_deck_controller=[],
@@ -253,9 +229,9 @@ def check_deck_group_active_page_guards() -> None:
             "no active page means 'not overwritten'"
         )
 
-        # update_image (screensaver asset picker callback) must not reload the
-        # screensaver against a None active_page: load_screensaver derefs
-        # page.dict, so a None here would raise.
+        # update_image is the screensaver asset picker callback. It must not
+        # reload the screensaver against a None active_page, because
+        # load_screensaver dereferences page.dict and would raise.
         load_screensaver = Recorder()
         controller3 = Obj(active_page=None, load_screensaver=load_screensaver)
         stub3 = Obj(
@@ -339,11 +315,11 @@ def check_asset_manager_drops_callback_refs() -> None:
     print("  PASS: AssetManager drops callback refs at delivery")
 
 
-def check_custom_asset_flowbox_drops_callback_refs() -> None:
-    # The second delivery path: CustomAssets/FlowBox.on_child_activated
-    # captures the callback then nulls the manager's refs *before* spawning the
-    # delivery thread. Stub threading.Thread so the callback is captured
-    # synchronously and no real thread runs.
+def check_flowbox_drops_callback_refs() -> None:
+    # The second delivery path is CustomAssets/FlowBox.on_child_activated. It
+    # captures the callback, then nulls the manager refs before it spawns the
+    # delivery thread. Stub threading.Thread, so the capture is synchronous and
+    # no real thread runs.
     import src.windows.AssetManager.CustomAssets.FlowBox as fb_mod
 
     action = Obj(name="opener-action")  # stands in for the pinned action/page
@@ -377,7 +353,7 @@ def check_custom_asset_flowbox_drops_callback_refs() -> None:
     finally:
         fb_mod.threading.Thread = saved_thread
 
-    # Refs must be dropped on the manager the moment delivery is dispatched.
+    # The manager must drop the refs the moment delivery is dispatched.
     assert asset_manager.callback_func is None, (
         "the hidden singleton must not pin the selection callback after the "
         "custom-asset FlowBox delivers"
@@ -386,7 +362,7 @@ def check_custom_asset_flowbox_drops_callback_refs() -> None:
         f"callback args/kwargs must be dropped too, got "
         f"{asset_manager.callback_args!r} / {asset_manager.callback_kwargs!r}"
     )
-    # And the captured thread must still carry the real callback + path/args.
+    # The captured thread must still carry the real callback, path and args.
     assert captured.get("started") is True, "delivery thread must be started"
     assert captured["args"] == (
         "/some/custom.png", callback, (action,), {"k": action}
@@ -401,14 +377,14 @@ def check_custom_asset_flowbox_drops_callback_refs() -> None:
 def main() -> None:
     fixtures.start_watchdog(60, label="scenario_appshell_lows")
     check_on_activate_defers_show_donate()
-    check_sidebar_hide_error_targets_stack_child()
+    check_hide_error_targets_stack_child()
     check_deck_name_dedup()
     check_page_selector_negative_index_guard()
     check_deck_manager_usb_callback_guards()
     check_deck_group_active_page_guards()
     check_udev_probe_spawn_form()
     check_asset_manager_drops_callback_refs()
-    check_custom_asset_flowbox_drops_callback_refs()
+    check_flowbox_drops_callback_refs()
     print("PASS: scenario_appshell_lows")
 
 

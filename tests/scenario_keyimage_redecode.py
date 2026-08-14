@@ -1,28 +1,7 @@
-"""
-Scenario: InputImage must not re-decode from disk on every composite for
-sub-tile sources, and must not close the image under concurrent readers.
+"""InputImage must not re-decode from disk on every composite.
 
-get_raw_image() -> _ensure_fits_composed() re-decoded when the composed
-layout needed more resolution than the retained copy -- but when the SOURCE
-is smaller than the ask (any 64px icon on 72px tiles at size>1), the check
-could never be satisfied: every call re-ran Image.open+convert+enhance from
-disk, and the swap closed the previously returned image out from under the
-media thread ('Operation on closed image').
-
-Checks (real InputImage against a stub input):
-  1. Repeated get_raw_image() with an unsatisfiable ask decodes from disk at
-     most once (the memoized native-size clamp); pre-fix: once per call.
-  2. A reference handed out by get_raw_image() stays usable after a
-     re-decode swap; pre-fix: ValueError on any operation.
-  3. Under the REAL cross-thread race -- one thread compositing (reading
-     pixels off) get_raw_image()'s reference while another drives re-decode
-     swaps on the same InputImage -- no composite ever operates on a closed
-     image. This is the media-thread-composite vs UI-sync-re-decode hazard
-     the fix targets (get_current_image at DeckController.py:3782/4024 on the
-     media thread vs update_all_inputs' preview sync at :1113 on another
-     thread, on a background-video page). Checks 1/2 prove the policy
-     single-threaded; this proves it holds under contention. Pre-fix:
-     'Operation on closed image' from the compositor mid-read.
+A source smaller than the ask can never satisfy the check, so the native size
+is memoized. A swapped-out image is dropped, not closed, for live readers.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
@@ -40,8 +19,10 @@ from src.backend.DeckManagement.Subclasses.KeyImage import InputImage
 
 
 class StubInput:
-    """Just enough ControllerInput for InputImage: saturation, active state
-    with a composed layout, and the tile size."""
+    """Just enough ControllerInput for InputImage.
+
+    Saturation, an active state with a composed layout, and the tile size.
+    """
 
     def __init__(self, layout_size: float):
         self.deck_controller = types.SimpleNamespace(
@@ -59,14 +40,14 @@ class StubInput:
 
 
 def leg_concurrent_swap() -> int:
-    """Two threads on ONE InputImage: a compositor that reads pixels off the
-    reference get_raw_image() hands it (as add_image_to_background's resize
-    does), and a resizer that keeps forcing genuine re-decode swaps. Pre-fix
-    the resizer's swap closed the image the compositor was mid-read on
-    ('Operation on closed image'); post-fix the swapped-out image is dropped,
-    not closed, so an in-flight composite always completes."""
+    """Two threads on one InputImage, a compositor and a resizer.
+
+    The compositor reads pixels off the reference get_raw_image() hands it,
+    as the resize of add_image_to_background does, while the resizer forces
+    genuine re-decode swaps. An in-flight composite must always complete.
+    """
     big_path = os.path.join(gl.DATA_PATH, "concurrent_src.png")
-    # A large source so every re-decode yields a fresh, still-open image the
+    # A large source, so every re-decode yields a fresh, still-open image the
     # compositor can be caught reading.
     Image.new("RGBA", (512, 512), (40, 90, 160, 255)).save(big_path)
 
@@ -79,9 +60,9 @@ def leg_concurrent_swap() -> int:
     stop = threading.Event()
 
     def reseed_for_next_swap():
-        # Re-arm the swap path: shrink the retained copy and forget the
-        # memoized native size so the next get_raw_image() re-decodes and
-        # swaps again (the clamp would otherwise settle after one decode).
+        # Re-arm the swap path. Shrink the retained copy and forget the
+        # memoized native size, so the next get_raw_image() re-decodes and
+        # swaps again. The clamp would otherwise settle after one decode.
         key_image.image = key_image.image.resize((64, 64))
         key_image._source_native_size = None
 
@@ -91,7 +72,7 @@ def leg_concurrent_swap() -> int:
                 img = key_image.get_raw_image()
                 if img is None:
                     continue
-                # Touch the pixels the same way the real composite does; on a
+                # Touch the pixels the same way the real composite does. On a
                 # closed image this raises ValueError.
                 img.tobytes()
                 img.resize((32, 32))
@@ -116,7 +97,7 @@ def leg_concurrent_swap() -> int:
                threading.Thread(target=resizer, name="resizer")]
     for t in threads:
         t.start()
-    # The resizer sets stop after its 400 swaps; bound the join defensively.
+    # The resizer sets stop after its 400 swaps. Bound the join defensively.
     for t in threads:
         t.join(timeout=20)
     stop.set()
@@ -142,8 +123,8 @@ def leg_concurrent_swap() -> int:
 def main() -> int:
     start_watchdog(30, "keyimage_redecode")
 
-    # A 64x64 source: smaller than one 72px tile, so any layout size >= 1
-    # asks for more than the source can ever deliver.
+    # A 64x64 source is smaller than one 72 px tile, so any layout size of 1 or
+    # more asks for more than the source can ever deliver.
     src_path = os.path.join(gl.DATA_PATH, "icon64.png")
     Image.new("RGBA", (64, 64), (30, 120, 200, 255)).save(src_path)
 
@@ -177,7 +158,7 @@ def main() -> int:
         return 1
     print(f"PASS: unsatisfiable source decoded {opens[0]}x across 31 composites")
 
-    # 2) close-under-reader: hand out a reference, force a swap, use the ref.
+    # 2. Hand out a reference, force a swap, then use the reference.
     stub2 = StubInput(layout_size=1.0)
     big_path = os.path.join(gl.DATA_PATH, "big.png")
     Image.new("RGBA", (600, 600), (200, 30, 30, 255)).save(big_path)
@@ -195,7 +176,7 @@ def main() -> int:
         return 1
     print("PASS: swapped-out image stays usable for in-flight composites")
 
-    # 3) the real cross-thread hazard (checks 1/2 are single-threaded).
+    # 3. The real cross-thread hazard. Checks 1 and 2 are single-threaded.
     return leg_concurrent_swap()
 
 

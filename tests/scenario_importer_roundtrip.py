@@ -1,14 +1,7 @@
-"""
-Scenario: StreamDeck-UI importer round-trip.
+"""Round-trip scenario for the StreamDeck-UI importer.
 
-Three defects under test:
-  1. It wrote `font_size`/`font_family` (underscores) into label dicts; the
-     loader reads `font-size`/`font-family` -- imported fonts were dead keys.
-  2. It REPLACED settings/decks/<serial>.json wholesale, erasing whatever
-     deck settings already existed (rotation, unrelated sections).
-  3. It overwrote same-named pages (`ui_<deck>_<n>.json`) -- and any suffix
-     scheme must keep intra-import ChangePage references pointing at the
-     final (suffixed) filenames.
+Label dicts must carry the hyphenated keys the loader reads, deck settings
+must merge, and a suffixed page name must keep ChangePage references valid.
 """
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH)
 
@@ -34,7 +27,7 @@ def main() -> int:
     os.makedirs(pages_dir, exist_ok=True)
     os.makedirs(decks_dir, exist_ok=True)
 
-    # Pre-existing pages the import must NOT clobber (both target names).
+    # Pre-existing pages the import must not clobber, under both target names.
     sentinel = {"sentinel": True}
     for n in (1, 2):
         with open(os.path.join(pages_dir, f"ui_{SERIAL}_{n}.json"), "w") as f:
@@ -45,8 +38,8 @@ def main() -> int:
     with open(deck_settings_path, "w") as f:
         json.dump({"rotation": 90, "brightness": {"value": 20}, "custom": {"keep": 1}}, f)
 
-    # Minimal streamdeck-ui export: two pages; page 0's button switches to
-    # page 1 (export switch_page is 1-based: value 2 -> export page "1").
+    # A minimal streamdeck-ui export of two pages. The button on page 0
+    # switches to page 1, and the export switch_page is 1-based.
     export = {
         "streamdeck_ui_version": 2,
         "state": {
@@ -78,13 +71,13 @@ def main() -> int:
 
     failures = []
 
-    # --- 3a: sentinels untouched -----------------------------------------
+    # 3a. The sentinels are untouched.
     for n in (1, 2):
         with open(os.path.join(pages_dir, f"ui_{SERIAL}_{n}.json")) as f:
             if json.load(f) != sentinel:
                 failures.append(f"pre-existing page ui_{SERIAL}_{n}.json was clobbered")
 
-    # --- 3b: imported pages landed under suffixed names -------------------
+    # 3b. The imported pages landed under suffixed names.
     imported = sorted(
         p for p in os.listdir(pages_dir)
         if p.startswith(f"ui_{SERIAL}_") and p.endswith(".json")
@@ -95,8 +88,8 @@ def main() -> int:
     if len(imported) != 2:
         failures.append(f"expected 2 collision-suffixed imported pages, found {imported}")
     else:
-        # Identify by content, not filename: page 0 carries the "hello"
-        # label, page 1 carries "second".
+        # Identify by content rather than filename. Page 0 carries the hello
+        # label and page 1 carries second.
         for name in imported:
             full = os.path.join(pages_dir, name)
             with open(full) as f:
@@ -118,7 +111,7 @@ def main() -> int:
     if page0_dict is not None:
         state0 = page0_dict.get("keys", {}).get("0x0", {}).get("states", {}).get("0", {})
 
-        # --- 1: hyphenated label keys the loader reads ---------------------
+        # 1. The hyphenated label keys the loader reads.
         label = state0.get("labels", {}).get("bottom", {})
         if "font-family" not in label or "font-size" not in label:
             failures.append(f"label written with keys {sorted(label)} -- loader reads font-family/font-size")
@@ -127,7 +120,7 @@ def main() -> int:
         if label.get("text") != "hello":
             failures.append(f"label text lost: {label.get('text')!r}")
 
-        # --- 3c: ChangePage points at page 1's FINAL (suffixed) path -------
+        # 3c. ChangePage points at the final suffixed path of page 1.
         actions = state0.get("actions", [])
         change = [a for a in actions if a.get("id") == "com_core447_DeckPlugin::ChangePage"]
         if not change:
@@ -138,7 +131,7 @@ def main() -> int:
                 failures.append(
                     f"ChangePage points at {target!r}; the import wrote page 1 to {page1_path!r}")
 
-    # --- 2: deck settings merged, not replaced ----------------------------
+    # 2. The deck settings were merged, not replaced.
     with open(deck_settings_path) as f:
         deck_settings = json.load(f)
     if deck_settings.get("rotation") != 90 or deck_settings.get("custom") != {"keep": 1}:

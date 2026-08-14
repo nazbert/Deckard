@@ -1,44 +1,7 @@
-"""
-Scenario: corrupt-but-present JSON must not become silent data loss
-(read side -- the write side landed with the atomic-write seam).
+"""Corrupt-but-present JSON must not become silent data loss on the read side.
 
-Four sites, all against the real code:
-
-  1. get_page_data on a corrupt page WITH a backup: pre-fix the loader
-     silently returned {} (and the next Page.save() persisted the empty
-     dict); post-fix the corrupt file is quarantined to <path>.corrupt and
-     the page heals from pages/backups/.
-  2. get_page_data on a corrupt page WITHOUT a backup: still {} (nothing to
-     heal from), but the corrupt original is preserved aside instead of
-     sitting in place waiting to be overwritten by the next save.
-  3. Migrator.get_settings on a torn migrations.json: pre-fix the raw
-     json.load raised out of run_migrators and aborted startup; post-fix it
-     quarantines and reports all migrations pending (safe to re-run, since
-     the migrators are idempotent).
-  4. remove_asset_from_all_pages with one poison page: pre-fix the raw
-     json.load aborted the sweep for every remaining page; post-fix the
-     poison page skips and the healthy page is still cleaned.
-
-Review round 1 (reviewer-fixed HIGH + two MEDIUMs -- the heal is now
-loader-owned):
-
-  5. set_page_settings on a corrupt page must NOT gut the live page. The
-     settings mutators read via get_page_data(path, use_backup=False) and
-     write the result straight back; the old heal only fired on the
-     use_backup=True path, so a corrupt page loaded {} and the writer
-     persisted {"settings": ...}, erasing keys/background/dials. Post-fix
-     the loader reports corruption and get_page_data heals from the backup
-     regardless of use_backup, so the healed content AND the new setting
-     both survive.
-  6. Heal must not depend on the quarantine rename succeeding. If os.replace
-     fails (read-only fs / permissions), the corrupt primary stays in place;
-     the old heal keyed off "primary no longer exists" and so did nothing,
-     and the next save overwrote the corrupt file with {}. Post-fix the heal
-     keys off the load-result corrupt flag, so it fires even when the
-     quarantine could not move the file aside.
-  7. Quarantine must not clobber a prior <path>.corrupt. A second corruption
-     used to os.replace over the first forensic copy; post-fix the helper
-     picks the first free .corrupt / .corrupt.1 / .corrupt.2 ... slot.
+The loader quarantines the corrupt file and heals from the backup, whatever
+use_backup says. A failed quarantine still heals, and never clobbers a copy.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
@@ -151,8 +114,10 @@ def check_sweep_survives_poison() -> int:
 
 
 def _seed_page_with_backup(name: str, content: dict) -> str:
-    """Write a real page + a validated known-good backup, then corrupt the
-    primary. Returns the page path."""
+    """Write a real page and a validated backup, then corrupt the primary.
+
+    Returns the page path.
+    """
     path = seed_page(name)
     backup_dir = os.path.join(gl.page_manager.PAGE_PATH, "backups")
     os.makedirs(backup_dir, exist_ok=True)
@@ -165,18 +130,18 @@ def _seed_page_with_backup(name: str, content: dict) -> str:
 
 
 def check_set_page_settings_no_gut() -> int:
-    # HIGH: the settings writers read with use_backup=False and save the
-    # result back. A corrupt page must heal from the backup so the write
-    # preserves keys/background instead of gutting them to {"settings": ...}.
+    # The settings writers read with use_backup=False and save the result back.
+    # A corrupt page must heal from the backup, so the write preserves keys and
+    # background instead of gutting them to a settings-only dict.
     content = {"keys": {"0x0": {"states": {"0": {}}}}, "background": {"path": "wall.png"}}
     path = _seed_page_with_backup("SettingsWriterHeal", content)
 
     gl.page_manager.set_page_settings(path, {"brightness": 42})
 
     # A settings write is an edit of the page, marked with the flush seam and
-    # written on its timer -- and the heal has just left this path with no
-    # primary at all (the loader quarantined it), so the file only exists
-    # again once that write goes out.
+    # written on its timer. The heal has just left this path with no primary,
+    # because the loader quarantined it, so the file exists again only once that
+    # write goes out.
     page_flush.get().flush_path(path)
     with open(path) as f:
         after = json.load(f)
@@ -194,7 +159,7 @@ def check_set_page_settings_no_gut() -> int:
 
 
 def check_get_page_settings_heals() -> int:
-    # HIGH sibling: the pure reader must also heal (it feeds every mutator).
+    # The pure reader must also heal, because it feeds every mutator.
     content = {"keys": {}, "settings": {"brightness": 77}}
     path = _seed_page_with_backup("SettingsReaderHeal", content)
 
@@ -207,7 +172,7 @@ def check_get_page_settings_heals() -> int:
 
 
 def check_heal_when_quarantine_fails() -> int:
-    # MEDIUM: heal must not depend on the quarantine rename succeeding.
+    # The heal must not depend on the quarantine rename succeeding.
     content = {"keys": {}, "background": {"marker": "from-backup"}}
     path = _seed_page_with_backup("QuarantineFails", content)
 
@@ -232,7 +197,7 @@ def check_heal_when_quarantine_fails() -> int:
 
 
 def check_quarantine_no_clobber() -> int:
-    # MEDIUM: a second corruption must not destroy the first .corrupt copy.
+    # A second corruption must not destroy the first .corrupt copy.
     from src.backend.SettingsManager import SettingsManager
 
     path = seed_page("NoClobber")
@@ -248,10 +213,10 @@ def check_quarantine_no_clobber() -> int:
             print("FAIL(7): first .corrupt has wrong content")
             return 1
 
-    # regenerate the primary and corrupt it a second time
+    # Regenerate the primary and corrupt it a second time.
     with open(path, "w") as f:
         f.write("SECOND-CORRUPT")
-    SettingsManager.load_settings_from_file(path)  # must NOT clobber .corrupt
+    SettingsManager.load_settings_from_file(path)  # must not clobber .corrupt
 
     with open(path + ".corrupt") as f:
         if f.read() != "FIRST-CORRUPT":

@@ -1,43 +1,7 @@
-"""
-Pins the CLI half of the control plane (src/backend/cli_forward.py): what an
-invocation carrying `--change-page` / `--change-state` does with the requests
-it was given.
+"""Pins the CLI half of the control plane in src/backend/cli_forward.py.
 
-This code was unreachable by any test until it left main.py, and being
-unreachable is how it came to drop requests: forwarding returned after the
-FIRST request it sent, so `--change-page A X --change-page B Y` moved one deck
-and left the other alone, and any `--change-state` on a command that also
-carried a `--change-page` never left the process. Guard 1 is the mutation pin
-for exactly that -- putting either early return back turns it red.
-
-The requests are built by parsing real argv through the app's own parser, so
-the mapping from what a person types to what gets sent is pinned here too, and
-the running instance is a recorder rather than a bus: what is under test is
-which requests are sent, in which order, with which values -- not D-Bus, which
-scenario_dbus_control_methods drives for real.
-
-Guards:
-  1. Every page and state request is forwarded, in argv order within each
-     group, with the state converted to the integer the bus method takes.
-  2. With no instance running, every request is parked instead -- all of them,
-     in the exact dict shape the startup queue and the boot path agree on.
-  3. `--close-running` parks even though an instance is running: that
-     invocation is about to become the instance.
-  4. A failure reported by the instance comes back in the verdict, and does
-     NOT stop the requests behind it.
-  5. An instance with no control methods on the bus produces one explanatory
-     failure and no further attempts -- and that failure names both of the
-     things that state can still mean: a build too old to have them, and one
-     shutting down that has already dropped its interface.
-  5b. A conversation that breaks outright is reported the same way, in the
-     bus's own words, rather than escaping the CLI as an exception.
-  6. Validation is syntax only, and all-or-nothing: a malformed group leaves
-     the whole command unapplied, and nothing -- not even the "is anything
-     running" probe -- happens first.
-  7. Coordinates and state numbers the old invented caps rejected (anything
-     past x,y = 10 or state 20) travel to the instance untouched, because the
-     device is what decides whether they exist.
-  8. An invocation carrying no requests touches nothing at all.
+Every page and state request is forwarded or parked. Validation is syntax
+only and all-or-nothing, and a failure never stops the requests behind it.
 """
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH before globals)
 
@@ -49,9 +13,9 @@ from src.backend import cli_forward  # noqa: E402
 
 WATCHDOG_SECONDS = 60
 
-# One command carrying more of each kind than the old code could send: three
-# page requests and two state requests, every one naming a different deck so
-# a dropped request cannot hide behind last-write-wins parking.
+# One command carrying three page requests and two state requests. Every one
+# names a different deck, so a dropped request cannot hide behind
+# last-write-wins parking.
 ARGV = [
     "--change-page", "deck-a", "Alpha",
     "--change-page", "deck-b", "Beta",
@@ -82,9 +46,8 @@ def clear_parking() -> None:
 class Recorder:
     """The running instance, without a bus.
 
-    Records every call the forwarder makes, in order, and answers the way the
-    real methods do: the empty string when the instance applied the request,
-    a sentence when it did not.
+    Records every call the forwarder makes, in order. It answers the way the
+    real methods do, with an empty string on success and a sentence on failure.
     """
 
     def __init__(self, running: bool = True, answers: dict | None = None,
@@ -115,9 +78,7 @@ class Recorder:
         return [call for call in self.calls if call[0] != "is_running"]
 
 
-# ===================================================================== #
-# 1. Every request is forwarded                                         #
-# ===================================================================== #
+# 1. Every request is forwarded
 
 def check_all_requests_are_forwarded() -> None:
     clear_parking()
@@ -137,8 +98,8 @@ def check_all_requests_are_forwarded() -> None:
         f"forwarded requests must not also be parked: {gl.api_page_requests} / "
         f"{gl.api_state_requests}")
 
-    # The state travelled as an integer: the bus method's signature says so,
-    # and the conversion is the CLI edge's job.
+    # The state travelled as an integer. The bus method signature says so, and
+    # the conversion is the job of the CLI edge.
     for call in recorder.forwards():
         if call[0] == "state":
             assert isinstance(call[4], int) and not isinstance(call[4], bool), (
@@ -147,9 +108,7 @@ def check_all_requests_are_forwarded() -> None:
     print("PASS: every page and state request on the command line is forwarded")
 
 
-# ===================================================================== #
-# 2/3. Parking                                                          #
-# ===================================================================== #
+# 2 and 3. Parking
 
 def check_nothing_running_parks_everything() -> None:
     clear_parking()
@@ -167,7 +126,7 @@ def check_nothing_running_parks_everything() -> None:
     assert gl.api_page_requests == {
         "deck-a": "Alpha", "deck-b": "Beta", "deck-c": "Gamma",
     }, gl.api_page_requests
-    # The exact dict the boot path reads back, state already an int.
+    # The exact dict the boot path reads back, with state already an int.
     assert gl.api_state_requests == {
         "deck-d": {"page_name": "Delta", "coords": "0,0", "state": 1},
         "deck-e": {"page_name": "Epsilon", "coords": "1,2", "state": 3},
@@ -176,7 +135,7 @@ def check_nothing_running_parks_everything() -> None:
     print("PASS: with no instance running every request is parked for the boot")
 
 
-def check_close_running_parks_despite_a_running_instance() -> None:
+def check_close_running_parks_requests() -> None:
     clear_parking()
     recorder = Recorder(running=True)
 
@@ -195,11 +154,9 @@ def check_close_running_parks_despite_a_running_instance() -> None:
     print("PASS: --close-running parks its requests even with an instance running")
 
 
-# ===================================================================== #
-# 4/5. What the instance says comes back                                #
-# ===================================================================== #
+# 4 and 5. What the instance says comes back
 
-def check_failures_surface_and_do_not_stop_the_rest() -> None:
+def check_failures_surface_without_stopping() -> None:
     clear_parking()
     refusal = "Page 'Beta' not found. Available pages: Alpha, Gamma"
     unknown_deck = "StreamDeck with serial 'deck-d' not found. Available devices: deck-a"
@@ -218,7 +175,7 @@ def check_failures_surface_and_do_not_stop_the_rest() -> None:
     print("PASS: refusals come back in the verdict without stopping the command")
 
 
-def check_an_older_instance_says_so_once() -> None:
+def check_older_instance_reports_once() -> None:
     clear_parking()
     recorder = Recorder(running=True, raises=cli_forward.OlderInstance())
 
@@ -249,12 +206,12 @@ def check_an_older_instance_says_so_once() -> None:
     print("PASS: an instance without the methods is reported once, and clearly")
 
 
-def check_a_broken_conversation_is_reported() -> None:
-    """A wedged instance, a dropped connection, a refused call. The bus's own
-    text has to reach the terminal: left as the GLib error it starts life as,
-    it escaped the CLI entirely and was logged as a crash -- a traceback on
-    screen, and still an exit code of zero, which is the silent success this
-    whole command set out to stop reporting."""
+def check_broken_conversation_reported() -> None:
+    """A wedged instance, a dropped connection or a refused call reads back.
+
+    The bus text must reach the terminal. Left as the GLib error it starts as,
+    it escapes the CLI, prints a traceback and still exits zero.
+    """
     clear_parking()
     broke = cli_forward.TransportError(
         "GDBus.Error:org.freedesktop.DBus.Error.NoReply: Message did not "
@@ -279,9 +236,7 @@ def check_a_broken_conversation_is_reported() -> None:
     print("PASS: a failed conversation with the instance is reported, not raised")
 
 
-# ===================================================================== #
-# 6/7. Syntax only                                                      #
-# ===================================================================== #
+# 6 and 7. Syntax only
 
 def check_validation_is_syntax_only() -> None:
     bad = [
@@ -310,7 +265,7 @@ def check_validation_is_syntax_only() -> None:
         assert not gl.api_page_requests and not gl.api_state_requests, (
             f"{argv} parked something despite being rejected")
 
-    # All-or-nothing: one malformed group leaves the whole command unapplied,
+    # All-or-nothing. One malformed group leaves the whole command unapplied,
     # because a partly applied command is the worst of the three outcomes.
     clear_parking()
     recorder = Recorder(running=True)
@@ -326,10 +281,12 @@ def check_validation_is_syntax_only() -> None:
     print("PASS: syntax failures reject the whole command before anything happens")
 
 
-def check_large_decks_are_not_pre_rejected() -> None:
-    """The invented caps, gone. x,y <= 10 and state <= 20 matched no device;
-    they rejected valid requests for large decks before anything that knows
-    what a deck looks like ever saw them."""
+def check_large_decks_not_pre_rejected() -> None:
+    """Large coordinates and state numbers travel to the instance untouched.
+
+    A cap of x,y <= 10 and state <= 20 matches no device and rejects valid
+    requests for large decks before anything that knows a deck sees them.
+    """
     argv = ["--change-state", "deck-a", "Alpha", "9,9", "19",
             "--change-state", "deck-b", "Beta", "14,7", "31"]
 
@@ -342,8 +299,8 @@ def check_large_decks_are_not_pre_rejected() -> None:
         ("state", "deck-b", "Beta", "14,7", 31),
     ], recorder.forwards()
 
-    # And the same on the parking path, so a boot-time request is not judged
-    # by numbers the CLI made up either.
+    # The same on the parking path, so no boot-time request is judged by
+    # numbers the CLI made up.
     clear_parking()
     verdict = cli_forward.forward_cli_requests(parse(argv), Recorder(running=False))
     assert verdict.failures == [], verdict.failures
@@ -353,9 +310,7 @@ def check_large_decks_are_not_pre_rejected() -> None:
     print("PASS: coordinates and states the device decides on are passed through")
 
 
-# ===================================================================== #
-# 8. Nothing asked for                                                  #
-# ===================================================================== #
+# 8. Nothing asked for
 
 def check_no_requests_touches_nothing() -> None:
     clear_parking()
@@ -377,12 +332,12 @@ def main() -> None:
     try:
         check_all_requests_are_forwarded()
         check_nothing_running_parks_everything()
-        check_close_running_parks_despite_a_running_instance()
-        check_failures_surface_and_do_not_stop_the_rest()
-        check_an_older_instance_says_so_once()
-        check_a_broken_conversation_is_reported()
+        check_close_running_parks_requests()
+        check_failures_surface_without_stopping()
+        check_older_instance_reports_once()
+        check_broken_conversation_reported()
         check_validation_is_syntax_only()
-        check_large_decks_are_not_pre_rejected()
+        check_large_decks_not_pre_rejected()
         check_no_requests_touches_nothing()
     finally:
         clear_parking()

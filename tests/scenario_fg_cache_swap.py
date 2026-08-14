@@ -1,27 +1,7 @@
-"""
-Scenario: LayoutManager._fg_cache must not serve a stale resized foreground
-after the source asset's backing image is swapped in place.
+"""LayoutManager._fg_cache must not serve a stale resized foreground.
 
-add_image_to_background() memoizes the resized foreground keyed on the asset
-object (cache_token) + a layout key. InputImage._ensure_fits_composed()
-re-decodes and swaps its `image` IN PLACE (B-03): the asset object stays
-identical while its pixels change. If the layout key does not distinguish
-WHICH source image was resized, a composite after such a swap is served the
-stale entry cached from before it.
-
-Today a re-decode only ever GROWS the image, and the layout key already
-carries the composed pixel size (driven by layout.size), so a real swap
-happens to change the key too -- the bug is latent, not live. This scenario
-forces the future-proof condition the coupling does not cover: a swap that
-keeps the SAME layout (a same-geometry re-decode, e.g. a saturation/mtime
-refresh). Under the pre-hardening key that is an unconditional stale serve;
-under the hardened key (id(image)/image.size in fg_key) the swap invalidates
-the entry.
-
-Check (real LayoutManager):
-  1. Composite asset with a RED source image (layout unchanged), then swap
-     the asset's backing image to a GREEN one of the same size and composite
-     again. The second composite must show GREEN, not the cached RED.
+InputImage._ensure_fits_composed() swaps its image in place, so the asset
+object stays identical while its pixels change. The layout key must notice.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
@@ -40,20 +20,21 @@ GREEN = (30, 200, 30, 255)
 
 
 class _FakeAsset:
-    """Stands in for the InputImage cache_token: an object whose backing
-    `image` can be swapped in place, exactly like _ensure_fits_composed()
-    does. It is only ever compared by identity (cache_token is ...), so no
-    behaviour is needed."""
+    """Stands in for the InputImage cache_token.
+
+    Its backing image can be swapped in place, exactly as
+    _ensure_fits_composed() does. It is only ever compared by identity.
+    """
 
     def __init__(self, image: Image.Image):
         self.image = image
 
 
 def _make_layout_manager() -> LayoutManager:
-    # add_image_to_background only reaches get_composed_layout(); give the
-    # action_layout every field so inject_defaults never touches the
-    # controller_input's identifier. controller_input is otherwise unused
-    # here (the resized foreground depends only on asset + layout).
+    # add_image_to_background only reaches get_composed_layout(). Give the
+    # action_layout every field, so inject_defaults never touches the
+    # controller_input identifier. controller_input is otherwise unused here,
+    # because the resized foreground depends on the asset and the layout alone.
     controller_input = types.SimpleNamespace(identifier=None)
     lm = LayoutManager(controller_input)
     lm.action_layout = ImageLayout(valign=0, halign=0, fill_mode="stretch", size=1.0)
@@ -61,7 +42,7 @@ def _make_layout_manager() -> LayoutManager:
 
 
 def _dominant(img: Image.Image) -> tuple:
-    """The single solid colour of a flat image (center pixel)."""
+    """The single solid colour of a flat image, read at the centre pixel."""
     return img.convert("RGBA").getpixel((img.width // 2, img.height // 2))
 
 
@@ -71,23 +52,23 @@ def main() -> int:
     lm = _make_layout_manager()
     background = Image.new("RGBA", (72, 72), (0, 0, 0, 0))
 
-    # Both source images are the SAME size so the composed pixel size (and
-    # thus the pre-hardening layout key) is identical across the swap -- the
-    # only difference the cache can key on is the image itself.
+    # Both source images are the same size, so the composed pixel size, and with
+    # it the unhardened layout key, is identical across the swap. The only
+    # difference the cache can key on is the image itself.
     red_src = Image.new("RGBA", (144, 144), RED)
     green_src = Image.new("RGBA", (144, 144), GREEN)
 
     asset = _FakeAsset(red_src)
 
-    # 1. First composite: RED. Populates _fg_cache for this asset+layout.
+    # 1. The first composite is red and populates _fg_cache for this pair.
     out1 = lm.add_image_to_background(asset.image, background, cache_token=asset)
     if _dominant(out1) != RED:
         print(f"FAIL(setup): first composite is not RED: {_dominant(out1)}")
         return 1
 
-    # 2. Swap the asset's backing image in place -- the same asset object,
-    #    the same layout, a new (same-size) source. This is exactly what an
-    #    _ensure_fits_composed() re-decode does, minus the size growth.
+    # 2. Swap the backing image of the asset in place, keeping the same asset
+    #    object, the same layout and a new source of the same size. That is what
+    #    an _ensure_fits_composed() re-decode does, without the size growth.
     asset.image = green_src
     out2 = lm.add_image_to_background(asset.image, background, cache_token=asset)
 

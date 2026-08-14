@@ -1,29 +1,7 @@
-"""
-Scenario: the event-dispatch contract gaps not already pinned by
-scenario_plugin_events.py / scenario_onready_ordering.py / scenario_dispatch_
-watchdog.py.
+"""Two remaining gaps in the event-dispatch contract.
 
-Those three already cover: a raising observer logging a
-traceback and the batch continuing past it; the event-id-prepend contract
-(load-bearing for AudioControl); the wedged-observer starvation mode (B-05);
-and on_ready ordering / exactly-once. This file adds the two genuine
-remainders:
-
-  (a) FIFO ordering -- observers in a single batch run in registration order.
-      The dispatcher runs a batch sequentially on one lane
-      (event_dispatch.py, max_workers=1); nothing asserted that ordering, so
-      a plugin that connects two observers and depends on the first running
-      before the second had only convention to lean on.
-
-  (b) trigger_event / dispatch RETURN BEFORE the observers complete. The
-      dispatch went async in the branch (queue-and-return) -- a contract that
-      is load-bearing for the AudioControl hot path (PulseEvent fires
-      synchronously from inside pulse.event_listen()'s own loop and must not
-      block on observer completion). Pin it so a future "just await it"
-      change can't silently make trigger_event synchronous again.
-
-Deck-independent -- exercises event_dispatch + a real EventHolder directly, no
-FakeDeck, no controller.
+Observers in one batch run in registration order, and trigger_event and
+dispatch both return before the observers complete.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
@@ -35,9 +13,7 @@ from src.backend.PluginManager import event_dispatch
 from src.backend.PluginManager.EventHolder import EventHolder
 
 
-# ===================================================================== #
-# (a) FIFO ordering within a batch
-# ===================================================================== #
+# FIFO ordering within a batch
 
 def check_batch_runs_in_registration_order() -> None:
     order: list[int] = []
@@ -61,9 +37,7 @@ def check_batch_runs_in_registration_order() -> None:
     print("PASS: a batch dispatches its observers in registration (FIFO) order")
 
 
-# ===================================================================== #
-# (b) dispatch / trigger_event return before observers complete
-# ===================================================================== #
+# dispatch and trigger_event return before the observers complete
 
 def check_dispatch_returns_before_observer_completes() -> None:
     started = threading.Event()
@@ -73,22 +47,22 @@ def check_dispatch_returns_before_observer_completes() -> None:
     def blocking_observer(*args, **kwargs):
         started.set()
         # Hold the lane until the assertion below has proven dispatch already
-        # returned. Bounded so a regression can't hang the scenario -- the
-        # watchdog would catch it, but failing fast is cleaner.
+        # returned. Bounded, so a regression cannot hang the scenario. The
+        # watchdog would catch it, and failing fast is cleaner.
         release.wait(timeout=10)
         finished.set()
 
     event_dispatch.dispatch([blocking_observer], (), {}, label="test::AsyncReturn")
 
-    # dispatch() must have returned here even though the observer has NOT
-    # finished (it is still parked on `release`). If dispatch had become
-    # synchronous, control would not reach this line until finished.is_set().
+    # dispatch() must have returned here although the observer has not
+    # finished, because it is still parked on release. A synchronous dispatch
+    # would not reach this line until finished.is_set().
     assert not finished.is_set(), (
         "dispatch() did not return until the observer finished -- the "
         "queue-and-return contract regressed to synchronous dispatch (the "
         "AudioControl PulseEvent hot path must not block on observers)"
     )
-    # Prove the observer really is running (queued, on the lane), not skipped.
+    # Prove the observer really is running on the lane, not skipped.
     assert wait_until(started.is_set, timeout=5.0), (
         "the queued observer never started on the dispatch lane"
     )
@@ -101,12 +75,11 @@ def check_dispatch_returns_before_observer_completes() -> None:
     print("PASS: dispatch() returns before the observer completes (async queue-and-return)")
 
 
-def check_trigger_event_returns_before_observer_completes() -> None:
-    # Same contract, one layer up, through a real EventHolder.trigger_event
-    # (the actual plugin-facing API). A PluginBase is only needed for
-    # get_plugin_id() inside EventHolder.__init__ when using event_id_suffix;
-    # passing an explicit event_id sidesteps that, so no plugin/manager setup
-    # is required here.
+def check_trigger_event_returns_early() -> None:
+    # The same contract one layer up, through a real EventHolder.trigger_event,
+    # which is the plugin-facing API. A PluginBase is needed only for
+    # get_plugin_id() inside EventHolder.__init__ when event_id_suffix is used,
+    # and an explicit event_id sidesteps that.
     holder = EventHolder(plugin_base=None, event_id="test::HolderAsyncReturn")
 
     started = threading.Event()
@@ -114,11 +87,11 @@ def check_trigger_event_returns_before_observer_completes() -> None:
     finished = threading.Event()
 
     async def blocking_coroutine_observer(*args, **kwargs):
-        # `async def` is the real ecosystem shape (every EventHolder observer
-        # today is a coroutine). trigger_event must still return immediately.
+        # An async def is the real ecosystem shape, because every EventHolder
+        # observer today is a coroutine. trigger_event must still return at once.
         started.set()
         import asyncio
-        # Poll the threading.Event from the observer's own loop without
+        # Poll the threading.Event from the observer's own loop, without
         # blocking that loop's thread against the release for the whole time.
         while not release.is_set():
             await asyncio.sleep(0.01)
@@ -146,7 +119,7 @@ def main() -> None:
     start_watchdog(40, label="scenario_event_dispatch_contract")
     check_batch_runs_in_registration_order()
     check_dispatch_returns_before_observer_completes()
-    check_trigger_event_returns_before_observer_completes()
+    check_trigger_event_returns_early()
     print("PASS: scenario_event_dispatch_contract")
 
 

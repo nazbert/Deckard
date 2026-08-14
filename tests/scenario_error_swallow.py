@@ -1,20 +1,7 @@
-"""
-Unit-tier scenario (docs/presenter-migration-plan.md §7 "TransportError x6
-non-beta" / "TransportError burst, beta", M2): beta-resume graduated to the
-only mode (plan §9.1) -- the per-task-class ClassVar counters and 5-strike
-removal branch are gone. A burst of write failures must be swallowed (no
-controller removal attempt, no reconnect), and writes must resume normally
-once the injected failures are exhausted.
+"""A burst of write failures must be swallowed, and writes must resume.
 
-Also exercises the M2 recovery mechanics (plan §4 M2, coordinator-revised):
-every write FAILURE arms the pending full repaint; the media loop's
-_run_pending_repaint fires it on a 2s cadence. Content written into a
-failure window may be lost on the device, so recovery must repaint every
-input -- and it must not fire more than once for one failure burst.
-
-Exercises MediaPlayerSetImageTask.run's except-TransportError branch
-(deck_controller/media_writer.py, calls _on_write_result(False)/(True)) via
-FaultyFakeDeck.fail_next().
+No controller removal and no reconnect. Every failure arms the pending full
+repaint, which _run_pending_repaint fires once per burst on a 2 s cadence.
 """
 import fixtures
 
@@ -47,8 +34,8 @@ def main() -> None:
 
     deck.clear_journal()
 
-    # Failures exhausted: the next write lands normally and clears the
-    # failure flag; the armed repaint fires via the loop hook.
+    # With the failures exhausted, the next write lands normally and clears the
+    # failure flag, and the armed repaint fires through the loop hook.
     img = fixtures.make_native_image(fill=9)
     media_player.add_image_task(0, img, page=page, config_gen=gen)
     media_player.perform_media_player_tasks()
@@ -68,7 +55,7 @@ def main() -> None:
         f"every key must be rewritten by the recovery repaint, got {written_keys}"
     )
 
-    # One failure burst -> one repaint: nothing further is pending.
+    # One failure burst gives one repaint, so nothing further is pending.
     assert not controller._full_repaint_pending
     assert not controller._run_pending_repaint(), "no second repaint for the same burst"
     assert controller.repaint_count == 1

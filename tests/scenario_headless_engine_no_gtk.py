@@ -1,32 +1,7 @@
-"""
-Scenario: the render engine's import closure must be
-WIDGET-FREE.
+"""The import closure of the render engine must be widget-free.
 
-A real DeckController -- page loads (background AND action pages, so
-ActionCore construction / initialize_actions / on_ready are covered too),
-key/dial input, media ticks, teardown -- must run without ever importing
-`gi.repository.Gtk/Adw/Gdk/GdkPixbuf/Pango`, `src.windows.*`,
-`GtkHelper.GtkHelper` or `GtkHelper.GenerativeUI.*`. `DeckManager` is
-imported here too: the harness substitutes a stub for it, so without an
-explicit import its module-level closure would go unproven.
-
-Scope honesty: this proves the `make_headless_controller` ENGINE closure only.
-The running app with plugins still loads Gtk/Adw at module scope
-(PluginBase.py, ActionHolder.py -- deliberately untouched), so what
-this pins is the seam and headless testability, NOT an RSS reduction; that
-lands with the daemon/client split.
-
-"No gi at all" is deliberately NOT the target and never will be: dasbus (the
-DBus API), the signal-manager idle trampoline, notify, single-instance, and
-the lockscreen/window-grabber integrations all need GLib/Gio, and none of them
-loads the widget stack. GLib and Gio are therefore asserted PRESENT below, so
-the sweep can't pass vacuously.
-
-Mechanism: a sys.meta_path finder installed at index 0 BEFORE anything else is
-imported, so a violation fails at the offending import with that import's own
-traceback -- far better diagnostics than a post-hoc sys.modules sweep. The
-sweep runs anyway as a belt-and-braces check for anything that slipped in
-before the tripwire.
+A real DeckController must run page loads, input, media ticks and teardown
+without importing Gtk, Adw, Gdk, GdkPixbuf, Pango, src.windows or GtkHelper.
 """
 import sys
 
@@ -42,25 +17,24 @@ FORBIDDEN_EXACT = frozenset({
 })
 FORBIDDEN_PREFIXES = ("src.windows.", "GtkHelper.GenerativeUI.")
 
-# Expected residue: gi namespaces that carry no widget stack. Asserted PRESENT
-# so a sweep over an engine that somehow imported nothing can't pass silently.
+# Expected residue, gi namespaces that carry no widget stack. Asserted present,
+# so a sweep over an engine that imported nothing cannot pass silently.
 REQUIRED_PRESENT = ("gi.repository.GLib", "gi.repository.Gio")
 
-# The COMPLETE set the engine closure is allowed to pull in. GLib/Gio are the
-# ones engine code names (SignalManager, api, notify, HelperMethods.open_web);
-# GObject/GModule come with gi itself; Xdp is DeckManager's flatpak probe
-# (libportal, not a widget toolkit -- and absent on Mac, hence a subset check
-# rather than equality). Anything OUTSIDE this set is a new dependency that
-# has to be argued for, which is the point of pinning it.
+# The complete set the engine closure may pull in. Engine code names GLib and
+# Gio through SignalManager, api, notify and HelperMethods.open_web. GObject
+# and GModule come with gi itself, and Xdp is the flatpak probe of DeckManager,
+# which is libportal and absent on Mac, hence a subset check. Anything outside
+# this set is a new dependency that has to be argued for.
 ALLOWED_GI_RESIDUE = frozenset({
     "gi.repository.GLib",
     "gi.repository.GModule",
     "gi.repository.GObject",
     "gi.repository.Gio",
     "gi.repository.Xdp",
-    # PyGObject >= 3.56 splits the Unix-only portions of GLib/Gio into their
-    # own namespaces and loads them transitively with Gio. Still no
-    # widget stack — same argument as GLib/Gio themselves.
+    # PyGObject 3.56 and later split the Unix-only parts of GLib and Gio into
+    # their own namespaces and load them transitively with Gio. Still no widget
+    # stack, so the same argument as GLib and Gio themselves holds.
     "gi.repository.GLibUnix",
     "gi.repository.GioUnix",
 })
@@ -73,9 +47,8 @@ def _is_forbidden(name: str) -> bool:
 class _GuiImportTripwire:
     """A meta-path finder that refuses widget-stack imports.
 
-    gi's own DynamicImporter is a meta-path finder too, so `from gi.repository
-    import Gtk` routes through here first -- inserting this at index 0 means it
-    wins.
+    The DynamicImporter of gi is a meta-path finder too, so a gi.repository
+    import routes through here first once this sits at index 0.
     """
 
     def find_spec(self, fullname, path=None, target=None):
@@ -95,18 +68,19 @@ import globals as gl  # noqa: E402
 
 from src.backend.DeckManagement.InputIdentifier import Input  # noqa: E402
 
-# The harness runs a StubDeckManager (the real one starts a USBMonitor and an
-# Xdp portal probe), so the real module would otherwise never be imported at
-# all and its closure -- also cleaned of gl.app.main_win reads --
-# would go unproven. Importing the module alone starts nothing.
+# The harness runs a StubDeckManager, because the real one starts a USBMonitor
+# and an Xdp portal probe, so without this import the real module and its
+# closure would go unproven. Importing the module alone starts nothing.
 import src.backend.DeckManagement.DeckManager  # noqa: E402,F401
 
 WATCHDOG_SECONDS = 60
 
 
 def check_tripwire_is_armed() -> None:
-    """The tripwire must actually fire -- otherwise everything below is
-    vacuous. Uses a name nothing else imports so no real module is affected."""
+    """The tripwire must fire, or everything below is vacuous.
+
+    It uses a name nothing else imports, so no real module is affected.
+    """
     try:
         __import__("src.windows.ui_adapter")
     except ImportError as e:
@@ -135,16 +109,11 @@ def _any_action_ready(page) -> bool:
 
 
 def check_engine_runs_headless() -> None:
-    """Drive the real engine: two visually distinct pages (the second carrying
-    a real ActionCore subclass), a page switch, key and dial input, media
-    ticks, teardown.
+    """Drive the real engine end to end under the tripwire.
 
-    Page B is deliberately an ACTION page: ActionCore construction,
-    Page.initialize_actions and on_ready are a large slice of the engine
-    closure -- including ActionCore's function-local
-    `from GtkHelper.GenerativeUI.GenerativeUI import GenerativeUI` -- and a
-    background-only page never reaches any of it, leaving it outside the
-    tripwire's proof.
+    Two visually distinct pages, a page switch, key and dial input, media ticks
+    and teardown. Page B is an action page, so ActionCore construction,
+    initialize_actions, on_ready and the local GenerativeUI import are covered.
     """
     import os
 
@@ -154,7 +123,7 @@ def check_engine_runs_headless() -> None:
         os.path.join(gl.DATA_PATH, "media", "engine_green.png"), color=(20, 220, 20))
     page_a_path = fixtures.seed_page_with_background("EngineA", red)
 
-    # Before the controller: load_default_page() runs at the end of
+    # Before the controller. load_default_page() runs at the end of
     # DeckController.__init__ and would hit an unset plugin_manager.
     fixtures.install_stub_plugin_manager(fixtures.make_latch_action_class(), green)
 
@@ -170,8 +139,8 @@ def check_engine_runs_headless() -> None:
         )
         a_hashes = {e[4] for e in deck.ops_by_name("set_key_image")}
 
-        # Input while page A is up: the real event callbacks, hold timers and
-        # action dispatch all run.
+        # Input while page A is up, so the real event callbacks, hold timers
+        # and action dispatch all run.
         deck.fire_key_event(0, True)
         deck.fire_key_event(0, False)
         if controller.inputs.get(Input.Dial):
@@ -191,16 +160,16 @@ def check_engine_runs_headless() -> None:
             timeout=10), "page B never reached the device"
         b_hashes = {e[4] for e in deck.ops_after(before_switch) if e[2] == "set_key_image"}
 
-        # The action actually ran: construction + initialize_actions +
-        # on_ready, all inside the engine closure, all under the tripwire.
+        # The action ran. Construction, initialize_actions and on_ready all sit
+        # inside the engine closure and all ran under the tripwire.
         assert fixtures.wait_until(lambda: _any_action_ready(page_b), timeout=10), (
             "page B's action never reached on_ready -- ActionCore init / "
             "initialize_actions / on_ready would be outside this scenario's "
             "widget-free proof"
         )
 
-        # And its paint reached the device, which is what proves the action
-        # ran for real rather than merely being constructed.
+        # Its paint reached the device, which proves the action ran for real
+        # rather than merely being constructed.
         deck.fire_key_event(0, True)
         deck.fire_key_event(0, False)
 
@@ -211,8 +180,8 @@ def check_engine_runs_headless() -> None:
             "supposed to be visually distinct, so this run proved nothing"
         )
 
-        # The engine still dirty-marks with no UI attached: the null port is
-        # the whole reason this works headless.
+        # The engine still dirty-marks with no UI attached, which is what the
+        # null port buys.
         assert controller.ui_image_changes_while_hidden, (
             "no dirty markers accumulated -- the null port should refuse every "
             "push and the engine should mark instead"
@@ -224,10 +193,11 @@ def check_engine_runs_headless() -> None:
 
 
 def check_no_widget_modules_loaded() -> None:
-    """Belt and braces: catches anything imported before the tripwire went in
-    (nothing should be, but the assertion is cheap and the failure mode it
-    guards -- a silent widget import at the very top of the process -- is not
-    otherwise observable)."""
+    """Catch anything imported before the tripwire went in.
+
+    Nothing should be, and a silent widget import at the very top of the
+    process is not otherwise observable.
+    """
     loaded = sorted(m for m in sys.modules if _is_forbidden(m))
     assert not loaded, f"widget-stack modules loaded in the engine closure: {loaded}"
 

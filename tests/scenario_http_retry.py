@@ -1,29 +1,7 @@
-"""
-Coverage for the shared HTTP client, exercised against a LOCAL
-http.server -- no internet, no GitHub.
+"""Coverage for the shared HTTP client, against a local http.server.
 
-src/backend/http_client.py replaced N throwaway `requests.get()` calls with
-one process-wide Session behind a retrying adapter. The three properties the
-rest of the codebase now depends on:
-
-  1. Transient 429/502/503 answers are retried (GitHub rate-limits the store
-     by IP; the catalog fetch used to give up on the first 429 and fall back
-     to the stale cache).
-  2. Once the retries are exhausted the FINAL response is returned, NOT an
-     exception -- that is what lets StoreBackend.request_from_url turn a
-     still-429 fetch into a StoreFetchError, and therefore keeps
-     get_remote_file's stale-cache fallback working exactly as before.
-  3. The session really pools: consecutive fetches ride one TCP connection
-     instead of paying a fresh handshake each (~150 of them per store page
-     load) -- including across the routine 404s a catalog is full of, which
-     only holds because StoreBackend.request_from_url drains the error body
-     before closing the response.
-  4. Only *statuses* are retried. `connect=0` keeps an unreachable host from
-     costing three timeouts instead of one, which matters most on the GTK
-     main thread (KeyGrid's drop handler downloads synchronously).
-
-Plus the download_to_file helper's contract: full body on success, and no
-partial/zero-byte file left behind when the transfer breaks mid-body.
+Transient 429, 502 and 503 answers are retried, the exhausted retry returns
+the final response, the session pools, and connect failures are not retried.
 """
 import os
 import socket
@@ -37,13 +15,13 @@ import globals as gl
 from src.backend import http_client
 
 
-BODY = b"payload" * 4096  # ~28 KiB: several iter_content chunks
+BODY = b"payload" * 4096  # about 28 KiB, several iter_content chunks
 
 
 class _Handler(BaseHTTPRequestHandler):
-    # Keep-alive requires HTTP/1.1 plus an explicit Content-Length on every
-    # answer -- without it the server closes after each response and the
-    # connection-reuse assertion below could never hold.
+    # Keep-alive needs HTTP/1.1 plus an explicit Content-Length on every answer.
+    # Without it the server closes after each response and the connection-reuse
+    # assertion below could never hold.
     protocol_version = "HTTP/1.1"
 
     def log_message(self, *args):
@@ -73,7 +51,7 @@ class _Handler(BaseHTTPRequestHandler):
         elif self.path == "/pooled":
             self._respond(200, b"{}")
         elif self.path == "/flaky":
-            # 429, 429, then success -> exactly one retry budget's worth.
+            # 429, 429, then success, which is one retry budget's worth.
             if n > 2:
                 self._respond(200, BODY)
             else:
@@ -84,8 +62,8 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 self._respond(429, b"slow down", retry_after="0")
         elif self.path == "/retry-after":
-            # One 429 carrying a real (non-zero) Retry-After. The first retry's
-            # own backoff is 0s, so any wait observed here can only come from
+            # One 429 carrying a real, non-zero Retry-After. The backoff of the
+            # first retry is 0 s, so any wait observed here can only come from
             # the header being honored.
             if n > 1:
                 self._respond(200, b"ok")
@@ -94,7 +72,7 @@ class _Handler(BaseHTTPRequestHandler):
         elif self.path == "/always-429":
             self._respond(429, b"slow down", retry_after="0")
         elif self.path == "/truncated":
-            # Declares more body than it sends, then drops the connection:
+            # Declares more body than it sends, then drops the connection, so
             # the client hits an IncompleteRead partway through the stream.
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
@@ -142,12 +120,11 @@ def test_retries_transient_429(server, base) -> None:
         f"expected 2 retries after the initial attempt, server saw "
         f"{_count(server, '/flaky')} requests"
     )
-    # Ceiling on the retry ladder, not on the (sub-millisecond) loopback work:
-    # urllib3 sleeps 0s before the first retry and backoff_factor*2 = 1.0s
-    # before the second, so retrying can never turn one fetch into a long
-    # stall. (Retry-After: 0 does NOT short-circuit that -- urllib3 treats a
-    # zero header as absent and falls back to the ladder; the header's effect
-    # is pinned separately in test_respects_retry_after.)
+    # A ceiling on the retry ladder, not on the sub-millisecond loopback work.
+    # urllib3 sleeps 0 s before the first retry and backoff_factor times 2, so
+    # 1.0 s, before the second, so retrying can never turn one fetch into a
+    # long stall. A Retry-After of 0 does not short-circuit that, because
+    # urllib3 treats a zero header as absent and falls back to the ladder.
     assert elapsed < 2.0, f"retrying one fetch took {elapsed:.2f}s -- backoff is unbounded"
     print("PASS: a transient 429 is retried and the eventual 200 is returned")
 
@@ -159,9 +136,9 @@ def test_respects_retry_after(server, base) -> None:
 
     assert response.status_code == 200
     assert _count(server, "/retry-after") == 2
-    # The FIRST retry's own backoff is 0s. Waiting ~1s can therefore only be
-    # the server's `Retry-After: 1` being obeyed -- i.e. we back off by as
-    # much as GitHub asks for instead of hammering a rate-limited endpoint.
+    # The backoff of the first retry is 0 s. A wait of about 1 s can therefore
+    # only be the Retry-After of 1 being obeyed, which backs off by as much as
+    # the server asks instead of hammering a rate-limited endpoint.
     assert elapsed >= 0.9, (
         f"retry fired after {elapsed:.2f}s despite Retry-After: 1 -- the "
         f"server's requested delay is being ignored"
@@ -169,12 +146,12 @@ def test_respects_retry_after(server, base) -> None:
     print("PASS: a server-sent Retry-After is honored before retrying")
 
 
-def test_exhausted_retries_return_the_response(server, base) -> None:
-    """The property the store's stale-cache fallback rests on: a still-429
-    fetch comes back as a RESPONSE with status 429, never as a raised
-    RetryError. request_from_url turns that non-200 into a StoreFetchError, and
-    get_remote_file catches it and serves the cached copy exactly as it did
-    before the session existed."""
+def test_exhausted_retries_return_response(server, base) -> None:
+    """A still-429 fetch comes back as a response, never as a raised RetryError.
+
+    request_from_url turns that non-200 into a StoreFetchError, and
+    get_remote_file catches it and serves the cached copy.
+    """
     response = http_client.get(f"{base}/always-429", timeout=5)
 
     assert response.status_code == 429, (
@@ -206,11 +183,12 @@ def test_session_is_shared_and_pooled(server, base) -> None:
 
 
 def test_connect_failures_are_not_retried(server, base) -> None:
-    """`total=2` alone would spend the budget on connect errors too, which
-    buys nothing (a down host stays down) and triples the wall clock of every
-    offline failure -- including on the GTK main thread, where KeyGrid's drop
-    handler reaches HelperMethods.download_file synchronously. `connect=0`
-    keeps the status retries and drops that amplification."""
+    """connect=0 keeps the status retries and drops the connect amplification.
+
+    A total of 2 alone would spend the budget on connect errors too, which buys
+    nothing against a down host and triples the wall clock of every offline
+    failure, including on the GTK main thread.
+    """
     retry = http_client.get_session().adapters["https://"].max_retries
     assert retry.connect == 0, (
         f"connect retries must stay off, got connect={retry.connect!r} -- an "
@@ -218,10 +196,10 @@ def test_connect_failures_are_not_retried(server, base) -> None:
     )
     assert retry.total == 2, f"status retry budget changed: total={retry.total!r}"
 
-    # A port nobody listens on: the refusal itself is instant, so all the
-    # elapsed time an extra attempt could add is the retry ladder's backoff
-    # (~1.0s before the second retry). Measuring that is a behavioural check
-    # on top of the config assertion above.
+    # A port nobody listens on refuses instantly, so all the elapsed time an
+    # extra attempt could add is the backoff of the retry ladder, about 1.0 s
+    # before the second retry. Measuring that is a behavioural check on top of
+    # the config assertion above.
     probe = socket.socket()
     probe.bind(("127.0.0.1", 0))
     dead_port = probe.getsockname()[1]
@@ -243,12 +221,13 @@ def test_connect_failures_are_not_retried(server, base) -> None:
     print("PASS: connect errors fail on the first attempt (status retries intact)")
 
 
-def test_non_200_returns_the_connection_to_the_pool(server, base) -> None:
-    """StoreBackend.request_from_url's non-200 branch must consume the error
-    body before closing. Closing a streamed response with an unread body
-    CLOSES the socket, so a catalog's routine 404s (attribution.json is
-    optional for most entries) would cost the next fetch a fresh TCP + TLS
-    handshake -- defeating the pooled session this module exists to provide."""
+def test_non_200_returns_connection(server, base) -> None:
+    """The non-200 branch of request_from_url must consume the error body.
+
+    Closing a streamed response with an unread body closes the socket, so the
+    routine 404s of a catalog would cost the next fetch a fresh handshake and
+    defeat the pooled session.
+    """
     from src.backend.Store.StoreBackend import StoreBackend
     from src.backend.Store.store_result import StoreFetchError
 
@@ -256,9 +235,9 @@ def test_non_200_returns_the_connection_to_the_pool(server, base) -> None:
     sb._fetch_limiter = threading.Semaphore(http_client.POOL_MAXSIZE)
 
     assert sb.request_from_url(f"{base}/pooled").status_code == 200
-    # A 404 now RAISES StoreFetchError (was: a returned NoConnectionError), but
-    # only after draining the error body -- which is what keeps the socket in
-    # the pool, the property this test pins.
+    # A 404 raises StoreFetchError, but only after draining the error body,
+    # which is what keeps the socket in the pool and is the property this test
+    # pins.
     try:
         sb.request_from_url(f"{base}/absent")
         raise AssertionError("a 404 must raise StoreFetchError")
@@ -275,7 +254,7 @@ def test_non_200_returns_the_connection_to_the_pool(server, base) -> None:
     print("PASS: a non-200 store fetch keeps the pooled connection alive")
 
 
-def test_download_to_file_writes_full_body(server, base) -> None:
+def test_download_writes_full_body(server, base) -> None:
     target = os.path.join(_SCRATCH, "download.bin")
 
     http_client.download_to_file(f"{base}/flaky-download", target, timeout=5)
@@ -286,7 +265,7 @@ def test_download_to_file_writes_full_body(server, base) -> None:
     print("PASS: download_to_file streams the whole body (retrying a 429)")
 
 
-def test_download_to_file_leaves_no_partial_file(server, base) -> None:
+def test_download_leaves_no_partial_file(server, base) -> None:
     target = os.path.join(_SCRATCH, "partial.bin")
 
     raised = None
@@ -304,10 +283,11 @@ def test_download_to_file_leaves_no_partial_file(server, base) -> None:
     print("PASS: a broken transfer raises and leaves no partial file")
 
 
-def test_download_to_file_rejects_error_status(server, base) -> None:
-    """An HTTP error body is never persisted as if it were the asset (the old
-    HelperMethods.download_file wrote 404 pages straight into the asset
-    cache)."""
+def test_download_rejects_error_status(server, base) -> None:
+    """An HTTP error body is never persisted as if it were the asset.
+
+    The older download helper wrote 404 pages straight into the asset cache.
+    """
     target = os.path.join(_SCRATCH, "missing.bin")
 
     raised = None
@@ -331,13 +311,13 @@ def main() -> None:
     try:
         test_retries_transient_429(server, base)
         test_respects_retry_after(server, base)
-        test_exhausted_retries_return_the_response(server, base)
+        test_exhausted_retries_return_response(server, base)
         test_session_is_shared_and_pooled(server, base)
         test_connect_failures_are_not_retried(server, base)
-        test_non_200_returns_the_connection_to_the_pool(server, base)
-        test_download_to_file_writes_full_body(server, base)
-        test_download_to_file_leaves_no_partial_file(server, base)
-        test_download_to_file_rejects_error_status(server, base)
+        test_non_200_returns_connection(server, base)
+        test_download_writes_full_body(server, base)
+        test_download_leaves_no_partial_file(server, base)
+        test_download_rejects_error_status(server, base)
     finally:
         server.shutdown()
         server.server_close()

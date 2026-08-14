@@ -1,15 +1,7 @@
-"""
-Integration scenario (docs/presenter-migration-plan.md §7 "Suspend/resume
-repaint" sibling / §3 dedup coherence, M2): DeckController.clear() must
-reset dedup state on every current input before writing the blanks, so a
-repaint of visually-IDENTICAL content after a clear is never wrongly
-hash-skipped (the "blank-after-clear" bug the plan fixes in M2 -- pre-fix,
-the key's cached _last_img_hash/_last_enqueued_hash would still match the
-unchanged content and the device would stay permanently blank).
+"""DeckController.clear() must reset dedup state before it writes the blanks.
 
-Also covers the touchscreen dedup added in M2 (mirrors ControllerKey.
-update's existing dual-hash guard): two identical composites without a
-clear in between must produce exactly one device write.
+A repaint of visually identical content after a clear must reach the device.
+Two identical touchscreen composites without a clear must write once.
 """
 import time
 
@@ -21,12 +13,11 @@ def main() -> None:
     controller = fixtures.make_headless_controller(serial="dedup-1")
     deck = fixtures.raw_deck(controller)
 
-    # DeckController.__init__'s bootstrap clear() is a deterministic
-    # blank/alpha image -- capture its hash as the "blank" reference (same
-    # technique as scenario_screensaver_entry.py).
+    # The bootstrap clear() of DeckController.__init__ paints a deterministic
+    # blank image. Capture its hash as the blank reference.
     blank_hash = next(e[4] for e in deck.journal() if e[3] == "key:0")
 
-    # Let the default page's real (static) content land.
+    # Let the real static content of the default page land.
     fixtures.wait_until(lambda: deck.last_op_for("key:0") is not None, timeout=3)
     time.sleep(0.1)
     content_hash = deck.last_op_for("key:0")[4]
@@ -34,8 +25,8 @@ def main() -> None:
 
     key0 = controller.get_key_by_index(0)
 
-    # --- Sanity: without a clear, repainting identical content is hash-skipped
-    # (existing dual-hash behavior, untouched by this plan). ---
+    # Sanity check. Without a clear, repainting identical content is
+    # hash-skipped, which is the existing dual-hash behavior.
     seq_before_noop = deck.current_seq()
     key0.update()
     time.sleep(0.2)
@@ -43,8 +34,8 @@ def main() -> None:
         "fixture sanity: identical repaint without a clear should hash-skip"
     )
 
-    # --- The dedup-coherence fix: clear() then repaint IDENTICAL content
-    # must actually be written, not hash-skipped. ---
+    # The dedup-coherence fix. A clear() then a repaint of identical content
+    # must reach the device instead of being hash-skipped.
     controller.clear()
 
     def blank_landed():
@@ -67,15 +58,14 @@ def main() -> None:
         "reset by Clear (plan §3), otherwise the device is stuck on blank"
     )
 
-    # --- Touchscreen dedup (plan §3): two identical composites without a
-    # clear in between must produce exactly one device write. ---
+    # Touchscreen dedup. Two identical composites without a clear between them
+    # must produce exactly one device write.
     if controller.deck.is_touch():
         from src.backend.DeckManagement.InputIdentifier import Input
 
         touchscreen = controller.inputs[Input.Touchscreen][0]
-        # Force a clean slate so the first update() below is guaranteed to
-        # land, decoupling this from whatever the boot/dial-tick machinery
-        # already painted.
+        # Force a clean slate, so the first update() below lands. That decouples
+        # this from whatever the boot and dial-tick machinery already painted.
         touchscreen._last_img_hash = None
         touchscreen._last_enqueued_hash = None
 
@@ -89,7 +79,7 @@ def main() -> None:
         assert ok, "first touchscreen paint should land"
 
         seq_after_first_ts = deck.current_seq()
-        touchscreen.update()  # identical composite -- must be a no-op
+        touchscreen.update()  # identical composite, so a no-op
         time.sleep(0.3)  # let a would-be regression write land
 
         extra_ts_writes = [e for e in deck.ops_after(seq_after_first_ts) if e[2] == "set_touchscreen_image"]

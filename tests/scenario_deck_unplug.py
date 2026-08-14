@@ -1,34 +1,7 @@
-"""
-Scenario: deck unplug/replug mid-render.
+"""Scenario for deck unplug and replug mid-render.
 
-The hardware-verified backend-reap / close-teardown fixes (commit 08aae662
-"opaque-key initial paint, bounded close teardown, close-vs-load bg leak"
-and the M2 graduated write-error policy) had NO regression net: the stock
-FakeDeck's is_open()/connected() are hard-wired True, so a post-close write
-silently succeeded and an unplug was inexpressible. FaultyFakeDeck now models
-closed/unplugged states (close() -> _open False; simulate_unplug() -> both
-False; strict lifecycle makes subsequent writes raise TransportError). This
-scenario pins the production contracts that depend on those states:
-
-  (a) lifecycle seam: a fresh deck is open+connected; close() flips is_open()
-      and makes a later write raise TransportError; simulate_unplug() flips
-      connected() and fails writes -- and strict mode is opt-out.
-
-  (b) unplug mid-render: on a LIVE media writer thread, yanking the deck must
-      NOT kill the writer. The task-level TransportError handler swallows the
-      failed write (graduated error policy, plan §9.1) and arms the pending
-      full repaint via _on_write_result(False); the thread stays alive. This
-      is the sole-writer resilience the backend-reap fix relies on.
-
-  (c) close() an unplugged deck: teardown must still complete -- step 5's
-      ClearAndClose blank-frame writes fail harmlessly, and the fallback
-      deck.close() (lifecycle-exempt) is a safe no-op. The controller
-      deregisters and its threads exit even though the transport is gone.
-
-  (d) unplug racing a page load on the load pool: removal (close) concurrent
-      with a load_page dispatched onto the deck's load_executor must not
-      deadlock or crash -- close() invalidates the generation and the load
-      aborts / lands harmlessly, teardown completes.
+FaultyFakeDeck models the closed and unplugged states, so this pins the
+lifecycle seam, writer survival, close on an unplugged deck, and a load race.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
@@ -48,8 +21,10 @@ from StreamDeck.Transport.Transport import TransportError
 
 
 def test_lifecycle_seam() -> int:
-    """The enabling fixture change: is_open()/connected() reflect real state
-    and strict-mode writes past close()/unplug raise TransportError."""
+    """is_open() and connected() report real state.
+
+    In strict mode a write past close() or unplug raises TransportError.
+    """
     deck = FaultyFakeDeck(serial_number="unplug-seam")
 
     if not deck.is_open() or not deck.connected():
@@ -67,11 +42,11 @@ def test_lifecycle_seam() -> int:
     if deck.is_open():
         print("FAIL(a): is_open() must read False after close()")
         return 1
-    # connected() stays True on a plain close (handle released, cable still in).
+    # connected() stays True on a plain close, because the cable is still in.
     if not deck.connected():
         print("FAIL(a): a plain close() must not flip connected()")
         return 1
-    # A write after close raises (strict default) and does NOT journal.
+    # A write after close raises under the strict default and does not journal.
     seq_before = deck.current_seq()
     try:
         deck.set_key_image(0, b"\x02" * 16)
@@ -83,7 +58,7 @@ def test_lifecycle_seam() -> int:
         print("FAIL(a): a rejected post-close write must not journal")
         return 1
 
-    # A second deck: unplug flips connected() and fails writes.
+    # A second deck. Unplug flips connected() and fails writes.
     deck2 = FaultyFakeDeck(serial_number="unplug-seam-2")
     deck2.simulate_unplug()
     if deck2.connected() or deck2.is_open():
@@ -96,11 +71,11 @@ def test_lifecycle_seam() -> int:
     except TransportError:
         pass
 
-    # Opt-out: lenient mode restores the old silent-journal behaviour.
+    # Lenient mode lets a post-close write journal silently.
     deck3 = FaultyFakeDeck(serial_number="unplug-seam-3")
     deck3.set_strict_lifecycle(False)
     deck3.close()
-    deck3.set_key_image(0, b"\x04" * 16)  # must NOT raise
+    deck3.set_key_image(0, b"\x04" * 16)  # must not raise
     if deck3.last_op_for("key:0") is None:
         print("FAIL(a): lenient mode must let a post-close write journal")
         return 1
@@ -111,32 +86,21 @@ def test_lifecycle_seam() -> int:
 
 
 def test_unplug_mid_render_survives() -> int:
-    """Yanking the deck mid-render must NOT kill the sole writer: the write
-    task's TransportError handler swallows the failed write and arms the
-    pending repaint via _on_write_result(False) (graduated error policy, plan
-    §9.1). This is the sole-writer resilience the backend-reap fix depends on.
+    """Yanking the deck mid-render must not kill the sole writer.
 
-    Two deterministic parts drive a write against the DEAD transport through
-    the real task path (add_image_task -> the task's run() -> deck.set_key_
-    image), which bypasses update_all_inputs's get_alive() short-circuit --
-    the exact interleave of a paint already enqueued when the cable is yanked.
-
-      b1 (drive-by-hand): the writer is stopped and its tick driven by hand,
-          so the assertions can't race the live loop. Proves the failed write
-          is swallowed (no exception out of perform_media_player_tasks), arms
-          _had_write_failure, and lands NOTHING on the journal.
-      b2 (live loop): on a fresh controller with the live writer running, the
-          same enqueue-after-unplug must leave the thread ALIVE.
+    The TransportError handler of the write task swallows the failed write and
+    arms the pending repaint through _on_write_result(False). Part b1 drives
+    the tick by hand for determinism; part b2 checks the live loop survives.
     """
     from src.backend.DeckManagement.DeckController import Input
 
-    # ---- b1: deterministic drive-by-hand ---------------------------------- #
+    # Part b1 drives the writer by hand.
     controller = make_headless_controller(serial="unplug-live")
     try:
         deck = raw_deck(controller)
         media_player = controller.media_player
 
-        # Land a real paint first so the journal has a pre-unplug baseline,
+        # Land a real paint first, so the journal has a pre-unplug baseline,
         # then quiesce the live writer and drive it by hand.
         if not wait_until(lambda: deck.last_op_for("key:0") is not None, timeout=3):
             print("SETUP-FAIL(b1): the writer never landed an initial key paint")
@@ -156,8 +120,8 @@ def test_unplug_mid_render_survives() -> int:
             config_gen=controller._page_load_generation,
             controller_key=key0, img_hash=5555,
         )
-        # The task's run() attempts set_key_image on the dead transport. The
-        # handler must swallow the TransportError -- this call must NOT raise.
+        # The task run() attempts set_key_image on the dead transport. The
+        # handler must swallow the TransportError, so this call must not raise.
         try:
             media_player.perform_media_player_tasks()
         except Exception as e:
@@ -184,7 +148,7 @@ def test_unplug_mid_render_survives() -> int:
     finally:
         fixtures.teardown(controller)
 
-    # ---- b2: the LIVE writer must survive the same interleave ------------- #
+    # Part b2. The live writer must survive the same interleave.
     controller2 = make_headless_controller(serial="unplug-live-2")
     try:
         deck2 = raw_deck(controller2)
@@ -198,8 +162,8 @@ def test_unplug_mid_render_survives() -> int:
 
         deck2.simulate_unplug()
         key0b = controller2.inputs[Input.Key][0]
-        # Enqueue a paint the live loop will drain and attempt against the
-        # dead transport.
+        # Enqueue a paint the live loop drains and attempts against the dead
+        # transport.
         mp2.add_image_task(
             0, b"\x66" * 64,
             page=controller2.active_page,
@@ -226,10 +190,11 @@ def test_unplug_mid_render_survives() -> int:
 
 
 def test_close_unplugged_deck_completes() -> int:
-    """close() on an already-unplugged deck must still tear the controller
-    down: the blank-frame writes fail harmlessly, the fallback deck.close()
-    is a lifecycle-exempt no-op, and the controller deregisters + its threads
-    exit despite the gone transport."""
+    """close() on an already-unplugged deck must still tear the controller down.
+
+    The blank-frame writes fail harmlessly and the fallback deck.close() is a
+    lifecycle-exempt no-op. The controller deregisters and its threads exit.
+    """
     controller = make_headless_controller(serial="unplug-close")
     deck = raw_deck(controller)
 
@@ -238,8 +203,8 @@ def test_close_unplugged_deck_completes() -> int:
         fixtures.teardown(controller)
         return 1
 
-    # Unplug BEFORE close: this is the mid-render-removal case the backend
-    # reap handles. close() must not hang or raise out.
+    # Unplug before close, which is the mid-render removal case the backend reap
+    # handles. close() must not hang and must not raise out.
     deck.simulate_unplug()
 
     done = threading.Event()
@@ -256,7 +221,7 @@ def test_close_unplugged_deck_completes() -> int:
               "blank-frame writes or fallback close hung/looped)")
         return 1
 
-    # Teardown actually completed: media + tick threads exited, controller
+    # Teardown completed. The media and tick threads exited, and the controller
     # deregistered from the page cache.
     media_dead = wait_until(lambda: not controller.media_player.is_alive(), timeout=3)
     if not media_dead:
@@ -277,10 +242,11 @@ def test_close_unplugged_deck_completes() -> int:
 
 
 def test_unplug_races_page_load() -> int:
-    """Removal (close) concurrent with a page load dispatched onto the deck's
-    load pool must not deadlock or crash. close() bumps the generation so the
-    racing load aborts at its gen gate; teardown completes regardless of which
-    won the interleave."""
+    """A close concurrent with a page load must not deadlock or crash.
+
+    close() bumps the generation, so the racing load aborts at its gen gate.
+    Teardown completes whichever way the interleave went.
+    """
     controller = make_headless_controller(serial="unplug-load")
     deck = raw_deck(controller)
 
@@ -289,8 +255,8 @@ def test_unplug_races_page_load() -> int:
         fixtures.teardown(controller)
         return 1
 
-    # A second page to load, made visually distinct (its own background) so the
-    # load does real work.
+    # A second page to load, made visually distinct with its own background, so
+    # the load does real work.
     media = make_test_png(f"{gl.DATA_PATH}/media/unplug_load.png", color=(0, 120, 200))
     second_path = fixtures.seed_page_with_background("UnplugLoad", media)
     second_page = gl.page_manager.get_page(second_path, controller)
@@ -303,8 +269,8 @@ def test_unplug_races_page_load() -> int:
         try:
             controller.load_page(second_page, allow_reload=True)
         except Exception as e:
-            # A crash out of load_page racing close is the failure this pins;
-            # record it rather than letting it vanish on the daemon thread.
+            # A crash out of load_page racing close is the failure this pins.
+            # Record it rather than let it vanish on the daemon thread.
             run_load.error = e
         finally:
             load_returned.set()
@@ -315,7 +281,7 @@ def test_unplug_races_page_load() -> int:
     loader.start()
     load_started.wait(timeout=3)
 
-    # Unplug mid-load, then close concurrently -- the removal path racing the
+    # Unplug mid-load, then close concurrently. The removal path then races the
     # in-flight load on the pool.
     deck.simulate_unplug()
 
@@ -357,12 +323,10 @@ def test_unplug_races_page_load() -> int:
 
 def main() -> int:
     start_watchdog(60, "deck_unplug")
-    # ONE tier only (the order-dependence class): install the
-    # integration globals up front. Leg (a)'s bare FaultyFakeDecks only need
-    # gl.settings_manager.get_deck_settings() (FakeDeck.__init__), which the
-    # real SettingsManager satisfies ({} for an unknown serial), and the
-    # controller legs need the full integration graph anyway -- never mix the
-    # stub tier into this process.
+    # One tier only. Install the integration globals up front. The bare
+    # FaultyFakeDecks of the first leg need only
+    # gl.settings_manager.get_deck_settings(), which the real SettingsManager
+    # satisfies, and the controller legs need the full integration graph.
     fixtures._install_integration_globals()
     rc = test_lifecycle_seam()
     rc |= test_unplug_mid_render_survives()

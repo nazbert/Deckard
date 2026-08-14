@@ -1,29 +1,7 @@
-"""
-Scenario (the rapidfuzz swap): pins the fuzzy-search contract the app's seven
-search call sites rely on, now that they import `rapidfuzz.fuzz` instead of
-`fuzzywuzzy.fuzz`.
+"""Pins the fuzzy-search contract the seven search call sites rely on.
 
-fuzzywuzzy returned a rounded `int`; rapidfuzz returns a `float` in [0, 100].
-Every consumer was audited to be float-safe, so what actually has to keep
-holding is the *shape* of the results, not their exact values:
-
-  1. `fuzz.ratio` returns a float in [0, 100].
-  2. An exact match scores 100; clearly unrelated strings score below every
-     threshold the call sites use (20 in StorePageSection/ActionChooser, 40 in
-     CustomAssets/FlowBox, 50 in the Icon/Wallpaper/SDPlusBar choosers and
-     PageSelector).
-  3. Ranking a small asset-like corpus puts the exact hit first and the whole
-     related family above every unrelated entry.
-  4. A GTK sort comparator built on those float scores still returns `int`
-     (GTK's sort contract), even though the scores it compares are floats.
-  5. The `@staticmethod` + `@lru_cache` wrapper shape used by
-     `PageSelector.calc_ratio` still caches (it keys on the strings only).
-  6. A score that is *mathematically* exactly a call-site threshold survives
-     the filter. rapidfuzz computes an exact 20 as 19.999999999999996 (one ULP
-     low), so the two `>= 20` filters compare `round(score)` -- fuzzywuzzy's
-     own `intr()` semantics -- instead of the raw float.
-
-Pure functions: no GTK, no globals install, no deck.
+rapidfuzz returns a float in [0, 100] where fuzzywuzzy returned a rounded int,
+so the result shape, the thresholds and the int sort comparator are pinned.
 """
 from functools import lru_cache
 
@@ -31,7 +9,7 @@ import fixtures  # imported first, per the harness contract
 
 from rapidfuzz import fuzz
 
-# Asset-like names, in the shape the choosers actually see (basenames, lowered).
+# Asset-like names, in the shape the choosers see, as lowered basenames.
 CORPUS = [
     "volume_up",
     "volume_down",
@@ -42,8 +20,8 @@ CORPUS = [
 ]
 VOLUME_FAMILY = {"volume_up", "volume_down", "volume_mute"}
 
-# Every threshold used at a call site, so a rapidfuzz bump that shifts the
-# scale gets caught here rather than as "search silently returns nothing".
+# Every threshold used at a call site, so a rapidfuzz bump that shifts the scale
+# is caught here rather than as a search that silently returns nothing.
 THRESHOLDS = (20, 40, 50)
 
 
@@ -63,8 +41,8 @@ def test_exact_match_and_unrelated_scores() -> None:
     unrelated = fuzz.ratio("brightness", "volume_down")
     assert unrelated < min(THRESHOLDS), f"unrelated pair scored {unrelated}, not below {min(THRESHOLDS)}"
 
-    # The related family must clear the strictest threshold, and an unrelated
-    # name must fall under the loosest -- i.e. the filters still discriminate.
+    # The related family must clear the strictest threshold and an unrelated
+    # name must fall under the loosest, so the filters still discriminate.
     for name in VOLUME_FAMILY:
         score = fuzz.ratio("volume", name)
         assert score > max(THRESHOLDS), f"{name} scored {score}, below the 50 chooser threshold"
@@ -90,8 +68,8 @@ def test_ranking_order() -> None:
 
 
 def test_sort_comparator_still_returns_int() -> None:
-    # Mirrors the -1/0/1 comparators in IconChooser/WallpaperChooser/FlowBox/
-    # ActionChooser: they compare float scores but must hand GTK an int.
+    # Mirrors the -1, 0 and 1 comparators in the choosers and the action
+    # chooser. They compare float scores and must hand GTK an int.
     def sort_func(name1: str, name2: str, search: str) -> int:
         fuzz1 = fuzz.ratio(name1, search)
         fuzz2 = fuzz.ratio(name2, search)
@@ -112,11 +90,10 @@ def test_sort_comparator_still_returns_int() -> None:
 
 def test_threshold_boundary_is_rounded() -> None:
     # Pairs whose exact indel ratio is a whole number sitting on a call-site
-    # threshold. fuzzywuzzy returned int(round(...)) and let them through;
-    # rapidfuzz's float can land one ULP below (19.999999999999996 for an exact
-    # 20), so StorePageSection.filter_func and both ActionChooser filters
-    # compare round(score). Without that, typing "n" in the action chooser
-    # dropped "Next Song", and "p" in the store dropped "OS Plugin".
+    # threshold. fuzzywuzzy returned int(round(...)) and let them through, and
+    # the rapidfuzz float can land one ULP below, so the store filter and both
+    # action-chooser filters compare round(score). Without that, typing n in the
+    # action chooser dropped Next Song and p in the store dropped OS Plugin.
     exact = [
         ("n", "next song", 20),
         ("p", "os plugin", 20),
@@ -127,8 +104,8 @@ def test_threshold_boundary_is_rounded() -> None:
     for query, name, expected in exact:
         raw = fuzz.ratio(query, name)
         assert round(raw) == expected, f"{query}/{name}: round({raw}) != {expected}"
-        # An exact threshold must never come back *above* it -- that would mean
-        # rapidfuzz changed the scale, not just its rounding.
+        # An exact threshold must never come back above it, which would mean
+        # rapidfuzz changed the scale rather than its rounding.
         assert raw <= expected, f"{query}/{name}: {raw} overshoots the exact {expected}"
         assert round(raw) >= expected, (
             f"{query}/{name}: rounded score {round(raw)} would be filtered out at {expected}"
@@ -138,7 +115,7 @@ def test_threshold_boundary_is_rounded() -> None:
 
 
 def test_cached_static_wrapper() -> None:
-    # Same shape as PageSelector.calc_ratio: a staticmethod so the cache keys
+    # The same shape as PageSelector.calc_ratio. A staticmethod keys the cache
     # on the strings only, never on self.
     class Selector:
         @staticmethod
@@ -155,8 +132,8 @@ def test_cached_static_wrapper() -> None:
     assert info.misses == 1, f"expected 1 miss, got {info.misses}"
     assert info.hits == 1, f"expected 1 hit, got {info.hits}"
 
-    # Two instances must share the one cache entry -- that's the point of the
-    # staticmethod. A bound method would key on self and miss every time.
+    # Two instances must share the one cache entry, which is what the
+    # staticmethod buys. A bound method would key on self and miss every time.
     Selector().calc_ratio("Volume_Up", "volume up")
     Selector().calc_ratio("Volume_Up", "volume up")
     info = Selector.calc_ratio.cache_info()

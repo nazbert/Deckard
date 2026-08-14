@@ -1,36 +1,7 @@
-"""
-Regression test for constructor calls that cannot bind their class's own
-`__init__` signature.
+"""Static tripwire for constructor calls that cannot bind their own __init__.
 
-`src/app.py`'s `show_permissions()` built
-`FlatpakPermissionRequestWindow(application=..., main_window=...)` while the
-window required `command` and `description` too -- a guaranteed TypeError on
-the one path (flatpak) the dialog exists for, invisible to every other
-environment. A window nobody can construct is exactly the class of defect
-that never shows up in a headless suite and never shows up on the
-maintainer's machine either, so pin it statically instead: no display, no
-GTK import, no window ever opened -- just AST.
-
-Two checks:
-
-  1. A repo-wide scan: for every call `Foo(...)` where `Foo` is a class
-     defined exactly once in the scanned tree, every parameter of `Foo`'s
-     own `__init__` that has no default must be bound by the call, either
-     positionally or by keyword. Calls that splat (`*args` / `**kwargs`)
-     and classes whose `__init__` takes `*args` are skipped -- as are
-     classes with NO explicit `__init__` (dataclasses and pure subclasses
-     inherit theirs, so ~a third of the tree is invisible to this scan;
-     measured at 133/405) -- their
-     binding is not decidable here.
-
-  2. The specific shape that regressed: `FlatpakPermissionRequestWindow` must stay
-     constructible from `application` + `main_window` alone, because
-     `app.show_permissions()` (the generic, command-less request) has
-     nothing else to pass.
-
-Scope note: this only sees classes defined in this repo and called by
-simple name. It is a tripwire for the "signature drifted away from its
-callers" defect, not a type checker.
+An AST scan checks every call to a class defined once in the tree. It also
+pins FlatpakPermissionRequestWindow, which app.show_permissions() builds.
 """
 import ast
 import os
@@ -42,20 +13,19 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SCAN_ROOTS = ["src", "GtkHelper"]
 SCAN_FILES = ["main.py", "globals.py"]
 
-# Directory *names* pruned from the walk -- never matched against the
-# absolute path, which may itself contain e.g. ".claude" when the harness
-# runs inside an agent worktree.
+# Directory names pruned from the walk. These never match the absolute path,
+# which may itself contain .claude when the harness runs inside a worktree.
 SKIP_PARTS = (".venv", ".claude", "__pycache__")
 
-# Tripwire: if a refactor moves the tree and the walk silently stops finding
-# files, the scan would "pass" while checking nothing.
+# Tripwire. If a refactor moves the tree and the walk silently stops finding
+# files, the scan would pass while it checks nothing.
 MIN_SCANNED_FILES = 150
 MIN_CHECKED_CALLS = 200
 
 PERMISSION_WINDOW = "FlatpakPermissionRequestWindow"
 PERMISSION_WINDOW_FILE = os.path.join(
     "src", "windows", "Permissions", "FlatpakPermissionRequest.py")
-# What app.show_permissions() has to offer -- see the module docstring.
+# What app.show_permissions() has to offer.
 GENERIC_REQUEST_ARGS = {"application", "main_window"}
 
 
@@ -83,7 +53,7 @@ def get_init(class_node: ast.ClassDef):
 
 
 def signature(init: ast.FunctionDef):
-    """(positional param names, required param names) or None if undecidable."""
+    """Positional and required param names, or None when undecidable."""
     args = init.args
     if args.vararg is not None:
         return None  # *args swallows any arity
@@ -105,7 +75,7 @@ def collect(trees: dict) -> tuple[dict, set]:
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef):
                 if node.name in classes:
-                    # Same name in two modules: a bare `Foo(...)` call site
+                    # The same name in two modules. A bare Foo(...) call site
                     # cannot be resolved to one of them here.
                     duplicates.add(node.name)
                 classes[node.name] = (path, node)
@@ -133,7 +103,7 @@ def find_offenders(trees: dict, classes: dict, duplicates: set):
                 continue
             positional, required = sig
 
-            # Splatted calls: the bound set is unknowable statically.
+            # A splatted call has an unknowable bound set.
             if any(isinstance(a, ast.Starred) for a in node.args):
                 continue
             if any(kw.arg is None for kw in node.keywords):

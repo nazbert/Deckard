@@ -1,22 +1,7 @@
-"""
-Scenario: three deck-lifecycle defects.
+"""Scenario for three deck-lifecycle defects.
 
-  (a): on a background-video page, update_all_inputs skipped ALL key device
-       writes (the per-frame video loop paints keys) -- but the video loop
-       deliberately never repaints fully-opaque keys, so those never got
-       their FIRST paint after a page switch: the device kept showing the
-       previous page's content until a keypress. Opaque keys now get their
-       initial update() (their tile hides the video; the write cannot
-       disturb it).
-  (b): close() step 6 ran plugin teardown hooks unbounded on the DeckClose
-       thread -- a wedged hook stranded steps 7-9 forever (unplug leak
-       reintroduced) and _closing=True made retry a permanent no-op. Now a
-       bounded join; on timeout the hook thread is abandoned and teardown
-       completes.
-  (c): close() neither bumped _page_load_generation nor cancelled
-       _bg_future, so an in-flight load_background could attach a fresh
-       BackgroundVideo AFTER step 7's resource sweep -- leaked until process
-       exit. close() now invalidates the generation and cancels the future.
+An opaque key gets its first paint after a page switch. close() joins plugin
+teardown hooks with a bound, and cancels an in-flight background load.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
@@ -34,12 +19,11 @@ from src.backend.DeckManagement.InputIdentifier import Input
 
 
 def _expected_native_hash(controller, key) -> str:
-    """The journal fingerprint (faulty_fake_deck._hash_bytes: sha1[:12]) the
-    device SHOULD receive for `key`, computed by encoding its current
-    composed image through the exact path ControllerKey.update() uses
-    (RGBA->RGB paste, rotate, encode_native_key). Lets the (a) check assert
-    the opaque key's write carried the NEW page's opaque color, not the
-    previous page's stale content."""
+    """The journal fingerprint the device should receive for key.
+
+    Computed by encoding the current composed image through the exact path
+    ControllerKey.update() uses, so a check can assert the new page's color.
+    """
     image = key.get_current_image()
     if image.mode == "RGBA":
         rgb = Image.new("RGB", image.size, (0, 0, 0))
@@ -54,31 +38,29 @@ def _expected_native_hash(controller, key) -> str:
 def check_opaque_initial_paint() -> int:
     controller = make_headless_controller(serial="trio-11")
     try:
-        # Deterministic tier: stop the live writer and drive the drain by
-        # hand (the pattern scenario_touchscreen_write_cap established) --
-        # otherwise the live loop races the assertions. Drain the load's
-        # leftover tasks before arming the check.
+        # Deterministic tier. Stop the live writer and drive the drain by hand,
+        # or the live loop races the assertions. Drain the leftover tasks of the
+        # load before arming the check.
         controller.media_player.stop(timeout=3.0)
         controller.media_player.perform_media_player_tasks()
 
-        # Opaque page-color on key 0; the others stay transparent.
+        # Opaque page-color on key 0. The others stay transparent.
         opaque_key = controller.inputs[Input.Key][0]
         opaque_color = [10, 20, 30, 255]
         opaque_key.get_active_state().background_manager.set_page_color(
             opaque_color, update=False)
 
-        # The branch under test only checks `background.video is not None`.
+        # The branch under test only checks background.video for None.
         controller.background.video = object()
         try:
             deck = raw_deck(controller)
             deck.clear_journal()
-            # A real page switch delivers NEW content; here the page stays,
-            # so drop the dedup hashes or the repaint is (correctly) skipped
-            # as identical.
+            # A real page switch delivers new content. The page stays here, so
+            # drop the dedup hashes or the repaint is skipped as identical.
             controller._reset_dedup_hashes()
-            # Reference hash BEFORE the paint (get_current_image is stable for
-            # the current color) -- what the device SHOULD receive for the
-            # opaque key.
+            # Reference hash taken before the paint, because get_current_image
+            # is stable for the current color. This is what the device should
+            # receive for the opaque key.
             expected_hash = _expected_native_hash(controller, opaque_key)
             controller.update_all_inputs()
             controller.media_player.perform_media_player_tasks()
@@ -100,9 +82,9 @@ def check_opaque_initial_paint() -> int:
                   f"bg-video branch (would fight the video loop): "
                   f"{others_written}")
             return 1
-        # CONTENT, not just presence: the write must carry the
-        # NEW opaque color's bytes, not the previous page's stale content. The
-        # journal records _hash_bytes(native) at index 4.
+        # Check the content, not just the presence. The write must carry the
+        # bytes of the new opaque color, not the previous page's stale content.
+        # The journal records _hash_bytes(native) at index 4.
         written_hash = opaque_writes[-1][4]
         if written_hash != expected_hash:
             print(f"FAIL(a): opaque key was painted, but with the WRONG "
@@ -110,9 +92,8 @@ def check_opaque_initial_paint() -> int:
                   f"{expected_hash} for the new opaque color) -- a stale/"
                   f"previous-page frame reached the device")
             return 1
-        # Differential: a DIFFERENT opaque color must yield DIFFERENT bytes --
-        # guards against the check passing vacuously (e.g. if expected_hash
-        # were computed from a constant).
+        # Differential check. A different opaque color must yield different
+        # bytes, which guards against the check passing vacuously.
         opaque_key.get_active_state().background_manager.set_page_color(
             [200, 120, 40, 255], update=False)
         other_hash = _expected_native_hash(controller, opaque_key)
@@ -146,8 +127,8 @@ def check_close_gen_invalidation() -> int:
               "future")
         return 1
 
-    # An in-flight load that captured its gen BEFORE close must now abort
-    # instead of attaching a fresh BackgroundVideo post-sweep.
+    # An in-flight load that captured its gen before close must abort instead of
+    # attaching a fresh BackgroundVideo after the sweep.
     controller.load_background(page, update=False, gen=gen_before_close)
     if attached:
         print("FAIL(c): a load that predates close() attached a "
@@ -160,21 +141,22 @@ def check_close_gen_invalidation() -> int:
 
 
 def check_close_load_race() -> int:
-    """Residual (c) window: the gen-bump + future.cancel() in
-    close() close the window for a load that has NOT yet reached its
-    _page_is_current(gen) gate. They do NOT cover a load already PAST that
-    gate, parked inside the seconds-long prebuild, when close()'s step-7 sweep
-    runs -- its freshly built BackgroundVideo (cv2 capture) would land on
-    self.background.video AFTER the sweep and leak until process exit. This
-    drives exactly that interleaving through the REAL apply_prebuilt path."""
+    """A load already past its gen gate, parked inside the prebuild.
+
+    The gen bump and future.cancel() in close() do not cover it, so its freshly
+    built BackgroundVideo would land on self.background.video after the step-7
+    sweep and leak. This drives that interleaving through apply_prebuilt.
+    """
     controller = make_headless_controller(serial="trio-15race")
     page = controller.active_page
     background = controller.background
 
     class _FakeVideo:
-        """Stands in for a prebuilt BackgroundVideo: `close()` is what the
-        residual-window fix must call on the orphaned payload (mirrors the
-        real cv2-capture release)."""
+        """Stands in for a prebuilt BackgroundVideo.
+
+        close() is what the fix must call on the orphaned payload, which
+        mirrors the real cv2 capture release.
+        """
         def __init__(self):
             self.closed = False
             self.video_path = "/fake/race.mp4"
@@ -188,21 +170,20 @@ def check_close_load_race() -> int:
     release = threading.Event()     # test lets the parked prebuild finish
 
     def blocking_prebuild(path, fps=30, loop=True, allow_keep=True):
-        # We are called from set_from_path, which load_background calls AFTER
-        # its _page_is_current(gen) gate -- i.e. we are past the gate. Park
-        # here (as a real multi-second decode would) until the test has run
-        # close()'s sweep, then hand back a fresh "video" payload for
-        # apply_prebuilt to (try to) attach.
+        # Called from set_from_path, which load_background calls after its
+        # _page_is_current(gen) gate, so this is past the gate. Park here, as a
+        # real multi-second decode would, until the test has run the close()
+        # sweep, then hand back a fresh video payload for apply_prebuilt.
         past_gate.set()
         release.wait(timeout=5)
         return ("video", fake_video)
 
     background.prebuild_from_path = blocking_prebuild
 
-    # set_video would close a previous video; make sure there is none, and
-    # give apply_prebuilt's real "video" branch a set_video that records the
-    # attach faithfully (the real one calls update_all_inputs, which needs a
-    # live deck -- keep the observable effect, drop the fan-out).
+    # set_video would close a previous video, so make sure there is none. Give
+    # the real video branch of apply_prebuilt a set_video that records the attach
+    # faithfully, because the real one calls update_all_inputs and needs a live
+    # deck.
     background.video = None
     attached = {}
     background.set_video = lambda video, update=True: attached.__setitem__("video", video)
@@ -220,15 +201,13 @@ def check_close_load_race() -> int:
         return 1
 
     # Close the deck while the load is parked past its gate. close() sets
-    # _closing, bumps gen, cancels the future, and (step 7) sweeps the
-    # background under _background_load_lock -- which blocks on the loader if
-    # it already holds the lock, or runs first if it does not. Either way,
-    # once we release the loader, apply_prebuilt's _closing re-check must
-    # suppress the attach and discard (close) the orphaned payload.
+    # _closing, bumps gen, cancels the future, and sweeps the background under
+    # _background_load_lock. Once the loader is released, the _closing re-check
+    # in apply_prebuilt must suppress the attach and close the orphaned payload.
     closer = threading.Thread(
         target=lambda: controller.close(remove_media=True), name="race-close", daemon=True)
     closer.start()
-    # Give close() a beat to set _closing and reach/enter the sweep.
+    # Give close() a beat to set _closing and reach the sweep.
     closer_ready = wait_until(lambda: controller._closing, timeout=3)
     if not closer_ready:
         print("SETUP-FAIL(c-race): close() never set _closing")
@@ -280,7 +259,7 @@ def check_bounded_teardown() -> int:
               "permanent no-op (unplug leak)")
         return 1
 
-    # Steps 7-9 actually completed despite the wedge.
+    # Steps 7 to 9 completed despite the wedge.
     if controller in gl.page_manager.pages:
         print("FAIL(b): controller never deregistered from the page cache")
         wedge.set()

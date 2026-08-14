@@ -1,44 +1,7 @@
-"""
-Scenario: the input-event pipeline (press/dial/touch -> action delivery).
+"""Scenario for the input pipeline, from a device event to action delivery.
 
-The injection API (FaultyFakeDeck.fire_key_event / fire_dial_event /
-fire_touchscreen_event) was dead code at audit time: zero scenarios fired any
-input, so the app's PRIMARY input path was entirely untested despite producing
-multiple field bugs (dial starvation, HA dial reversal, rotated-deck remap).
-This drives real input events through the whole chain --
-
-  fire_*_event
-    -> BetterDeck remapper_callback (physical -> logical via get_logical_index)
-    -> DeckController.key/dial/touchscreen_event_callback (coords remap + ident)
-    -> DeckController.event_callback -> get_input -> ControllerInput.event_callback
-    -> ControllerInputState.own_actions_event_callback_threaded (action pool)
-    -> ActionCore._raw_event_callback -> EventAssigner.call
-
--- against the REAL DeckController/Page/ControllerKey/ActionCore machinery,
-with a minimal recording stub action injected via a stub plugin_manager (the
-diag_wipe_contract.py stub pattern; kept local to this scenario).
-
-Legs:
-  1. key events (rotation 0): a physical press then release delivers DOWN,
-     then SHORT_UP + UP, to the action on the pressed key -- and NOT to a
-     different key's action.
-  2. rotation 90 input remap: firing a PHYSICAL key delivers to the correct
-     LOGICAL coordinates (the fire_key_event -> get_logical_index -> coords
-     path). Plus a press-state-seeding check that is a regression net for
-     f9533578 (reorder_physical_for_rotation direction): a physical key held
-     at init seeds the CORRECT logical ControllerKey's press_state.
-  3. dial events: turn CW/CCW deliver TURN_CW/TURN_CCW carrying the detent
-     count; push+release deliver DOWN then SHORT_UP + UP.
-  4. touchscreen events: a drag left->right delivers DRAG_RIGHT; right->left
-     delivers DRAG_LEFT.
-  5. hold timer: a key held past hold_time delivers HOLD_START (from the
-     timer-wheel fire), and the release after that delivers HOLD_STOP, not
-     SHORT_UP.
-  6. event map junk keys: EventManager.get_event_map() is keyed by real
-     InputEvents only -- neither an assigner declared without events nor an
-     unresolvable override key (e.g. the literal "None" that page JSON
-     carries) may insert a None key, and doing so must not cost the
-     resolvable overrides their entries.
+Real key, dial and touchscreen events run the whole chain against the real
+DeckController, Page, ControllerKey and ActionCore machinery.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
@@ -63,8 +26,8 @@ from src.backend.PluginManager.EventManager import EventManager
 
 FAKE_PLUGIN_BASE = types.SimpleNamespace(PATH="/tmp", backend=None)
 
-# Process-wide record of delivered (input_ident, event, data) tuples, keyed so
-# each leg can filter to its own input. Appended from the action pool thread;
+# A process-wide record of delivered (input_ident, event, data) tuples, keyed so
+# each leg can filter to its own input. Appended from the action pool thread and
 # guarded by a lock. Cleared between legs.
 _DELIVERED: list = []
 _DELIVERED_LOCK = threading.Lock()
@@ -88,12 +51,14 @@ def _reset_delivered():
 
 
 class RecordingAction(ActionCore):
-    """Registers one EventAssigner per input event of interest, each recording
-    its (ident, event, data) into the shared log. Everything else is stubbed to
-    the ActionCore no-op contract (see diag_wipe_contract.py)."""
+    """Registers one EventAssigner per input event of interest.
+
+    Each assigner records its ident, event and data into the shared log.
+    Everything else is stubbed to the ActionCore no-op contract.
+    """
 
     # Every event this action listens for, by input type. Each becomes its own
-    # EventAssigner (default_events=[event]) so _raw_event_callback finds it.
+    # EventAssigner, so _raw_event_callback finds it.
     _KEY_EVENTS = [
         Input.Key.Events.DOWN, Input.Key.Events.UP, Input.Key.Events.SHORT_UP,
         Input.Key.Events.HOLD_START, Input.Key.Events.HOLD_STOP,
@@ -119,7 +84,7 @@ class RecordingAction(ActionCore):
             events = self._TOUCH_EVENTS
 
         for ev in events:
-            # A fresh closure per event so the recorded event is the right one.
+            # A fresh closure per event, so the recorded event is the right one.
             def make_cb(event=ev, ident=ident_str):
                 def cb(data=None):
                     _record(ident, event, data)
@@ -165,9 +130,11 @@ class _PluginManager:
 
 
 def _seed_page(name, action_map):
-    """action_map: {input_type: {json_ident: True}} -- each gets a
-    RecordingAction on state 0. input_type is one of 'keys'/'dials'/
-    'touchscreens'."""
+    """Seed a page from an action map of input type to json ident.
+
+    Each named input gets a RecordingAction on state 0. The input type is one
+    of keys, dials or touchscreens.
+    """
     page = {"keys": {}, "dials": {}, "touchscreens": {}}
     for input_type, idents in action_map.items():
         for ident in idents:
@@ -183,9 +150,9 @@ def _seed_page(name, action_map):
 def _load_page_and_wait(controller, path):
     page = gl.page_manager.get_page(path, controller)
     controller.load_page(page, allow_reload=True)
-    # The actions' event assigners register in RecordingAction.__init__, which
-    # runs during load (add_action_object_from_holder). Wait until the page's
-    # actions are actually present so a fired event has somewhere to land.
+    # The event assigners of the actions register in RecordingAction.__init__,
+    # which runs during the load. Wait until the page actions are present, so a
+    # fired event has somewhere to land.
     wait_until(lambda: page.action_objects, timeout=3)
     return page
 
@@ -195,11 +162,11 @@ def test_key_events_rotation_0() -> int:
     controller = make_headless_controller(serial="input-key0")
     try:
         deck = raw_deck(controller)
-        # Two keys with actions so we can prove delivery goes to the RIGHT key.
+        # Two keys with actions, so delivery to the right key is provable.
         _load_page_and_wait(controller, _seed_page(
             "KeyPage0", {"keys": {"0x0": True, "1x0": True}}))
 
-        # Physical key 0 == logical/coords 0x0 at rotation 0.
+        # Physical key 0 is logical 0x0 at rotation 0.
         deck.fire_key_event(0, True)   # press
         if not wait_until(lambda: (Input.Key.Events.DOWN, None) in _delivered_events("0x0"), timeout=3):
             print("FAIL(1): key DOWN was never delivered to the pressed key 0x0")
@@ -212,7 +179,7 @@ def test_key_events_rotation_0() -> int:
             print("FAIL(1): key UP was never delivered on release")
             return 1
 
-        # Isolation: the OTHER key's action must have received nothing.
+        # Isolation. The other key's action must have received nothing.
         if _delivered_events("1x0"):
             print(f"FAIL(1): events leaked to the wrong key 1x0: "
                   f"{_delivered_events('1x0')}")
@@ -231,10 +198,10 @@ def test_rotation_90_remap() -> int:
         deck = raw_deck(controller)
         better = controller.deck  # the BetterDeck wrapper
 
-        # --- press-state seeding (regression net for f9533578) ---
-        # A physical key held at init must seed the CORRECT logical
-        # ControllerKey.press_state under rotation 90. reorder_physical_for_
-        # rotation's contract: key_states()[get_logical_index(p)] == raw[p].
+        # Press-state seeding. A physical key held at init must seed the correct
+        # logical ControllerKey.press_state under rotation 90. The contract of
+        # reorder_physical_for_rotation is key_states()[get_logical_index(p)]
+        # == raw[p].
         raw_states = [False] * deck.key_count()
         raw_states[3] = True  # physical key 3 held
         deck.key_states = lambda: list(raw_states)
@@ -249,28 +216,24 @@ def test_rotation_90_remap() -> int:
                   f"regression: reorder_physical_for_rotation direction)")
             return 1
 
-        # --- live input remap through the pipeline ---
-        # Reset the held state, then REBUILD the inputs so their identifiers
-        # match the rotation. In production the rotation is fixed at __init__
-        # (BetterDeck(deck, rotation) from deck settings) and init_inputs()
-        # runs after; here we set rotation post-construction, so we re-run
-        # init_inputs() to get the same consistent state -- otherwise the
-        # inputs keep their rotation-0 identifiers while key_event_callback
-        # routes with the rotation-90 remap (a harness-only mismatch, not a
-        # product bug).
+        # Live input remap through the pipeline. Reset the held state, then
+        # rebuild the inputs so their identifiers match the rotation. In
+        # production the rotation is fixed at __init__ and init_inputs() runs
+        # after, so re-running init_inputs() here gives the same consistent
+        # state. Otherwise the inputs keep rotation-0 identifiers while
+        # key_event_callback routes with the rotation-90 remap.
         raw_states[3] = False
         controller.init_inputs()
         all_idents = [k.identifier.json_identifier for k in controller.inputs[Input.Key]]
         _load_page_and_wait(controller, _seed_page(
             "KeyPage90", {"keys": {ident: True for ident in all_idents}}))
 
-        # Expected delivery coords for each physical key at rotation 90,
-        # computed from the SAME primitives the pipeline uses, but assembled
-        # independently (so a bug in the pipeline can't make this agree with
-        # it): logical = get_logical_index(p); coords via the RAW deck layout
-        # Index_To_Coords (cols from deck.key_layout(), NOT the BetterDeck's
-        # rotated layout -- key_event_callback passes the raw deck); then x/y
-        # swapped because rotation % 180 != 0.
+        # The expected delivery coords for each physical key at rotation 90,
+        # computed from the same primitives the pipeline uses but assembled
+        # independently, so a bug in the pipeline cannot make this agree with
+        # it. The logical index comes from get_logical_index(p), the coords
+        # from the raw deck layout, and x and y are swapped because the
+        # rotation is not a multiple of 180.
         rows, cols = deck.key_layout()  # raw [2,4] -> cols=4
         for physical in range(deck.key_count()):
             logical = better.get_logical_index(physical)
@@ -286,16 +249,16 @@ def test_rotation_90_remap() -> int:
                       f"{[i for (i, e, d) in _DELIVERED]}")
                 deck.fire_key_event(physical, False)
                 return 1
-            # Nothing must land on any OTHER ident.
+            # Nothing must land on any other ident.
             wrong = [i for (i, e, d) in _DELIVERED if i != expected_ident]
             if wrong:
                 print(f"FAIL(2): physical key {physical} leaked to wrong "
                       f"coords {set(wrong)} (expected only {expected_ident})")
                 deck.fire_key_event(physical, False)
                 return 1
-            # Release AND drain: the release delivers SHORT_UP + UP on the
-            # action pool asynchronously; wait for it to land before the next
-            # iteration's _reset_delivered(), or it would pollute that window.
+            # Release and drain. The release delivers SHORT_UP and UP on the
+            # action pool asynchronously, so wait for it to land before the
+            # next reset, or it would pollute that window.
             deck.fire_key_event(physical, False)
             wait_until(lambda ei=expected_ident: (Input.Key.Events.UP, None) in _delivered_events(ei), timeout=3)
 
@@ -314,20 +277,20 @@ def test_dial_events() -> int:
         _load_page_and_wait(controller, _seed_page(
             "DialPage", {"dials": {"0": True}}))
 
-        # Turn CW by 3 detents: TURN_CW with ticks=3.
+        # Turn CW by 3 detents, which gives TURN_CW with ticks 3.
         deck.fire_dial_event(0, DialEventType.TURN, 3)
         if not wait_until(lambda: any(e == Input.Dial.Events.TURN_CW and (d or {}).get("ticks") == 3
                                       for (e, d) in _delivered_events("0")), timeout=3):
             print("FAIL(3): dial TURN_CW (ticks=3) not delivered")
             return 1
-        # Turn CCW by 2 detents (negative value): TURN_CCW with ticks=2.
+        # Turn CCW by 2 detents, a negative value, which gives TURN_CCW.
         deck.fire_dial_event(0, DialEventType.TURN, -2)
         if not wait_until(lambda: any(e == Input.Dial.Events.TURN_CCW and (d or {}).get("ticks") == 2
                                       for (e, d) in _delivered_events("0")), timeout=3):
             print("FAIL(3): dial TURN_CCW (ticks=2) not delivered")
             return 1
 
-        # Push + release (short): DOWN then SHORT_UP + UP.
+        # A short push and release gives DOWN, then SHORT_UP and UP.
         deck.fire_dial_event(0, DialEventType.PUSH, True)
         if not wait_until(lambda: (Input.Dial.Events.DOWN, None) in _delivered_events("0"), timeout=3):
             print("FAIL(3): dial DOWN not delivered on push")
@@ -354,7 +317,7 @@ def test_touchscreen_events() -> int:
         _load_page_and_wait(controller, _seed_page(
             "TouchPage", {"touchscreens": {"sd-plus": True}}))
 
-        # Drag left -> right: x < x_out  => DRAG_RIGHT.
+        # A drag from left to right, where x is below x_out, gives DRAG_RIGHT.
         deck.fire_touchscreen_event(
             TouchscreenEventType.DRAG, {"x": 10, "y": 5, "x_out": 700, "y_out": 5})
         if not wait_until(lambda: (Input.Touchscreen.Events.DRAG_RIGHT, None) in _delivered_events("sd-plus"), timeout=3):
@@ -362,7 +325,7 @@ def test_touchscreen_events() -> int:
                   "left-to-right drag")
             return 1
 
-        # Drag right -> left: x > x_out => DRAG_LEFT.
+        # A drag from right to left, where x is above x_out, gives DRAG_LEFT.
         deck.fire_touchscreen_event(
             TouchscreenEventType.DRAG, {"x": 700, "y": 5, "x_out": 10, "y_out": 5})
         if not wait_until(lambda: (Input.Touchscreen.Events.DRAG_LEFT, None) in _delivered_events("sd-plus"), timeout=3):
@@ -381,21 +344,21 @@ def test_hold_timer() -> int:
     controller = make_headless_controller(serial="input-hold")
     try:
         deck = raw_deck(controller)
-        # Shrink the hold time so the timer-wheel fire is quick + deterministic
-        # (still real-time, but far under the watchdog).
+        # Shrink the hold time, so the timer-wheel fire is quick and
+        # deterministic. It stays real time and far under the watchdog.
         controller.hold_time = 0.15
         _load_page_and_wait(controller, _seed_page(
             "HoldPage", {"keys": {"0x0": True}}))
 
-        # Press and hold past hold_time: the timer wheel fires on_hold_timer_end
-        # -> HOLD_START.
+        # Press and hold past hold_time. The timer wheel fires
+        # on_hold_timer_end, which delivers HOLD_START.
         deck.fire_key_event(0, True)
         if not wait_until(lambda: (Input.Key.Events.HOLD_START, None) in _delivered_events("0x0"), timeout=3):
             print("FAIL(5): HOLD_START was never delivered after holding past "
                   "hold_time (the hold timer never fired into the pipeline)")
             return 1
 
-        # Release AFTER the hold elapsed: HOLD_STOP, not SHORT_UP.
+        # A release after the hold elapsed gives HOLD_STOP, not SHORT_UP.
         deck.fire_key_event(0, False)
         if not wait_until(lambda: (Input.Key.Events.HOLD_STOP, None) in _delivered_events("0x0"), timeout=3):
             print("FAIL(5): HOLD_STOP not delivered on release after a hold")
@@ -412,24 +375,18 @@ def test_hold_timer() -> int:
 
 
 def test_event_map_junk_keys() -> int:
-    """Leg 6: the event map is keyed by real InputEvents only.
+    """The event map is keyed by real InputEvents only.
 
-    Two paths used to insert a None key, which nothing can ever look up (the
-    map is read with a real InputEvent) but which does reach the event
-    configurator's row loop:
-      a) an EventAssigner declared with neither default_events nor
-         default_event falls back to [default_event] == [None];
-      b) an override whose key does not resolve -- notably the literal
-         "None", which page JSON carries because assignments persist as
-         str(input_event).
-    No controller needed: EventManager is a plain object.
+    An assigner declared with no events, and an override key that does not
+    resolve, must both insert no None key. Page JSON carries the literal
+    string None, because assignments persist as str(input_event).
     """
     manager = EventManager()
 
-    # (a) assigner with no declared events at all.
+    # An assigner with no declared events at all.
     manager.add_event_assigner(EventAssigner(
         id="no-events", ui_label="No Events", callback=lambda *a, **k: None))
-    # (b) a real assigner, addressed by a stale/unresolvable override key.
+    # A real assigner, addressed by a stale override key that cannot resolve.
     manager.add_event_assigner(EventAssigner(
         id="real", ui_label="Real", default_events=[Input.Key.Events.DOWN],
         callback=lambda *a, **k: None))

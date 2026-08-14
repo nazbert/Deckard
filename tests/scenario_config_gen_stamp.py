@@ -1,22 +1,8 @@
-"""
-Regression test for the config_gen stamping race behind "VolumeMixer icons
-blank on the second page".
+"""Regression test for the config_gen stamping race.
 
-load_page() must stamp every input's config_gen to the new generation
-SYNCHRONOUSLY -- under _page_gen_lock, at the generation bump -- not only via
-the asynchronous per-input _load_input_if_current on the load pool. Paints are
-triggered from other threads (Page.initialize_actions on the action pool, the
-tick loop, update_all_inputs) that read controller_input.config_gen directly
-(ControllerKey.update, DeckController.py ~3312). If a paint reads config_gen
-after the generation bumped but before the async stamp caught up, it carries
-the PREVIOUS generation, and the present-boundary judge drops it as stale-gen
--- silently blanking the newly loaded page's own keys. Observed live: the
-VolumeMixer overlay's own keys dropped with task_gen=N, current_gen=N+1.
-
-Deterministic seam: make load_all_inputs a no-op so the ONLY thing that can
-advance config_gen is the synchronous stamp under test, then load a page and
-assert every input carries the new generation the instant load_page returns.
-(With the fix reverted this fails: the inputs keep the previous generation.)
+load_page() must stamp every input config_gen synchronously under
+_page_gen_lock. An async stamp lets a racing paint carry the old generation,
+which the present-boundary judge then drops and blanks the new page.
 """
 import fixtures
 import globals as gl
@@ -26,9 +12,9 @@ def main() -> None:
     fixtures.start_watchdog(30, label="scenario_config_gen_stamp")
     controller = fixtures.make_headless_controller(serial="cfggen-1")
     try:
-        # Neutralize the async per-input stamp path: with load_all_inputs a
-        # no-op, config_gen can only advance via the synchronous stamp in
-        # load_page -- which is exactly what the real paint path races.
+        # Neutralize the async per-input stamp path. With load_all_inputs a
+        # no-op, config_gen can advance only through the synchronous stamp in
+        # load_page, which is what the real paint path races.
         controller.load_all_inputs = lambda *a, **k: None
 
         seed_path = fixtures.seed_page("CfgGenPage")

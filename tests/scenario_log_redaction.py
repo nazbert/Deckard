@@ -1,45 +1,9 @@
+"""Scenario for src/backend/log_redaction.py.
+
+A loguru core patcher scrubs every record, message and folded traceback,
+before any sink formats it. install_exception_hooks() must install it.
 """
-Scenario for src/backend/log_redaction.py.
-
-The regression: the central exception hooks route full tracebacks
-into logs.log, so frame paths (/home/<user>/...), usernames and credentialed
-URLs reach disk unredacted. The fix is a core-level loguru patcher
-(install_log_redaction()) that scrubs every record -- message AND folded
-traceback -- before any sink formats it.
-
-Covers:
-
-  1. scrub() unit behavior (pure, no loguru): home -> ~ with boundary
-     guards on both sides, username only in path segments / user@host
-     (never bare-word), URL credentials -> ***@host, secret key=value AND
-     key: value forms (dict repr / JSON / spaced '='), Authorization
-     Basic/Bearer headers (case-folded), ambiguous names (key=) only when
-     query-anchored -- deck vocabulary like key=3 / {'key': 3} survives;
-  2. the REAL boot wiring: this scenario installs ONLY
-     log_hooks.install_exception_hooks() -- exactly what main() calls --
-     and asserts the redaction patcher rides along (review round 1 found
-     the wiring untested: deleting the install call shipped green because
-     the old scenario installed redaction itself). Reverting the
-     install_log_redaction() call inside install_exception_hooks() must
-     turn this scenario red;
-  3. the full pipeline: a raising Thread whose message and frames carry
-     $HOME, the username and a credentialed URL -- asserted against a REAL
-     file sink, with backtrace=True/diagnose=True deliberately turned ON so
-     the {exception} path is exercised, not simulated. That is the worst
-     case, and it is worse than the app configures: the sinks
-     config_logger() installs carry neither flag, precisely because the
-     patcher below leaves them nothing to expand;
-  4. debuggability floor: the traceback survives redaction identifiable --
-     `File "~/...scenario_log_redaction.py"` frame, source line, exception
-     type/message -- and no diagnose variable dump leaks values;
-  5. idempotence -- of the double hook install (same patcher), and of
-     scrub() itself over the whole corpus (re-scrubbing an auth
-     header used to eat the scheme word, "Basic ***" -> "*** ***").
-
-Run in isolation (run_all.py gives each scenario its own interpreter):
-logger.configure(patcher=...) and the exception hooks are process-global.
-"""
-import fixtures  # must be first: isolates DATA_PATH before any src import
+import fixtures  # must be first; isolates DATA_PATH before any src import
 
 import getpass
 import os
@@ -56,12 +20,12 @@ UT = "<user>"  # the token scrub() substitutes for the username
 
 
 def check_scrub_unit() -> None:
-    # Home directory -> ~, project-relative tail preserved.
+    # The home directory becomes a tilde, and the project-relative tail stays.
     assert scrub(f"{HOME}/dev/StreamController/src/app.py") == "~/dev/StreamController/src/app.py"
     assert scrub(f'File "{HOME}/.config/x.json", line 3') == 'File "~/.config/x.json", line 3'
     assert scrub(HOME) == "~", "bare home path (end of string) must redact"
-    # Boundary guards: a LONGER username sharing the prefix must not be
-    # clipped, and dot-suffix siblings must not become "~.old" (round 1).
+    # Boundary guards. A longer username sharing the prefix must not be
+    # clipped, and dot-suffix siblings must not collapse into the tilde form.
     assert scrub(HOME + "ette/f") == HOME + "ette/f", "prefix-sharing sibling user must survive"
     if os.path.basename(HOME) == USER:
         parent = os.path.dirname(HOME)
@@ -72,21 +36,21 @@ def check_scrub_unit() -> None:
             "sentence-final home path must still hide the username"
         )
 
-    # Username: path segments and user@host only -- never bare words.
+    # The username matches in path segments and in user@host, never bare.
     assert scrub(f"/run/media/{USER}/stick") == f"/run/media/{UT}/stick"
     assert scrub(f"/var/home/{USER}") == f"/var/home/{UT}"
     assert scrub(f"ssh {USER}@build-host: refused") == f"ssh {UT}@build-host: refused"
     prose = f"the {USER}xyz option"
     assert scrub(prose) == prose, "username as a word prefix must not be touched"
 
-    # URL credentials: user[:pass]@host -> ***@host, host+path preserved.
+    # URL credentials collapse to a mask, and the host and path stay.
     assert scrub("https://alice:hunter2@example.com/a/b") == "https://***@example.com/a/b"
     assert scrub("https://alice@example.com/a") == "https://***@example.com/a"
     assert "example.com/a/b" in scrub("https://alice:hunter2@example.com/a/b?x=1")
 
-    # Secret params, = forms: unambiguous names anywhere, spaces tolerated;
-    # `key=` only query-anchored ("key" is deck vocabulary -- key=3 in a
-    # debug message must survive).
+    # Secret params in the equals form. Unambiguous names match anywhere and
+    # tolerate spaces. A bare key equals matches only when query-anchored,
+    # because key is deck vocabulary and key=3 in a debug message must survive.
     assert scrub("GET /repo?access_token=abc123&x=1") == "GET /repo?access_token=***&x=1"
     assert scrub("retry with token=tok-9") == "retry with token=***"
     assert scrub("retry with token = tok-9") == "retry with token=***", (
@@ -95,8 +59,8 @@ def check_scrub_unit() -> None:
     assert scrub("https://h/p?key=sekrit&b=2") == "https://h/p?key=***&b=2"
     assert scrub("painting key=3 gen=7") == "painting key=3 gen=7"
 
-    # Secret params, : forms -- dict repr / JSON dumps (round 1: the
-    # HomeAssistant plugin logging its settings/headers dict on error).
+    # Secret params in the colon form, from a dict repr or a JSON dump, such as
+    # the HomeAssistant plugin logging its settings dict on error.
     assert scrub("{'access_token': 'eyJabc.def'}") == "{'access_token': '***'}"
     assert scrub('{"api_key": "sk-12345"}') == '{"api_key": "***"}'
     assert scrub("headers token: abc.def") == "headers token: ***"
@@ -104,8 +68,8 @@ def check_scrub_unit() -> None:
         "deck 'key' dict field must survive the colon rule"
     )
 
-    # Authorization headers (round 1): Basic b64 decodes straight to
-    # user:pass; BEARER in any case must not slip the fast path.
+    # Authorization headers. A Basic b64 value decodes straight to user and
+    # pass, and BEARER in any case must not slip the fast path.
     assert scrub("Authorization: Basic dXNlcjpwYXNz") == "Authorization: Basic ***"
     assert scrub('"Authorization": "Bearer eyJhbGciOi"') == '"Authorization": "Bearer ***"'
     assert scrub("Authorization: Bearer eyJhbGciOi.payload") == "Authorization: Bearer ***"
@@ -121,30 +85,23 @@ def check_scrub_unit() -> None:
         "'basic' is prose vocabulary -- only redact it in header context"
     )
 
-    # The no-scheme branch must never consume a bare scheme word as
-    # the value. A credential that merely STARTS with those letters is not
-    # a bare scheme word and must still be redacted.
+    # The no-scheme branch must never consume a bare scheme word as the value.
+    # A credential that merely starts with those letters is not a scheme word
+    # and must still be redacted.
     assert scrub("Authorization: basicauthvalue123") == "Authorization: ***"
     assert scrub("Authorization: tokenvalue99") == "Authorization: ***"
     assert scrub("Authorization: bearertoken.abc") == "Authorization: ***"
 
 
 def check_scrub_idempotent() -> None:
-    """scrub(scrub(x)) == scrub(x) over the whole corpus.
+    """scrub(scrub(x)) must equal scrub(x) over the whole corpus.
 
-    The auth-header rule used to break this: re-scrubbing
-    "Authorization: Basic ***" could not match the value class against
-    "***", backtracked out of the optional scheme group, and consumed the
-    word "Basic" itself as the value -- "Authorization: *** ***" (same for
-    Bearer/Digest/Token; it converged only on pass 3). Cosmetic in
-    isolation, but any pipeline that scrubs twice -- the boot scrub
-    re-running over an already-scrubbed file, a line passing both
-    the loguru patcher and a later scrub -- mangled every header it had
-    already redacted, so the module could only claim idempotence for
-    faulthandler content rather than in general.
+    The auth-header rule can backtrack out of its optional scheme group and
+    consume the scheme word itself on a second pass, so any pipeline that
+    scrubs twice would mangle every header it had already redacted.
     """
     corpus = [
-        # Auth headers: every scheme, both delimiters, quoted and bare.
+        # Auth headers, every scheme, both delimiters, quoted and bare.
         "Authorization: Basic dXNlcjpwYXNz",
         "Authorization: Bearer eyJhbGciOi.payload",
         "authorization: Token abc123def",
@@ -170,7 +127,7 @@ def check_scrub_idempotent() -> None:
         "{'access_token': 'eyJabc.def'}",
         '{"api_key": "sk-12345"}',
         "headers token: abc.def",
-        # Must-not-touch vocabulary: idempotent trivially, but a rule that
+        # Must-not-touch vocabulary. Idempotent trivially, but a rule that
         # starts eating these would show up here too.
         "painting key=3 gen=7",
         "{'key': 3, 'gen': 7}",
@@ -184,11 +141,11 @@ def check_scrub_idempotent() -> None:
             f"scrub() is not idempotent for {text!r}: "
             f"pass 1 -> {once!r}, pass 2 -> {scrub(once)!r}"
         )
-        # Already-redacted markers must survive a re-scrub verbatim: the
-        # count can only be what pass 1 produced, never grow.
+        # Already-redacted markers must survive a re-scrub verbatim, so the
+        # count can only be what pass 1 produced and never grow.
         assert once.count("***") == scrub(once).count("***")
 
-    # Fast path returns unchanged text untouched.
+    # The fast path returns unchanged text untouched.
     assert scrub("plain message, nothing sensitive") == "plain message, nothing sensitive"
     assert scrub("") == ""
 
@@ -198,10 +155,10 @@ def main() -> None:
     check_scrub_unit()
     check_scrub_idempotent()
 
-    # THE REAL BOOT WIRING, and nothing else: main() only ever calls
-    # install_exception_hooks(); redaction must ride along. Deliberately NOT
-    # calling install_log_redaction() here -- if the piggyback inside
-    # install_exception_hooks() is reverted, this must go red.
+    # The real boot wiring, and nothing else. main() only ever calls
+    # install_exception_hooks(), and redaction must ride along. This does not
+    # call install_log_redaction(), so reverting the piggyback inside
+    # install_exception_hooks() turns this red.
     log_hooks.install_exception_hooks()
     assert logger._core.patcher is redact_record, (
         "install_exception_hooks() must install the redaction patcher -- "
@@ -210,10 +167,10 @@ def main() -> None:
     log_hooks.install_exception_hooks()  # idempotent
     assert logger._core.patcher is redact_record
 
-    # A real file sink, PLUS a capture sink -- both must receive scrubbed
-    # text. backtrace/diagnose are ON here on purpose: they are the loudest
-    # possible {exception} expansion, so a patcher that failed to clear the
-    # record would leak the most here.
+    # A real file sink plus a capture sink. Both must receive scrubbed text.
+    # backtrace and diagnose are on here, because they are the loudest possible
+    # exception expansion, so a patcher that failed to clear the record would
+    # leak the most here.
     log_dir = os.path.join(fixtures.DATA_DIR, "logs")
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, "logs.log")
@@ -227,10 +184,10 @@ def main() -> None:
     logger.info(f"mounted /run/media/{USER}/stick")
     logger.info("HA settings: {'host': 'ha.local', 'access_token': 'eyJlongtoken'}")
 
-    # An uncaught thread exception through the REAL hook: message,
+    # An uncaught thread exception through the real hook. The message, the
     # frame paths and a diagnose-visible local all carry PII.
     def boom() -> None:
-        key_path = f"{HOME}/.ssh/id_rsa"  # local: would leak via diagnose=True
+        key_path = f"{HOME}/.ssh/id_rsa"  # a local that diagnose=True would leak
         raise ValueError(
             f"cannot open {key_path} "
             f"(remote=https://{USER}:sekrit@host.example/x?token=tok123)"
@@ -246,8 +203,8 @@ def main() -> None:
     joined = "".join(records)
 
     for output, label in ((content, "logs.log"), (joined, "capture sink")):
-        # Raw values must be gone -- including traceback frame paths, which
-        # is the whole point of folding {exception} into the message.
+        # The raw values must be gone, traceback frame paths included, which is
+        # why the exception is folded into the message.
         assert HOME not in output, f"{label}: raw home path leaked"
         assert "hunter2" not in output, f"{label}: URL password leaked"
         assert "sekrit" not in output, f"{label}: URL password (exception message) leaked"
@@ -262,7 +219,7 @@ def main() -> None:
             f"{label}: bare user@host leaked"
         )
 
-        # Redacted forms present.
+        # The redacted forms are present.
         assert "~/.config/streamcontroller/settings.json" in output, f"{label}: home must map to ~"
         assert "https://***@git.example.com/repo.git?access_token=***&x=1" in output, label
         assert "/run/media/<user>/stick" in output, label
@@ -270,7 +227,7 @@ def main() -> None:
         assert "'access_token': '***'" in output, f"{label}: dict-repr token must redact"
         assert "'host': 'ha.local'" in output, f"{label}: non-secret dict fields must survive"
 
-        # Debuggability floor: the traceback is still a traceback.
+        # Debuggability floor. The traceback is still a traceback.
         assert "Traceback (most recent call last):" in output, f"{label}: traceback text missing"
         assert 'File "~/' in output, (
             f"{label}: frame paths must stay identifiable as ~-relative, not vanish"

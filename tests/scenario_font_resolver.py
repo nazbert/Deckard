@@ -1,27 +1,7 @@
-"""
-Integration scenario (docs/memory-footprint-impl-plan.md P3.1):
-src/backend/DeckManagement/font_resolver.py replaces matplotlib.font_manager
-as KeyLabel/HelperMethods' font backend.
+"""font_resolver.py replaces matplotlib.font_manager as the font backend.
 
-Covers:
-  (a) resolve(family, 400, "normal") picks a different file than
-      resolve(family, 700, "normal") for a family with both weights present
-      -- the regression this module exists to prevent: fontconfig's weight
-      scale (0-215) is NOT the app's numeric Pango/CSS scale (100-900), and
-      passing a raw app weight straight through silently returns the bold
-      file for a "normal" request (verified live against this machine's
-      fontconfig: `fc-match "DejaVu Sans:weight=400"` returns
-      DejaVuSans-Bold.ttf).
-  (b) the resolved file actually exists and PIL's ImageFont.truetype (what
-      KeyLabel.get_font() uses at render time) can open it.
-  (c) font_name_from_path round-trips a resolved file back to a non-empty
-      family name (fontTools name-table read, replacing
-      matplotlib.font_manager.FontProperties(fname=...).get_family()).
-  (d) fallback_font() is NOT computed at `import globals` time -- the
-      module-level `__getattr__` (PEP 562) must defer the fontconfig round
-      trip to first access of `gl.fallback_font`, not pay for it at import
-      (that eager cost, via matplotlib's find_fallback_font(), is exactly
-      what this migration removes from the startup path).
+resolve() must map the app weight scale onto the fontconfig one, the resolved
+file must open in PIL, and fallback_font() must stay lazy at import.
 """
 import os
 import subprocess
@@ -33,8 +13,8 @@ from src.backend.DeckManagement import font_resolver
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-# A family verified (via `fc-list`) to be present on the harness machine with
-# both a regular and a bold face, so check (a) has something real to bite on.
+# A family verified with fc-list to be present on the harness machine with both
+# a regular and a bold face, so the weight check has something real to bite on.
 _TEST_FAMILY = "DejaVu Sans"
 
 
@@ -77,9 +57,9 @@ def check_font_name_round_trips() -> None:
     print(f"PASS: font_name_from_path({path!r}) -> {name!r}")
 
 
-def check_fallback_font_not_computed_at_import_time() -> None:
-    # Fresh interpreter: import globals, check the lazy attribute has NOT
-    # been materialized, then access it and check that it has.
+def check_fallback_font_lazy_at_import() -> None:
+    # Fresh interpreter. Import globals, check the lazy attribute is not
+    # materialized, then access it and check that it is.
     script = (
         "import sys, tempfile\n"
         f"sys.path.insert(0, {_REPO_ROOT!r})\n"
@@ -112,8 +92,8 @@ def check_fallback_font_not_computed_at_import_time() -> None:
 
 
 def check_no_matplotlib_imported() -> None:
-    # font_resolver itself, and everything it pulls in on the Linux path,
-    # must never import matplotlib (the whole point of P3.1).
+    # font_resolver itself, and everything it pulls in on the Linux path, must
+    # never import matplotlib.
     script = (
         "import sys\n"
         f"sys.path.insert(0, {_REPO_ROOT!r})\n"
@@ -144,7 +124,7 @@ def main() -> None:
     check_weight_selects_different_files()
     check_resolved_file_openable()
     check_font_name_round_trips()
-    check_fallback_font_not_computed_at_import_time()
+    check_fallback_font_lazy_at_import()
     check_no_matplotlib_imported()
     print("PASS: scenario_font_resolver")
 

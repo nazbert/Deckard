@@ -1,36 +1,7 @@
-"""
-Unit-tier scenario for the per-deck display-saturation feature (PIL
-ImageEnhance.Color factor, default 1.0, UI range 1.0-1.5).
+"""Unit-tier scenario for the per-deck display-saturation feature.
 
-Drives the REAL production code at two of its application points:
-
-  * BackgroundImage.__init__
-    (src/backend/DeckManagement/deck_controller/background_media.py) -- the
-    one-time enhancement point for the static background-image path
-    (and, by construction, InputImage in KeyImage.py, which applies the
-    identical pattern for key/dial static media).
-  * BackgroundVideoCache.__init__ / _canvas_from_source_bgr
-    (src/backend/DeckManagement/Subclasses/background_video_cache.py) -- the
-    build-time enhancement point for background video, plus its
-    factor-suffixed cache filename.
-
-Both are exercised through small stub deck_controllers exposing exactly the
-surface each class reads (get_display_saturation(), and, for the video
-cache, .deck/.key_spacing) -- not by re-implementing the enhancement or
-naming logic in the test itself.
-
-Covers:
-  (a) factor 1.3 measurably raises mean HSV saturation vs factor 1.0, on a
-      synthetic vivid-color image, through BackgroundImage.
-  (b) factor 1.0 is a byte-identical no-op: BackgroundImage.image is the
-      exact same object passed in -- no ImageEnhance call, no mode
-      conversion, no copy.
-  (c) BackgroundVideoCache's cache_path carries a ".satNNN" suffix at 1.3 and
-      not at 1.0 (both built from the same source file/md5), and
-      video_cache_sweeper.py's inline hash-stem extraction
-      (`entry.split(".")[0]`, sweep_stale_video_caches) still resolves both
-      real filenames back to the source md5 -- i.e. the suffix cannot break
-      the sweeper's stale-cache matching.
+Drives BackgroundImage and BackgroundVideoCache at their real enhancement
+points. Factor 1.0 is a strict no-op, and the cache filename carries .satNNN.
 """
 import os
 
@@ -45,9 +16,7 @@ from src.backend.DeckManagement.DeckController import BackgroundImage
 from src.backend.DeckManagement.Subclasses.background_video_cache import BackgroundVideoCache
 
 
-# ===================================================================== #
-# (a) + (b): BackgroundImage
-# ===================================================================== #
+# BackgroundImage
 
 class _StubImageDeckController:
     """Exposes exactly what BackgroundImage.__init__ reads."""
@@ -60,8 +29,8 @@ class _StubImageDeckController:
 
 
 def _make_colorful_image(size=(64, 64)) -> Image.Image:
-    # Vivid horizontal color bands: a low-chroma photo could hide a modest
-    # saturation change in rounding, these bands make it unambiguous.
+    # Vivid horizontal color bands. A low-chroma photo could hide a modest
+    # saturation change in rounding; these bands make it unambiguous.
     arr = np.zeros((size[1], size[0], 3), dtype=np.uint8)
     bands = [(220, 30, 30), (30, 200, 40), (40, 60, 220), (230, 210, 20)]
     band_h = size[1] // len(bands)
@@ -82,15 +51,15 @@ def check_background_image() -> None:
     bg_default = BackgroundImage(_StubImageDeckController(1.0), source)
     bg_boosted = BackgroundImage(_StubImageDeckController(1.3), source.copy())
 
-    # (b) factor 1.0 must be a strict no-op: no ImageEnhance call, no mode
-    # conversion, no copy -- the exact same object comes back out.
+    # Factor 1.0 must be a strict no-op. No ImageEnhance call, no mode
+    # conversion and no copy, so the same object comes back out.
     assert bg_default.image is source, (
         "factor 1.0 must skip enhancement entirely: BackgroundImage.image "
         "should be the original object, not a copy or a converted image"
     )
 
-    # (a) factor 1.3 must measurably raise mean HSV saturation relative to
-    # the untouched default-factor image.
+    # Factor 1.3 must measurably raise mean HSV saturation against the
+    # untouched default-factor image.
     sat_default = _mean_hsv_saturation(bg_default.image)
     sat_boosted = _mean_hsv_saturation(bg_boosted.image)
     assert sat_boosted > sat_default + 1.0, (
@@ -101,9 +70,7 @@ def check_background_image() -> None:
     print(f"PASS: BackgroundImage saturation (default={sat_default:.2f}, boosted={sat_boosted:.2f})")
 
 
-# ===================================================================== #
-# (c): BackgroundVideoCache naming + sweeper hash-stem compatibility
-# ===================================================================== #
+# BackgroundVideoCache naming and sweeper hash-stem compatibility
 
 class _StubDeck:
     def key_layout(self):
@@ -120,8 +87,11 @@ class _StubDeck:
 
 
 class _StubVideoDeckController:
-    """Exposes exactly what BackgroundVideoCache.__init__/_generate_alpha_frame
-    read: get_display_saturation(), .deck, .key_spacing, generate_alpha_key()."""
+    """Exposes what BackgroundVideoCache.__init__ and _generate_alpha_frame read.
+
+    Those are get_display_saturation(), .deck, .key_spacing and
+    generate_alpha_key().
+    """
 
     def __init__(self, saturation: float):
         self._saturation = saturation
@@ -146,8 +116,8 @@ def _make_test_video(path: str, n_frames: int = 5, size=(64, 64), color=(30, 80,
 
 
 def check_background_video_cache() -> None:
-    # A real StubSettingsManager (get_app_settings()) is needed:
-    # BackgroundVideoCache.__init__ reads performance.cache-videos from it.
+    # A real StubSettingsManager is needed, because BackgroundVideoCache.__init__
+    # reads performance.cache-videos through get_app_settings().
     fixtures.install_stub_globals()
 
     video_path = os.path.join(gl.DATA_PATH, "sat_test_source.mp4")
@@ -173,20 +143,17 @@ def check_background_video_cache() -> None:
             f"factor 1.3 must carry the two-decimal-encoded suffix, got {boosted_name!r}"
         )
 
-        # video_cache_sweeper.sweep_stale_video_caches computes
-        # `entry_hash = entry.split(".")[0]` on every cache directory entry
-        # before dispatching on file/dir type, to check it against the set of
-        # md5s still referenced by deck/page settings. Verify that inline
-        # expression -- unmodified, exactly as the sweeper runs it -- still
-        # resolves BOTH real filenames back to the source md5, i.e. the
-        # ".satNNN" suffix cannot break stale-cache matching.
+        # sweep_stale_video_caches computes entry_hash = entry.split(".")[0] on
+        # every cache directory entry before it dispatches on file type, to check
+        # it against the md5s still referenced by deck and page settings. Run
+        # that inline expression unmodified and require both real filenames to
+        # resolve back to the source md5.
         assert default_name.split(".")[0] == md5
         assert boosted_name.split(".")[0] == md5
 
-        # Sanity: the build path actually runs end to end and produces a
-        # measurably more saturated frame, i.e. the suffix isn't the only
-        # thing that changed -- the enhancement really is baked into the
-        # cached canvas.
+        # Sanity. The build path runs end to end and produces a measurably more
+        # saturated frame, so the suffix is not the only thing that changed and
+        # the enhancement really is baked into the cached canvas.
         default_tile = cache_default.get_tiles(0)[0]
         boosted_tile = cache_boosted.get_tiles(0)[0]
         sat_default = _mean_hsv_saturation(default_tile)

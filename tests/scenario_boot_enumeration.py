@@ -1,31 +1,13 @@
-"""
-Boot-enumeration rescan scenario: if no deck is USB-enumerable
-when the app starts (autostart racing device init at boot), DeckManager must
-re-enumerate with bounded backoff in the background and pick the deck up
-when it appears -- exactly once, even when the USB hotplug monitor races the
-rescan for the same deck -- and a rescan parked in backoff must stop
-promptly on shutdown.
+"""Pins the boot-enumeration rescan of DeckManager.
 
-Review round 1 additions:
-  * flaky-open phase -- a deck that ENUMERATES but flakes its open
-    (TransportError -1, the documented boot-storm failure) must not end the
-    rescan behind a success log: the stop condition is "registered", not
-    "enumerable", and the pickup path retries opens like the startup path.
-  * barrier phase -- two callers inside connect_new_decks' window for the
-    SAME deck (synchronized with threading.Barrier so the windows genuinely
-    overlap) must register it exactly once; this fails if
-    _connect_decks_lock is ever weakened (verified red: with the lock
-    replaced by a no-op context manager, duplicates register).
-
-DeckManager is constructed for real, with its environment-touching
-collaborators (USBMonitor, Xdp portal, StreamDeck DeviceManager) stubbed at
-module level BEFORE construction. Enumeration is scripted.
+With no deck enumerable at start, DeckManager re-enumerates with bounded
+backoff, registers the deck exactly once, and stops promptly on shutdown.
 """
 import threading
 import time
 import types
 
-import fixtures  # must be first: isolates DATA_PATH before `import globals`
+import fixtures  # must be first; isolates DATA_PATH before import globals
 import globals as gl
 
 from StreamDeck.Transport.Transport import TransportError
@@ -36,7 +18,7 @@ import src.backend.DeckManagement.DeckManager as dm_module
 
 
 class StubUSBMonitor:
-    """usbmonitor.USBMonitor stand-in: no udev, no threads."""
+    """usbmonitor.USBMonitor stand-in with no udev and no threads."""
 
     def __init__(self, *args, **kwargs):
         self.on_connect = None
@@ -56,9 +38,11 @@ class StubPortal:
 
 
 class ScriptedDeviceManager:
-    """StreamDeck.DeviceManager stand-in: enumerate() returns whatever the
-    class-level script currently says (fresh instances share it, mirroring
-    how the real code constructs a new DeviceManager per enumeration)."""
+    """StreamDeck.DeviceManager stand-in driven by a class-level script.
+
+    Fresh instances share the script, which mirrors the real code building a
+    new DeviceManager per enumeration.
+    """
 
     results: list = []
     enumerate_calls: int = 0
@@ -71,9 +55,11 @@ class ScriptedDeviceManager:
 
 
 class FlakyOpenDeck(FaultyFakeDeck):
-    """First `fail_opens` open() calls raise TransportError (the boot-storm
-    flake); is_open() reflects the real open state -- FakeDeck's stub always
-    answers True, which would let the init path skip the open entirely."""
+    """The first fail_opens open() calls raise TransportError, the boot flake.
+
+    is_open() reports the real open state. The FakeDeck stub always answers
+    True, which lets the init path skip the open.
+    """
 
     def __init__(self, *args, fail_opens: int = 0, **kwargs):
         super().__init__(*args, **kwargs)
@@ -115,15 +101,15 @@ def phase_pickup_exactly_once() -> None:
     assert manager._boot_rescan_thread.is_alive(), "rescan thread not running"
     assert len(manager.deck_controller) == 0
 
-    # Let at least one *empty* retry complete (startup call was #1).
+    # Let at least one empty retry complete. The startup call was the first.
     ok = fixtures.wait_until(lambda: ScriptedDeviceManager.enumerate_calls >= 2, timeout=3)
     assert ok, "rescan never re-enumerated"
     assert len(manager.deck_controller) == 0, "controller appeared from an empty enumeration"
 
-    # Deck becomes enumerable now. Race a simulated hotplug event (the USB
-    # monitor's on_connect path calls connect_new_decks directly) against
-    # the rescan's next round. (The tight same-window race is exercised
-    # deterministically in phase_concurrent_callers_exactly_once.)
+    # The deck becomes enumerable now. Race a simulated hotplug event, where
+    # the on_connect path of the USB monitor calls connect_new_decks directly,
+    # against the next rescan round. phase_concurrent_callers_exactly_once
+    # drives the tight same-window race deterministically.
     deck = FaultyFakeDeck(serial_number="boot-rescan-1", deck_type="Fake Deck")
     ScriptedDeviceManager.results = [deck]
 
@@ -139,8 +125,8 @@ def phase_pickup_exactly_once() -> None:
     assert fixtures.wait_until(lambda: not manager._boot_rescan_thread.is_alive(), timeout=10), \
         "rescan thread did not stop after the deck appeared"
 
-    # Give any (buggy) late duplicate registration a moment to land before
-    # asserting exactly-once.
+    # Give a late duplicate registration a moment to land before the
+    # exactly-once assertion.
     time.sleep(0.3)
     assert len(manager.deck_controller) == 1, \
         f"expected exactly 1 controller, got {len(manager.deck_controller)} (double-register)"
@@ -158,15 +144,15 @@ def phase_pickup_exactly_once() -> None:
 
 
 def phase_flaky_open_still_registered() -> None:
-    """Review round 1 finding 1 (the exact reported failure): deck absent at
-    boot -> rescan armed -> deck enumerates but its open flakes with
-    TransportError. The rescan must NOT stop on mere enumerability: the
-    pickup path retries the open, a fully-failed round leaves the deck
-    unregistered so a later round retries it, and the rescan only stops
-    once a controller actually exists."""
+    """The rescan must not stop when the deck merely enumerates.
+
+    The deck is absent at boot, the rescan arms, and the deck then enumerates
+    with an open that flakes. The pickup path retries the open, a fully failed
+    round leaves the deck unregistered, and the rescan stops only on a deck.
+    """
     gl.deck_manager = manager = make_deck_manager()
-    # Enough rounds after the deck appears for a fully-failed pickup round
-    # (3 in-round open retries) plus the retry round that succeeds.
+    # Enough rounds after the deck appears for a fully failed pickup round,
+    # which runs three in-round open retries, plus the round that succeeds.
     manager.BOOT_RESCAN_DELAYS = (0.1, 0.1, 0.3, 0.3, 0.5, 0.5)
 
     ScriptedDeviceManager.results = []
@@ -175,10 +161,10 @@ def phase_flaky_open_still_registered() -> None:
     manager.load_hardware_decks()
     assert manager._boot_rescan_thread.is_alive()
 
-    # 3 open failures = the first pickup attempt exhausts its in-round
-    # retries (attempts=3) and gives up; only a LATER rescan round can
-    # register the deck -- exercising both the in-round retry and the
-    # "registered, not enumerable" stop condition.
+    # Three open failures exhaust the in-round retries of the first pickup
+    # attempt, so only a later rescan round can register the deck. That
+    # exercises the in-round retry and the registered-not-enumerable stop
+    # condition together.
     deck = FlakyOpenDeck(serial_number="flaky-open-1", deck_type="Fake Deck", fail_opens=3)
     ScriptedDeviceManager.results = [deck]
 
@@ -199,12 +185,12 @@ def phase_flaky_open_still_registered() -> None:
 
 
 def phase_concurrent_callers_exactly_once() -> None:
-    """Review round 1 finding 2: the raced-thread phase above can settle
-    before the two windows ever overlap, so it cannot catch a weakened
-    _connect_decks_lock. Here two callers are barrier-synchronized INTO
-    connect_new_decks for the same deck across several trials -- with the
-    lock elided (no-op context manager) this reliably registers duplicates;
-    with the real lock it must always be exactly one."""
+    """Two barrier-synchronized callers must register one deck exactly once.
+
+    The raced-thread phase above can settle before the two windows overlap, so
+    it cannot catch a weakened _connect_decks_lock. With the lock elided this
+    registers duplicates reliably.
+    """
     gl.deck_manager = manager = make_deck_manager()
 
     TRIALS = 8
@@ -255,7 +241,7 @@ def phase_clean_shutdown_during_backoff() -> None:
         "rescan thread still alive after stop_boot_rescan()"
     assert elapsed < 2.5, f"stop_boot_rescan took {elapsed:.2f}s -- backoff sleep not interruptible"
 
-    # Idempotent / safe with no rescan running.
+    # Idempotent and safe with no rescan running.
     manager.stop_boot_rescan()
 
 

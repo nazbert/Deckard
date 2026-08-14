@@ -1,20 +1,7 @@
-"""
-Integration-tier scenario (phase 2): a GIF screensaver
-background exercises the same GifBackground branch as a page background.
+"""A GIF screensaver background must take the same GifBackground branch.
 
-ScreenSaver.show()/set_media_path() reach into
-Background.prebuild_from_path/set_from_path, so the .gif divert must hold
-there too -- this is the regression guard for the ScreenSaver.py reach-ins
-(a refactor that moved the branch out of prebuild_from_path would silently
-put screensaver GIFs back on the alpha-dropping cv2 path).
-
-Covers:
-  * show() with a GIF media path lands a GifBackground on the (swapped)
-    screensaver background, tiles published RGBA;
-  * a set_media_path() call WHILE showing (the ScreenSaver.py:80 reach-in)
-    re-routes through the same branch;
-  * hide() restores the page and releases the screensaver's GIF frames
-    (the swap closes the provider -- ownership follows the background).
+ScreenSaver.show() and set_media_path() reach into prebuild_from_path and
+set_from_path, so the .gif divert must hold there too. hide() releases it.
 """
 import os
 
@@ -66,9 +53,9 @@ def main() -> None:
             "no identified tile published for the screensaver GIF background"
         )
 
-        # The while-showing reach-in (ScreenSaver.set_media_path ->
-        # background.set_from_path) takes the same branch and swaps the
-        # provider; the old one is closed by Background.set_video.
+        # The while-showing reach-in, where ScreenSaver.set_media_path calls
+        # background.set_from_path, takes the same branch and swaps the
+        # provider. Background.set_video closes the old one.
         controller.screen_saver.set_media_path(gif_b)
         swapped = controller.background.video
         assert type(swapped).__name__ == "GifBackground" and swapped.video_path == gif_b, (
@@ -81,8 +68,8 @@ def main() -> None:
 
         controller.screen_saver.hide()
         assert not controller.screen_saver.showing, "hide() must flip showing off"
-        # The default page has no background: the restore swaps the GIF
-        # provider out (and closes it) once hide()'s load settles.
+        # The default page has no background, so the restore swaps the GIF
+        # provider out, and closes it, once the load of hide() settles.
         assert wait_until(lambda: controller.background.video is None, timeout=5), (
             "hide() must restore the page's (empty) background"
         )

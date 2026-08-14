@@ -1,16 +1,11 @@
-"""
-Regression test: malformed env vars used to abort deck init.
+"""A malformed env var must not abort deck init.
 
 MediaPlayerThread.__init__ reads DECKARD_VIDEO_WRITE_HZ and
-DECKARD_WRITE_YIELD_MS from the environment. A malformed value
-(e.g. "fast") used to raise ValueError out of __init__, which
-DeckManager swallows as "Failed to initialize deck" -- the deck was
-silently skipped over a tuning knob typo. A bad env var must instead log
-a warning and fall back to the built-in default.
+DECKARD_WRITE_YIELD_MS. A bad value logs a warning and falls back.
 """
 import os
 
-# Poison the environment BEFORE the thread class ever reads it.
+# Poison the environment before the thread class ever reads it.
 os.environ["DECKARD_VIDEO_WRITE_HZ"] = "fast"
 os.environ["DECKARD_WRITE_YIELD_MS"] = "1.5ms"
 
@@ -20,7 +15,7 @@ import fixtures
 def main() -> None:
     fixtures.start_watchdog(30, label="scenario_env_var_resilience")
 
-    # Pre-fix this raises ValueError out of MediaPlayerThread.__init__.
+    # Without the fallback this raises ValueError out of __init__.
     controller, media_player, _ = fixtures.make_stub_controller(serial="envvar-1")
 
     assert media_player._video_write_hz == 30.0, (
@@ -33,7 +28,7 @@ def main() -> None:
     )
     print("PASS: malformed env vars fall back to defaults without aborting init")
 
-    # Sanity: well-formed overrides must still take effect.
+    # Sanity. Well-formed overrides must still take effect.
     os.environ["DECKARD_VIDEO_WRITE_HZ"] = "10"
     os.environ["DECKARD_WRITE_YIELD_MS"] = "3"
     from src.backend.DeckManagement.DeckController import MediaPlayerThread

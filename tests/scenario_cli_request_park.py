@@ -1,43 +1,7 @@
-"""
-Pins legs B/C of the startup queue (src/backend/startup_queue.py): the page
-and state changes `deckard --change-page` / `--change-state` park for a deck
-that has not appeared yet, and the claim/peek/resolve discipline
-DeckController.load_default_page() applies to them.
+"""Pins the parked page and state requests in src/backend/startup_queue.py.
 
-The parked-request path only exists because the CLI can name a deck the
-process has not enumerated yet. Everything below is about WHEN a parked
-request stops being parked -- claimed once and gone, or held until the work
-it asks for has actually happened.
-
-Guards:
-  1. Parking is keyed by serial and last-write-wins: a second `--change-page`
-     pair for one serial replaces the first rather than queueing behind it,
-     which is what plain dict assignment has always done here.
-  2. A page request is CLAIMED: the first claim hands it over and removes it,
-     every later claim for that serial answers None.
-  3. peek_state_request does NOT consume -- two peeks see the same request --
-     and resolve_state_request does, idempotently.
-  4. The gl slots are read on every call, never cached: swapping
-     gl.api_page_requests / gl.api_state_requests moves the parking, and a
-     request written straight into a slot (what the CLI's older shape did,
-     and what scenario_active_page_guards still does) is seen by the queue.
-  5. A page request parked before any controller exists is applied by that
-     controller's FIRST load_default_page and is NOT re-applied by the
-     second -- the regression the pop is there for: a request left in place
-     silently re-asserted itself on every unplug/replug and every "no page
-     found" fallback, forever.
-  6. A request naming a serial that never connects stays parked across any
-     number of loads by other decks. Nothing sweeps it; that is the shipped
-     behavior, pinned so a future sweep is a deliberate change.
-  7. A state request survives an exception raised while it is being applied
-     (peek, then a failing page load, and no resolve) and is consumed only
-     once a later load gets through -- the crash-retry the read/del split
-     buys, which a single claiming pop would silently turn into a drop.
-
-main.py is deliberately NOT imported: its module body re-execs the process
-unless SC_REEXEC is set. The queue API is what makes the CLI's half testable
-without it -- what main.py does with a parked request is park_page_request /
-park_state_request and nothing else.
+A page request is claimed once and gone. A state request is peeked, then
+resolved, so an exception during apply leaves it for the next load to retry.
 """
 import fixtures  # noqa: F401  (isolates DATA_PATH before src imports)
 
@@ -47,14 +11,14 @@ import globals as gl  # noqa: E402
 
 WATCHDOG_SECONDS = 60
 
-# The deck this scenario actually stands up.
+# The deck this scenario stands up.
 SERIAL = "park-1"
-# A serial no deck in this process ever reports.
+# A serial no deck in this process reports.
 ABSENT_SERIAL = "never-connects"
 
 
 def _state_request(page_name: str, coords: str = "0,0", state: int = 0) -> dict:
-    """The dict shape main.py parks (after its own int() conversion)."""
+    """The dict shape main.py parks, after its own int() conversion."""
     return {"page_name": page_name, "coords": coords, "state": state}
 
 
@@ -78,8 +42,8 @@ def check_parking_is_last_write_wins(queue) -> None:
         f"the later state request must win: {gl.api_state_requests['lww']}"
     )
 
-    # Parking two serials keeps two requests -- the collapse above is
-    # per-serial, not global.
+    # Parking two serials keeps two requests. The collapse above is per-serial,
+    # not global.
     queue.park_page_request("other", "Third")
     assert gl.api_page_requests == {"lww": "Second", "other": "Third"}, (
         f"different serials must not collide: {gl.api_page_requests}"
@@ -135,7 +99,7 @@ def check_state_peek_does_not_consume(queue) -> None:
         f"resolve must consume the request: {gl.api_state_requests}"
     )
     assert queue.peek_state_request(SERIAL) is None
-    # Two controllers can race the same serial up; a resolve that found
+    # Two controllers can race the same serial up, so a resolve that finds
     # nothing is not an error.
     queue.resolve_state_request(SERIAL)
 
@@ -164,10 +128,10 @@ def check_slots_are_read_per_call(queue) -> None:
         assert queue.claim_page_request(SERIAL) == "Parked"
         assert queue.peek_state_request(SERIAL) is not None
 
-        # The other direction: a request written straight into the slot must
-        # be visible to the queue. The CLI-facing surface is the dict, and
-        # scenario_active_page_guards drives the state branch by writing one
-        # by hand -- both stay honest only while nothing here is cached.
+        # The other direction. A request written straight into the slot must be
+        # visible to the queue. The CLI-facing surface is the dict, and
+        # scenario_active_page_guards drives the state branch by writing one by
+        # hand. Both stay honest only while nothing here is cached.
         gl.api_page_requests["hand-written"] = "Parked"
         gl.api_state_requests["hand-written"] = _state_request("StateTarget")
         assert queue.claim_page_request("hand-written") == "Parked", (
@@ -187,10 +151,12 @@ def check_slots_are_read_per_call(queue) -> None:
     print("PASS: the gl request slots are read per call, never cached")
 
 
-def check_first_load_claims_the_parked_page(controller) -> None:
-    """The controller was constructed with a page request already parked --
-    DeckController.__init__ ends in load_default_page(), so its first load is
-    the claim."""
+def check_first_load_claims_parked_page(controller) -> None:
+    """The first load of a controller claims a page request parked before it.
+
+    DeckController.__init__ ends in load_default_page(), so that first load is
+    the claim.
+    """
     parked_path = fixtures.seed_page("Parked")
 
     assert controller.active_page is not None, (
@@ -204,10 +170,10 @@ def check_first_load_claims_the_parked_page(controller) -> None:
         f"applying the request must consume it: {gl.api_page_requests}"
     )
 
-    # The regression: a request left parked re-applied itself on every later
-    # load_default_page for this serial -- every unplug/replug, every "no page
-    # found" fallback -- so the deck could never be moved off the page the CLI
-    # named. The second load must fall back to the normal default.
+    # A request left parked re-applies itself on every later load_default_page
+    # for this serial, on every replug and every fallback, so the deck can never
+    # be moved off the page the CLI named. The second load must fall back to the
+    # normal default.
     fallback_path = gl.page_manager.get_pages()[0]
     controller.load_default_page()
     assert os.path.abspath(controller.active_page.json_path) != os.path.abspath(parked_path), (
@@ -238,15 +204,15 @@ def check_absent_serial_stays_parked(queue, controller) -> None:
         f"{gl.api_state_requests}"
     )
 
-    # Nothing in the app ever sweeps these; the scenario does, so the guards
-    # below start from a known set.
+    # Nothing in the app sweeps these. The scenario does, so the guards below
+    # start from a known set.
     gl.api_page_requests.pop(ABSENT_SERIAL, None)
     gl.api_state_requests.pop(ABSENT_SERIAL, None)
 
     print("PASS: a request for a serial that never connects stays parked")
 
 
-def check_state_request_survives_a_failed_apply(queue, controller) -> None:
+def check_state_request_survives_failed_apply(queue, controller) -> None:
     target_path = fixtures.seed_page("StateTarget")
     queue.park_state_request(SERIAL, _state_request("StateTarget"))
 
@@ -256,10 +222,10 @@ def check_state_request_survives_a_failed_apply(queue, controller) -> None:
     def exploding_load_page(page, *args, **kwargs):
         loads.append(page)
         if len(loads) >= 2:
-            # Within one load_default_page() call the first load is the
-            # default page and the second is the state request's own page --
-            # so this raises exactly between the peek and the resolve, which
-            # is the window the split exists for.
+            # Within one load_default_page() call the first load is the default
+            # page and the second is the page of the state request, so this
+            # raises exactly between the peek and the resolve, which is the
+            # window the split exists for.
             raise RuntimeError("simulated failure while applying a state request")
         return original_load_page(page, *args, **kwargs)
 
@@ -284,7 +250,7 @@ def check_state_request_survives_a_failed_apply(queue, controller) -> None:
     finally:
         del controller.load_page
 
-    # The retry: same request, nothing in the way this time.
+    # The retry runs the same request with nothing in the way this time.
     controller.load_default_page()
     assert os.path.abspath(controller.active_page.json_path) == os.path.abspath(target_path), (
         f"the retry must load the page the state request names: "
@@ -294,7 +260,7 @@ def check_state_request_survives_a_failed_apply(queue, controller) -> None:
         f"a processed state request must be resolved: {gl.api_state_requests}"
     )
 
-    # And having been resolved, it is not applied a third time.
+    # Having been resolved, it is not applied a third time.
     fallback_path = gl.page_manager.get_pages()[0]
     controller.load_default_page()
     assert os.path.abspath(controller.active_page.json_path) == os.path.abspath(fallback_path), (
@@ -321,16 +287,16 @@ def main() -> None:
         gl.api_page_requests.clear()
         gl.api_state_requests.clear()
 
-        # Park BEFORE the deck exists: that is the whole point of the leg, and
-        # DeckController.__init__'s own load_default_page is the first claim.
+        # Park before the deck exists, which is the point of the leg. The
+        # load_default_page of DeckController.__init__ is the first claim.
         fixtures.seed_page("Parked")
         queue.park_page_request(SERIAL, "Parked")
 
         controller = fixtures.make_headless_controller(serial=SERIAL)
         try:
-            check_first_load_claims_the_parked_page(controller)
+            check_first_load_claims_parked_page(controller)
             check_absent_serial_stays_parked(queue, controller)
-            check_state_request_survives_a_failed_apply(queue, controller)
+            check_state_request_survives_failed_apply(queue, controller)
         finally:
             fixtures.teardown(controller)
     finally:

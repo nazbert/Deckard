@@ -1,15 +1,7 @@
-"""
-Scenario: BetterDeck rotation mapping and async callback setters.
+"""Pins the BetterDeck rotation mapping and the async callback setters.
 
-  (a): reorder_physical_for_rotation applied the rotation map in the WRONG
-       direction (out[p] = orig[logical(p)] instead of
-       out[logical(p)] = orig[p]) -- only self-inverse at 0/180, so
-       key_states() was scrambled under 90/270 and ControllerKey.__init__
-       read the wrong key's press state on rotated decks. Verified against
-       get_physical_index as an independent oracle (a different formula)
-       plus hand-computed literals.
-  (b): the three async callback setters called themselves instead of the
-       wrapped deck -> RecursionError for any plugin using them.
+reorder_physical_for_rotation must write out[logical(p)] = orig[p], checked
+against get_physical_index. The three async setters call the wrapped deck.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
@@ -21,7 +13,7 @@ from src.backend.DeckManagement.BetterDeck import BetterDeck
 
 def check_rotation() -> int:
     deck = FaultyFakeDeck(serial_number="rot-1")
-    # Independent layout: force a 3x5 so the literals below hold.
+    # Force a 3x5 layout, so the literals below hold.
     deck.key_layout = lambda: (3, 5)
     better = BetterDeck(deck)
 
@@ -32,13 +24,13 @@ def check_rotation() -> int:
         better.set_rotation(rotation)
         out = better.reorder_physical_for_rotation(physical)
 
-        # Permutation sanity: nothing lost or duplicated.
+        # The result must stay a permutation, with nothing lost or duplicated.
         if sorted(out) != physical:
             print(f"FAIL(a): rotation {rotation} output is not a "
                   f"permutation: {out}")
             return 1
 
-        # Contract, via the INVERSE formula as oracle: the value from
+        # Check against the inverse formula as an oracle. The value from
         # physical slot p must sit at logical slot l where
         # get_physical_index(l) == p.
         for logical in range(total):
@@ -49,8 +41,8 @@ def check_rotation() -> int:
                       f"{p} -- the map is applied in the wrong direction")
                 return 1
 
-    # Hand-computed literal (3 rows x 5 cols, rotation 90):
-    # get_logical_index(0) = (0%5)*3 + (3-1-0//5) = 2 -> orig[0] lands at out[2].
+    # Hand-computed literal for 3 rows by 5 cols at rotation 90.
+    # get_logical_index(0) = (0%5)*3 + (3-1-0//5) = 2, so orig[0] lands at out[2].
     better.set_rotation(90)
     out = better.reorder_physical_for_rotation(physical)
     if out[2] != 0:

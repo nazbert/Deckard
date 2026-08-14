@@ -1,34 +1,7 @@
-"""
-Unit-tier scenario: InputVideo.close() racing a concurrent
-get_next_frame().
+"""InputVideo.close() racing a concurrent get_next_frame().
 
-close() (called from load/teardown threads via close_resources()) used to
-null self.video_cache while a render tick could be between its multiple
-video_cache reads (n_frames / is_cache_complete() / get_source_fps() /
-get_frame()) -> AttributeError on None. Worse than the logged error: a
-get_frame() that starts AFTER the reader is released can resurrect a
-cv2.VideoCapture via Mp4FrameCache._maybe_adopt_shared_cache and leak it.
-
-The fix serializes the two with a per-instance lock (check-then-hold: an
-unlocked None peek keeps the post-close path free; the body holds the lock
-so close() waits for an in-flight frame and no frame starts against a
-released reader).
-
-Drives the REAL InputVideo via __new__ (house pattern, see
-scenario_keyvideo_build.py) with a stub cache whose accessors deliberately
-sleep, widening the historical race window, and which records any call
-landing after its release. Also constructs one REAL InputVideo over the
-mp4_tile_cache registry (real cv2 capture) to prove __init__ wires the lock
-and close() works end-to-end.
-
-Covers:
-  (a) hammer: N rounds of a render thread ticking get_next_frame() while
-      the main thread close()s mid-flight -- zero exceptions.
-  (b) serialization: zero cache accesses recorded after release (the
-      snapshot-only fix would pass (a) but fail this).
-  (c) post-close get_next_frame() returns None; close() is idempotent.
-  (d) real-registry InputVideo: construct, tick, close under a concurrent
-      ticker -- no exception, reader detached.
+A per-instance lock serializes the two, so close() waits for an in-flight
+frame and no frame starts against a released reader.
 """
 import os
 import threading
@@ -44,10 +17,11 @@ from src.backend.DeckManagement.Subclasses.KeyVideo import InputVideo
 
 
 class RacyStubCache:
-    """Mimics KeyVideoCache's surface used by InputVideo, with deliberate
-    sleeps inside the accessors so a concurrent close() lands mid-
-    get_next_frame with high probability (the pre-fix failure needed close
-    to hit between two video_cache reads). Records use-after-release."""
+    """Mimics the KeyVideoCache surface InputVideo reads, with sleeps.
+
+    The sleeps inside the accessors make a concurrent close() land
+    mid-get_next_frame with high probability. It records use after release.
+    """
 
     def __init__(self, n_frames: int = 10):
         self._n_frames = n_frames
@@ -78,8 +52,8 @@ class RacyStubCache:
         time.sleep(0.0002)
         return n
 
-    # mp4_tile_cache.release(reader) calls reader.close(); no registry
-    # bookkeeping runs (no _registry_key/_registry_entry attributes).
+    # mp4_tile_cache.release(reader) calls reader.close(), and no registry
+    # bookkeeping runs, because the registry attributes are absent.
     def close(self) -> None:
         self.released = True
 
@@ -113,27 +87,27 @@ def check_close_race_hammer(rounds: int = 150) -> None:
 
         t = threading.Thread(target=render_loop, name=f"hammer-{r}", daemon=True)
         t.start()
-        # Let the renderer get mid-flight, then close underneath it. Vary
-        # the delay so close lands at different points of the body.
+        # Let the renderer get mid-flight, then close underneath it. Vary the
+        # delay, so close lands at different points of the body.
         time.sleep(0.0001 + (r % 7) * 0.0002)
         video.close()
         stop.set()
         t.join(timeout=5.0)
         assert not t.is_alive(), f"round {r}: render thread wedged (deadlock?)"
 
-        # (a) the historical failure: AttributeError('NoneType' ... ).
+        # The historical failure was an AttributeError on NoneType.
         assert not errors, f"round {r}: get_next_frame raised under concurrent close: {errors[0]!r}"
 
-        # (b) serialization, not just crash-avoidance: once close() released
-        # the reader, no cache access may happen (a straggler get_frame on a
-        # released reader can resurrect+leak a capture via
-        # _maybe_adopt_shared_cache).
+        # Serialization, not just crash avoidance. Once close() released the
+        # reader, no cache access may happen, because a straggler get_frame on
+        # a released reader can resurrect and leak a capture through
+        # _maybe_adopt_shared_cache.
         assert cache.calls_after_release == 0, (
             f"round {r}: {cache.calls_after_release} cache accesses after "
             f"release -- close() and get_next_frame() are not serialized"
         )
 
-        # (c) post-close behavior: quiet None, and idempotent close.
+        # Post-close behavior. A quiet None, and an idempotent close.
         assert video.get_next_frame() is None
         video.close()
 
@@ -146,8 +120,10 @@ class _StubDeckControllerReal:
 
 
 class _StubControllerInputReal:
-    """Exactly what InputVideo.__init__ reads: .deck_controller (via
-    SingleKeyAsset) and get_image_size()."""
+    """Exactly what InputVideo.__init__ reads.
+
+    Those are .deck_controller, through SingleKeyAsset, and get_image_size().
+    """
 
     def __init__(self):
         self.deck_controller = _StubDeckControllerReal()
@@ -167,9 +143,9 @@ def _make_test_video(path: str, n_frames: int = 20, size=(64, 64)) -> None:
 
 
 def check_real_inputvideo_close() -> None:
-    # Registry + cv2 tier: __init__ must wire the lock itself (the hammer
-    # above hand-sets it), and close() must run the real release path while
-    # a ticker is mid-frame.
+    # The registry and cv2 tier. __init__ must wire the lock itself, where the
+    # hammer above hand-sets it, and close() must run the real release path
+    # while a ticker is mid-frame.
     fixtures.install_stub_globals()
 
     video_path = os.path.join(gl.DATA_PATH, "close_race_source.mp4")

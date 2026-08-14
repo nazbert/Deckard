@@ -1,21 +1,7 @@
-"""
-Unit-tier scenario (docs/presenter-migration-plan.md §4 M4, §7 "GIF
-wall-clock timeline"): KeyGIF.get_next_frame() must pick the time-correct
-frame from a cumulative-delay timeline (`itertools.accumulate` over
-per-frame delays in seconds), not the old increment-at-render loop.
+"""KeyGIF.get_next_frame() must pick the time-correct frame by wall clock.
 
-Drives KeyGIF directly with a synthetic `frame_delays` list (variable
-delays, so a single-fps factor would be wrong -- the reason this plan picked
-bisect over a fixed-fps ratio). `get_next_frame` takes an optional `now`
-(mirrors MediaPlayerThread.check_resume_gap's `now: float = None` pattern,
-deck_controller/media_writer.py) so this test is deterministic -- no real
-sleeping,
-no thread.
-
-Bypasses KeyGIF.__init__ (which decodes an actual GIF file from disk) via
-__new__ and hand-sets exactly the attributes get_next_frame reads: this
-keeps the scenario a pure arithmetic test of the timeline, independent of
-PIL/GIF decoding.
+A cumulative-delay timeline is bisected, so variable per-frame delays work
+where a single-fps factor would not. Bypasses __init__ to stay pure arithmetic.
 """
 import itertools
 
@@ -42,8 +28,8 @@ def main() -> None:
     fixtures.start_watchdog(60, label="scenario_gif_timeline")
     T0 = 1_000_000.0  # arbitrary wall-clock base, far from 0 to catch base-0 bugs
 
-    # --- Boundary picking over variable delays: [0.1, 0.5, 0.2, 1.0]s,
-    # cumulative edges at 0.1 / 0.6 / 0.8 / 1.8. ---
+    # Boundary picking over variable delays of 0.1, 0.5, 0.2 and 1.0 seconds,
+    # with cumulative edges at 0.1, 0.6, 0.8 and 1.8.
     g = make_gif([100, 500, 200, 1000], loop=True)
 
     frame = g.get_next_frame(now=T0)  # seeds _play_start at elapsed=0
@@ -56,9 +42,9 @@ def main() -> None:
         just_after = g.get_next_frame(now=T0 + edge + 0.001)
         assert just_after == i + 1, f"just-after edge {edge}: expected frame {i + 1}, got {just_after}"
 
-    # --- Loop wraparound: past the total (1.8s), time wraps modulo total.
-    # Step in <1s increments so we exercise the mod-wrap arithmetic, not the
-    # >1s gap-reseed path (that's a separate, deliberate test below). ---
+    # Loop wraparound. Past the total of 1.8 s the time wraps modulo the total.
+    # Step in increments under 1 s to exercise the mod-wrap arithmetic rather
+    # than the gap-reseed path, which has its own check below.
     g_wrap = make_gif([100, 500, 200, 1000], loop=True)
     assert g_wrap.get_next_frame(now=T0) == 0  # seed, elapsed 0
     assert g_wrap.get_next_frame(now=T0 + 0.9) == 3  # elapsed .9 -> frame 3
@@ -67,9 +53,9 @@ def main() -> None:
     wrapped2 = g_wrap.get_next_frame(now=T0 + 2.45)  # elapsed 2.45 -> t=0.65 in the 2nd cycle -> frame 2
     assert wrapped2 == 2, f"loop wraparound mid next cycle: expected frame 2, got {wrapped2}"
 
-    # --- Non-loop clamp: once elapsed reaches the total, pin to the last
-    # frame and stay there (no wrap). Same <1s stepping to reach the end
-    # without tripping the gap-reseed path. ---
+    # Non-loop clamp. Once elapsed reaches the total, pin to the last frame and
+    # stay there. The same sub-second stepping reaches the end without tripping
+    # the gap-reseed path.
     g_noloop = make_gif([100, 500, 200, 1000], loop=False)
     assert g_noloop.get_next_frame(now=T0) == 0
     assert g_noloop.get_next_frame(now=T0 + 0.9) == 3
@@ -79,12 +65,12 @@ def main() -> None:
     assert clamped2 == 3, f"non-loop clamp past the total: expected last frame (3), got {clamped2}"
     assert g_noloop.active_frame == 3
 
-    # --- Gap re-seed: a >1s gap between picks (page-away/suspend) must
-    # shift the timebase so playback resumes near where it left off, not
-    # jump forward by the full raw elapsed gap (mirrors BackgroundVideo's
-    # get_next_tiles gap clamp, DeckController.py ~1712-1715). ---
+    # Gap re-seed. A gap over 1 s between picks, from a page-away or a suspend,
+    # must shift the timebase, so playback resumes near where it left off
+    # instead of jumping forward by the whole raw elapsed gap. This mirrors the
+    # get_next_tiles gap clamp of BackgroundVideo.
     g_gap = make_gif([100, 500, 200, 1000], loop=True)
-    g_gap.get_next_frame(now=T0)  # prime: seeds _play_start, always frame 0
+    g_gap.get_next_frame(now=T0)  # primes _play_start, always frame 0
     before_gap = g_gap.get_next_frame(now=T0 + 0.3)  # elapsed 0.3 -> frame 1
     assert before_gap == 1
     last_tick_before = g_gap._last_frame_tick
@@ -92,18 +78,18 @@ def main() -> None:
 
     GAP = 5.0  # > 1.0s threshold
     after_gap = g_gap.get_next_frame(now=last_tick_before + GAP)
-    # frame_period used for the clamp is _cum_delays[0] == 0.1s (mirrors the
-    # BackgroundVideo formula: play_start += gap - frame_period).
+    # The frame_period used for the clamp is _cum_delays[0], 0.1 s, which
+    # mirrors the BackgroundVideo formula play_start += gap - frame_period.
     expected_play_start = play_start_before + (GAP - g_gap._cum_delays[0])
     assert abs(g_gap._play_start - expected_play_start) < 1e-9, (
         f"gap clamp did not shift _play_start as expected: "
         f"{g_gap._play_start} != {expected_play_start}"
     )
-    # Resulting elapsed-since-shifted-start is small (~0.4s), landing back
-    # near frame 1 -- not fast-forwarded through several full 1.8s loops.
+    # The resulting elapsed since the shifted start is about 0.4 s, which lands
+    # back near frame 1 rather than several full 1.8 s loops ahead.
     assert after_gap == 1, f"gap re-seed should resume at frame 1, got frame {after_gap}"
 
-    # --- Edge cases: 1-frame and 0-frame GIFs must not raise / must be inert. ---
+    # Edge cases. A 1-frame and a 0-frame GIF must not raise and stay inert.
     g_one = make_gif([100], loop=True)
     f1 = g_one.get_next_frame(now=T0)
     f2 = g_one.get_next_frame(now=T0 + 50.0)

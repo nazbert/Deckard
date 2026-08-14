@@ -1,50 +1,7 @@
-"""
-Pins the top-level DBus control methods end to end: ChangePage and ChangeState
-called over a real bus, against real deck controllers, with the answers a
-client actually receives.
+"""Pins the top-level DBus control methods ChangePage and ChangeState.
 
-These two methods are the transport a `deckard --change-page` /
-`--change-state` invocation now travels on when an instance is already
-running. They replaced a fire-and-forget Gio action whose failures ended up in
-the running process's log, so the part under test here is as much the ANSWER
-as the effect: the empty string means "done", and anything else is a sentence
-meant for the person who typed the command.
-
-Everything is asserted the way an external client sees it -- a second, private
-connection to an isolated dbus-daemon, calling over the wire -- reusing
-scenario_api_lifecycle_publish's harness rather than a second copy of it. That
-harness owns its dbus-daemon on purpose: Gio.TestDBus waits for the shared
-session connection to be finalized at teardown, and GDBus holds a reference on
-that connection for every method call it has dispatched, so any scenario that
-calls methods on the API it publishes -- exactly this one -- spends the full
-30-second timeout there.
-
-Legs:
-  1. ChangePage switches the deck it names and answers "".
-  2. Asking for the page already showing also answers "" -- a no-op is a
-     fulfilled request -- and loads nothing.
-  3. An unknown serial and an unknown page answer with the reason, and name
-     what does exist so a typo diagnoses itself.
-  4. ChangeState loads the page it names and sets the input's state, and
-     answers "".
-  5. A state past the end of that input, coordinates off the device and an
-     unparsable coordinate string each answer with the reason and leave the
-     deck alone.
-  6. The published signatures are the ones the CLI composes its calls from.
-     The CLI builds "(ss)" and "(sssi)" by hand, so a signature change here
-     would break it silently at the wire.
-  7. The CLI's own transport object drives this service, from a thread, over
-     the app's well-known name -- the one part of the forwarding path that no
-     other scenario constructs against something that answers.
-  8. And what it says when the methods are not on the bus. An instance whose
-     name is owned but whose objects are not there is reported by GDBus
-     exactly like an instance too old to have the methods, so the CLI's
-     message covers both -- but that state is no longer a starting instance:
-     the app publishes before it takes the name. What is left is a build
-     without the methods and an instance shutting down, which drops its
-     interface and keeps the name until the process ends. A call refused for
-     any other reason arrives as something printable rather than as a toolkit
-     error nothing catches.
+They run over a real bus against real controllers. The answer matters as much
+as the effect. An empty string means done; anything else is a sentence to read.
 """
 import fixtures  # noqa: F401  (must be first: isolates DATA_PATH before globals)
 
@@ -59,8 +16,8 @@ import globals as gl  # noqa: E402
 
 import src.api as api  # noqa: E402
 
-# The isolated-daemon harness, shared rather than copied. Importing it does
-# nothing but define helpers -- its own legs run under its __main__ guard.
+# The isolated-daemon harness, shared rather than copied. Importing it only
+# defines helpers, because its own legs run under its __main__ guard.
 import scenario_api_lifecycle_publish as harness  # noqa: E402
 
 from src.backend.DeckManagement.InputIdentifier import Input  # noqa: E402
@@ -74,8 +31,10 @@ STATE_COUNT = 4
 
 
 def seed_multistate_page(page_name: str, key_ident: str, n_states: int) -> str:
-    """A page whose `key_ident` carries `n_states` states, so the state the
-    methods are checked against is the input's real state count."""
+    """Seed a page whose key_ident carries n_states states.
+
+    The methods are then checked against the input's real state count.
+    """
     pages_dir = os.path.join(gl.DATA_PATH, "pages")
     os.makedirs(pages_dir, exist_ok=True)
     path = os.path.join(pages_dir, f"{page_name}.json")
@@ -117,9 +76,7 @@ class Client:
         return reply.unpack()[0]
 
 
-# ===================================================================== #
-# Legs                                                                  #
-# ===================================================================== #
+# Legs
 
 def leg_change_page(client, controller) -> None:
     assert client.change_page(SERIAL, "Alpha") == "", (
@@ -135,8 +92,11 @@ def leg_change_page(client, controller) -> None:
 
 
 def leg_already_active_is_success(client, controller) -> None:
-    """A script that sets a page on every event asks for the page already
-    showing constantly; that is a fulfilled request, and it must not reload."""
+    """Asking for the page already showing is a fulfilled request.
+
+    A script that sets a page on every event asks for it constantly, and the
+    method must not reload.
+    """
     assert active_name(controller) == "Beta", "this leg starts from a known page"
 
     original_load_page = controller.load_page
@@ -206,11 +166,12 @@ def leg_state_errors(client, controller) -> None:
     print("  PASS: every rejected state change answers with its reason")
 
 
-def leg_signatures_match_the_cli(client) -> None:
-    """The CLI composes GLib.Variant("(ss)") and ("(sssi)") by hand against
-    these methods (src/backend/cli_forward.py), and a wire signature has no
-    other guard: a change here would fail at the bus, in a process the test
-    suite otherwise never runs."""
+def leg_signatures_match_cli(client) -> None:
+    """The published signatures are the ones the CLI composes calls from.
+
+    The CLI builds the (ss) and (sssi) variants by hand, and a wire signature
+    has no other guard, so a change here fails at the bus.
+    """
     xml = client.introspect()
     assert '<method name="ChangePage">' in xml, xml
     assert '<method name="ChangeState">' in xml, xml
@@ -230,13 +191,11 @@ def leg_signatures_match_the_cli(client) -> None:
 
 
 def drive_on_worker(work, name: str, timeout: float = 30.0) -> dict:
-    """Run `work(answers)` on a thread while this one pumps, and hand back what
-    it recorded.
+    """Run work(answers) on a thread while this one pumps, and return records.
 
-    The CLI's transport calls call_sync, which blocks until the reply lands --
-    and the reply comes from this process's main context, so the call cannot
-    be made from the thread that has to answer it. On a worker it is the same
-    shape as the real thing, where the CLI is a different process entirely.
+    The CLI transport calls call_sync, which blocks until the reply lands, and
+    the reply comes from this process's main context. A worker matches the real
+    shape, where the CLI is a different process.
     """
     answers: dict = {}
 
@@ -257,23 +216,12 @@ def drive_on_worker(work, name: str, timeout: float = 30.0) -> dict:
     return answers
 
 
-def leg_the_cli_transport_speaks_to_this_service(controller) -> None:
+def leg_cli_transport_reaches_service(controller) -> None:
     """The CLI's own transport, against the real service.
 
-    Everything above calls the methods the way the harness's observer does.
-    This is the object that ships: it composes its own variants, addresses the
-    app's well-known name, and carries the CLI's timeout. Nothing else in the
-    suite constructs it against a live service, and a mistake in its call
-    composition would surface only in the field.
-
-    It has to run on another thread. call_sync blocks until the reply lands,
-    and the reply comes from this process's main context -- so the call goes
-    on a worker and this thread pumps, which is the same shape as the running
-    app (the CLI is a different process entirely).
-
-    Safe on any machine: every request below names a serial that exists only
-    inside this process, so even a transport that somehow reached the real
-    session bus would be told there is no such deck and would change nothing.
+    This object composes its own variants, addresses the app's well-known name
+    and carries the CLI timeout. It runs on a worker because call_sync blocks
+    and this thread must pump. Every request names a serial local to this run.
     """
     from src.backend import cli_forward
 
@@ -285,8 +233,8 @@ def leg_the_cli_transport_speaks_to_this_service(controller) -> None:
     def drive(answers: dict) -> None:
         answers["running"] = transport.is_running()
         answers["page"] = transport.change_page(SERIAL, "Alpha")
-        # Read where the deck ended up before the next call moves it: the
-        # page was loaded before the reply was sent, so this is settled.
+        # Read where the deck ended up before the next call moves it. The page
+        # was loaded before the reply was sent, so this is settled.
         answers["after_page"] = active_name(controller)
         answers["bad_page"] = transport.change_page(SERIAL, "no-such-page")
         answers["state"] = transport.change_state(SERIAL, "States", "0,0", 1)
@@ -310,39 +258,27 @@ def leg_the_cli_transport_speaks_to_this_service(controller) -> None:
     print("  PASS: the CLI's own transport drives this service end to end")
 
 
-def leg_an_instance_that_does_not_answer(controller) -> None:
-    """What the CLI says when the methods are not on the bus -- over the real
-    bus, through the real transport, for both of the things that produces.
+def leg_instance_never_answers(controller) -> None:
+    """What the CLI says when the methods are not on the bus.
 
-    GDBus reports a missing OBJECT the same way it reports a missing method, so
-    an instance that owns the bus name with nothing published behind it is
-    indistinguishable here from an instance too old to have the methods.
-
-    What that state MEANS is what changed. It used to be the beginning of every
-    launch, because the name was taken at registration and the objects went up
-    at the end of activation; the app now publishes before it registers, so a
-    name owned by this build always has the methods behind it. The state below
-    is therefore no longer a starting instance -- it is a build without the
-    methods, or one that is shutting down and has already taken its interface
-    off the bus while it still holds the name.
-
-    The name stays owned here and the top-level object is taken off the bus,
-    which is that state exactly.
+    GDBus reports a missing object the same way it reports a missing method, so
+    a build without the methods and an instance shutting down look alike. The
+    name stays owned here and the top-level object goes off the bus.
     """
     from src.backend import cli_forward
 
     transport = cli_forward._BusTransport()
     page_before = active_name(controller)
 
-    # Phase 1 -- the object is gone and the name is not: what a client meets
-    # while an instance tears down. Mutating the registrations happens here, on
+    # Phase 1. The object is gone and the name is not, which is what a client
+    # meets while an instance tears down. The registrations are mutated here on
     # the main context, as everything else that touches them does.
     api._bus.unpublish_object(api.DBUS_OBJECT_PATH)
 
     def drive_missing_object(answers: dict) -> None:
         answers["running"] = transport.is_running()
-        # The whole forwarding path, so what is asserted is the sentence a
-        # person would actually read rather than a constant this file names.
+        # Drive the whole forwarding path, so the assertion covers the sentence
+        # a person reads rather than a constant this file names.
         answers["failures"] = cli_forward._forward(
             transport, [(SERIAL, "Alpha")], [(SERIAL, "States", "0,0", 1)])
 
@@ -350,9 +286,9 @@ def leg_an_instance_that_does_not_answer(controller) -> None:
 
     api._bus.publish_object(api.DBUS_OBJECT_PATH, api._api_instance)
 
-    # Phase 2 -- the genuinely older build: the object is there, the method is
-    # not. And a call the service refuses for a third reason entirely, which
-    # must not be mistaken for either.
+    # Phase 2. The genuinely older build has the object and not the method. The
+    # third case is a call the service refuses for another reason, which must
+    # not be mistaken for either.
     def drive_missing_method(answers: dict) -> None:
         try:
             transport._call("NoSuchMethod",
@@ -400,13 +336,13 @@ def leg_an_instance_that_does_not_answer(controller) -> None:
 def run_legs(bus_address: str, controller, other) -> None:
     api.start_dbus_service()
     assert api._bus is not None, "the DBus service did not start"
-    # GApplication owns the app's name in the running app; this stands in for
-    # it, so the CLI transport leg can address the name it addresses in the
-    # field rather than a unique connection name.
+    # GApplication owns the app name in the running app. This stands in for it,
+    # so the CLI transport leg can address the name it addresses in the field
+    # rather than a unique connection name.
     api._bus.register_service(appinfo.APP_ID)
     observer = harness.Observer(bus_address, api._bus.connection.get_unique_name())
     client = Client(observer)
-    # Whatever the second deck booted onto, it must still be showing it: every
+    # Whatever the second deck booted onto, it must still be showing it. Every
     # request below names one deck.
     other_page = other.active_page
     assert other_page is not None, "the second deck never loaded a page"
@@ -416,9 +352,9 @@ def run_legs(bus_address: str, controller, other) -> None:
         leg_errors_name_what_exists(client, controller)
         leg_change_state(client, controller)
         leg_state_errors(client, controller)
-        leg_signatures_match_the_cli(client)
-        leg_the_cli_transport_speaks_to_this_service(controller)
-        leg_an_instance_that_does_not_answer(controller)
+        leg_signatures_match_cli(client)
+        leg_cli_transport_reaches_service(controller)
+        leg_instance_never_answers(controller)
 
         assert other.active_page is other_page, (
             f"every request above named one deck; the other one moved anyway: "

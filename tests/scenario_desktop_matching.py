@@ -1,29 +1,11 @@
-"""
-Desktop-session matching for the window grabber.
+"""Desktop-session matching for the window grabber.
 
-XDG_CURRENT_DESKTOP is a colon-separated list of names ("ubuntu:GNOME",
-"sway:wlroots:swayfx"). WindowGrabber used to compare it as one whole
-string against a fixed list of literals, so a stock Ubuntu session matched
-nothing, no integration was constructed, and window-based automatic page
-switching was silently dead for the whole session.
-
-Both halves are asserted here:
-
-  * `src.backend.session_info` -- the shared splitter: components are
-    lowercased, stripped, order-preserving, and empty when the variable is
-    unset or blank.
-  * `WindowGrabber.select_integration_class` -- the pure selection, driven
-    through the real environment variables. The selection returns the class
-    instead of an instance, so nothing here spawns a watcher thread, a DBus
-    proxy or an `swaymsg`/`xprop` subprocess.
-
-The KDE-on-Xorg case guards the branch order: the session-type check
-outranks the KDE component, and a KDE session on X11 must keep selecting
-the xprop integration.
+XDG_CURRENT_DESKTOP is a colon-separated list, so session_info splits it and
+select_integration_class picks from the components. Session type outranks KDE.
 """
 import os
 
-import fixtures  # must be first: isolates DATA_PATH
+import fixtures  # must be first; isolates DATA_PATH
 
 
 def stage_env(desktop: str | None, server: str | None) -> None:
@@ -90,7 +72,7 @@ def check_selection() -> None:
         # Session type is the fallback for desktops without an integration.
         ("XFCE", "x11", X11),
         (None, "x11", X11),
-        # Branch order: X11 outranks the KDE component.
+        # Branch order. X11 outranks the KDE component.
         ("KDE", "x11", X11),
         # Nothing to grab windows with.
         (None, "wayland", None),

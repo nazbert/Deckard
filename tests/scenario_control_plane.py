@@ -1,47 +1,7 @@
-"""
-Pins the control plane (src/backend/control_plane.py): the ONE rule set that
-decides whether a page or state switch is valid, whichever transport asked.
+"""Pins the control plane in src/backend/control_plane.py.
 
-Before it existed the same question was answered by four disjoint copies -- the
-DBus API, the Gio actions a second CLI invocation forwards, the CLI's own
-pre-validation, and the boot path's parked-request branch -- and the copies had
-drifted from each other. This scenario is the rules table those copies are now
-judged against, plus the two properties that make sharing them safe: a
-validation failure is a RESULT, and an unexpected exception is not.
-
-Guards:
-  1. An unknown serial answers `no-such-deck` and names the serials that ARE
-     connected; with no decks at all it says so instead of listing nothing.
-  2. An unknown page answers `no-such-page` and lists the pages that exist.
-     The five guards ported from scenario_change_page_unknown live here 1:1
-     (unknown name leaves the page alone; unknown name with NO active page
-     does not load anything -- the abspath(None)/get_page(None) crash pair;
-     the happy path; the same-page repeat; a non-matching serial). They are
-     driven through the DBus method the CLI now forwards to, which is where
-     the Gio action they were written against used to land.
-  2b. A page that RESOLVES but cannot be built answers `page-build-failed` and
-     leaves the deck alone. Handing get_page's None to load_page CLEARS the
-     deck, so every surface used to blank the device and report success.
-  3. Asking for the page a deck ALREADY shows loads nothing. Asserted through
-     the DBus method over the fake deck's write journal, because that method
-     is where the no-op was missing: every SetActivePage call reloaded the
-     deck, which on real hardware is a visible flicker and a full re-render.
-  4. Bounds are the DEVICE's truth, not a constant. On a 10x10 deck, (9,9) is
-     in bounds and state 19 of a 20-state input exists -- both beyond the caps
-     the CLI used to reject requests with (x,y <= 10 and state <= 20 were
-     invented numbers matching no device).
-  5. A load happens only when the page is actually different (load counting).
-  6. Every validation failure comes back as a ControlResult. None of them
-     raise, and none of them touch the deck.
-  7. An UNEXPECTED exception -- a load_page that raises -- propagates out of
-     the service untouched. The boot path peeks a parked state request, applies
-     it through here, and resolves it only afterwards, so this propagation is
-     exactly what leaves a failed request parked for the next load to retry
-     (scenario_cli_request_park guard 7 pins the other half).
-  8. The DBus methods and the service core produce the SAME outcome for the
-     same request, page and state alike -- the pin against a transport quietly
-     re-growing rules of its own.
-  9. A request names one deck and reaches only that deck.
+One rule set decides whether a page or state switch is valid, for every
+transport. A validation failure comes back as a result; an exception escapes.
 """
 import fixtures  # noqa: F401  (isolates DATA_PATH before src imports)
 
@@ -55,19 +15,21 @@ from src.backend.DeckManagement.InputIdentifier import Input  # noqa: E402
 
 WATCHDOG_SECONDS = 120
 
-# Controller A: the stock 2x4 fake deck, used for everything that is about
-# pages rather than device geometry.
+# Controller A is the stock 2x4 fake deck, used for everything about pages
+# rather than device geometry.
 SERIAL_A = "cp-a"
-# Controller B: a 10x10 deck, the only way to prove that in-bounds means "this
-# device says so" rather than "under some constant".
+# Controller B is a 10x10 deck, the only way to prove that in-bounds means what
+# this device says rather than what some constant says.
 SERIAL_B = "cp-b"
 WIDE_KEY = "9x9"
 WIDE_STATES = 20
 
 
 def seed_multistate_page(page_name: str, key_ident: str, n_states: int) -> str:
-    """A page whose `key_ident` carries `n_states` states, so the state bound
-    under test is the input's real state count."""
+    """Seed a page whose key_ident carries n_states states.
+
+    The state bound under test is then the input's real state count.
+    """
     pages_dir = os.path.join(gl.DATA_PATH, "pages")
     os.makedirs(pages_dir, exist_ok=True)
     path = os.path.join(pages_dir, f"{page_name}.json")
@@ -80,10 +42,11 @@ def seed_multistate_page(page_name: str, key_ident: str, n_states: int) -> str:
 
 
 def settle(controller, quiet_for: float = 0.4, timeout: float = 10.0) -> None:
-    """Waits until the deck has gone `quiet_for` seconds without a write.
+    """Wait until the deck has gone quiet_for seconds without a write.
 
-    The journal is fed by the media thread, so "nothing happened" is only
-    meaningful once whatever WAS happening has finished."""
+    The media thread feeds the journal, so a claim that nothing happened means
+    something only once whatever was happening has finished.
+    """
     raw = fixtures.raw_deck(controller)
     deadline = time.monotonic() + timeout
     last = raw.current_seq()
@@ -102,9 +65,11 @@ def settle(controller, quiet_for: float = 0.4, timeout: float = 10.0) -> None:
 
 
 def load_named_page(controller, page_name: str) -> str:
-    """Puts `page_name` on `controller` the plain way (no service involved) and
-    waits for it to be the active page -- the fixed starting point the
-    equivalence and no-op guards compare from."""
+    """Put page_name on controller the plain way, with no service involved.
+
+    Waits for it to become the active page, the fixed starting point the
+    equivalence and no-op guards compare from.
+    """
     path = gl.page_manager.find_matching_page_path(page_name)
     assert path is not None, f"the scenario must seed {page_name!r} before loading it"
     if controller.active_page is None or os.path.abspath(controller.active_page.json_path) != os.path.abspath(path):
@@ -121,9 +86,7 @@ def active_name(controller) -> str | None:
     return None if page is None else page.get_name()
 
 
-# ===================================================================== #
-# 1. Unknown serial                                                     #
-# ===================================================================== #
+# 1. Unknown serial
 
 def check_unknown_serial(plane) -> None:
     result = plane.change_page("not-a-deck", "Main")
@@ -137,12 +100,10 @@ def check_unknown_serial(plane) -> None:
     assert state_result.message == result.message, (
         "both entry points must answer an unknown serial identically")
 
-    # With nothing connected there is no list to offer, and saying "available
-    # devices: " would be worse than saying what is true. What it says instead
-    # has to leave room for the deck being on its way: requests are answered
-    # from the moment the app takes the bus name, which is before it has opened
-    # a single deck, so "none connected" full stop would tell a person their
-    # deck is unplugged when it is merely not enumerated yet.
+    # With nothing connected there is no list to offer. The wording has to leave
+    # room for a deck on its way, because requests are answered from the moment
+    # the app takes the bus name, which is before it opens a single deck. A flat
+    # none-connected would call a deck unplugged while it is merely unenumerated.
     manager = gl.deck_manager
     saved = manager.deck_controller
     manager.deck_controller = []
@@ -157,15 +118,13 @@ def check_unknown_serial(plane) -> None:
     print("PASS: an unknown serial answers no-such-deck and lists what is connected")
 
 
-# ===================================================================== #
-# 2. Unknown page (ported from scenario_change_page_unknown)            #
-# ===================================================================== #
+# 2. Unknown page
 
 def check_unknown_page(plane, controller) -> None:
     before = load_named_page(controller, "Alpha")
-    # Identity, not path equality: a rejected request that nevertheless
-    # reloaded the same page would leave an equal path and a DIFFERENT object,
-    # and only `is` can tell those apart.
+    # Compare by identity, not by path equality. A rejected request that
+    # reloaded the same page would leave an equal path and a different object,
+    # and only identity tells those apart.
     active_before = controller.active_page
 
     result = plane.change_page_on(controller, "no-such-page")
@@ -177,16 +136,15 @@ def check_unknown_page(plane, controller) -> None:
     assert os.path.abspath(controller.active_page.json_path) == os.path.abspath(before)
 
     # The same request through the serial-resolving wrapper and through the
-    # state entry point: one rule, three doors.
+    # state entry point. One rule, three doors.
     assert plane.change_page(SERIAL_A, "no-such-page").code == "no-such-page"
     assert plane.change_state(SERIAL_A, "no-such-page", "0,0", 0).code == "no-such-page", (
         "a state change must fail on the page BEFORE it looks at coordinates")
 
-    # --- The scenario_change_page_unknown guards, 1:1, through the transport
-    # a `--change-page` reaches today. The handler they were written against
-    # crashed on an unknown name: it compared os.path.abspath(None) against
-    # the active page's path and called get_page(page_path=None) before its
-    # None check.
+    # The same guards, through the transport a --change-page reaches today. The
+    # handler they were written against crashes on an unknown name. It compares
+    # os.path.abspath(None) against the active page path and calls
+    # get_page(page_path=None) before its None check.
     from src.api import DeckardAPI
 
     top = DeckardAPI()
@@ -197,14 +155,14 @@ def check_unknown_page(plane, controller) -> None:
     assert controller.active_page is active_before, (
         "unknown page name must leave the active page untouched")
 
-    # Unknown page with NO active page: the second half of the same crash.
+    # An unknown page with no active page is the second half of the same crash.
     controller.active_page = None
     top.ChangePage(SERIAL_A, "no-such-page")
     assert controller.active_page is None, "skip path must not load anything"
     controller.active_page = active_before
 
-    # Happy path, same page again (the no-op), and a serial nobody reports --
-    # none of them may raise.
+    # A successful switch, the same page again as a no-op, and a serial nobody
+    # reports. None of them may raise.
     target = fixtures.seed_page("ChangeTarget")
     assert top.ChangePage(SERIAL_A, "ChangeTarget") == ""
     assert fixtures.wait_until(
@@ -219,11 +177,11 @@ def check_unknown_page(plane, controller) -> None:
     print("PASS: an unknown page answers no-such-page and never disturbs the deck")
 
 
-def check_unbuildable_page_leaves_the_deck_alone(plane, controller) -> None:
-    """A page name that RESOLVES to a file the store cannot turn into a page.
+def check_unbuildable_page_leaves_deck_alone(plane, controller) -> None:
+    """A page name that resolves to a file the store cannot turn into a page.
 
-    get_page answers None, and load_page(None) clears the deck -- so the deck
-    went blank while the request reported success, on every surface at once.
+    get_page answers None, and load_page(None) clears the deck, so the deck goes
+    blank while the request reports success on every surface at once.
     """
     load_named_page(controller, "Alpha")
     active_before = controller.active_page
@@ -246,8 +204,8 @@ def check_unbuildable_page_leaves_the_deck_alone(plane, controller) -> None:
             f"the deck was cleared by a page it could not build: "
             f"{active_name(controller)}")
 
-        # And through the transports, since both used to report success while
-        # the deck went dark.
+        # And through the transports, because both report success while the
+        # deck goes dark.
         from src.api import ControllerInstanceAPI, DeckardAPI
 
         assert DeckardAPI().ChangePage(SERIAL_A, "Beta") == result.message
@@ -264,21 +222,14 @@ def check_unbuildable_page_leaves_the_deck_alone(plane, controller) -> None:
     print("PASS: a page that cannot be built is a failure, and the deck keeps its page")
 
 
-# ===================================================================== #
-# 3. The same-page no-op, through the DBus method                       #
-# ===================================================================== #
+# 3. The same-page no-op, through the DBus method
 
-def check_same_page_no_op_through_dbus(controller) -> None:
-    """The MR's red-on-main guard. SetActivePage had no same-page check at
-    all: asking for the page already showing reloaded it, and a reload
-    reaches the device -- which is what the write journal records.
+def check_same_page_noop_over_dbus(controller) -> None:
+    """SetActivePage must not reload the page a deck already shows.
 
-    PROBING A RELOAD. Identical repaints are deduped at the write boundary,
-    so re-rendering the same page writes nothing by itself and the journal
-    would look the same either way. The probe is therefore something a load
-    RESTORES rather than repaints: every load_page applies the page's
-    configured brightness, so putting the deck on a brightness no page
-    configures makes the next load -- and only a load -- show up.
+    A reload reaches the device, which the write journal records. Identical
+    repaints are deduped at the write boundary, so the probe is something a
+    load restores, and an off-page brightness makes the next load visible.
     """
     from src.api import ControllerInstanceAPI
 
@@ -288,8 +239,8 @@ def check_same_page_no_op_through_dbus(controller) -> None:
     api = ControllerInstanceAPI(controller)
     raw = fixtures.raw_deck(controller)
 
-    # Armed check first: a REAL switch must move the journal, or "no writes"
-    # below would pass for the wrong reason.
+    # The armed check comes first. A real switch must move the journal, or the
+    # no-writes assertion below would pass for the wrong reason.
     controller.set_brightness(probe_brightness)
     settle(controller)
     seq = raw.current_seq()
@@ -301,7 +252,7 @@ def check_same_page_no_op_through_dbus(controller) -> None:
         f"SetActivePage did not switch the page: {active_name(controller)}")
     assert api.ActivePageName == "Alpha", api.ActivePageName
 
-    # The guard itself: the same request again, with the probe re-armed.
+    # The guard itself runs the same request again, with the probe re-armed.
     controller.set_brightness(probe_brightness)
     settle(controller)
     seq = raw.current_seq()
@@ -320,9 +271,7 @@ def check_same_page_no_op_through_dbus(controller) -> None:
     print("PASS: SetActivePage for the active page is a no-op (nothing reaches the deck)")
 
 
-# ===================================================================== #
-# 4/5. Device-truth bounds, and loading only when different              #
-# ===================================================================== #
+# 4 and 5. Device-truth bounds, and loading only when different
 
 def check_load_only_if_different(plane, controller) -> None:
     load_named_page(controller, "Alpha")
@@ -356,8 +305,7 @@ def check_load_only_if_different(plane, controller) -> None:
 
 
 def check_device_truth_bounds(plane, controller_b) -> None:
-    """The 10x10 deck. Every number here is the device's or the page's; none
-    of them is a constant this code could have invented."""
+    """The 10x10 deck. Every number here comes from the device or the page."""
     result = plane.change_page_on(controller_b, "Wide")
     assert result.ok, result
     c_input = controller_b.get_input(Input.Key(WIDE_KEY))
@@ -365,22 +313,21 @@ def check_device_truth_bounds(plane, controller_b) -> None:
     assert fixtures.wait_until(lambda: len(c_input.states) == WIDE_STATES, timeout=10.0), (
         f"the page's {WIDE_STATES} states never reached the input: {len(c_input.states)}")
 
-    # In bounds for THIS device, and beyond the old CLI's invented caps
-    # (x,y <= 10 and state <= 20 were rejected before they ever reached a deck).
+    # In bounds for this device, and beyond the invented CLI caps of x,y <= 10
+    # and state <= 20, which rejected requests before they reached a deck.
     ok = plane.change_state_on(controller_b, "Wide", "9,9", 19)
     assert ok.ok and ok.code == "", ok
     assert c_input.state == 19, f"the input must actually be on state 19: {c_input.state}"
     assert SERIAL_B in ok.message, ok.message
 
-    # A state that arrives as text still applies. Nothing on the DBus
-    # signature can carry a string any more, but the parked-request dict is
-    # written into by hand, so the success arm of that conversion is only true
-    # while something asserts it.
+    # A state that arrives as text still applies. Nothing on the DBus signature
+    # can carry a string, but the parked-request dict is written into by hand,
+    # so the success arm of that conversion holds only while this asserts it.
     assert plane.change_state_on(controller_b, "Wide", "9,9", "18").ok
     assert c_input.state == 18, f"a state given as text must apply: {c_input.state}"
     assert plane.change_state_on(controller_b, "Wide", "9,9", 19).ok
 
-    # Out of bounds for THIS device.
+    # Out of bounds for this device.
     oob = plane.change_state_on(controller_b, "Wide", "10,10", 0)
     assert not oob.ok and oob.code == "coords-out-of-bounds", oob
     assert "x=0-9" in oob.message and "y=0-9" in oob.message, oob.message
@@ -389,7 +336,7 @@ def check_device_truth_bounds(plane, controller_b) -> None:
     negative = plane.change_state_on(controller_b, "Wide", "-1,0", 0)
     assert negative.code == "coords-out-of-bounds", negative
 
-    # Past the end of THIS input's states.
+    # Past the end of the states of this input.
     too_high = plane.change_state_on(controller_b, "Wide", "9,9", WIDE_STATES)
     assert not too_high.ok and too_high.code == "state-out-of-range", too_high
     assert f"{WIDE_STATES} states (0-{WIDE_STATES - 1})" in too_high.message, too_high.message
@@ -405,9 +352,7 @@ def check_device_truth_bounds(plane, controller_b) -> None:
     print("PASS: coordinate and state bounds are the device's and the page's truth")
 
 
-# ===================================================================== #
-# 6/7. Failures are results; exceptions are not                          #
-# ===================================================================== #
+# 6 and 7. Failures are results, exceptions are not
 
 def check_validation_failures_are_results(plane, controller) -> None:
     load_named_page(controller, "Alpha")
@@ -446,8 +391,10 @@ def check_validation_failures_are_results(plane, controller) -> None:
 
 
 def check_unexpected_exception_propagates(plane, controller) -> None:
-    """The precondition the boot path's peek/resolve split is built on: only a
-    genuine exception may escape, and it must escape."""
+    """Only a genuine exception may escape, and it must escape.
+
+    The peek-and-resolve split of the boot path is built on this.
+    """
     load_named_page(controller, "Alpha")
 
     def exploding_load_page(page, *args, **kwargs):
@@ -476,23 +423,24 @@ def check_unexpected_exception_propagates(plane, controller) -> None:
     print("PASS: an unexpected exception propagates out of the service")
 
 
-# ===================================================================== #
-# 8. The delegate and the core agree                                     #
-# ===================================================================== #
+# 8. The delegate and the core agree
 
 def check_dbus_delegate_matches_service(plane, controller) -> None:
-    """Drives the DBus method (the transport) and the service core over the
-    same requests from the same starting state, and compares what the deck
-    ended up doing. The transport is allowed to render the answer however it
-    likes; it is not allowed to decide anything."""
+    """Drive the DBus method and the service core over the same requests.
+
+    Both start from the same state, and the deck must end up doing the same
+    thing. The transport may render the answer, and may not decide anything.
+    """
     from src.api import DeckardAPI
 
     top = DeckardAPI()
 
     def outcome(drive) -> tuple:
-        """(active page, loads performed) after `drive()`, from a fixed start.
-        active_page is set inside load_page itself, so it is already the
-        answer by the time the drive returns -- nothing to wait for here."""
+        """Active page and load count after drive(), from a fixed start.
+
+        load_page sets active_page itself, so it is already the answer when
+        the drive returns.
+        """
         load_named_page(controller, "Alpha")
         original_load_page = controller.load_page
         loads: list = []
@@ -523,8 +471,8 @@ def check_dbus_delegate_matches_service(plane, controller) -> None:
             f"request ({serial!r}, {page_name!r}) came out differently through the "
             f"DBus method ({through_method}) than through the service "
             f"({through_service}) -- the transport has grown rules of its own")
-        # And the method says exactly what the service decided: empty on
-        # success (the no-op included), the service's own sentence otherwise.
+        # The method says what the service decided. It answers empty on
+        # success, the no-op included, and the service sentence otherwise.
         result = plane.change_page(serial, page_name)
         assert top.ChangePage(serial, page_name) == ("" if result.ok else result.message), (
             f"the method's answer for ({serial!r}, {page_name!r}) is not the "
@@ -534,9 +482,11 @@ def check_dbus_delegate_matches_service(plane, controller) -> None:
 
 
 def check_state_delegate_matches_service(plane, controller) -> None:
-    """Guard 8's other half, for the state transport. Same shape: drive the
-    DBus method and the service core over the same requests from the same
-    starting state, and compare what the deck ended up doing."""
+    """The state half of the same comparison.
+
+    Drive the DBus method and the service core over the same requests from the
+    same starting state, and compare what the deck ended up doing.
+    """
     from src.api import DeckardAPI
 
     top = DeckardAPI()
@@ -560,9 +510,9 @@ def check_state_delegate_matches_service(plane, controller) -> None:
             del controller.load_page
         return (active_name(controller), c_input.state, len(loads))
 
-    # The state is an integer on this transport (the method's signature says
-    # so), and the coordinates are still the text the caller typed -- parsing
-    # them is the service's job, on every path.
+    # The state is an integer on this transport, as the method signature says,
+    # and the coordinates are still the text the caller typed. Parsing them is
+    # the job of the service, on every path.
     requests = [
         (SERIAL_B, "Wide", "9,9", 5),          # applied
         (SERIAL_B, "Wide", "9,9", 99),         # state out of range
@@ -587,8 +537,11 @@ def check_state_delegate_matches_service(plane, controller) -> None:
 
 
 def check_other_decks_are_untouched(plane, controller_a, controller_b) -> None:
-    """A request names one deck. The second controller is here anyway, so
-    pinning that it stays out of it costs nothing."""
+    """A request names one deck.
+
+    The second controller is here anyway, so pinning that it stays out of the
+    request costs nothing.
+    """
     load_named_page(controller_a, "Alpha")
     settle(controller_b)
     raw_b = fixtures.raw_deck(controller_b)
@@ -626,8 +579,8 @@ def main() -> None:
     try:
         check_unknown_serial(plane)
         check_unknown_page(plane, controller_a)
-        check_unbuildable_page_leaves_the_deck_alone(plane, controller_a)
-        check_same_page_no_op_through_dbus(controller_a)
+        check_unbuildable_page_leaves_deck_alone(plane, controller_a)
+        check_same_page_noop_over_dbus(controller_a)
         check_load_only_if_different(plane, controller_a)
         check_device_truth_bounds(plane, controller_b)
         check_other_decks_are_untouched(plane, controller_a, controller_b)

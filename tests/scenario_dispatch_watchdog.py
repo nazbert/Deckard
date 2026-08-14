@@ -1,25 +1,7 @@
-"""
-Scenario: a wedged plugin observer must be loud and attributable.
+"""A wedged plugin observer must be loud and attributable.
 
-The single-lane dispatcher means one blocking observer (pulsectl-wedge
-precedent) stalls plugin events APP-WIDE while the queue grows -- and it
-used to do so with zero diagnostics. The un-stalling itself is the
-per-holder-lanes refactor; this covers the bug half: a >N-second
-observer produces an error log naming the observer and the queued backlog,
-and a piled-up backlog warns on the submit side too.
-
-Checks (real dispatcher, thresholds patched down):
-  1.  A wedged observer produces the watchdog error naming it within the
-      monitor interval.
-  1b. While still wedged, the watchdog RE-warns with a climbing stall
-      duration (a persistent stall must not look resolved after one log).
-  2.  Backlog crossing the threshold produces the backlog error.
-  3.  After the wedge releases, dispatch drains and later events still run
-      (no regression from the accounting).
-  4.  Backlog accounting does not leak when a batch raises before the
-      observer loop (_get_loop failure): the finally's decrement still runs.
-  5.  A submit that fails because dispatch has been shut down rolls the
-      increment back and re-raises.
+An observer that blocks past the threshold produces an error log naming it
+and the queued backlog, and a piled-up backlog warns on the submit side too.
 """
 import fixtures  # noqa: F401  (import first: sets up the isolated data dir)
 
@@ -35,7 +17,7 @@ import src.backend.PluginManager.event_dispatch as ed
 def main() -> int:
     start_watchdog(40, "dispatch_watchdog")
 
-    # Tighten the thresholds so the scenario runs in seconds.
+    # Tighten the thresholds, so the scenario runs in seconds.
     ed._WEDGE_WARN_S = 0.3
     ed._WEDGE_REWARN_S = 0.5
     ed._MONITOR_INTERVAL_S = 0.1
@@ -51,7 +33,7 @@ def main() -> int:
 
     ed.dispatch([wedged_observer], (), {}, label="wedge-test-holder")
 
-    # 1) watchdog names the wedged observer
+    # 1. The watchdog names the wedged observer.
     if not wait_until(lambda: any("wedged" in r and "wedged_observer" in r
                                   for r in records), timeout=5):
         print("FAIL(1): no watchdog error naming the wedged observer -- a "
@@ -60,10 +42,10 @@ def main() -> int:
         return 1
     print("PASS: wedged observer is named in the watchdog error")
 
-    # 1b) the watchdog RE-warns while still stuck, with a climbing duration --
-    # a wedge that logged once and then went quiet would look resolved. Parse
-    # the "wedged for Ns" field out of every wedge record and require at least
-    # two distinct warns whose reported stall duration increased.
+    # 1b. The watchdog re-warns while the observer is still stuck, with a
+    # climbing duration. A wedge that logged once and went quiet would look
+    # resolved. Parse the stall duration out of every wedge record and require
+    # two distinct warns whose reported duration increased.
     def _wedge_durations() -> list[float]:
         out = []
         for r in records:
@@ -89,7 +71,7 @@ def main() -> int:
         return 1
     print(f"PASS: watchdog re-warns with a climbing stall duration ({durations})")
 
-    # 2) backlog warning while the lane is stalled
+    # 2. The backlog warns while the lane is stalled.
     ran = []
     for i in range(15):
         ed.dispatch([lambda i=i: ran.append(i)], (), {})
@@ -100,7 +82,7 @@ def main() -> int:
         return 1
     print("PASS: backlog pile-up warns on the submit side")
 
-    # 3) drain after unwedging
+    # 3. Dispatch drains after the wedge releases.
     gate.set()
     if not wait_until(lambda: len(ran) == 15, timeout=10):
         print(f"FAIL(3): queued events did not drain after the wedge "
@@ -113,11 +95,10 @@ def main() -> int:
         return 1
     print("PASS: lane drains and keeps working after the wedge releases")
 
-    # 4) backlog accounting survives a batch that raises BEFORE the observer
-    # loop -- _get_loop() (loop creation / lazy log_hooks import) sits inside
-    # the try whose finally owns the decrement, so a raise there must not leak
-    # the count. Red-checked: with _get_loop() outside the try, this leaks +1
-    # permanently.
+    # 4. Backlog accounting survives a batch that raises before the observer
+    # loop. _get_loop(), which creates the loop and lazily imports log_hooks,
+    # sits inside the try whose finally owns the decrement, so a raise there
+    # must not leak the count.
     baseline = ed._backlog
     orig_get_loop = ed._get_loop
 
@@ -127,8 +108,8 @@ def main() -> int:
     ed._get_loop = boom_get_loop
     try:
         ed.dispatch([lambda: None], (), {}, label="leak-probe")
-        # the batch runs on the worker, blows up in _get_loop, and its finally
-        # must still decrement -- backlog returns to baseline, does not leak.
+        # The batch runs on the worker and blows up in _get_loop. Its finally
+        # must still decrement, so the backlog returns to baseline.
         leaked = not wait_until(lambda: ed._backlog == baseline, timeout=5)
     finally:
         ed._get_loop = orig_get_loop
@@ -139,9 +120,9 @@ def main() -> int:
         return 1
     print("PASS: backlog does not leak when a batch raises before dispatch")
 
-    # 5) a submit that fails because dispatch has been shut down must roll the
-    # increment back and re-raise (not leave the count stuck +1 forever). This
-    # is destructive to the lane, so it runs last.
+    # 5. A submit that fails because dispatch has shut down must roll the
+    # increment back and re-raise, not leave the count stuck. This is
+    # destructive to the lane, so it runs last.
     baseline = ed._backlog
     ed.shutdown()
     raised = False
