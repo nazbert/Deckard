@@ -155,9 +155,9 @@ class BackgroundMediaRow(Adw.PreferencesRow):
         self.connect_signals()
 
     def load_defaults_from_page(self):
-        # Dead: the early return below disables this method entirely, so the
-        # unguarded active_page.dict["background"] derefs that follow never
-        # run. Guard them if this is ever revived (cf. DeckGroup None-guards).
+        # The early return below disables this method, so the unguarded
+        # active_page.dict["background"] reads that follow never run. Guard
+        # them before anything calls this method again.
         return
         if not hasattr(self.settings_page.deck_page.deck_controller, "active_page"):
             return

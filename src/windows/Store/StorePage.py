@@ -50,10 +50,11 @@ class StorePage(Gtk.Stack):
 
         self.store = store
 
-        # P4.3: subclasses no longer kick off their own load() thread from __init__ -- Store
-        # only starts it for the default/first tab eagerly, and lazily for the rest on first
-        # notify::visible-child-name. Guarded so switching back to an already-loaded tab is a
-        # no-op instead of re-fetching from the store backend.
+        # A subclass starts no load() thread from __init__. Store starts one
+        # at once for the first tab, and for the other tabs on the first
+        # notify::visible-child-name. The guard makes a switch back to a
+        # loaded tab do nothing instead of fetching from the store backend
+        # again.
         self._loaded = False
 
         self.build()
@@ -65,16 +66,20 @@ class StorePage(Gtk.Stack):
         threading.Thread(target=self._load_guarded, name=f"load_{type(self).__name__}").start()
 
     def load(self) -> None:
-        """Subclass hook: fetches this tab's catalog and appends its
-        previews. Runs on the loader thread started by ensure_loaded."""
+        """Subclass hook. Fetch the catalog of this tab and append the previews.
+
+        It runs on the loader thread that ensure_loaded starts.
+        """
         raise NotImplementedError
 
     def _load_guarded(self) -> None:
-        """Runs the subclass load() and keeps the tab retryable: an exception
-        used to die in the load()'s @log.catch with the spinner still up and
-        _loaded stuck True, so the tab never retried until the whole store
-        window was recreated. Now a failed load shows the error page and
-        resets _loaded, and revisiting the tab tries again."""
+        """Run the subclass load() and keep the tab retryable.
+
+        Without this wrapper, an exception dies in the log.catch of load(),
+        the spinner keeps running, and _loaded stays True, so the tab retries
+        only after a rebuild of the store window. A failed load here shows the
+        error page and clears _loaded, so the next visit tries again.
+        """
         try:
             self.load()
         except Exception:
@@ -119,11 +124,13 @@ class StorePage(Gtk.Stack):
         self.add_titled(self.no_connection_page, "Error", "Error")
 
     def append_preview_on_main(self, section, factory):
-        """Constructs a preview widget ON the GTK main loop and appends it.
-        The pages' loaders run on worker threads; the old
-        `GLib.idle_add(section.append_child, XPreview(...))` marshalled only
-        the append -- the widget tree was still built as the argument, on the
-        loader thread: the process-fatal off-main-GTK class."""
+        """Construct a preview widget on the GTK main loop, then append it.
+
+        The page loaders run on worker threads. A call of the form
+        GLib.idle_add(section.append_child, XPreview(...)) marshals the append
+        only, and it builds the widget tree as the argument, on the loader
+        thread. That is the off-main GTK class that kills the process.
+        """
         def _build():
             section.append_child(factory())
             return False
@@ -158,9 +165,9 @@ class StorePage(Gtk.Stack):
             self.store.back_button.set_visible(False)
 
     def show_connection_error(self):
-        # A failed load must stay retryable -- the next ensure_loaded()
-        # (revisiting the tab) attempts a fresh load instead of treating the
-        # error page as "loaded".
+        # A failed load stays retryable. The next ensure_loaded(), which a
+        # visit to the tab triggers, starts a fresh load instead of reading
+        # the error page as loaded.
         self._loaded = False
         # Called from the load() worker thread: marshal the widget change.
         GLib.idle_add(self.set_visible_child, self.no_connection_page)

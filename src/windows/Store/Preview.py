@@ -53,11 +53,11 @@ class StorePreview(Gtk.FlowBoxChild):
                                  width_request=250, height_request=250)
         self.set_child(self.main_box)
 
-        # ADD BOX FOR SEARCHING
+        # Box that holds the search bar
         self.search_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         self.main_box.append(self.search_box)
 
-        # ADD SEARCH BAR
+        # Search bar
         self.search_bar = Gtk.SearchBar()
         self.search_box.append(self.search_bar)
 
@@ -156,7 +156,7 @@ class StorePreview(Gtk.FlowBoxChild):
         GLib.idle_add(self.image.set_pixbuf, pixbuf)
 
     def set_official(self, official: bool | None):
-        # A catalog entry without the field reads as None -- not official.
+        # A catalog entry without the field reads as None, so not official.
         self.official_badge.set_visible(bool(official))
 
     def set_verified(self, verified:bool):
@@ -184,13 +184,12 @@ class StorePreview(Gtk.FlowBoxChild):
 
     @log.catch
     def perform_download_threaded(self):
-        # Prevent multiple downloads because this may lead to errors during
-        # plugin initialization. The lock replaces the old check-then-set
-        # poll on currently_downloading, which was racy (double-click ->
-        # two concurrent installs). The finally is load-bearing: a raising
-        # install/uninstall/update used to leave the flag latched True,
-        # wedging every later download in the poll loop for the session
-        # (and the spinner spinning forever).
+        # Allow one download at a time, because two break the plugin
+        # initialization. The lock replaces a check-then-set poll on
+        # currently_downloading, which lets a double-click start two installs.
+        # The finally is required. An install, uninstall or update that raises
+        # leaves the flag at True, which wedges every later download in the
+        # poll loop and runs the spinner forever.
         store = self.store_page.store
         with store.download_lock:
             store.currently_downloading = True
@@ -266,5 +265,5 @@ class StorePreview(Gtk.FlowBoxChild):
         self.description_label.set_label(description)
 
     def check_required_version(self, app_version_to_check: str | None):
-        # Single shared gate -- see StoreData.is_min_app_version_satisfied.
+        # One shared gate. See StoreData.is_min_app_version_satisfied.
         return is_min_app_version_satisfied(app_version_to_check)

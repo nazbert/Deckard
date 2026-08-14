@@ -26,8 +26,8 @@ from typing import Any
 
 from loguru import logger as log
 
-# The three pluggable hooks a chooser installs on a flow box. All three are
-# optional: an unconfigured box shows its items unfiltered/unsorted, and
+# The three hooks that a chooser installs on a flow box. All three are
+# optional. A box without them shows its items unfiltered and unsorted, and
 # show_range refuses to run without a factory.
 FilterFunc = Callable[[Any], bool]
 SortFunc = Callable[[Any, Any], int]
@@ -119,31 +119,29 @@ class DynamicFlowBox(Gtk.Box):
 
         self.current_start_index = start
 
-        # The whole rebind runs as ONE main-loop callback. Recycled
-        # children used to be set visible right here (synchronously, and
-        # show_range is also called from chooser build threads) while their
-        # new asset was bound via a separate idle per child -- a click in
-        # that gap activated the PREVIOUS page's asset, or a fresh
-        # placeholder's None asset (TypeError in on_child_activated), and a
-        # child selected on the old page kept its GTK selection while
-        # already showing a different asset. Input events are dispatched by
-        # the same main loop, so a single callback leaves no window where a
-        # half-rebound pool is clickable. filter/sort funcs read GTK state
-        # (search entry, toggles), so get_items_to_show now also runs on
-        # the main thread, at apply time.
+        # The whole rebind runs as one main-loop callback. A show of the
+        # recycled children here, with a separate idle per child for the bind,
+        # leaves a gap in which a click activates the asset of the earlier
+        # page, or the None asset of a fresh placeholder, which raises
+        # TypeError in on_child_activated. A child that the old page selected
+        # also keeps its GTK selection while it shows a different asset. The
+        # same main loop dispatches the input events, so one callback leaves
+        # no moment where a half-rebound pool is clickable. The filter and
+        # sort functions read GTK state, such as the search entry, so
+        # get_items_to_show runs on the main thread as well, at apply time.
         GLib.idle_add(self._apply_range, start, end)
 
     def _apply_range(self, start: int, end: int) -> bool:
         factory_func = self.factory_func
         if factory_func is None:
-            # show_range refuses to schedule without one; None here means it
-            # was cleared between scheduling and the idle dispatch.
+            # show_range refuses to schedule without one, so a None here
+            # means a clear between the schedule and this idle dispatch.
             return False
         items = self.get_items_to_show()
         page_items = items[start:end]
 
-        # Kill any selection from the previous page/filter BEFORE the pool
-        # is rebound -- the factory re-selects the matching child, if any.
+        # Clear the selection of the earlier page or filter before the rebind
+        # of the pool. The factory selects the matching child again.
         self.flow_box.unselect_all()
 
         for i in range(self.N_ITEMS_PER_PAGE):
@@ -151,11 +149,11 @@ class DynamicFlowBox(Gtk.Box):
             if preview is None:
                 break
             if i < len(page_items):
-                # Bind BEFORE showing: the child only ever becomes
-                # clickable already carrying its new asset. Guarded:
-                # one poison item must not abort the rest of the rebind --
-                # and a child whose bind failed must stay hidden, or it
-                # would be clickable with the PREVIOUS page's asset.
+                # Bind before the show, so a child becomes clickable only
+                # with its new asset. The guard keeps one bad item from
+                # aborting the rest of the rebind. A child whose bind failed
+                # stays hidden, or a click reaches the asset of the earlier
+                # page.
                 try:
                     factory_func(preview, page_items[i])
                 except Exception as e:

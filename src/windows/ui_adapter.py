@@ -1,22 +1,15 @@
+"""GTK side of the engine-to-UI port.
+
+GtkUIAdapter implements src.backend.ui_port.UIPort against the real widget
+tree, so the engine touches no widget. Every method accepts a call from any
+thread and returns without a block on the main loop. Widget changes marshal
+with GLib.idle_add. Do not use run_on_main here, because a wedged main loop
+must not stall the media writer. on_deck_layout_changed is the one exception,
+and its docstring says why.
 """
-The GTK side of the engine->UI port: `GtkUIAdapter` implements
-`src.backend.ui_port.UIPort` against the real widget tree.
-
-Everything the engine used to do itself -- resolving a controller's
-`DeckStackChild`, reading `main_win.get_mapped()` from the media thread,
-scanning the deck stack's ListModel off-main, poking sidebar editors -- lives
-here, on the GTK side of the seam.
-
-Threading: every method is callable from any thread and must return without
-blocking on the main loop. Widget mutations are marshalled with
-`GLib.idle_add`; `run_on_main` is banned here (a wedged main loop must never
-stall the media writer). The one documented exception to idle-everything is
-`on_deck_layout_changed` -- see its docstring.
-
-This module deliberately imports nothing from `src.windows.*` at module scope:
-`KeyGrid` imports it (for `mark_dirty`), so the only widget import here is a
-function-local one in the rotation path.
-"""
+# This module imports nothing from src.windows at module scope, because
+# KeyGrid imports it for mark_dirty. The one widget import is function-local,
+# in the rotation path.
 import threading
 import time
 
@@ -29,26 +22,22 @@ from src.backend.DeckManagement.HelperMethods import recursive_hasattr
 from src.backend.DeckManagement.InputIdentifier import Input
 
 # Seconds between on-screen touchscreen previews. The physical touchscreen
-# still gets every frame; only the mirror is rate-limited, because one strip
+# still gets every frame. Only the mirror takes the limit, because one strip
 # frame repaints a preview as wide as the whole deck.
 TOUCHSCREEN_UI_INTERVAL_S = 0.1
-# Key previews paint as fast as the main loop drains them; the slot below is
-# what keeps that bounded.
+# Key previews paint as fast as the main loop drains them. The slot bounds it.
 KEY_UI_INTERVAL_S = 0.0
 
 
 def mark_dirty(controller, identifier) -> None:
-    """Late-failure channel for an ACCEPTED-then-dropped frame.
+    """Record a frame that the adapter accepted and then dropped.
 
-    `push_input_image` answers True as soon as a frame is in the input's
-    mirror slot -- but the window can unmap (or a rebuild orphan the widget)
-    before that paint runs, and by then there is no engine call left to
-    return False through. Every such drop routes here instead, so
-    `load_from_changes` still has something to replay on remap.
-
-    The markers dict stays engine-side on purpose: it is what a future
-    detached UI client would ask the engine to recomposite.
+    push_input_image returns True as soon as a frame reaches the mirror slot of
+    the input, and the window can unmap before that paint runs, so no engine
+    call is left to return False. load_from_changes replays what lands here.
     """
+    # The markers dict lives on the controller, so a detached UI client can
+    # ask the engine to composite again.
     try:
         controller.ui_image_changes_while_hidden[identifier] = True
     except Exception:
@@ -57,43 +46,33 @@ def mark_dirty(controller, identifier) -> None:
 
 
 class _MirrorSlot:
-    """Latest-wins hand-off of ONE input's preview frames to the main loop.
+    """Latest-wins hand-off of the preview frames of one input.
 
-    A producer leaves a paint-ready payload here and arms at most ONE
-    main-loop callback; that callback paints whatever is in the slot when it
-    runs. A backlogged loop therefore costs one queued callback and one
-    retained payload per input instead of one of each per frame -- and the
-    frame that lands is always the newest one, so nothing is gained by
-    painting the ones it superseded.
-
-    `interval` is a floor on how often the slot drains, for previews whose
-    repaint is worth rate-limiting on its own. 0 means "as fast as the loop
-    drains". A frame held by the interval is still flushed by its own
-    delayed callback, so the last frame of a burst (a scroll that stops)
-    lands instead of being held forever.
-
-    Thread-safe: `offer` runs on producers (the media thread), `take` on the
-    main loop.
+    A producer leaves a paint-ready payload here and arms at most one main-loop
+    callback. That callback paints whatever the slot holds when it runs, so a
+    backlogged loop keeps one callback and one payload per input, and the
+    newest frame is the one that lands.
     """
 
     __slots__ = ("_interval", "_lock", "_pending", "_armed", "_last_drain")
 
     def __init__(self, interval: float = 0.0) -> None:
+        # A floor on the drain rate, for a preview that is worth a limit of its
+        # own. 0 drains as fast as the loop allows. A delayed callback still
+        # flushes a held frame, so the last frame of a burst lands.
         self._interval = interval
         self._lock = threading.Lock()
         self._pending: object | None = None
         self._armed: bool = False
-        # Deliberately infinitely far in the past: the first frame paints
-        # immediately, however long the process has been up.
+        # Infinitely far in the past, so the first frame paints at once.
         self._last_drain: float = float("-inf")
 
     def offer(self, payload: object) -> float | None:
-        """Producer side, any thread. Makes `payload` the frame to paint,
-        replacing one that has not been painted yet.
+        """Producer side, any thread. Makes payload the frame to paint.
 
-        Returns the seconds to wait before draining, or None when a drain is
-        already armed -- that callback picks this payload up instead of the
-        one it was armed for, which is what keeps the callback count at one.
+        It replaces a frame that no callback painted yet. Returns the seconds
+        to wait before the drain, or None when a drain is already armed. That
+        callback then takes this payload, which keeps the callback count at one.
         """
         with self._lock:
             self._pending = payload
@@ -103,9 +82,11 @@ class _MirrorSlot:
             return max(0.0, self._interval - (time.monotonic() - self._last_drain))
 
     def take(self) -> object | None:
-        """Main loop. The frame to paint, disarming the slot. None when the
-        slot is empty -- a producer that armed a second callback in the gap
-        between this call and the paint finds nothing left to do."""
+        """Main loop. Returns the frame to paint and disarms the slot.
+
+        Returns None when the slot is empty, so a callback that a producer
+        armed in the gap between this call and the paint does nothing.
+        """
         with self._lock:
             payload, self._pending = self._pending, None
             self._armed = False
@@ -114,40 +95,41 @@ class _MirrorSlot:
             return payload
 
     def disarm(self) -> None:
-        """Undo an `offer` whose callback never got scheduled. The payload
-        stays: without this the slot looks armed forever and the input's
-        preview freezes with a frame pinned behind it."""
+        """Undo an offer whose callback never reached the loop.
+
+        The payload stays. Without this the slot stays armed, and the preview
+        of the input freezes with a frame behind it.
+        """
         with self._lock:
             self._armed = False
 
 
 class GtkUIAdapter(ui_port.UIPort):
     def __init__(self):
-        # controller -> DeckStackChild, maintained by DeckStack.add_page /
-        # remove_page. Binding is by OBJECT IDENTITY at add time:
-        # no serial/name matching anywhere, and no ListModel scan from the
-        # media thread.
+        # Maps a controller to its DeckStackChild. DeckStack.add_page and
+        # DeckStack.remove_page maintain it. The bind uses object identity at
+        # add time, with no serial match and no ListModel scan from the media
+        # thread.
         self._children: dict = {}
         self._window = None
-        # Plain bool written by the window's map/unmap handlers and read
-        # lock-free from the media thread. This replaces the off-main
-        # `main_win.get_mapped()` widget reads the engine used to do.
+        # The map and unmap handlers of the window write this bool, and the
+        # media thread reads it without a lock. It replaces an off-main
+        # main_win.get_mapped() widget read.
         self._window_mapped: bool = False
-        # (controller, identifier) -> _MirrorSlot. One slot per input, so a
-        # stalled main loop holds one frame per input, not a queue per input.
+        # Maps (controller, identifier) to a _MirrorSlot. One slot per input,
+        # so a stalled main loop holds one frame per input, not a queue.
         self._mirror_slots: dict = {}
-        # controller -> bool; the page-sync coalescer.
+        # Maps a controller to a bool. This is the page-sync coalescer.
         self._page_sync_queued: dict = {}
 
-    # ---------------------------------------------------------------- setup
+    # Setup
 
     def attach_window(self, window) -> None:
-        """Bind to a built MainWindow: track its mapped state and (re-)scan
-        the deck stack so any child added during construction is bound.
+        """Bind to a built MainWindow.
 
-        Called AFTER the constructor because the map/unmap handlers need a
-        real window -- but the adapter itself is installed BEFORE it, since
-        every boot-time `add_page` runs inside `MainWindow.build()`.
+        It runs after the constructor, because the map and unmap handlers need
+        a real window. The adapter installs before the constructor, because
+        every boot-time add_page runs inside MainWindow.build().
         """
         self._window = window
         try:
@@ -156,32 +138,31 @@ class GtkUIAdapter(ui_port.UIPort):
             window.connect("unmap", self._on_window_unmap)
         except Exception:
             log.opt(exception=True).warning("Could not track the main window's mapped state")
+        # Re-scan the deck stack, so a child that the constructor added binds
+        # too.
         self.rescan_children()
         self.reconcile_children()
 
     def reconcile_children(self) -> None:
-        """Heal decks the window constructor could not see.
+        """Heal the decks that the window constructor could not see.
 
-        `on_deck_added`/`on_deck_removed` are no-ops while `_window` is None
-        -- which is exactly the window in which `MainWindow.__init__` runs
-        (the adapter is installed BEFORE the constructor so boot-time
-        `add_page` calls still bind, but `attach_window` only lands after
-        it). A deck the USB monitor plugged in during that window would
-        therefore never get a stack child, and one unplugged during it would
-        leave a stale one. `rescan_children` only re-binds children that
-        already exist, so reconcile both directions against the deck
-        manager's live list here.
+        rescan_children re-binds only the children that exist, so this method
+        reconciles both directions against the deck manager list.
         """
+        # on_deck_added and on_deck_removed do nothing while _window is None,
+        # which is the period that MainWindow.__init__ occupies. A deck that
+        # the USB monitor plugs in then gets no stack child, and a deck that it
+        # unplugs leaves a stale one.
         window = self._window
         if not recursive_hasattr(window, "leftArea.deck_stack"):
             return
         deck_stack = window.leftArea.deck_stack
         registered = getattr(getattr(gl, "deck_manager", None), "deck_controller", None)
         if registered is None:
-            # No deck manager to reconcile against. Bail rather than treat
-            # that as "no decks exist" -- the removal pass below would then
-            # tear down every bound child. (main.py builds gl.deck_manager
-            # before App, so this is belt-and-braces, not an expected state.)
+            # No deck manager to reconcile against. Return instead of reading
+            # this as an empty deck list, because the removal pass below then
+            # tears down every bound child. main.py builds gl.deck_manager
+            # before App, so this state does not occur.
             return
         live = list(registered)
         for controller in live:
@@ -199,16 +180,18 @@ class GtkUIAdapter(ui_port.UIPort):
         self._page_sync_queued.clear()
 
     def rescan_children(self) -> None:
-        """(Re-)bind every controller whose DeckStackChild is already in the
-        stack. Makes binding independent of adapter-install ordering and heals
-        a rebuilt window."""
+        """Bind every controller whose DeckStackChild is in the stack.
+
+        This makes the bind independent of the adapter install order, and it
+        heals a rebuilt window.
+        """
         window = self._window
         if not recursive_hasattr(window, "leftArea.deck_stack"):
             return
         for page in window.leftArea.deck_stack.get_pages():
             if page is None:
-                # ListModel iteration snapshots len once; trailing removed
-                # indices yield None. Only trailing entries can be None.
+                # The ListModel iteration reads the length once, so a removed
+                # trailing index yields None. Only trailing entries are None.
                 break
             child = page.get_child()
             controller = getattr(child, "deck_controller", None)
@@ -221,16 +204,14 @@ class GtkUIAdapter(ui_port.UIPort):
     def unbind(self, controller) -> None:
         self._children.pop(controller, None)
         self._page_sync_queued.pop(controller, None)
-        # Snapshot, then delete TOLERANTLY: this runs off the main loop (deck
-        # removal arrives on the USB monitor, boot rescan and flatpak poll
-        # threads) and is not the only writer. The media thread creates a slot
-        # the first time it mirrors an input, so scanning the live dict can
-        # see it change size; and every armed drain for this controller --
-        # precisely what is pending at unplug -- pops its own slot from the
-        # GTK loop as soon as the child is gone, so an entry in the snapshot
-        # can already be deleted by the time we get to it. Either one raising
-        # here would come out of on_deck_removed, skipping the controller's
-        # close() and stranding its media thread and USB handle.
+        # Snapshot the keys, then delete without a KeyError. This method runs
+        # off the main loop, on the USB monitor, boot rescan and flatpak poll
+        # threads, and it is not the only writer. The media thread creates a
+        # slot at the first mirror of an input, so a scan of the live dict can
+        # see the size change. Every armed drain for this controller pops its
+        # own slot from the GTK loop once the child goes, so a key in the
+        # snapshot can be gone already. A raise here leaves on_deck_removed,
+        # skips close(), and strands the media thread and the USB handle.
         for key in [k for k in list(self._mirror_slots) if k[0] is controller]:
             self._mirror_slots.pop(key, None)
 
@@ -240,7 +221,7 @@ class GtkUIAdapter(ui_port.UIPort):
     def _on_window_unmap(self, *args) -> None:
         self._window_mapped = False
 
-    # ------------------------------------------------------------ resolvers
+    # Resolvers
 
     def _grid(self, child):
         if not recursive_hasattr(child, "page_settings.deck_config.grid"):
@@ -253,11 +234,10 @@ class GtkUIAdapter(ui_port.UIPort):
         return child.page_settings.deck_config.screenbar
 
     def _mirror_widget(self, child, identifier):
-        """The widget that mirrors `identifier`, or None when this input has
-        no preview widget (yet).
+        """The widget that mirrors identifier, or None when there is none.
 
-        Raises through a grid rebuild -- buttons[x][y] can be short of these
-        coords mid-rebuild -- so every caller contains that.
+        This raises during a grid rebuild, because buttons[x][y] can be short
+        of these coordinates, so every caller contains the exception.
         """
         if isinstance(identifier, Input.Key):
             grid = self._grid(child)
@@ -270,7 +250,7 @@ class GtkUIAdapter(ui_port.UIPort):
             return None if screenbar is None else screenbar.image
         return None
 
-    # --------------------------------------------------------- render mirror
+    # Render mirror
 
     def push_input_image(self, controller, identifier, image) -> bool:
         try:
@@ -283,9 +263,9 @@ class GtkUIAdapter(ui_port.UIPort):
             if widget is None:
                 return False
 
-            # Convert on THIS thread -- the media thread for live frames.
-            # prepare_mirror_frame is pure PIL + GdkPixbuf, so the main loop
-            # only ever gets handed the finished payload.
+            # Convert on this thread, the media thread for a live frame.
+            # prepare_mirror_frame uses only PIL and GdkPixbuf, so the main
+            # loop receives the finished payload.
             payload = widget.prepare_mirror_frame(image)
 
             key = (controller, identifier)
@@ -301,10 +281,10 @@ class GtkUIAdapter(ui_port.UIPort):
                 # A drain is already armed and now carries this frame.
                 return True
             try:
-                # Idle priority on BOTH arms: pixbuf updates that outrank
-                # GTK's layout/draw (priority 120) starve the very redraw
-                # they are feeding. timeout_add defaults to priority 0, so
-                # the delayed arm has to say so explicitly.
+                # Both arms use idle priority. A pixbuf update above the GTK
+                # layout and draw priority of 120 starves the redraw that it
+                # feeds. timeout_add defaults to priority 0, so the delayed
+                # arm names the priority.
                 if delay_s <= 0:
                     GLib.idle_add(self._drain_mirror, controller, identifier)
                 else:
@@ -312,25 +292,23 @@ class GtkUIAdapter(ui_port.UIPort):
                                      controller, identifier,
                                      priority=GLib.PRIORITY_DEFAULT_IDLE)
             except BaseException:
-                # Nothing will drain this slot now; leaving it armed would
-                # freeze the input for good.
+                # No callback drains this slot now, and an armed slot freezes
+                # the input.
                 slot.disarm()
                 raise
             return True
         except Exception:
-            # Open failure set: widget lookups race window teardown, and
-            # prepare_mirror_frame runs PIL convert/tobytes plus
-            # GdkPixbuf.new_from_bytes. Contain all of it -- the mirror is
-            # best-effort and we run under the media tick, whose catch-all
-            # backs off 0.25s per exception. A failing preview must never
-            # throttle the deck writer loop.
+            # The failure set is open. A widget lookup races the window
+            # teardown, and prepare_mirror_frame runs PIL and
+            # GdkPixbuf.new_from_bytes. Contain all of it. This code runs under
+            # the media tick, whose catch-all waits 0.25 s per exception, and a
+            # failed preview must not throttle the deck writer loop.
             log.opt(exception=True).warning(f"Failed to mirror {identifier} into the UI")
             return False
 
     def _drain_mirror(self, controller, identifier) -> bool:
-        # Main loop: paint the newest frame this input has produced. Returns
-        # False -- a GLib idle/timeout callback that returns truthy re-arms
-        # forever.
+        # On the main loop, paint the newest frame of this input. Return
+        # False, because a GLib callback that returns a true value re-arms.
         slot = self._mirror_slots.get((controller, identifier))
         if slot is None:
             return False
@@ -338,21 +316,20 @@ class GtkUIAdapter(ui_port.UIPort):
         if payload is None:
             return False
         try:
-            # Resolved again here rather than captured at push time: the
-            # binding is by deck-stack-child identity, and a grid rebuilt in
-            # the gap would otherwise be handed a frame for its orphaned
-            # predecessor.
+            # Resolve again here instead of a capture at push time. The bind
+            # uses deck-stack-child identity, and a grid that rebuilds in the
+            # gap would else receive a frame for its orphaned predecessor.
             child = self._children.get(controller)
             if child is None:
-                # Unbound between the push and this paint: drop the slot too.
-                # A push that raced unbind() re-creates one, and leaving it
-                # keyed by a dead controller pins that controller's whole
-                # graph -- one leak per replug.
+                # The unbind landed between the push and this paint, so drop
+                # the slot too. A push that races unbind() makes a new one, and
+                # a slot keyed by a dead controller pins its whole graph.
                 self._mirror_slots.pop((controller, identifier), None)
             widget = None if child is None else self._mirror_widget(child, identifier)
             if not self._window_mapped or widget is None:
-                # Accepted then dropped: push_input_image already answered
-                # True for this frame, so nothing else will record it.
+                # The adapter accepted and then dropped this frame.
+                # push_input_image already returned True, so nothing else
+                # records it.
                 mark_dirty(controller, identifier)
                 return False
             widget.paint_mirror_frame(payload)
@@ -361,24 +338,23 @@ class GtkUIAdapter(ui_port.UIPort):
             mark_dirty(controller, identifier)
         return False
 
-    # ------------------------------------------------------------ deck sync
+    # Deck sync
 
     def on_page_changed(self, controller) -> None:
-        # Coalesce page-load completion signals into one pending idle: N rapid
-        # page changes (unlock bursts, ChangePage chains) must not queue N
-        # full sidebar rebuilds. Each callback renders the LIVE state, so
-        # whichever completion lands last wins. The check-then-set race
-        # between the two trigger threads is benign -- worst case two idles,
-        # both rendering the same current state.
+        # Coalesce the page-load completions into one pending idle, so a burst
+        # of page changes does not queue a sidebar rebuild for each one. Each
+        # callback renders the live state, so the last completion wins. The
+        # check-then-set race between the two trigger threads costs at most two
+        # idles that render the same state.
         if self._page_sync_queued.get(controller):
             return
         self._page_sync_queued[controller] = True
         GLib.idle_add(self._run_page_changed, controller)
 
     def _run_page_changed(self, controller) -> bool:
-        # pop, not `= False`: an idle queued before unbind() still runs after
-        # it, and re-inserting the key would resurrect a pinned reference to
-        # an unplugged controller's whole graph -- one leak per replug.
+        # Use pop, not an assignment of False. An idle queued before unbind()
+        # still runs after it, and a re-inserted key pins the whole graph of an
+        # unplugged controller.
         self._page_sync_queued.pop(controller, None)
         window = self._window
         if not recursive_hasattr(window, "sidebar"):
@@ -386,16 +362,15 @@ class GtkUIAdapter(ui_port.UIPort):
         child = self._children.get(controller)
         if child is None:
             return False
-        # The sidebar mirrors the VISIBLE deck's selected input; a page change
-        # on a background deck must not reload it.
+        # The sidebar mirrors the selected input of the visible deck, so a
+        # page change on a background deck must not reload it.
         if window.leftArea.deck_stack.get_visible_child() is not child:
             return False
         sidebar = window.sidebar
-        # Never yank the user out of a sub-view: Sidebar.load_for_* forces
-        # main_stack back to the input editor, so refreshing while the
-        # ActionChooser/ActionConfigurator (or the error page, whose deferred
-        # on_map task handles its own reload) is up would snap a mid-edit user
-        # away on every automatic page change.
+        # Do not pull the user out of a sub-view. Sidebar.load_for_* sets
+        # main_stack back to the input editor, so a refresh while the
+        # ActionChooser, the ActionConfigurator or the error page is up moves a
+        # user away in the middle of an edit.
         if sidebar.main_stack.get_visible_child() is not sidebar.configurator_stack:
             return False
         sidebar.update()
@@ -443,9 +418,10 @@ class GtkUIAdapter(ui_port.UIPort):
         return False
 
     def _sidebar_for(self, controller, identifier, require_active_deck: bool = True):
-        """The sidebar, but only when it is currently showing `identifier` of
-        `controller`. Runs on the main loop -- all the widget reads the engine
-        used to do off-thread live here."""
+        """The sidebar, only while it shows identifier of controller.
+
+        This runs on the main loop, and it holds the widget reads.
+        """
         window = self._window
         if not recursive_hasattr(window, "sidebar.active_identifier"):
             return None
@@ -467,13 +443,12 @@ class GtkUIAdapter(ui_port.UIPort):
         return False
 
     def on_deck_layout_changed(self, controller) -> None:
-        """Rebuild the deck's key grid for a new rotation.
+        """Rebuild the key grid of the deck for a new rotation.
 
-        Runs INLINE when already on the main loop, and set_rotation's only
-        caller is main-thread: it reloads the page immediately afterwards, and
-        an idled rebuild would let those repaints hit the pre-rotation grid
-        (transposed buttons[x][y] -> contained IndexErrors -> dropped frames
-        with no marker).
+        This runs inline on the main loop, because the one caller of
+        set_rotation runs there and reloads the page at once. An idled rebuild
+        lets those repaints reach the grid from before the rotation, where the
+        transposed buttons raise IndexError and the frames drop with no marker.
         """
         if threading.current_thread() is threading.main_thread():
             self._run_deck_layout_changed(controller)
@@ -481,7 +456,7 @@ class GtkUIAdapter(ui_port.UIPort):
         GLib.idle_add(self._run_deck_layout_changed, controller)
 
     def _run_deck_layout_changed(self, controller) -> bool:
-        # Function-local: KeyGrid imports this module for mark_dirty.
+        # Function-local, because KeyGrid imports this module for mark_dirty.
         from src.windows.mainWindow.elements.KeyGrid import KeyGrid
 
         child = self._children.get(controller)
@@ -494,7 +469,7 @@ class GtkUIAdapter(ui_port.UIPort):
         deck_config.prepend(deck_config.grid)
         return False
 
-    # --------------------------------------------------- deprecated queries
+    # Deprecated queries
 
     def query_input_widget(self, controller, identifier):
         child = self._children.get(controller)
@@ -516,7 +491,7 @@ class GtkUIAdapter(ui_port.UIPort):
             return self._grid(child)
         return None
 
-    # ----------------------------------------------------------- app level
+    # App level
 
     def on_deck_added(self, controller) -> None:
         window = self._window
@@ -525,10 +500,10 @@ class GtkUIAdapter(ui_port.UIPort):
         GLib.idle_add(window.leftArea.deck_stack.add_page, controller)
 
     def on_deck_removed(self, controller) -> None:
-        # The detach idle is queued SYNCHRONOUSLY here (plan P1.3): the caller
-        # spawns the slow close thread immediately after this returns, and a
-        # fast unplug/replug must not race a late detach against a fresh
-        # add_page idle and leave two stack children for one serial.
+        # Queue the detach idle here, before the return. The caller starts the
+        # slow close thread at once, and a fast unplug and replug must not race
+        # a late detach against a new add_page idle, which leaves two stack
+        # children for one serial.
         window = self._window
         if recursive_hasattr(window, "leftArea.deck_stack"):
             GLib.idle_add(window.leftArea.deck_stack.remove_page, controller)

@@ -108,8 +108,8 @@ class PageSelector(Adw.NavigationPage):
     def remove_row_with_path(self, path: str) -> None:
         for page_row in self.page_rows:
             if page_row.page_path == path:
-                # Keep page_rows in sync: a dead row left behind here kept
-                # matching in activate_page()/rename_page_row() afterwards.
+                # Keep page_rows in step. A dead row that stays here keeps
+                # matching in activate_page() and in rename_page_row().
                 self.page_rows.remove(page_row)
                 self.list_box.remove(page_row)
                 return

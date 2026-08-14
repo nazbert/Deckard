@@ -29,9 +29,9 @@ if TYPE_CHECKING:
 
 class SDPlusBarWallpaperPackPreview(Preview):
     def __init__(self, wallpaper_pack_chooser: "SDPlusBarWallpaperPackChooser", pack: IconPack, pixbuf=_PIXBUF_UNSET):
-        # `pixbuf` arrives already decoded from the chooser's build
-        # worker; only fall back to decoding here (on whatever thread
-        # constructs us) when nobody supplied one.
+        # The build worker of the chooser decodes pixbuf. This constructor
+        # decodes the thumbnail itself, on its own thread, only when the
+        # caller supplies no pixbuf.
         super().__init__(
             image_path=pack.get_thumbnail_path() if pixbuf is _PIXBUF_UNSET else None,
             text=pack.name,

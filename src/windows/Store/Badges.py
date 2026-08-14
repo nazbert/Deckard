@@ -33,5 +33,5 @@ class Badge(Gtk.Button):
             self.set_has_tooltip(True)
         else:
             self.set_has_tooltip(False)
-        # No key -> no tooltip text (what gl.lm.get(None) already resolved to).
+        # No key gives no tooltip text, which is what gl.lm.get(None) returns.
         self.set_tooltip_text(gl.lm.get(tooltip) if tooltip else None)

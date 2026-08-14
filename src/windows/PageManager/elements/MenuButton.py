@@ -121,11 +121,11 @@ class MenuButton(Gtk.MenuButton):
 
     def export_page_callback(self, selected_file):
         page_json = {}
-        # One read of the path, so the flush and the open cannot target
-        # different files if the editor's selection moves under us.
+        # Read the path once, so the flush and the open reach the same file
+        # when the editor selection changes during this call.
         page_path = self.pageEditor.active_page_path
-        # Read barrier: the export reads the file directly, so an edit still
-        # in flight would be missing from what the user exports.
+        # A read barrier. The export reads the file directly, so an edit that
+        # is still in flight would be absent from what the user exports.
         page_flush.get().flush_path(page_path)
         with open(page_path, "r") as f:
             page_json = json.load(f)
@@ -159,21 +159,21 @@ class MenuButton(Gtk.MenuButton):
     def import_page_name_selected_callback(self, name):
         import_dict = {}
         source_path = self.selected_file.get_path()
-        # Read barrier: on the duplicate path this file IS a live page, so
-        # its pending edits belong on disk before the copy is read -- a
-        # duplicate must not be a second-old version of what is on screen.
-        # A no-op for a genuine import, whose source is not a page of ours.
+        # A read barrier. On the duplicate path this file is a live page, so
+        # its pending edits must reach the disk before the copy reads it. A
+        # duplicate must match what the screen shows. This does nothing for a
+        # real import, whose source is not a page of this app.
         page_flush.get().flush_path(source_path)
         with open(source_path, "r") as f:
             import_dict = json.load(f)
 
         self.selected_file = None
 
-        # `name` is already the page name on both callers: the direct path
-        # passes basename-without-extension, the rename dialog passes the
-        # user's typed text verbatim. Use it as-is -- splitext here would
-        # silently truncate a typed name at its first dot ("backup.v2" ->
-        # "backup"). add_page appends the .json extension itself.
+        # Both callers already pass the page name. The direct path passes the
+        # basename without the extension, and the rename dialog passes the
+        # text that the user typed. Use it unchanged. A splitext call here
+        # truncates a typed name at its first dot, so "backup.v2" becomes
+        # "backup". add_page appends the .json extension itself.
         page_name = name
         try:
             page_path = gl.page_manager.add_page(page_name, import_dict)

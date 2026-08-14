@@ -27,8 +27,8 @@ class StateSwitcher(Gtk.ScrolledWindow):
         super().__init__(**kwargs)
         self.type = type
 
-        # Switch callbacks take no arguments; add-new callbacks get the
-        # index of the state that was just appended.
+        # A switch callback takes no arguments. An add-new callback takes the
+        # index of the state that this switcher appended.
         self.switch_callbacks: list[Callable[[], Any]] = []
         self.add_new_callbacks: list[Callable[[int], Any]] = []
 

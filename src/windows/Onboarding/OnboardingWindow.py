@@ -156,16 +156,16 @@ class OnboardingWindow(Adw.Dialog):
         command = ["udevadm", "--version"]
 
         if is_flatpak():
-            # udevadm lives on the host. The old form ("flatpak run
-            # --command udevadm --version") was malformed and always failed,
-            # so the udev warning never showed for flatpak users -- its
-            # target audience.
+            # udevadm lives on the host, so the call needs flatpak-spawn.
+            # Without it the command fails and the udev warning never reaches
+            # a flatpak user, who is the reader it targets.
             command = ["flatpak-spawn", "--host"] + command
 
         try:
             output = subprocess.check_output(command).decode("utf-8").strip()
-            # e.g. "252" -- but some distros append build info; keep the
-            # first token so version.parse() in build() can't choke on it.
+            # The output is a number such as "252", and some distributions
+            # append build information. Keep the first token, so
+            # version.parse() in build() accepts it.
             return output.split()[0] if output else None
         except (subprocess.CalledProcessError, FileNotFoundError):
             return None
@@ -276,9 +276,8 @@ class ExtensionOnboardingScreen(Gtk.Box):
             self.set_button_status("installed")
         else:
             self.set_button_status("failed")
-        # The window grabber's D-Bus proxy was built against a session with
-        # no such extension, so it has to be rebuilt to see the one just
-        # installed.
+        # The D-Bus proxy of the window grabber was built against a session
+        # with no such extension, so it must rebuild to see the new one.
         if gl.window_grabber is not None:
             gl.window_grabber.reset_integration()
 
@@ -332,8 +331,8 @@ class OnboardingScreen5(Gtk.Box):
         GLib.idle_add(self.onboarding_window.loading_box.loading_label.set_label, "Installing plugins")
         GLib.idle_add(self.onboarding_window.loading_box.set_spinning, True)
 
-        # get_selected_plugins reads CheckButton state -- a GTK call, so it
-        # must run on the main loop, not this install worker.
+        # get_selected_plugins reads CheckButton state, which is a GTK call,
+        # so it runs on the main loop and not on this install worker.
         plugins = run_on_main(self.onboarding_window.recommendations.get_selected_plugins)
 
         GLib.idle_add(self.onboarding_window.loading_box.progress_bar.set_visible, len(plugins) > 0)
@@ -358,12 +357,11 @@ class OnboardingScreen5(Gtk.Box):
         GLib.idle_add(self.onboarding_window.close)
         GLib.idle_add(gl.app.main_win.show)
         if failed:
-            # The progress-bar text above dies with the closing window; the
-            # user otherwise lands in the main window with no plugins and no
-            # explanation. Reported on the surviving main
-            # window, which the idle_add(show) above has already queued --
-            # gl.notify's own idle runs after it, so the window is up by the
-            # time this is delivered.
+            # The progress-bar text above dies with the closing window, and
+            # the user then reaches the main window with no plugins and no
+            # explanation. This report goes to the main window, which the
+            # idle_add(show) above already queued. The idle of gl.notify runs
+            # after that one, so the window is up when this arrives.
             gl.notify.error(
                 f"Failed to install {len(failed)} plugin"
                 f"{'s' if len(failed) != 1 else ''} "

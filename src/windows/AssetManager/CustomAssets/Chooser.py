@@ -46,8 +46,8 @@ class CustomAssetChooser(ChooserPage):
         self.asset_chooser: CustomAssetChooserFlowBox | None = None
         self.build_finished = False
         self.build_task_finished_tasks: list[Callable[[], Any]] = []
-        # Serializes build_finished with the deferred-task queue -- see
-        # _finish_build / show_for_path.
+        # Serializes build_finished with the deferred-task queue. See
+        # _finish_build and show_for_path.
         self._build_tasks_lock = threading.Lock()
 
         threading.Thread(target=self.build).start()
@@ -56,21 +56,23 @@ class CustomAssetChooser(ChooserPage):
     def build(self):
         self.build_finished = False
         try:
-            # The whole GTK construction runs on the main loop: building the
-            # flow box (a page's worth of AssetPreviews) and the button on
-            # this worker thread was the off-main-GTK crash class.
-            # One-time jank on opening the tab beats a segfault; only
-            # the build bookkeeping around this stays on the thread.
+            # The whole GTK construction runs on the main loop. A build of
+            # the flow box, which holds one page of AssetPreviews, and of the
+            # button on this worker thread is the off-main GTK crash class.
+            # One pause when the tab opens costs less than a segfault. Only
+            # the build bookkeeping stays on the thread.
             def _build_ui():
                 self.asset_chooser = CustomAssetChooserFlowBox(self)
-                # Append to main_box (like the Wallpaper / SD+ Bar / Icon choosers do),
-                # NOT into ChooserPage's outer ScrolledWindow: a ScrolledWindow sizes
-                # its child to natural height (never stretches it), which collapses a
-                # nested grid, and the flow box brings its own ScrolledWindow +
-                # pagination. As a direct main_box child its own scroller fills the
-                # available height. The default scrolled_window must also be REMOVED
-                # (as the sibling choosers do) -- an empty vexpand=True child competes
-                # for the page's height and squeezes the grid.
+                # Append to main_box, as the wallpaper, SD+ bar and icon
+                # choosers do, and not into the outer ScrolledWindow of
+                # ChooserPage. A ScrolledWindow sizes its child to the natural
+                # height and never stretches it, which collapses a nested
+                # grid, and the flow box brings its own ScrolledWindow and
+                # pagination. As a direct main_box child, its own scroller
+                # fills the available height. The default scrolled_window also
+                # has to go, as it does in the sibling choosers, because an
+                # empty vexpand=True child competes for the page height and
+                # squeezes the grid.
                 self.main_box.remove(self.scrolled_window)
                 self.main_box.append(self.asset_chooser)
 
@@ -82,28 +84,29 @@ class CustomAssetChooser(ChooserPage):
 
             self.load_defaults()
         finally:
-            # GUARANTEE the spinner is dismissed: any exception above
-            # used to be swallowed by @log.catch with set_loading(False) never
-            # reached, leaving the Custom Assets page loading forever.
-            # (@log.catch stays -- finally runs first, then the exception
-            # propagates into it and gets logged.)
+            # Always dismiss the spinner. Without this finally, log.catch
+            # swallows an exception from the code above, set_loading(False)
+            # never runs, and the Custom Assets page loads forever. log.catch
+            # stays, because this finally runs first, and the exception then
+            # reaches it and gets logged.
             self.set_loading(False)
 
             self._finish_build()
 
     def _finish_build(self) -> None:
-        """Flips build_finished and snapshots the deferred-task queue as one
-        atomic step. show_for_path checks the flag and appends under the
-        same lock, so a caller that read build_finished as False can no
-        longer slip its task into the queue AFTER this (only) drain already
-        snapshotted it -- such a task used to sit in the list forever and
-        the requested path was never shown."""
+        """Set build_finished and snapshot the deferred-task queue in one step.
+
+        show_for_path reads the flag and appends under the same lock, so a
+        caller that read build_finished as False cannot add its task after
+        this drain took the snapshot. Such a task would stay in the list, and
+        the requested path would never show.
+        """
         with self._build_tasks_lock:
             self.build_finished = True
             tasks = list(self.build_task_finished_tasks)
             self.build_task_finished_tasks.clear()
-        # Run the tasks outside the lock: they call back into
-        # show_for_path-adjacent code and must not hold it.
+        # Run the tasks outside the lock, because they call back into code
+        # near show_for_path, which must not hold it.
         for task in tasks:
             try:
                 task()
@@ -119,19 +122,19 @@ class CustomAssetChooser(ChooserPage):
         return True
     
     def add_asset(self, asset: dict) -> None:
-        # asset_chooser.items is the same live list object as gl.asset_manager_backend, so the
-        # new asset is already visible to it -- just re-render the recycler. This may run off
-        # the main thread (called from add_custom_media_set_by_ui's worker thread), so marshal.
+        # asset_chooser.items is the same live list object as the one in
+        # gl.asset_manager_backend, so it already holds the new asset. Only
+        # the recycler needs a re-render. This can run off the main thread,
+        # from the worker of add_custom_media_set_by_ui, so it marshals.
         chooser = self.asset_chooser
         if chooser is None:
             return
         GLib.idle_add(chooser.refresh)
 
     def add_files(self, files: list) -> None:
-        # The window owning the cursor can already be gone when a drop or a
-        # file-dialog callback lands (AssetManager.on_close nulls
-        # gl.asset_manager): skip the busy-cursor feedback in that case, but
-        # still add the files.
+        # The window that owns the cursor can be gone when a drop or a
+        # file-dialog callback lands, because AssetManager.on_close nulls
+        # gl.asset_manager. Skip the busy cursor then, and still add the files.
         asset_manager = gl.asset_manager
         if asset_manager is not None:
             asset_manager.set_cursor_from_name("wait")
@@ -150,16 +153,16 @@ class CustomAssetChooser(ChooserPage):
         def show_now() -> None:
             chooser = self.asset_chooser
             if chooser is None:
-                # build() failed before the flow box existed -- the failure is
-                # already logged; don't raise into the caller as well.
+                # build() failed before the flow box existed. The failure is
+                # already in the log, so do not raise into the caller too.
                 return
             chooser.show_for_path(path)
 
         with self._build_tasks_lock:
             if not self.build_finished:
-                # Deferred under the same lock _finish_build drains with:
-                # the task either makes the snapshot or sees the flag True
-                # here and dispatches directly -- never stranded in between.
+                # Defer under the same lock that _finish_build drains with.
+                # The task either reaches the snapshot, or it reads the flag
+                # as True here and dispatches at once.
                 self.build_task_finished_tasks.append(show_now)
                 return
         show_now()
@@ -183,9 +186,9 @@ class CustomAssetChooser(ChooserPage):
             self.asset_chooser.refresh()
 
     def load_defaults(self):
-        # Both toggles default ON; the True defaults live in the surface schema.
+        # Both toggles start on. The True defaults live in the surface schema.
         settings = settings_store.get().view(settings_store.UI_ASSET_MANAGER)
-        # Called from the build worker: toggle writes are GTK calls too.
+        # This runs on the build worker, and a toggle write is a GTK call.
         run_on_main(self.video_button.set_active, settings.get("video-toggle"))
         run_on_main(self.image_button.set_active, settings.get("image-toggle"))
 

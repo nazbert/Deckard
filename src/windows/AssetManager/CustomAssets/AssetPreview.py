@@ -32,8 +32,9 @@ if TYPE_CHECKING:
 
 class AssetPreview(Preview):
     def __init__(self):
-        # DynamicFlowBox recycles a fixed pool of placeholders built with no arguments
-        # (P4.2); the actual asset is bound later via set_asset() from the factory func.
+        # DynamicFlowBox recycles a fixed pool of placeholders that take no
+        # constructor arguments. set_asset() binds the asset later, from the
+        # factory function.
         super().__init__(can_be_deleted=True)
         self.asset: dict = None
         self.flow: "CustomAssetChooserFlowBox" = None
@@ -42,10 +43,11 @@ class AssetPreview(Preview):
         self.flow = flow
         self.asset = asset
 
-        # Runs inside DynamicFlowBox._apply_range's main-loop callback: set
-        # text/image directly. Deferring them through idle_add reopened a
-        # frame where the child was already visible (and clickable) but
-        # still showed the PREVIOUS asset's name/thumbnail.
+        # This runs inside the main-loop callback of
+        # DynamicFlowBox._apply_range, so set the text and the image here. A
+        # deferral through idle_add opens a frame where the child is visible,
+        # and clickable, while it shows the name and thumbnail of the earlier
+        # asset.
         self.set_text(asset["name"])
         self.set_image(asset["thumbnail"])
 
@@ -63,10 +65,10 @@ class AssetPreview(Preview):
         dial.present()
 
     def on_remove_confirmed(self):
-        # self.flow owns a fixed pool of recycled placeholders (P4.2's DynamicFlowBox
-        # conversion) -- removing `self` from its native FlowBox would shrink that pool below
-        # N_ITEMS_PER_PAGE, so route the removal through the flow instead of touching the
-        # widget tree directly.
+        # self.flow owns a fixed pool of recycled placeholders. A removal of
+        # self from its native FlowBox shrinks that pool below
+        # N_ITEMS_PER_PAGE, so the removal goes through the flow instead of
+        # the widget tree.
         self.flow.remove_asset(self.asset)
 
 

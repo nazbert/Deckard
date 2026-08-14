@@ -44,8 +44,8 @@ class IconPage(StorePage):
         self.compatible_section.search_entry.set_placeholder_text(gl.lm.get("store.icons.search-placeholder"))
         self.incompatible_section.search_entry.set_placeholder_text(gl.lm.get("store.icons.search-placeholder"))
 
-    # No @log.catch here: StorePage._load_guarded needs to SEE the failure to
-    # show the error page and re-arm the tab for a retry.
+    # Carry no @log.catch here. StorePage._load_guarded must see the failure,
+    # so it can show the error page and arm the tab for a retry.
     def load(self):
         self.set_loading()
         result = self.store.backend.get_all_icons()
@@ -107,10 +107,12 @@ class IconPreview(StorePreview):
         self.set_description(description)
 
     def install(self) -> bool:
-        """Runs on the store's download worker thread; returns whether the
-        install actually succeeded. A failed install (Err) leaves the button in
-        its previous state instead of flipping it to 'installed' -- the fix for
-        a 400/404/offline download silently reading as installed."""
+        """Run on the download worker thread. Returns True on a real install.
+
+        A failed install returns an Err, and the button keeps its previous
+        state instead of moving to installed. A 400, a 404 or an offline
+        download must not read as installed.
+        """
         backend = self.store.backend
         if backend is None:
             log.error(f"Store backend unavailable; cannot install {self.icon_data.icon_id}")

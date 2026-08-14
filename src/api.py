@@ -1,19 +1,8 @@
-"""
-Deckard DBus API
+"""Deckard DBus API.
 
-Provides a DBus interface at io.github.nazbert.Deckard for external
-tools to query and control Deckard.
-
-Top-level object: /io/github/nazbert/Deckard
-  - Controllers property (list of serial numbers)
-  - Pages property, AddPage, RemovePage
-  - ChangePage, ChangeState
-  - NotifyForegroundWindow, IconPacks property, GetIconNames
-  - ForegroundWindow property (WindowInfo struct)
-
-Per-controller objects: /io/github/nazbert/Deckard/controllers/<serial>
-  - SetActivePage
-  - ActivePageName property
+The interface at io.github.nazbert.Deckard lets external tools query and
+control Deckard. The top-level object is /io/github/nazbert/Deckard, and each
+controller gets /io/github/nazbert/Deckard/controllers/<serial>.
 """
 
 import json
@@ -73,9 +62,7 @@ def _serial_to_dbus_path(serial: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", serial)
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Per-controller API (published at .../controllers/<serial>)
-# ─────────────────────────────────────────────────────────────────────
+# Per-controller API, published at .../controllers/<serial>.
 
 @dbus_interface(CTRL_IFACE)
 class ControllerInstanceAPI:
@@ -86,16 +73,14 @@ class ControllerInstanceAPI:
         self._active_page_name: str = ""
         self._object_path: str = ""  # set by _publish_controller
 
-    # ── Methods ──────────────────────────────────────────────────────
+    # Methods
 
     def SetActivePage(self, name: Str) -> None:
         """Set the active page on this controller.
 
-        A rendering of the control plane's answer, nothing more: the rules
-        are shared with every other transport, which is how this method
-        gained the same-page no-op the others already had. It still answers
-        the bus with nothing and raises nothing -- a caller learns of a bad
-        page name from the log, as it always has.
+        The control plane holds the rules, which every transport shares, and a
+        request for the active page does nothing. This method returns no value
+        and raises nothing. A bad page name appears only in the log.
         """
         serial = self._controller.serial_number()
         log.info(f"DBus API [{serial}]: SetActivePage called – name={name!r}")
@@ -108,7 +93,7 @@ class ControllerInstanceAPI:
         except Exception as e:
             log.error(f"DBus API [{serial}]: SetActivePage error: {e}")
 
-    # ── Properties ───────────────────────────────────────────────────
+    # Properties
 
     @property
     def ActivePageName(self) -> Str:
@@ -126,9 +111,7 @@ class ControllerInstanceAPI:
             )
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Top-level API (published at /io/github/nazbert/Deckard)
-# ─────────────────────────────────────────────────────────────────────
+# Top-level API, published at /io/github/nazbert/Deckard.
 
 @dbus_interface(TOP_IFACE)
 class DeckardAPI:
@@ -137,7 +120,7 @@ class DeckardAPI:
     def __init__(self):
         self._foreground_window: WindowInfo = WindowInfo("", "")
 
-    # ── Methods ──────────────────────────────────────────────────────
+    # Methods
 
     @property
     def Pages(self) -> List[Str]:
@@ -185,21 +168,13 @@ class DeckardAPI:
             log.error(f"DBus API: RemovePage error: {e}")
 
     def ChangePage(self, serial: Str, page: Str) -> Str:
-        """Show `page` -- a page name or a page path -- on the deck reporting
-        `serial`.
+        """Show page, a page name or a page path, on the deck with serial.
 
-        Answers with the empty string when the request was applied, and with
-        the reason when it was not. "Applied" includes the deck already being
-        on that page: a no-op is a fulfilled request, not a failure, and a
-        caller that switches on every event would otherwise have to tell the
-        two apart to stay quiet.
-
-        Returning the reason instead of logging it is the whole point of this
-        method existing. The CLI forwards here, and a person who mistypes a
-        page name has to read about it in their terminal rather than in the
-        log of a process they cannot see. Unexpected exceptions are left to
-        propagate: dasbus turns those into an error reply, which is a truer
-        answer than an empty string.
+        Returns the empty string when the deck applied the request, and the
+        reason when it did not. A deck that already shows that page counts as
+        applied. The CLI forwards here, so the caller reads the reason in its
+        own terminal. Unexpected exceptions propagate, and dasbus turns them
+        into an error reply.
         """
         log.info(f"DBus API: ChangePage called – serial={serial!r} page={page!r}")
         result = control_plane.get().change_page(serial, page)
@@ -209,14 +184,12 @@ class DeckardAPI:
         return result.message
 
     def ChangeState(self, serial: Str, page: Str, coords: Str, state: Int) -> Str:
-        """Set the input at `coords` on `page` of the deck reporting `serial`
-        to `state`, loading that page first if it is not the active one.
+        """Set the input at coords on page of the deck with serial to state.
 
-        Same answer shape as ChangePage: empty on success, the reason
-        otherwise. Coordinates travel as the "x,y" text the caller typed --
-        the control plane parses them once, for every transport -- while the
-        state is a plain integer, because nothing about a state number needs
-        to survive as text.
+        This loads the page first when it is not the active one. The answer
+        matches ChangePage, empty on success and the reason otherwise. coords
+        travels as the "x,y" text the caller typed, and the control plane
+        parses it once for every transport.
         """
         log.info(f"DBus API: ChangeState called – serial={serial!r} page={page!r} "
                  f"coords={coords!r} state={state!r}")
@@ -228,9 +201,9 @@ class DeckardAPI:
         return result.message
 
     def NotifyForegroundWindow(self, name: Str, wm_class: Str) -> None:
-        """
-        Notify Deckard of the current foreground window.
-        Useful for testing/development without kdotool.
+        """Tell Deckard the current foreground window.
+
+        This lets a test or a development run work without kdotool.
         """
         win = WindowInfo(name, wm_class)
         log.info(f"DBus API: NotifyForegroundWindow called – {win!r}")
@@ -248,8 +221,8 @@ class DeckardAPI:
         log.info("DBus API: IconPacks read")
         try:
             if gl.icon_pack_manager is not None:
-                # Annotated locally because IconPackManager.get_icon_packs is
-                # declared `-> dir` (a typo for dict), which is not a type.
+                # Annotate locally, because IconPackManager.get_icon_packs
+                # declares a return type of dir, a typo for dict, not a type.
                 packs: dict[str, Any] = gl.icon_pack_manager.get_icon_packs()
                 return list(packs.keys())
         except Exception as e:
@@ -272,39 +245,31 @@ class DeckardAPI:
             log.error(f"DBus API: GetIconNames error: {e}")
         return []
 
-    # ── Properties ───────────────────────────────────────────────────
+    # Properties
 
     @property
     def DataPath(self) -> Str:
-        """The base path where Deckard stores its data (pages, icons, etc). 
-        (This is necessary for clients to compose valid JSON page files)"""
+        """Base path for the Deckard data, such as pages and icons.
+
+        A client needs it to compose valid JSON page files.
+        """
         return gl.DATA_PATH
     
     @property
     def Controllers(self) -> List[Str]:
         """Serial numbers of the controllers a client can address.
 
-        The published object set is the source, not the deck manager's list, so
-        this property and the objects behind it cannot disagree: every serial
-        listed here has an object at the path composed from it, because listing
-        it and publishing it are one step (_publish_controller).
-
-        When it was read from the deck manager it announced decks that had no
-        object yet, and a client that took what it found and addressed it got
-        UnknownObject for a deck that was plainly plugged in.
-
-        The disagreement that remains points the other way, at the truth rather
-        than at the bus: publishing is marshalled onto the main context, so
-        between a deck registering and its publish idle running, this property
-        does not name a deck the app already has. Under-reporting a deck for a
-        moment costs a client a retry; over-reporting one costs it an error on
-        a path it composed from this very list. GLib runs idles below GDBus's
-        own dispatch, so an external read CAN overtake a publish queued before
-        it -- the window is not ordered away, it is healed, by the
-        PropertiesChanged that publishing emits.
-
-        Main context only, like every registration mutation.
+        The value comes from the published object set, not from the deck
+        manager list, so each serial here has an object at the path composed
+        from it, because _publish_controller lists and publishes in one step.
+        Main context only, like every registration change.
         """
+        # Publishing marshals onto the main context, so between a deck
+        # registering and its publish idle running this property omits a deck
+        # the app has. An omission costs a client one retry, and an extra name
+        # costs it an error on a path it composed from this list. GLib runs
+        # idles below the GDBus dispatch, so an external read can overtake a
+        # queued publish, and the PropertiesChanged from publishing corrects it.
         return list(_controller_instances)
 
     @property
@@ -322,7 +287,7 @@ class DeckardAPI:
         )
 
 
-# ── Helper to start / stop the service ──────────────────────────────
+# Helpers that start and stop the service.
 
 _bus = None
 _api_instance = None
@@ -337,11 +302,10 @@ def start_dbus_service():
         _api_instance = DeckardAPI()
         _bus.publish_object(DBUS_OBJECT_PATH, _api_instance)
 
-        # Catch-up sweep for the decks that were registered before the service
-        # existed; every later arrival publishes itself from the deck
-        # lifecycle. This already runs on the main context, so the same worker
-        # the lifecycle marshals to is called directly -- one code path, and
-        # one deck that fails to publish no longer abandons the rest.
+        # Sweep the decks that registered before the service existed. Every
+        # later arrival publishes itself from the deck lifecycle. This code
+        # runs on the main context, so it calls the same worker directly, and
+        # one deck that fails to publish does not stop the others.
         if gl.deck_manager is not None:
             for controller in list(gl.deck_manager.deck_controller):
                 _publish_on_main(controller)
@@ -352,30 +316,26 @@ def start_dbus_service():
 
 
 def publish_controller(controller) -> None:
-    """Put a deck controller on the bus, from wherever it was registered.
+    """Put a deck controller on the bus, from any registration thread.
 
-    Decks are registered from the USB monitor thread, the boot re-enumeration
-    thread and the main thread, while dasbus keeps its object registrations in
-    a plain dict and dispatches them on the GLib main context -- so the
-    registration itself is marshalled there and nowhere else.
-
-    The bus check is the first statement and dereferences nothing: callers
-    reach this during boot with a controller that is still being built, and
-    with no service to publish to there is nothing to look at. Those decks are
-    covered by start_dbus_service's sweep.
+    Decks register from the USB monitor thread, the boot re-enumeration thread
+    and the main thread. dasbus holds its object registrations in a plain dict
+    and dispatches on the GLib main context, so the registration marshals there.
     """
+    # The bus check comes first and reads nothing from the controller, because
+    # a boot caller passes a controller that is still under construction. The
+    # sweep in start_dbus_service covers those decks.
     if _bus is None:
         return
     GLib.idle_add(_publish_on_main, controller)
 
 
 def unpublish_controller(controller) -> None:
-    """Take a deck controller off the bus when it is removed.
+    """Take a deck controller off the bus when the deck goes away.
 
-    Guard and marshal exactly as publish_controller does. A client holding a
-    proxy for the removed deck gets UnknownObject from here on, and the
-    Controllers property stops naming it in the same step: the registry the
-    object comes off is the one the property is read from.
+    This guards and marshals as publish_controller does. A client that holds a
+    proxy for the removed deck then gets UnknownObject, and the Controllers
+    property stops naming it in the same step, because both read one registry.
     """
     if _bus is None:
         return
@@ -383,8 +343,10 @@ def unpublish_controller(controller) -> None:
 
 
 def _known_serial(controller) -> str:
-    """The controller's serial without asking the device for it -- usable on a
-    failure path, where the deck may be exactly what went wrong."""
+    """The controller serial, read without a call to the device.
+
+    A failure path can use it, where the deck itself may be the fault.
+    """
     return getattr(controller, "_serial_number", None) or "<unknown>"
 
 
@@ -415,13 +377,13 @@ def _unpublish_on_main(controller) -> bool:
 def _publish_controller(controller) -> None:
     """Publish a ControllerInstanceAPI for a single deck controller.
 
-    Main context only -- see publish_controller.
+    Main context only. See publish_controller.
     """
     if _bus is None:
         return  # the service stopped between queuing this and running it
     if gl.deck_manager is None or controller not in gl.deck_manager.deck_controller:
-        # Removed again before this ran. Publishing it now would leave an
-        # object behind that no removal is ever going to clear.
+        # The deck went away before this idle ran. A publish now leaves an
+        # object that no removal clears.
         return
     serial = controller.serial_number()
     existing = _controller_instances.get(serial)
@@ -430,14 +392,12 @@ def _publish_controller(controller) -> None:
                 gl.deck_manager is not None
                 and existing._controller in gl.deck_manager.deck_controller):
             return  # already published
-        # The serial is still claimed by a controller that has already been
-        # removed: nothing orders its unpublish against this publish, since
-        # removal queues its work outside the deck manager's lock and the
-        # registration sites take no lock at all. Drop the dead object here
-        # rather than leave the deck that is actually plugged in off the API
-        # for the rest of the session. The unpublish that arrives afterwards
-        # looks its entry up by controller identity, finds the serial bound to
-        # this fresh controller, and correctly does nothing.
+        # A removed controller still claims the serial. Nothing orders its
+        # unpublish against this publish. Removal queues its work outside the
+        # deck manager lock, and the registration sites take no lock. Drop the
+        # dead object here, so the connected deck reaches the API. The later
+        # unpublish looks up its entry by controller identity, finds the serial
+        # bound to this new controller, and does nothing.
         log.warning(
             f"DBus API: replacing the stale object for deck {serial} -- its "
             f"controller was removed, and this publish arrived first."
@@ -456,14 +416,14 @@ def _publish_controller(controller) -> None:
         return
     instance = ControllerInstanceAPI(controller)
     instance._object_path = obj_path
-    # Seed the page the deck is already showing. The boot page is loaded
-    # before this object exists, so waiting for the first switch to feed
-    # ActivePageName left it reading empty on a deck that plainly had a page.
+    # Seed the page that the deck already shows. The boot page loads before
+    # this object exists, so a wait for the first switch leaves ActivePageName
+    # empty on a deck that has a page.
     active_page = controller.active_page
     instance._active_page_name = "" if active_page is None else active_page.get_name()
     _bus.publish_object(obj_path, instance)
-    # Recorded only once the bus accepted it, so a failed publish leaves the
-    # serial free to be published again rather than permanently claimed.
+    # Record only after the bus accepts the object, so a failed publish leaves
+    # the serial free for another publish.
     _controller_instances[serial] = instance
     log.info(f"DBus API: published controller {serial} at {obj_path}")
     _emit_controllers_changed()
@@ -472,15 +432,15 @@ def _publish_controller(controller) -> None:
 def _unpublish_controller(controller) -> None:
     """Remove a controller's object from the bus.
 
-    Main context only -- see unpublish_controller.
+    Main context only. See unpublish_controller.
     """
     if _bus is None:
         return  # already stopped, which unpublished everything
     serial = _serial_published_for(controller)
     if serial is None:
-        # Never published, already unpublished, or -- after a fast replug --
-        # the serial now belongs to the fresh controller, whose object must
-        # stay up. Identity, not serial, is what this call is about.
+        # The controller never published, or it already unpublished, or a fast
+        # replug gave the serial to a new controller whose object stays up.
+        # This call matches on controller identity, not on the serial.
         return
     instance = _controller_instances.pop(serial)
     _bus.unpublish_object(instance._object_path)
@@ -489,7 +449,7 @@ def _unpublish_controller(controller) -> None:
 
 
 def _serial_published_at(obj_path: str) -> str | None:
-    """The serial already published at `obj_path`, if any."""
+    """The serial already published at obj_path, if there is one."""
     for serial, instance in _controller_instances.items():
         if instance._object_path == obj_path:
             return serial
@@ -505,14 +465,12 @@ def _serial_published_for(controller) -> str | None:
 
 
 def _emit_controllers_changed() -> None:
-    """Tell clients watching the top-level object that the deck inventory
-    moved, so arrivals and removals are a signal rather than a poll.
+    """Tell the clients that the deck inventory changed.
 
-    Sent from the publish and unpublish workers, after the registry has been
-    updated -- so the value carried is the object set as it now stands, and a
-    client that read the property early is corrected by this rather than left
-    to poll. Reading it through the property keeps that one source: a payload
-    composed from anything else could announce a set nobody could address.
+    The publish and unpublish workers send this after they update the registry,
+    so the payload carries the current object set and corrects a client that
+    read the property early. The payload comes from the property itself, so it
+    never names a deck that no client can address.
     """
     if _api_instance is None:
         return
@@ -557,18 +515,13 @@ def notify_active_page_changed(serial: str, page_name: str) -> None:
 
 
 def notify_foreground_window_changed(name: str, wm_class: str) -> None:
-    """Update the ForegroundWindow on the top-level API object.
+    """Update ForegroundWindow on the top-level API object.
 
-    Call this from WindowGrabber.on_active_window_changed() so that
-    DBus clients see foreground window changes.
-
-    The active-window watcher is the only thing that calls this, and the
-    watcher runs only while some page has a window auto-change rule. So
-    ForegroundWindow tracks the desktop only while window rules are in use,
-    and otherwise stays at its initial empty value. That is deliberate:
-    feeding the property regardless would mean polling the desktop for the
-    property alone, which is exactly the background cost the gating removes.
-    NotifyForegroundWindow still updates it from outside at any time.
+    WindowGrabber.on_active_window_changed() calls this, so DBus clients see
+    the foreground window change. NotifyForegroundWindow can still set it.
     """
+    # That watcher runs only while a page holds a window auto-change rule, so
+    # the property tracks the desktop only then, and otherwise keeps its empty
+    # value. A constant feed would poll the desktop for the property alone.
     if _api_instance is not None:
         _api_instance.ForegroundWindow = WindowInfo(name, wm_class)

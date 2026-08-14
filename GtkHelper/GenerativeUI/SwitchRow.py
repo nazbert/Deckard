@@ -14,7 +14,7 @@ class SwitchRow(GenerativeUI[bool]):
     """
     A class that represents a switch row widget, allowing the user to toggle between two states: on (True) or off (False).
 
-    Inherits from `GenerativeUI` to manage the UI and provide common functionality for interactive elements.
+    Inherits from GenerativeUI to manage the UI and provide common functionality for interactive elements.
 
     Attributes:
         active (bool): The current state of the switch (True for on, False for off).
@@ -81,9 +81,9 @@ class SwitchRow(GenerativeUI[bool]):
 
     def get_active(self) -> bool:
         """
-        Retrieves the current state of the switch. Falls back to the
-        settings-backed value layer if the widget hasn't been built yet --
-        reading the state is a value query and must not force a build.
+        Retrieves the current state of the switch. It falls back to the
+        settings value layer while the widget is unbuilt, because a read is a
+        value query and must not force a build.
 
         Returns:
             bool: The current state of the switch (True for on, False for off).

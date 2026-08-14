@@ -16,7 +16,7 @@ class FileDialogRow(GenerativeUI[str]):
     from the file system. It includes functionality to display a dialog with filters and
     manage the file selection.
 
-    Inherits from `GenerativeUI` to provide generic UI management and functionality.
+    Inherits from GenerativeUI to provide generic UI management and functionality.
 
     Attributes:
         selected_file (Gio.File): The currently selected file in the dialog.
@@ -83,10 +83,9 @@ class FileDialogRow(GenerativeUI[str]):
 
     def get_file(self) -> Gio.File:
         """
-        Retrieves the currently selected file from the file dialog. Falls
-        back to the settings-backed value layer (a path string) if the
-        widget hasn't been built yet -- reading the selection is a value
-        query and must not force a build.
+        Retrieves the currently selected file from the file dialog. It falls
+        back to the settings value layer, a path string, while the widget is
+        unbuilt, because a read is a value query and must not force a build.
 
         Returns:
             Gio.File: The selected file in the file dialog.
@@ -106,9 +105,9 @@ class FileDialogRow(GenerativeUI[str]):
         """
         path = file.get_path()
         if path is None:
-            # Non-local GFiles (gvfs URIs with no FUSE mount) have no path.
+            # A non-local GFile, a gvfs URI with no FUSE mount, has no path.
             # The value layer stores a path string, so there is nothing to
-            # record -- keep the previous value rather than persisting None.
+            # record. Keep the previous value instead of writing None.
             return
         self._handle_value_changed(path)
 

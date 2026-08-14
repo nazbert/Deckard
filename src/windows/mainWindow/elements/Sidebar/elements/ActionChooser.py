@@ -78,9 +78,9 @@ class ActionChooser(Gtk.Box):
         self.search_entry.connect("search-changed", self.on_search_changed)
         self.main_box.append(self.search_entry)
 
-        # Created before the PluginGroup: its update() (called from the
-        # PluginGroup constructor and on every store install/uninstall)
-        # refreshes this label through update_empty_state().
+        # Create this before the PluginGroup. Its update() refreshes this
+        # label through update_empty_state(), and that update runs from the
+        # PluginGroup constructor and at every store install and uninstall.
         self.empty_state_label = Gtk.Label(
             wrap=True,
             justify=Gtk.Justification.CENTER,
@@ -121,8 +121,9 @@ class ActionChooser(Gtk.Box):
         self.empty_state_label.set_label(text)
         self.empty_state_label.set_visible(True)
 
-    def show(self, callback_function, current_stack_page, identifier: InputIdentifier, callback_args, callback_kwargs):  # type: ignore[override]  # gi stub: deliberately shadows Gtk.Widget.show() with the chooser's own "show for this action slot" entry point (its single caller is Sidebar.let_user_select_action)
-        # The current-stack_page is usefull in case the let_user_select_action is called by an plugin action in the action_configurator
+    def show(self, callback_function, current_stack_page, identifier: InputIdentifier, callback_args, callback_kwargs):  # type: ignore[override]  # gi stub: shadows Gtk.Widget.show() with the show-for-this-action-slot entry point of the chooser; its one caller is Sidebar.let_user_select_action
+        # current_stack_page matters when a plugin action in the
+        # action_configurator calls let_user_select_action.
 
         # Validate the callback function
         if not callable(callback_function):
@@ -226,11 +227,10 @@ class PluginGroup(BetterPreferencesGroup):
             # Show all
             return True
 
-        # Compare the *rounded* score: rapidfuzz returns a float where
-        # fuzzywuzzy returned int(round(...)), and a ratio of exactly 20 comes
-        # back as 19.999999999999996 -- one ULP below the threshold. Rounding
-        # keeps those matches visible, as they were before the swap. Sorting
-        # still uses the unrounded scores, which rank strictly finer.
+        # Compare the rounded score. rapidfuzz returns a float, and a ratio
+        # of exactly 20 comes back as 19.999999999999996, one unit in the last
+        # place below the threshold. The round keeps such a match visible. The
+        # sort still uses the unrounded scores, which rank more finely.
         if round(expander.highest_fuzz_score) >= MIN_ACTION_FUZZY_SCORE:
             return True
 
@@ -389,7 +389,7 @@ class PluginExpander(ActionChooserExpander):
 
     def set_group_identifier(self, input_type: InputIdentifier, group: ActionHolderGroup, row):
         return True
-        ## In case we want to hide groups later
+        # Kept for a later option to hide groups
         group_input_compatibility = group.get_min_input_compatibility(input_type)
 
         if group_input_compatibility <= ActionInputSupport.UNSUPPORTED:
@@ -430,11 +430,13 @@ class ActionGroupExpander(ActionChooserExpander):
             self.add_row(action_row)
 
     def on_expanded(self, *args):
-        # This expander is nested in another expander causing the icon to be stuck at the expanded state - this fixes it
+        # This expander sits inside another expander, which sticks the icon
+        # in the expanded state. The code below sets the icon.
         image = self.get_arrow_image()
         if image is None:
-            # libadwaita's internal expander tree did not have the shape
-            # get_arrow_image walks; the arrow just keeps its default state.
+            # The internal expander tree of libadwaita does not match the
+            # shape that get_arrow_image walks, so the arrow keeps its default
+            # state.
             return
         if self.get_expanded():
             image.set_css_classes(["expander-arrow-activated"])

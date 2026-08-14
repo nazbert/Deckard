@@ -98,11 +98,10 @@ class HeaderHamburgerMenuButton(Gtk.MenuButton):
 
     def get_contributer_list(self):
         try:
-            # Shared session: api.github.com rate-limits by IP, and the
-            # store hits the same endpoint -- going through http_client means
-            # this fetch retries a 429 and reuses a pooled connection like
-            # every other one. raise_for_status keeps urlopen's old semantics,
-            # where a non-2xx answer raised into the except below.
+            # Use the shared session. api.github.com rate-limits by IP, and
+            # the store calls the same endpoint, so a fetch through
+            # http_client retries a 429 and reuses a pooled connection.
+            # raise_for_status sends a non-2xx answer to the except below.
             response = http_client.get("https://api.github.com/repos/StreamController/StreamController/contributors", timeout=10)
             response.raise_for_status()
             data = response.json()
@@ -139,8 +138,8 @@ class HeaderHamburgerMenuButton(Gtk.MenuButton):
         self.about = Adw.AboutDialog()
         self.about.set_application_name("Deckard")
 
-        # Show the Deckard fork release version (gl.deckard_version), NOT
-        # gl.app_version -- the latter stays upstream-aligned for plugin compat.
+        # Show the Deckard fork release version, gl.deckard_version, and not
+        # gl.app_version, which tracks upstream for plugin compatibility.
         version = gl.deckard_version
         if gl.argparser.parse_args().devel:
             version += " devel"
@@ -208,10 +207,10 @@ class HeaderHamburgerMenuButton(Gtk.MenuButton):
         
         self.about.present(gl.app.get_active_window())
 
-        # The contributor list comes from the GitHub API -- fetching it here
-        # (synchronously) froze the whole UI for a full network round trip and
-        # hung indefinitely on a black-holed connection. Present the dialog
-        # immediately and fill the section in when (and if) the data arrives.
+        # The contributor list comes from the GitHub API. A fetch on this
+        # thread freezes the whole UI for one network round trip, and it hangs
+        # without limit on a dropped connection. Present the dialog at once,
+        # and fill the section when the data arrives.
         threading.Thread(
             target=self._fetch_contributors_async,
             args=(self.about,),

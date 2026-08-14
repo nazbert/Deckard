@@ -43,10 +43,10 @@ class PluginRecommendations(Gtk.Box):
         self.group.set_sort_func(self.sort_func)
         self.clamp.set_child(self.group)
 
-        # Error state for a failed store fetch: without it the
-        # fetch failure killed the loader thread and left the spinner up
-        # forever -- the user paged past, installed nothing, and landed in
-        # the main window with an empty Add-Action list.
+        # Error state for a failed store fetch. Without it the failure kills
+        # the loader thread and leaves the spinner running, so the user pages
+        # past, installs nothing, and reaches the main window with an empty
+        # Add-Action list.
         self.error_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, vexpand=True,
                                  valign=Gtk.Align.CENTER)
         self.main_stack.add_named(self.error_box, "error")
@@ -66,8 +66,8 @@ class PluginRecommendations(Gtk.Box):
         threading.Thread(target=self.load).start()
 
     def set_loading(self, loading: bool):
-        # Marshalled wholesale: load() calls this from a plain thread, and
-        # set_spinning is as much a GTK call as set_visible_child.
+        # The whole body marshals, because load() calls it from a plain
+        # thread, and set_spinning is a GTK call like set_visible_child.
         GLib.idle_add(self.loading_box.set_spinning, loading)
         GLib.idle_add(self.main_stack.set_visible_child,
                       self.loading_box if loading else self.scrolled_window)
@@ -86,15 +86,14 @@ class PluginRecommendations(Gtk.Box):
     def load(self):
         self.set_loading(True)
 
-        # Only the data fetch belongs on this thread. Building PluginRows
-        # (Adw.ActionRow + CheckButton) and group.add() ran here too -- the
-        # process-fatal off-main-GTK construction class, racing
-        # the carousel on every first launch.
+        # Only the data fetch belongs on this thread. A build of the
+        # PluginRows, which are an Adw.ActionRow and a CheckButton, and a
+        # group.add() call here are the off-main GTK construction class that
+        # kills the process, and they race the carousel at each first launch.
         #
-        # The fetch returns an Err when every store is unreachable (offline,
-        # GitHub rate limit); iterating the old untyped failure sentinel raised
-        # TypeError, killing this thread with the spinner still up on a fresh
-        # install. Err and any raising fetch get the same error state.
+        # The fetch returns an Err when every store is unreachable, which
+        # happens offline and under a GitHub rate limit. Both an Err and a
+        # raising fetch reach the same error state.
         try:
             result = gl.store_backend.get_all_plugins()
         except Exception as e:

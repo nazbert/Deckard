@@ -16,10 +16,10 @@ class ColorButtonRow(Adw.ActionRow):
 
         Description:
             This constructor creates a new ColorButtonRow widget. It sets up a Gtk.ColorButton for selecting
-            a color and assigns it to the row. The initial color is set based on the provided `default_color`
+            a color and assigns it to the row. The initial color is set based on the provided default_color
             tuple, which represents the color in RGBA format (each value ranges from 0 to 255).
 
-            Additionally, the color button is connected to the `color-set` signal, which triggers the `_on_color_changed`
+            Additionally, the color button is connected to the color-set signal, which triggers the _on_color_changed
             method when the color is modified. The color is stored internally as a tuple of integers representing
             the RGBA values.
 

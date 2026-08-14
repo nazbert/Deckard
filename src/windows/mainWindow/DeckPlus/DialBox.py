@@ -352,7 +352,8 @@ class Dial(Gtk.Frame):
             #TODO: Use read_value_async to read it instead - This is more like a temporary hack
             return
         
-        # Remove the old action objects - useful in case the same action base is used across multiple actions because we would have no way to differentiate them
+        # Remove the old action objects. Several actions can share one action
+        # base, and nothing else tells those actions apart.
         self.on_remove()
         
         controller = gl.app.main_win.get_active_controller()
@@ -390,11 +391,10 @@ class Dial(Gtk.Frame):
         if state_key not in self.identifier.get_states(active_page):
             return
 
-        # Taking the state out IS the save: inside the block the page's own
-        # lock is held, so the removal cannot be snapshotted halfway by a
-        # write in flight, and it is marked once on the way out. Re-read
-        # inside rather than reusing the dict the check above looked at,
-        # which was read without the lock.
+        # The removal of the state is the save. The block holds the page
+        # lock, so a write in flight cannot snapshot the removal half done,
+        # and the exit marks the page once. Read the dict again inside the
+        # block, because the check above read it without the lock.
         with active_page.edit():
             self.identifier.get_states(active_page).pop(state_key, None)
 
@@ -452,10 +452,10 @@ class DialContextMenu(Gtk.PopoverMenu):
         super().popup()
 
     def on_close(self, *args, **kwargs):
-        # Unparent on idle rather than inline: we're inside the "closed"
-        # signal emission, and unparenting the popover mid-emission can
-        # dispose the emitter out from under GTK. Guard so repeated fast
-        # right-clicks don't each queue a redundant unparent.
+        # Unparent on an idle, not here. This code runs inside the closed
+        # signal emission, and an unparent of the popover during that emission
+        # can dispose the emitter under GTK. The guard keeps fast repeated
+        # right-clicks from queueing one unparent each.
         if self._unparenting:
             return
         self._unparenting = True

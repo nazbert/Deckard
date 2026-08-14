@@ -24,7 +24,7 @@ from .PluginAbout import PluginAboutFactory
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    # Runtime import would cycle: Settings.py imports this module.
+    # A runtime import cycles, because Settings.py imports this module.
     from src.windows.Settings.Settings import Settings
 
 

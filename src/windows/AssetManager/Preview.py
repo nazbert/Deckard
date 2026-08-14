@@ -19,12 +19,11 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, GdkPixbuf, GLib, Pango
 
-# Import python modules
 from loguru import logger as log
 
-# Distinguishes "the caller handed us a pixbuf" (even a None one, meaning its
-# decode failed and the broken-image icon is what should show) from "the caller
-# said nothing about an image".
+# Separates a caller that passed a pixbuf, which can be None when the decode
+# failed and the broken-image icon must show, from a caller that said nothing
+# about an image.
 _PIXBUF_UNSET = object()
 
 
@@ -38,16 +37,16 @@ class Preview(Gtk.FlowBoxChild):
         self.set_margin_top(5)
         self.set_margin_bottom(5)
 
-        # None whenever no image is bound: a failed decode shows the
-        # broken-image icon instead (see show_broken_image).
+        # None while no image is bound. A failed decode shows the
+        # broken-image icon instead. See show_broken_image.
         self.pixbuf: GdkPixbuf.Pixbuf | None = None
         self.can_be_deleted = can_be_deleted
 
         self._build()
 
         if pixbuf is not _PIXBUF_UNSET:
-            # Already decoded by the caller -- off the main thread, for the
-            # pack grids (see GenericPackChooserPage.build).
+            # The caller decoded this already, off the main thread, for the
+            # pack grids. See GenericPackChooserPage.build.
             self.set_pixbuf(pixbuf)
         elif image_path is not None:
             self.set_image(image_path)
@@ -67,8 +66,8 @@ class Preview(Gtk.FlowBoxChild):
         self.picture.set_pixbuf(self.pixbuf)
         self.main_box.append(self.picture)
 
-        # Shown instead of the picture when the file can't be decoded.
-        # Hidden by default; set_image toggles it so recycled cells recover.
+        # Shows instead of the picture when the decode of the file fails. It
+        # starts hidden, and set_image toggles it, so a recycled cell recovers.
         self.broken_icon = Gtk.Image(icon_name="image-missing-symbolic", pixel_size=48,
                                      halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER,
                                      visible=False, tooltip_text="Could not load this file")
@@ -88,20 +87,20 @@ class Preview(Gtk.FlowBoxChild):
 
     @staticmethod
     def decode_pixbuf(path: str | None) -> GdkPixbuf.Pixbuf | None:
-        """Decodes `path` at preview size, or returns None if it can't be
-        decoded (missing, corrupt, unreadable).
+        """Decode path at preview size, or return None on a failed decode.
 
-        Deliberately touches no widget: a GdkPixbuf decode is file I/O, not
-        GTK widgetry, so it is safe OFF the main thread -- and it is slow
-        enough (~17 ms for a store thumbnail, ~110 ms for an oversized one)
-        that running it inside a main-loop callback freezes the window for
-        the whole pack grid at once. The pack choosers therefore decode on
-        their build worker and hand the result to set_pixbuf.
+        A missing, corrupt or unreadable file returns None. This method touches
+        no widget, because a GdkPixbuf decode is file I/O and not GTK work, so
+        it is safe off the main thread.
         """
-        # The None check must run BEFORE any str() coercion (str(None) is the
-        # truthy "None"), and the decode must be guarded: a corrupt/unreadable
-        # file raises GLib.Error and previously killed the (idle) callback,
-        # leaving the recycled cell showing a stale image.
+        # The decode is slow, about 17 ms for a store thumbnail and about
+        # 110 ms for an oversized one, so a run inside a main-loop callback
+        # freezes the window for a whole pack grid. The pack choosers therefore
+        # decode on their build worker and pass the result to set_pixbuf.
+        # The None check runs before any str() call, because str(None) gives
+        # the true string "None". The decode also needs the guard, because a
+        # corrupt or unreadable file raises GLib.Error, which kills the idle
+        # and leaves the recycled cell on a stale image.
         if path is None:
             return None
 
@@ -111,12 +110,12 @@ class Preview(Gtk.FlowBoxChild):
                                                            height=180,
                                                            preserve_aspect_ratio=True)
         except GLib.Error as e:
-            # Expected for a corrupt/unreadable file -- the message says why.
+            # A corrupt or unreadable file reaches here. The message says why.
             log.warning(f"Could not load asset preview for {path}: {e}")
             return None
         except Exception as e:
-            # Unexpected (programming error, not a poison file): keep the
-            # traceback so it stays distinguishable in the logs.
+            # An unexpected error, which means a defect and not a bad file.
+            # Keep the traceback, so the logs separate the two.
             log.opt(exception=True).warning(f"Unexpected error loading asset preview for {path}: {e}")
             return None
 
@@ -135,8 +134,11 @@ class Preview(Gtk.FlowBoxChild):
         self.broken_icon.set_visible(False)
 
     def show_broken_image(self) -> None:
-        """Marks this preview as broken: clears any (possibly recycled)
-        pixbuf and shows the themed "image-missing" icon instead."""
+        """Mark this preview as broken.
+
+        It clears the pixbuf, which can come from a recycled cell, and shows
+        the themed image-missing icon.
+        """
         self.pixbuf = None
         self.picture.set_pixbuf(None)
         self.broken_icon.set_visible(True)

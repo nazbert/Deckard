@@ -88,11 +88,11 @@ class StorePageSection(Gtk.Stack):
         author = item.author_label.get_text().lower()
         description = item.description_label.get_text().lower()
 
-        # Compare the *rounded* scores: rapidfuzz returns a float where
-        # fuzzywuzzy returned int(round(...)), and a ratio of exactly 20 comes
-        # back as 19.999999999999996 -- one ULP below the threshold, which
-        # would silently drop cards that used to match (e.g. "p" vs
-        # "OS Plugin"). sort_func keeps the unrounded scores for finer ranking.
+        # Compare the rounded scores. rapidfuzz returns a float, and a ratio
+        # of exactly 20 comes back as 19.999999999999996, one unit in the last
+        # place below the threshold, which drops a matching card such as "p"
+        # against "OS Plugin". sort_func keeps the unrounded scores for a
+        # finer ranking.
         name_score = round(fuzz.ratio(search_string, name))
         author_score = round(fuzz.ratio(search_string, author))
         description_score = round(fuzz.ratio(search_string, description))

@@ -84,12 +84,12 @@ class Store(Gtk.ApplicationWindow):
         self.back_button.connect("clicked", self.on_back_button_click)
         self.header.pack_start(self.back_button)
 
-        # P4.3: every page still gets its (cheap) widget skeleton built eagerly here so the
-        # StackSwitcher shows all tabs immediately and no external code ever sees a page
-        # attribute that doesn't exist yet -- but only the default/first tab (Plugins) starts
-        # its network fetch + content population (StorePage.load(), the actually expensive
-        # part) right away. The other three are deferred to on_switch(), the first time each
-        # becomes the visible child.
+        # Every page builds its cheap widget skeleton here, so the
+        # StackSwitcher shows all tabs at once and no outside code meets a
+        # missing page attribute. Only the first tab, Plugins, starts its
+        # network fetch and content population at once, which StorePage.load()
+        # performs and which costs the time. The other three wait for
+        # on_switch(), when each first becomes the visible child.
         self.plugin_page = PluginPage(store=self)
         self.icon_page = IconPage(store=self)
         self.wallpaper_page = WallpaperPage(store=self)
@@ -100,10 +100,10 @@ class Store(Gtk.ApplicationWindow):
         self.main_stack.add_titled(self.wallpaper_page, "Wallpapers", gl.lm.get("store.wallpapers.section"))
         self.main_stack.add_titled(self.sd_plus_bar_wallpaper_page, "sdPlusBarWallpapers", gl.lm.get("store.sdPlusBarWallpapers.section"))
 
-        # Keep the default/first tab eager so opening the store shows content immediately;
-        # don't rely on add_titled's implicit "first child becomes visible" notify to trigger
-        # this (harmless if on_switch's own on-visit ensure_loaded() beats it to it -- both are
-        # idempotent).
+        # Load the first tab here, so the store shows content as soon as it
+        # opens. Do not rely on the notify that add_titled sends when the
+        # first child becomes visible. The ensure_loaded() call in on_switch
+        # can also arrive first, and both calls are idempotent.
         self.plugin_page.ensure_loaded()
 
     def on_back_button_click(self, button: Gtk.Button):
@@ -112,8 +112,8 @@ class Store(Gtk.ApplicationWindow):
 
     def on_switch(self, *args):
         child: StorePage = self.main_stack.get_visible_child()
-        # P4.3: (re)loading is guarded by StorePage._loaded, so this is a no-op for tabs that
-        # are already loaded (including the eager default tab).
+        # StorePage._loaded guards the load, so this does nothing for a tab
+        # that already loaded, which includes the first tab.
         child.ensure_loaded()
 
         if child.get_visible_child_name() == "Info":

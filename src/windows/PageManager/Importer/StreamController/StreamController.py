@@ -43,12 +43,12 @@ class StreamControllerImporter:
             if ".json.json" in page_path:
                 page_path = page_path.replace(".json.json", ".json")
 
-            # An import replaces a page wholesale, so any write still pending
-            # for that path is writing a version the user just chose to
-            # discard -- and it would land AFTER this one and undo the
-            # import. Dropped rather than flushed, and scoped to the page
-            # path: save_json also writes deck settings, which the flush seam
-            # knows nothing about.
+            # An import replaces a whole page, so a write that still waits
+            # for that path holds a version that the user discarded, and it
+            # lands after this one and undoes the import. Drop it instead of
+            # flushing it, and scope the drop to the page path, because
+            # save_json also writes deck settings, which the flush seam does
+            # not cover.
             page_flush.get().discard_path(page_path)
 
             self.save_json(page_path, page)
@@ -60,11 +60,10 @@ class StreamControllerImporter:
 
         log.success("Imported all pages from StreamController")
 
-        # These pages are written wholesale, bypassing every page-settings
-        # setter, so an import carrying enabled window auto-change rules is
-        # the one way rules can appear with nothing to notice them. Without
-        # this the watcher would stay off for the rest of the session and
-        # the imported rules would simply not work.
+        # These pages go to disk whole, past every page-settings setter, so
+        # an import that carries enabled window auto-change rules is the one
+        # way such rules appear unnoticed. Without this call the watcher stays
+        # off for the rest of the session and the imported rules do nothing.
         if gl.page_manager is not None:
             gl.page_manager.refresh_window_watch_state()
 

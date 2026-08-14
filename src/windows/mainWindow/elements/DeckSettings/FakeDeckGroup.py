@@ -25,7 +25,7 @@ import globals as gl
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    # Runtime import would cycle: DeckSettingsPage imports this module.
+    # A runtime import cycles, because DeckSettingsPage imports this module.
     from src.windows.mainWindow.elements.DeckSettings.DeckSettingsPage import DeckSettingsPage
 
 # Import own modules

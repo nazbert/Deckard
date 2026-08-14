@@ -33,11 +33,11 @@ class StreamDeckUIImporter:
         return f"{x}x{y}"
     
     def save_json(self, json_path: str, data: dict, _retries: int = 3):
-        # Writes a page file wholesale, bypassing the page-settings setters.
-        # Safe today only because a StreamDeck-UI profile carries no window
-        # auto-change rules: the moment this importer can emit one, it must
-        # also call page_manager.refresh_window_watch_state() after its
-        # import loop, or the imported rules will not be watched for.
+        # Writes a whole page file, past the page-settings setters. That is
+        # safe only because a StreamDeck-UI profile carries no window
+        # auto-change rule. An importer that emits one must also call
+        # page_manager.refresh_window_watch_state() after its import loop, or
+        # the watcher misses the imported rules.
         atomic_write_json(json_path, data)
 
         loaded = None
@@ -55,11 +55,12 @@ class StreamDeckUIImporter:
                 log.error(f"Failed to save {json_path} after all retries, giving up")
             
     def allocate_page_paths(self, deck: str, page_names) -> dict[str, str]:
-        """Maps each export page name to a collision-free target path.
-        Computed up front for the whole deck so ChangePage cross-references
-        can point at the FINAL filenames -- and so an existing user page
-        named ui_<deck>_<n>.json is never overwritten (a numeric suffix is
-        appended instead)."""
+        """Map each export page name to a target path that collides with none.
+
+        The whole deck resolves first, so a ChangePage cross-reference points
+        at the final filename. An existing user page named ui_<deck>_<n>.json
+        also survives, because this appends a numeric suffix instead.
+        """
         pages_dir = os.path.join(gl.DATA_PATH, "pages")
         os.makedirs(pages_dir, exist_ok=True)
 
@@ -93,13 +94,13 @@ class StreamDeckUIImporter:
 
 
         for deck in self.export.get("state", {}):
-            ## Deck preferences -- merge into whatever deck settings already
-            ## exist; replacing the file wholesale erased every unrelated
-            ## section (rotation, key layout, ...) on import. Through the
-            ## settings store rather than straight to the file: a deck's
-            ## settings are served from a cache that a raw write leaves stale,
-            ## so an import used to be invisible to everything that had
-            ## already read that deck -- including the deck itself.
+            # Deck preferences merge into the deck settings that exist. A
+            # whole-file replacement erases every unrelated section, such as
+            # the rotation and the key layout. The write goes through the
+            # settings store and not to the file, because a cache serves the
+            # settings of a deck and a raw write leaves that cache stale, so
+            # the import stays invisible to every earlier reader, including
+            # the deck itself.
             with settings_store.get().edit(settings_store.DECK, deck) as preferences:
                 preferences.setdefault("brightness", {})["value"] = self.export["state"][deck].get("brightness", 75)
                 screensaver = preferences.setdefault("screensaver", {})
@@ -123,8 +124,9 @@ class StreamDeckUIImporter:
 
                     button_data = self.export["state"][deck]["buttons"][page_name][button]
 
-                    # Support both formats: with explicit "states" dict, or
-                    # flat format where properties are directly on the button
+                    # Support both formats. One holds an explicit "states"
+                    # dict, and the flat one holds the properties on the
+                    # button.
                     if "states" in button_data and button_data["states"]:
                         states = button_data["states"]
                     else:
@@ -145,9 +147,9 @@ class StreamDeckUIImporter:
                         page["keys"][coords]["states"][page_state]["labels"]["bottom"] = {
                             "text": state_data.get("text", None),
                             "color": hex_to_rgba255(font_color_hex),
-                            # Hyphenated: the keys Page/LabelManager read.
-                            # The old underscore spellings were dead keys
-                            # the loader never looked at.
+                            # Use the hyphenated keys, which Page and
+                            # LabelManager read. The loader reads no
+                            # underscore spelling.
                             "font-size": None,
                             "font-family": font_family_from_path(state_data.get("font"))
                         }
@@ -167,9 +169,9 @@ class StreamDeckUIImporter:
                                 if asset is not None:
                                     page["keys"][coords]["states"][page_state]["media"]["path"] = asset["internal-path"]
                                 else:
-                                    # add() refuses corrupt/unreadable icons
-                                    # -- skip the icon, keep the rest of the
-                                    # import.
+                                    # add() refuses a corrupt or unreadable
+                                    # icon. Skip the icon and keep the rest
+                                    # of the import.
                                     log.warning(f"Could not import icon {export_icon}, skipping")
                             else:
                                 log.warning(f"Icon {export_icon} not found, skipping")
@@ -191,7 +193,7 @@ class StreamDeckUIImporter:
                                 except (TypeError, ValueError):
                                     page_path = None
                                 if page_path is None:
-                                    # Target page not part of this export:
+                                    # This export holds no target page, so
                                     # keep the historical naming.
                                     page_path = os.path.join(gl.DATA_PATH, "pages", f"ui_{deck}_{export_switch_page}.json")
                                 action = {
@@ -266,11 +268,10 @@ class StreamDeckUIImporter:
 
 
                 page_path = page_paths[page_name]
-                # An import replaces a page wholesale, so a write still
-                # pending for that path would land after this one and undo
-                # it. Dropped here rather than inside save_json, so the
-                # barrier sits at the point the page is replaced and the
-                # writer stays a writer.
+                # An import replaces a whole page, so a write that still
+                # waits for that path lands after this one and undoes it. The
+                # drop happens here and not inside save_json, so the barrier
+                # sits where the page is replaced and save_json only writes.
                 page_flush.get().discard_path(page_path)
                 self.save_json(page_path, page)
                 # gl.signal_manager.trigger_signal(Signals.PageAdd, page_path) # We don't trigger the action to save ressources

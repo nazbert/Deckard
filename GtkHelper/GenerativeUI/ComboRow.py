@@ -13,10 +13,10 @@ from GtkHelper.GtkHelper import better_disconnect, on_main
 class ComboRow(GenerativeUI[BaseComboRowItem | str | None]):
     """
     A UI element representing a combo box (drop-down menu) with selectable items,
-    linked to an `ActionCore` instance. Values cross this class as either a
-    `BaseComboRowItem` (what the widget deals in), the plain `str` the value
-    layer persists, or None when nothing is selected -- hence the union type
-    parameter.
+    linked to an ActionCore instance. Values cross this class as either a
+    BaseComboRowItem (what the widget deals in), the plain str the value
+    layer persists, or None when nothing is selected. The type parameter is
+    therefore a union.
 
     Attributes:
         _widget (Combo): The ComboRow widget instance.
@@ -92,15 +92,17 @@ class ComboRow(GenerativeUI[BaseComboRowItem | str | None]):
         if trigger_callback and self.on_change:
             old_value = self.get_item(old_value)
 
-            # Raw widget reference (may be None) -- see base class's
-            # _handle_value_changed for why this must not force a build.
+            # The raw widget reference, which can be None. The base class
+            # _handle_value_changed says why this must not force a build.
             self.on_change(self._widget, item, old_value)
 
     def reset_value(self):
-        """Resets the selection to its default. An unbuilt row has no item
-        list to resolve old/new BaseComboRowItem values against, so it just
-        persists the default and skips the on_change callback -- it must
-        not force a build just to reset a setting."""
+        """Reset the selection to its default.
+
+        An unbuilt row has no item list to resolve the old and new
+        BaseComboRowItem values against, so it persists the default and skips
+        the on_change callback. A reset must not force a build.
+        """
         if self._widget is None:
             self.set_value(self._default_value)
             return

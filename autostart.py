@@ -21,11 +21,10 @@ import sys
 
 import appinfo
 
-# Autostart entries written under the pre-rename identity. The app-written
-# "StreamController.desktop" would relaunch an old-identity build at every
-# login; the id-named one is a flatpak portal remnant no code path removed on
-# native installs. Removed on every launch (self-healing), since a still-
-# installed old build could recreate them after the one-time data migration.
+# Autostart entries from the pre-rename identity. StreamController.desktop
+# relaunches an old-identity build at each login. The id-named one is a flatpak
+# portal remnant that no native code path removes. The app deletes both at
+# every launch, because an installed old build can write them again.
 LEGACY_AUTOSTART_NAMES = ("StreamController.desktop", appinfo.OLD_APP_ID + ".desktop")
 
 import gi
@@ -37,18 +36,13 @@ from loguru import logger as log
 def is_flatpak():
     return os.path.isfile('/.flatpak-info')
 
-# Orders setup_autostart() calls against the portal's async callback: the
-# callback may land long after a NEWER setup_autostart() call already changed
-# the on-disk state -- a stale callback must never clobber it (the classic
-# case: disable removes the entry synchronously, then the disable/enable
-# portal request fails asynchronously and the fallback re-installed a
-# flatpak-style entry exec'ing /app/bin/launch.sh, broken on native installs).
-#
-# No lock: setup_autostart() is called from the GTK main loop (the settings
-# switch's notify::active) and request_background_callback is also dispatched
-# on the main loop, so the counter is only ever touched by that single thread.
-# The generation stamp, not mutual exclusion, is what makes disable
-# authoritative over a stale callback.
+# Orders the setup_autostart() calls against the async portal callback. The
+# callback can land after a newer setup_autostart() call changed the on-disk
+# state, and the stale callback must not overwrite it. For example, disable
+# removes the entry, the portal request then fails, and the fallback writes a
+# flatpak-style entry that a native install cannot run.
+# The counter needs no lock. The GTK main loop runs both setup_autostart() and
+# request_background_callback, so one thread touches the counter.
 _autostart_generation = 0
 
 
@@ -57,9 +51,11 @@ def _current_autostart_generation() -> int:
 
 
 def remove_legacy_autostart_entries():
-    """Delete any pre-rename autostart entries. Runs on every launch so it
-    self-heals if a transient failure or a re-run of an old build leaves one
-    behind -- the old data-migration path could only do this once."""
+    """Delete the pre-rename autostart entries.
+
+    This runs at every launch, so a failed delete, or an old build that writes
+    an entry again, does not persist.
+    """
     autostart_dir = os.path.join(os.environ.get("HOME") or os.path.expanduser("~"),
                                  ".config", "autostart")
     for name in LEGACY_AUTOSTART_NAMES:
@@ -83,21 +79,19 @@ def setup_autostart(enable: bool = True):
     if is_flatpak():
         setup_autostart_flatpak(enable, generation)
         if not enable:
-            # Also remove any manual fallback entry a previous failed portal
-            # request may have left behind.
+            # Also remove the manual fallback entry that a failed portal
+            # request left behind.
             setup_autostart_desktop_entry(False)
     else:
-        # Native installs never go through the portal: its async callback was
-        # the racing writer that re-installed a flatpak-style entry after the
-        # synchronous removal. The native desktop file is the only correct
-        # entry here, for enable and disable alike.
+        # A native install does not use the portal. Its async callback races
+        # the removal and writes a flatpak-style entry. The native desktop file
+        # is the only correct entry here, for enable and for disable.
         setup_autostart_desktop_entry(enable, native=True)
 
 
 def setup_autostart_flatpak(enable: bool = True, generation: int = None):
-    """
-    Use portal to autostart for Flatpak
-    Documentation:
+    """Set the flatpak autostart through the background portal.
+
     https://libportal.org/method.Portal.request_background.html
     https://libportal.org/method.Portal.request_background_finish.html
     https://docs.flatpak.org/de/latest/portal-api-reference.html#gdbus-org.freedesktop.portal.Background
@@ -111,13 +105,12 @@ def setup_autostart_flatpak(enable: bool = True, generation: int = None):
         if success:
             return
         if generation is not None and generation != _current_autostart_generation():
-            # A newer setup_autostart() call superseded this request; its
-            # outcome, not ours, owns the on-disk state now.
+            # A newer setup_autostart() call replaced this request, and its
+            # outcome owns the on-disk state.
             log.info("Skipping stale autostart fallback (superseded request)")
             return
-        # Fall back to a manual desktop entry -- honoring the ORIGINAL
-        # intent: a failed disable request must remove (never re-create)
-        # the entry.
+        # Fall back to a manual desktop entry, and keep the original intent.
+        # A failed disable request removes the entry and does not write it.
         setup_autostart_desktop_entry(enable)
 
     xdp = Xdp.Portal.new()
@@ -125,7 +118,6 @@ def setup_autostart_flatpak(enable: bool = True, generation: int = None):
     try:
         flag = Xdp.BackgroundFlags.AUTOSTART if enable else Xdp.BackgroundFlags.ACTIVATABLE
 
-        # Request Autostart
         xdp.request_background(
             None,  # parent
             "Autostart Deckard",  # reason
@@ -154,7 +146,7 @@ def setup_autostart_desktop_entry(enable: bool = True, native: bool = False):
         else:
             try:
                 os.makedirs(os.path.dirname(AUTOSTART_DESKTOP_PATH), exist_ok=True)
-                copy_desktop_file(os.path.join(gl.MAIN_PATH, "flatpak", "autostart.desktop"), AUTOSTART_DESKTOP_PATH, True) # flatpak entry: Exec is the sandbox launcher, kept verbatim
+                copy_desktop_file(os.path.join(gl.MAIN_PATH, "flatpak", "autostart.desktop"), AUTOSTART_DESKTOP_PATH, True) # flatpak entry; Exec is the sandbox launcher, kept verbatim
                 log.info(f"Autostart set up at: {AUTOSTART_DESKTOP_PATH}")
             except Exception as e:
                 log.error(f"Failed to set up autostart at: {AUTOSTART_DESKTOP_PATH} with error: {e}")
@@ -167,11 +159,10 @@ def setup_autostart_desktop_entry(enable: bool = True, native: bool = False):
                 log.error(f"Failed to remove autostart from: {AUTOSTART_DESKTOP_PATH} with error: {e}")
 
 def ensure_app_desktop_entry():
-    """Install/refresh ~/.local/share/applications/<app id>.desktop.
+    """Install or refresh ~/.local/share/applications/<app id>.desktop.
 
-    On Wayland the compositor maps a window's app_id (the GtkApplication id)
-    to a desktop file of the same name to find its taskbar/dock icon; on
-    source installs nothing else provides one.
+    A Wayland compositor maps the window app_id to a desktop file of the same
+    name to find the taskbar icon. A source install has no other source.
     """
     if is_flatpak():
         return
@@ -181,18 +172,16 @@ def ensure_app_desktop_entry():
 
 
 def _launcher_exec(extra_args: str = "") -> str:
-    """Absolute launch command for generated native desktop entries, so they
-    work without the optional ~/.local/bin/deckard PATH symlink.
+    """Absolute launch command for the generated native desktop entries.
 
-    Prefer the wrapper when it is on PATH (it exports the MALLOC_* vars that
-    let main.py skip its self-re-exec); otherwise self-reference the running
-    interpreter and main.py -- always resolvable, never a dangling command.
+    An absolute command works without the optional ~/.local/bin/deckard
+    symlink. The wrapper on PATH comes first, because it exports the MALLOC_
+    variables that let main.py skip its re-exec. Otherwise use this interpreter.
     """
     import globals as gl
     wrapper = shutil.which("deckard")
-    # Quote each path component: a checkout or venv path containing a space
-    # would otherwise render an Exec= line the desktop spec word-splits into
-    # a broken argv (the dangling-launch class this rewrite exists to avoid).
+    # Quote each path component. A checkout or venv path with a space makes an
+    # Exec= line that the desktop spec word-splits into a broken argv.
     if wrapper:
         cmd = shlex.quote(wrapper)
     else:
@@ -201,12 +190,11 @@ def _launcher_exec(extra_args: str = "") -> str:
 
 
 def _install_desktop_file(template_name: str, target: str, exec_args: str = ""):
-    """Write a native desktop entry from a flatpak/ template, rewriting Icon=
-    to an absolute repo path and Exec= to an absolute launch command, and
-    skipping the write when the target is already byte-identical.
+    """Write a native desktop entry from a flatpak template.
 
-    The compare-before-write avoids a needless mtime bump that makes desktop
-    environments re-scan their application cache on every launch.
+    Icon= becomes an absolute repo path, and Exec= becomes an absolute launch
+    command. An identical target skips the write, because a new mtime makes the
+    desktop environment re-scan its application cache at every launch.
     """
     import globals as gl
     source = os.path.join(gl.MAIN_PATH, "flatpak", template_name)
@@ -223,7 +211,7 @@ def _install_desktop_file(template_name: str, target: str, exec_args: str = ""):
     try:
         with open(target) as f:
             if f.read() == content:
-                return  # unchanged -- skip the write and the DE cache churn
+                return  # unchanged, so skip the write and the cache re-scan
     except OSError:
         pass
     try:
@@ -240,7 +228,6 @@ def copy_desktop_file(source: str, target: str, overwrite: bool = False):
         log.info(f"Desktop file already exists at: {target}")
         return
     
-    # Check that source exists
     if not os.path.exists(source):
         log.error(f"Desktop file does not exist at: {source}")
         return

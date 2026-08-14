@@ -44,8 +44,8 @@ class PageEditor(Adw.NavigationPage):
     def __init__(self, page_manager: "PageManager"):
         super().__init__(title=gl.lm.get("page-manager.page-editor.title"))
         self.page_manager = page_manager
-        # None until load_for_page runs -- the editor opens on its
-        # "no page selected" stack child (see delete_active_page).
+        # None until load_for_page runs. The editor opens on its stack child
+        # for no page selected. See delete_active_page.
         self.active_page_path: str | None = None
         self.build()
 
@@ -252,9 +252,9 @@ class DefaultPageGroup(PageEditorGroup):
         if not state:
             path = None
 
-        # None clears the deck's default page -- see
+        # None clears the default page of the deck. See
         # PageManagerBackend.get_all_default_page_serial_numbers, which skips
-        # falsy entries.
+        # a falsy entry.
         gl.page_manager.set_default_page(serial_number, path)
 
 class AutoChangeGroup(PageEditorGroup):
@@ -625,12 +625,12 @@ class ScreensaverGroup(PageEditorGroup):
         better_disconnect(self.delay_spin, self.on_delay_changed)
         better_disconnect(self.loop_toggle, self.on_loop_changed)
         better_disconnect(self.fps_spin, self.on_fps_changed)
-        # .scale, not the row: the handler is connected to the inner scale, and
-        # better_disconnect swallows a miss -- so naming the row here left the
-        # handler attached and selecting another page in the list added one
-        # more, until every load of the row wrote the brightness it had just
-        # displayed back to the page and reapplied it to the deck, once per
-        # page ever selected.
+        # Pass .scale, not the row. The handler connects to the inner scale,
+        # and better_disconnect accepts a miss without a word, so the row name
+        # here leaves the handler attached and each new page selection adds
+        # another. Every load of the row then writes the brightness it just
+        # showed back to the page, and applies it to the deck again, once per
+        # selected page.
         better_disconnect(self.brightness_scale.scale, self.on_brightness_changed)
         better_disconnect(self.media_selector_button, self.on_media_selector_click)
 
@@ -644,11 +644,10 @@ class ScreensaverGroup(PageEditorGroup):
 
         self.enable_screensaver_toggle.set_active(screensaver_settings.get("enable", False))
         self.delay_spin.set_value(screensaver_settings.get("time-delay", 5))
-        self.loop_toggle.set_active(screensaver_settings.get("loop", True))  # default: loop on
+        self.loop_toggle.set_active(screensaver_settings.get("loop", True))  # loop is on by default
         self.fps_spin.set_value(screensaver_settings.get("fps", 30))
-        # 30, the value the deck actually dims to when nothing is stored --
-        # this slider used to show 75, which is the RUNNING brightness and
-        # what no screensaver has ever applied.
+        # 30 is the value that the deck dims to when nothing is stored. 75 is
+        # the running brightness, which no screensaver applies.
         self.brightness_scale.set_value(screensaver_settings.get("brightness", 30))
 
         self.set_thumbnail(screensaver_settings.get("media-path", None))
@@ -757,19 +756,18 @@ class MatchingWindowExpander(BetterExpander):
             self.add_row(Adw.ActionRow(title=window.title, subtitle=window.wm_class, use_markup=False))
 
     def update_matching_windows(self, *args):
-        # The regexes are read here, on the main thread, because they come
-        # from widgets; the query itself must not run here. Listing windows
-        # shells out once per window on most desktops -- and builds the
-        # window grabber's integration on first use, which probes for a
-        # helper binary -- so on the main thread it stalls the UI it is
-        # about to update.
+        # Read the regexes here, on the main thread, because they come from
+        # widgets. The query itself must not run here. A window listing calls
+        # a subprocess once per window on most desktops, and the first call
+        # builds the integration of the window grabber, which probes for a
+        # helper binary. On the main thread that stalls the UI that it
+        # updates.
         class_regex = self.auto_change_group.wm_class_entry.get_text()
         title_regex = self.auto_change_group.title_entry.get_text()
 
         # Each refresh click and each regex apply queues its own query, and
-        # they can finish out of order -- so the list is only replaced by the
-        # newest one. Nothing serialized them before; nothing had to, while
-        # the query ran inline.
+        # they can finish out of order, so only the newest one replaces the
+        # list.
         self._query_generation += 1
         run_in_background(self._load_matching_windows, class_regex, title_regex,
                           self._query_generation)
@@ -783,7 +781,7 @@ class MatchingWindowExpander(BetterExpander):
 
     def _show_matching_windows(self, windows: list[Window], generation: int):
         if generation != self._query_generation:
-            # A newer query has been issued since: this list is already out
-            # of date, and showing it would undo the newer answer.
+            # A newer query started, so this list is out of date, and a show
+            # here undoes the newer answer.
             return
         self.load_windows(windows=windows)

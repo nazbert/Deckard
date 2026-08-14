@@ -7,37 +7,29 @@ from packaging.version import InvalidVersion
 
 
 def is_min_app_version_satisfied(minimum_app_version: str | None) -> bool:
-    """THE minimum-app-version gate for store assets -- the single
-    implementation behind StorePreview.check_required_version.
+    """The minimum-app-version gate for a store asset.
 
-    It used to exist as four drifting copies (StorePage, PluginPage,
-    StorePreview, PluginPreview), each comparing with a strict `<` that
-    flagged an asset requiring EXACTLY the running version incompatible.
-    Inclusive by design: requiring the running version is satisfied.
-
-    Compares BASE versions (pre-release/post/local suffixes stripped),
-    matching what the runtime plugin loader actually decides
-    (PluginBase.is_minimum_version_ok via _get_parsed_base_version). Without
-    this, running a pre-release like 1.5.0-beta.15 made the store badge an
-    asset requiring 1.5.0 as incompatible while the loader would load it
-    fine -- the displayed verdict must match the install-time verdict.
-
-    Fails open (True, with a warning) on an unparseable version string --
-    consistent with the None case; a malformed remote catalog entry must
-    not raise out of a store page build.
+    It is the one implementation behind StorePreview.check_required_version.
+    The comparison includes the running version, so an asset that requires
+    exactly the running version passes.
     """
-    import globals as gl  # deferred: keep this leaf module cycle-free
+    import globals as gl  # deferred, to keep this leaf module cycle-free
 
     if minimum_app_version is None:
         return True
     try:
-        # .base_version drops pre/post/dev/local segments the same way the
-        # runtime gate does; re-parse so the comparison is version-aware,
-        # not a string compare.
+        # .base_version drops the pre, post, dev and local segments the same
+        # way PluginBase.is_minimum_version_ok does, and the re-parse keeps the
+        # comparison version-aware instead of a string compare. Without that, a
+        # pre-release such as 1.5.0-beta.15 badges an asset that requires 1.5.0
+        # as incompatible while the loader loads it, and the badge must match
+        # the install-time verdict.
         minimum = version.parse(version.parse(minimum_app_version).base_version)
         running = version.parse(version.parse(gl.app_version).base_version)
         return minimum <= running
     except InvalidVersion:
+        # An unparseable version string returns True, which matches the None
+        # case. A malformed catalog entry must not raise out of a page build.
         log.warning(
             f"Unparseable minimum app version {minimum_app_version!r}; assuming compatible"
         )
@@ -47,9 +39,9 @@ def is_min_app_version_satisfied(minimum_app_version: str | None) -> bool:
 @dataclass
 class StoreData:
     github: str | None = None # Link to the github repository
-    # StoreBackend passes `... or None` for every one of these, so absent is
-    # None, not an empty container (LocaleManager.get_custom_translation
-    # answers "" for None but None for {} -- the two are not interchangeable).
+    # StoreBackend passes "... or None" for each of these, so an absent value
+    # is None and not an empty container. LocaleManager.get_custom_translation
+    # returns "" for None and None for an empty dict, so the two differ.
     descriptions: dict[str, str] | None = field(default_factory=dict) # All the translations for the description
     short_descriptions: dict[str, str] | None = field(default_factory=dict) # All the translations for the short descriptions
     description: str | None = None # Translated Description of the Content
@@ -57,7 +49,7 @@ class StoreData:
     author: str | None = None # Author of the Content
     official: bool | None = None # If the Content is Officially Made or not
     commit_sha: str | None = None # SHA of the github commit that gets used
-    local_sha: str | None = None # The Local SHA that is used to verify if plugins are installed
+    local_sha: str | None = None # The local SHA that verifies whether a plugin is installed
     minimum_app_version: str | None = None # Minimum app version that is required to use the Content
     app_version: str | None = None # The Current app version the Plugin is made for
     repository_name: str | None = None # Name of the Repository
@@ -78,16 +70,16 @@ class LicenceData:
     license: str | None = None # The actual licence
     license_descriptions: dict[str, str] | None = field(default_factory=dict) # Translations for the Licence Description
 
-# Each concrete class below names its id/name/version triple differently
-# (plugin_id, icon_id, wallpaper_id, bare id ...). The canonical asset_id /
-# asset_name / asset_version properties give shared backend code and log lines
-# one name for that triple, so the pipelines that used to getattr a per-type
-# field name read a property instead. Read-only by design -- the per-type
-# fields stay the writable source of truth.
+# Each concrete class below names its id, name and version triple
+# differently, such as plugin_id, icon_id or wallpaper_id. The asset_id,
+# asset_name and asset_version properties give the shared backend code and the
+# log lines one name for that triple, so a pipeline reads a property instead
+# of a per-type field name. The properties are read-only, and the per-type
+# fields stay writable.
 #
-# The name asset_id is overloaded inside StoreBackend: this catalog *Data
-# property is the manifest id, distinct from InstalledAsset.asset_id (an
-# install-directory name) and UpdateCheck.asset_id (the matched install's id).
+# StoreBackend uses the name asset_id for three things. This catalog property
+# holds the manifest id. InstalledAsset.asset_id holds an install-directory
+# name. UpdateCheck.asset_id holds the id of the matched install.
 
 @dataclass
 class PluginData(StoreData, ImageData, LicenceData):

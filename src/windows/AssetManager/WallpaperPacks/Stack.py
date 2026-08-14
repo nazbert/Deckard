@@ -46,10 +46,10 @@ class WallpaperPackChooserStack(Gtk.Stack):
         self.add_titled(self.wallpaper_chooser, "wallpaper-chooser", "Wallpaper Chooser")
 
     def show_for_path(self, path):
-        # dead path: AssetChooser.show_for_path (the only entry point) routes
-        # pre-selection to the custom-asset or icon-pack chooser only, never
-        # here. If this is ever wired up, the tab below must be set to
-        # "wallpaper-packs" (not "icon-packs", a copy-paste carryover).
+        # No caller reaches this method. AssetChooser.show_for_path is the
+        # one entry point, and it routes a pre-selection to the custom-asset
+        # chooser or to the icon-pack chooser. A future caller must set the
+        # tab below to wallpaper-packs, because icon-packs is wrong here.
         packs = gl.wallpaper_pack_manager.get_wallpaper_packs()
         for pack in packs.values():
             wallpapers = pack.get_wallpapers()

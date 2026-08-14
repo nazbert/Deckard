@@ -17,7 +17,6 @@ from typing import Any
 
 from typing_extensions import deprecated
 
-# Import gtk modules
 import gi
 
 from src.backend.DeckManagement.HelperMethods import open_web
@@ -26,18 +25,17 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib
 
-# Import Python modules
 from loguru import logger as log
 
 # Import the translation accessor
 from src.backend.services import tr
 
-# The thread kit lives in the toolkit-free src/backend/main_loop.py so engine
-# code can marshal to the main loop without importing the widget stack.
-# Re-exported here unchanged: every plugin imports these names from GtkHelper.
-# Note RUN_ON_MAIN_TIMEOUT_S is deliberately NOT re-bound here -- run_on_main
-# reads it from main_loop at call time, so a copy in this namespace would be a
-# dead write. Patch src.backend.main_loop.RUN_ON_MAIN_TIMEOUT_S instead.
+# The thread kit lives in the toolkit-free src/backend/main_loop.py, so engine
+# code marshals to the main loop without an import of the widget stack. These
+# names re-export here unchanged, because every plugin imports them from
+# GtkHelper. RUN_ON_MAIN_TIMEOUT_S does not re-bind here. run_on_main reads it
+# from main_loop at call time, so a copy in this namespace is a dead write.
+# Patch src.backend.main_loop.RUN_ON_MAIN_TIMEOUT_S instead.
 from src.backend.main_loop import (  # noqa: F401  (re-export for plugins)
     background,
     on_main,
@@ -332,7 +330,7 @@ class EntryDialog(Gtk.ApplicationWindow):
         Sets the status of the dialog
 
         Args:
-            status (int): The status of the dialog: 0: no name; 1:already in use; 2:ok
+            status (int): 0 for no name, 1 for already in use, 2 for ok
         """
         if status == 0:
             # Label

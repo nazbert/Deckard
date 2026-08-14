@@ -25,7 +25,7 @@ class ScaleRow(Adw.ActionRow):
 
         Description:
             This constructor creates a row containing a horizontal scale widget with optional labels for the minimum
-            and maximum values. If `add_text_entry` is set to True, a text entry field is included that allows the user
+            and maximum values. If add_text_entry is set to True, a text entry field is included that allows the user
             to enter a value directly. The value entered will be synchronized with the scale. The constructor also sets up
             necessary signal handlers to ensure that changes to the scale or text entry are appropriately handled.
     """

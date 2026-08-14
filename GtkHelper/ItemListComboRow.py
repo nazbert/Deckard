@@ -41,7 +41,7 @@ class ItemListComboRowListItem(GObject.Object):
 class ItemListComboRow(Adw.ComboRow):
     """
     A primitive wrapper, to make simple "combo box"-style selections.
-    You likely want to `.connect("notify::selected", ...)`, and then call `get_selected_item()` there,
+    You likely want to .connect("notify::selected", ...), and then call get_selected_item() there,
     to get the ListItem (key-name-pair) again
     Based on https://discourse.gnome.org/t/migrate-from-comboboxtext-to-comborow-dropdown/10565/2
     """

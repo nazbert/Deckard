@@ -45,8 +45,8 @@ class PluginPage(StorePage):
         self.compatible_section.search_entry.set_placeholder_text(gl.lm.get("store.plugins.search-placeholder"))
         self.incompatible_section.search_entry.set_placeholder_text(gl.lm.get("store.plugins.search-placeholder"))
 
-    # No @log.catch here: StorePage._load_guarded needs to SEE the failure to
-    # show the error page and re-arm the tab for a retry.
+    # Carry no @log.catch here. StorePage._load_guarded must see the failure,
+    # so it can show the error page and arm the tab for a retry.
     def load(self):
         self.set_loading()
         result = self.store.backend.get_all_plugins()
@@ -94,32 +94,35 @@ class PluginPreview(StorePreview):
 
     @staticmethod
     def get_install_state_for(plugin_data: PluginData) -> int:
-        """0 = not installed, 1 = installed (nothing to offer), 2 = update
-        available. An installed plugin whose pinned store version is
-        incompatible (is_compatible False -- prepare_plugin pins the newest
-        commit of ANOTHER app major when no compatible one exists) reads as
-        state 1: offering that update would replace a working plugin with an
-        incompatible build, exactly what get_plugins_to_update refuses to do
-        on the auto-update path."""
+        """0 is not installed, 1 is installed, and 2 is update available.
+
+        An installed plugin whose pinned store version is incompatible reads
+        as state 1. is_compatible is then False, because prepare_plugin pins
+        the newest commit of another app major when no compatible one exists.
+        That update would replace a working plugin with an incompatible build,
+        which get_plugins_to_update also refuses on the auto-update path.
+        """
         if plugin_data.local_sha is None:
             return 0
         if plugin_data.local_sha == plugin_data.commit_sha:
             return 1
         if plugin_data.commit_sha is None:
-            # Unresolved remote tip (branch-pinned plugin whose get_last_commit
-            # returned None -- 429/empty). commit_sha None != local_sha would
-            # otherwise flash a spurious "update available" badge whose install
-            # can only hard-404. There is no known target to update to.
+            # The remote tip is unresolved, because get_last_commit returned
+            # None for a branch-pinned plugin, after a 429 or an empty answer.
+            # A None commit_sha differs from local_sha, which would show an
+            # update-available badge whose install can only return 404. No
+            # known target exists to update to.
             return 1
         if plugin_data.is_compatible is False:
             return 1
         return 2
 
     def install(self) -> bool:
-        """Runs on the store's download worker thread; returns whether the
-        install actually succeeded. Success is anything but an Err -- a failed
-        install used to be discarded and the button flipped to 'installed'
-        anyway."""
+        """Run on the download worker thread. Returns True on a real install.
+
+        Any result other than an Err counts as success. A failed install must
+        not move the button to installed.
+        """
         backend = self.store.backend
         if backend is None:
             log.error("Store backend unavailable; cannot install "
@@ -140,9 +143,9 @@ class PluginPreview(StorePreview):
         GLib.idle_add(self.set_install_state, 0)
 
     def update(self):
-        # install_plugin deregisters the old version only after its download
-        # succeeded, so a failed update leaves the old version installed AND
-        # registered -- no recovery reload needed here.
+        # install_plugin deregisters the old version only after the download
+        # succeeds, so a failed update leaves the old version installed and
+        # registered. No recovery reload runs here.
         self.install()
 
     def notify_install_failure(self):
@@ -168,5 +171,5 @@ class PluginPreview(StorePreview):
         self.plugin_page.info_page.set_license_description(
             gl.lm.get_custom_translation(license_descriptions) if license_descriptions is not None else "")
 
-    # check_required_version is inherited from StorePreview -- one shared
-    # implementation (StoreData.is_min_app_version_satisfied), no copies.
+    # check_required_version comes from StorePreview, which calls the one
+    # implementation in StoreData.is_min_app_version_satisfied.

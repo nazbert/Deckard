@@ -35,8 +35,8 @@ class SearchComboRow(Adw.PreferencesRow):
     }
 
     def __init__(self, title: str, use_single_line: bool = False, **kwargs):
-        # No *args: Adw.PreferencesRow is a GObject, whose constructor takes
-        # keyword properties only -- any positional extra raised TypeError.
+        # Take no positional arguments. Adw.PreferencesRow is a GObject, and
+        # its constructor takes keyword properties only.
         super().__init__(title=title, **kwargs)
         self.search_text = '' # Initial search text for widgets
 

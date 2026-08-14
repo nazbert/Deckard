@@ -73,29 +73,30 @@ class DeckStack(Gtk.Stack):
             return
         deck_number, deck_type = attr
 
-        # Clear any previous binding BEFORE constructing the new child:
-        # KeyGrid.__init__ runs load_from_changes() during
-        # construction, and its touchscreen branch replays dirty markers into
-        # whatever screenbar it can resolve -- on a window rebuild a stale
-        # binding would consume the markers into dead widgets and leave the
-        # new screenbar with nothing to replay on map. Unbound, that replay
-        # defers and the markers survive for the new widgets.
-        # Duck-typed, not isinstance(GtkUIAdapter): a wrapper/proxy port
-        # (a recording port in tests, an IPC forwarder later) implements the
-        # same bind/unbind pair without inheriting, and an isinstance gate
-        # would silently drop every binding for it.
+        # Clear the earlier binding before the construction of the new child.
+        # KeyGrid.__init__ calls load_from_changes() during the construction,
+        # and its touchscreen branch replays the dirty markers into whatever
+        # screenbar it resolves. On a window rebuild a stale binding feeds
+        # those markers to dead widgets, and the new screenbar has nothing to
+        # replay on the map. Without a binding the replay defers, and the
+        # markers survive for the new widgets.
+        #
+        # The lookup is duck-typed and not an isinstance(GtkUIAdapter) test. A
+        # wrapper port, such as a recording port in a test or an IPC
+        # forwarder, implements the same bind and unbind pair without
+        # inheriting, and an isinstance gate drops every binding for it.
         adapter = ui_port.get()
         unbind = getattr(adapter, "unbind", None)
         if callable(unbind):
             unbind(deck_controller)
         page = DeckStackChild(self, deck_controller)
         self.add_titled(page, deck_number, deck_type)
-        # Bind by reference only once the child is actually in the stack:
-        # resolving by stack-child NAME re-read the serial from the device
-        # and silently missed forever if either read was wrong (USB
-        # contention at boot) or the window was rebuilt. Binding after
-        # add_titled also means an exception mid-construction can never
-        # leave the controller bound to a child that is not in the stack.
+        # Bind by reference, and only after the child reaches the stack. A
+        # lookup by stack-child name reads the serial from the device again,
+        # and it misses for good when either read is wrong, which USB
+        # contention at boot causes, or when the window rebuilds. A bind after
+        # add_titled also keeps an exception during the construction from
+        # leaving the controller bound to a child that is not in the stack.
         bind = getattr(adapter, "bind", None)
         if callable(bind):
             bind(deck_controller, page)
@@ -112,9 +113,9 @@ class DeckStack(Gtk.Stack):
         
         deck_type = deck_controller.deck.deck_type()
         try:
-            # The controller's cached accessor, not a fresh device read: this
-            # string becomes the stack-child name, and every consumer must
-            # agree on one value even if a later device read would differ.
+            # Use the cached accessor of the controller, not a fresh device
+            # read. This string becomes the stack-child name, and every reader
+            # must see one value, even when a later device read differs.
             serial_number = deck_controller.serial_number()
         except Exception as e:
             log.error(e)
@@ -126,9 +127,9 @@ class DeckStack(Gtk.Stack):
             self.deck_names.append(deck_type)
             self.deck_attributes[deck_controller] = deck_number, deck_type
             return deck_number, deck_type
-        # Name already exists: disambiguate with a "(n)" suffix. Never mutate
-        # the model name's own digits -- that turned a second
-        # "Stream Deck MK.2" into "Stream Deck MK.3".
+        # The name exists, so add a "(n)" suffix. Never change the digits in
+        # the model name, because that turns a second "Stream Deck MK.2" into
+        # "Stream Deck MK.3".
         base_type = deck_type
         suffix = 2
         while deck_type in self.deck_names:
@@ -158,11 +159,10 @@ class DeckStack(Gtk.Stack):
                 self.remove(page.get_child())
                 break
 
-        # Purge the controller's cached attributes regardless of whether it
-        # was ever visible (plan P1.3/design doc bug 2): left in place, these
-        # kept the dead controller reachable (deck_attributes is keyed by the
-        # controller object itself) and grew one stale entry per unplug/
-        # replug forever.
+        # Drop the cached attributes of the controller, whether or not it was
+        # visible. deck_attributes is keyed by the controller object, so an
+        # entry that stays keeps the dead controller reachable, and each
+        # unplug and replug adds one more stale entry.
         attr = self.deck_attributes.pop(deck_controller, None)
         if attr is not None:
             deck_number, _deck_type = attr

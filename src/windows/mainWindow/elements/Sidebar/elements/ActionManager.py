@@ -250,19 +250,18 @@ class ActionExpanderRow(BetterExpander):
         image_control_action_index = state_dict.get("image-control-action")
         state_dict["image-control-action"] = action_order_map.get(image_control_action_index, None)
 
-        # The background permission must follow its action just like the
-        # image permission does; this remap was missing (latent while the
-        # reorder buttons were dead), leaving the persisted index pointing
-        # at whatever action slid into the old slot.
+        # The background permission follows its action, as the image
+        # permission does. Without this remap the persisted index points at
+        # whatever action moved into the old slot.
         background_control_action_index = state_dict.get("background-control-action")
         state_dict["background-control-action"] = action_order_map.get(background_control_action_index, None)
 
-        # The key can be absent on pages that were never touched by
-        # add_action (hand-edited/imported/legacy). Default like
-        # ActionPermissionManager.get_label_control_indices does instead of
-        # raising mid-write: at this point the page dict and action_objects
-        # are already reordered but nothing is saved yet, so an exception
-        # here would silently desync memory from disk.
+        # The key can be absent on a page that add_action never touched,
+        # which covers a hand-edited, imported or old page. Use the same
+        # default as ActionPermissionManager.get_label_control_indices instead
+        # of a raise. The page dict and action_objects are reordered at this
+        # point and nothing is saved, so an exception here leaves memory and
+        # disk out of step.
         label_control_actions = state_dict.get("label-control-actions", [None, None, None])
         for i, label_control_action in enumerate(label_control_actions):
             label_control_actions[i] = action_order_map.get(label_control_action)
@@ -351,7 +350,7 @@ class ActionRowLabelToggle(Gtk.Button):
             try:
                 button.disconnect_by_func(self.on_label_toggled)
             except TypeError:
-                # Already disconnected: disconnect_by_func raises TypeError.
+                # disconnect_by_func raises TypeError when nothing is connected.
                 pass
 
     def set_active(self, values: list[bool]) -> None:
@@ -570,10 +569,10 @@ class ActionRow(Adw.ActionRow):
         self.expander.reorder_child_after(self, one_up_child)
         self.expander.reorder_actions(self.index - 1, self.index)
 
-        # Keep row.index in sync with the new visual order: the sidebar
-        # rebuild runs at idle priority (load_page ->
-        # GLib.idle_add(update_ui_on_page_change)), so a second click can be
-        # dispatched before it lands and would otherwise use stale indices.
+        # Keep row.index in step with the new visual order. The sidebar
+        # rebuild runs at idle priority, because load_page queues
+        # update_ui_on_page_change with GLib.idle_add, so a second click can
+        # dispatch before that rebuild lands and read a stale index.
         self.expander.update_indices()
 
 

@@ -124,8 +124,8 @@ class InfoPage(Gtk.Box):
         self.image_group.set_visible(True)
         self.video_group.set_visible(False)
 
-        # Update ui content -- guarded: a corrupt/unreadable file must
-        # show "unknown" fields, not kill the info-button handler.
+        # Update the UI content. The guard makes a corrupt or unreadable file
+        # show unknown fields instead of killing the info-button handler.
         try:
             with Image.open(path) as img:
                 self.img_resolution_row.set_url(f"{img.width}x{img.height}")
@@ -140,9 +140,9 @@ class InfoPage(Gtk.Box):
         self.image_group.set_visible(False)
         self.video_group.set_visible(True)
 
-        # Update ui content -- guarded: cv2 never raises for a
-        # corrupt/unreadable video, it just fails to open or reports zeroes, so
-        # the checks below raise on its behalf to reach the "unknown" fallback.
+        # Update the UI content. cv2 raises nothing for a corrupt or
+        # unreadable video. It fails to open the file, or it reports zeroes,
+        # so the checks below raise instead and reach the unknown fallback.
         try:
             vid = cv2.VideoCapture(path)
             try:

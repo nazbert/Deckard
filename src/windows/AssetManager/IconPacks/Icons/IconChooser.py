@@ -47,6 +47,6 @@ class IconChooserPage(GenericAssetChooserPage):
         return child.icon
 
     def on_build_finished(self) -> None:
-        # The icon stack gates deferred show_for_path tasks on BOTH its
-        # pages' build_finished flags.
+        # The icon stack gates a deferred show_for_path task on the
+        # build_finished flag of each of its two pages.
         self.stack.on_load_finished()

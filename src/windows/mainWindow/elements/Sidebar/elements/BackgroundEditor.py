@@ -115,10 +115,11 @@ class BackgroundExpanderRow(Adw.ExpanderRow):
         self.update_video_rows()
 
     def update_video_rows(self) -> bool:
-        # Loop/FPS only exist while a video is configured. For the
-        # touchscreen that is its background image; for keys/dials it is
-        # their media (FPS row only -- GIFs have their own timeline, and
-        # media loop stays a page-dict/plugin concern for now).
+        # The loop and FPS rows exist only while a video is configured. For
+        # the touchscreen that video is its background image. For a key or a
+        # dial it is its media, and only the FPS row applies there, because a
+        # GIF carries its own timeline and the media loop stays a page-dict
+        # and plugin concern.
         show_loop = False
         show_fps = False
         active_page = gl.app.main_win.get_active_page() if gl.app is not None else None
@@ -172,7 +173,7 @@ class ColorRow(Adw.PreferencesRow):
         try:
             self.button.button.disconnect_by_func(self.on_change_color)
         except TypeError:
-            # Already disconnected: disconnect_by_func raises TypeError.
+            # disconnect_by_func raises TypeError when nothing is connected.
             pass
 
     def set_color(self, color_values: list):
@@ -338,8 +339,8 @@ class VideoFpsRow(Adw.PreferencesRow):
         self.label = Gtk.Label(label="FPS", xalign=0, hexpand=True)
         self.main_box.append(self.label)
 
-        # 30 = MediaPlayerThread.FPS, the loop's render ceiling -- the same
-        # range every other fps spinner in the app offers.
+        # 30 is MediaPlayerThread.FPS, the render ceiling of the loop, and
+        # the same range that every other fps spinner in the app offers.
         self.spinner = Gtk.SpinButton.new_with_range(1, 30, 1)
         self.spinner.set_valign(Gtk.Align.CENTER)
         self.main_box.append(self.spinner)
@@ -356,7 +357,7 @@ class VideoFpsRow(Adw.PreferencesRow):
             pass
 
     def _uses_media_fps(self) -> bool:
-        # Keys/dials cap their MEDIA video; the touchscreen caps its
+        # A key or a dial caps its media video, and the touchscreen caps its
         # background video.
         return isinstance(self.active_identifier, (Input.Key, Input.Dial))
 
@@ -442,9 +443,9 @@ class ImageRow(Adw.PreferencesRow):
         if active_page is None:
             return
         active_page.set_background_image(identifier=self.active_identifier, state=self.active_state, path=file_path, update=True)
-        # May run off-main (the custom-assets chooser delivers selections on a
-        # callback thread) -- widget mutations must be marshalled onto the GTK
-        # main loop.
+        # This can run off the main thread, because the custom-assets chooser
+        # delivers a selection on a callback thread, so a widget change must
+        # marshal onto the GTK main loop.
         GLib.idle_add(self.clear_button.set_visible, True)
         GLib.idle_add(self.expander.update_video_rows)
         self.update_preview(file_path)
@@ -457,8 +458,9 @@ class ImageRow(Adw.PreferencesRow):
         self.update_preview(None)
 
     def update_preview(self, image_path: str | None):
-        # Thread-safe: any thumbnail decode happens here (possibly off-main);
-        # the actual widget updates are marshalled to the GTK main loop.
+        # Safe from any thread. The thumbnail decode runs here, which can be
+        # off the main thread, and the widget updates marshal onto the GTK
+        # main loop.
         GLib.idle_add(self._apply_preview, image_path, build_preview_pixbuf(image_path))
 
     def _apply_preview(self, image_path: str | None, pixbuf) -> bool:

@@ -8,9 +8,9 @@ from gi.repository import Gtk, GdkPixbuf, Pango, Gdk
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    # The page classes in the settings *window* (IconPage / ColorPage), not
-    # the same-named plugin list page in src/windows/Settings. Runtime import
-    # would cycle: PluginSettingsWindow imports this module.
+    # The page classes of the settings window, IconPage and ColorPage, and
+    # not the plugin list page of the same name in src/windows/Settings. A
+    # runtime import cycles, because PluginSettingsWindow imports this module.
     from src.windows.Settings.PluginSettingsWindow.PluginSettingsWindow import PluginSettingsPage
 
 class AssetPreview(Gtk.FlowBoxChild):
