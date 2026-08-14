@@ -86,6 +86,11 @@ class _TicketDrawProbe:
 
 
 def check_hot_loop_cannot_starve_waiter() -> None:
+    """A hot acquire loop must not overtake one queued waiter more than once.
+
+    One waiter cannot tell FIFO from LIFO, because a single waiter is both.
+    check_service_order_is_arrival_order pins ordering across several waiters.
+    """
     HOLD_S = 0.0005
     RUN_S = 2.0
 
@@ -164,12 +169,11 @@ def check_hot_loop_cannot_starve_waiter() -> None:
     assert worst_latency < 0.05, (
         f"worst queued wait {worst_latency * 1000:.1f}ms exceeds one poll window"
     )
-    # The same bound end to end, from the acquire() call. Ordering dates from
-    # the ticket draw, but drawing one means first winning the condition's own
-    # unfair mutex. A lock that kept the HID poll from reaching its ticket would
-    # starve exactly the way this module prevents while satisfying every
-    # draw-relative bound above. Two poll windows rather than one, because the
-    # pre-draw stretch is scheduler-governed.
+    # The same bound end to end, from the acquire() call. Drawing a ticket means
+    # first winning the condition's own unfair mutex, so a lock that starved the
+    # HID poll before its draw would satisfy every bound above. Two poll windows,
+    # because the pre-draw stretch is scheduler-governed. Measured worst under
+    # full-core load is about 2 ms, so the bound has large headroom.
     assert worst_call_latency < 0.10, (
         f"worst end-to-end acquire {worst_call_latency * 1000:.1f}ms exceeds "
         f"two poll windows -- a waiter is being starved before it can even "

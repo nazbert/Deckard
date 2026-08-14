@@ -682,7 +682,7 @@ def open_every_row(serial, controller):
     return rows
 
 
-def check_first_open_writes_nothing() -> None:
+def check_first_open_writes_moves_nothing() -> None:
     serial = "deck-defaults-first-open"
     fixtures._install_integration_globals()
     path = deck_settings_file(serial)
@@ -891,7 +891,7 @@ class _StubPageEditor:
         self.active_page_path = page_path
 
 
-def check_page_editor_row_handler_count() -> None:
+def check_page_editor_adds_no_handlers() -> None:
     """Selecting page after page must not turn the page editor into a writer.
 
     The row reloads per selection, and a handler left connected across that
@@ -947,11 +947,11 @@ if __name__ == "__main__":
     check_locked_deck_shows_config()
     check_locked_deck_blanks_without_screensaver()
 
-    check_first_open_writes_nothing()
+    check_first_open_writes_moves_nothing()
     check_fresh_page_shows_table()
     check_persisted_value_shown_untouched()
     check_control_use_saves_sparsely()
     check_reopened_row_one_handler()
-    check_page_editor_row_handler_count()
+    check_page_editor_adds_no_handlers()
 
     print("\nALL PASS: scenario_deck_settings_defaults")

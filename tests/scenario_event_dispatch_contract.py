@@ -75,7 +75,7 @@ def check_dispatch_returns_before_observer_completes() -> None:
     print("PASS: dispatch() returns before the observer completes (async queue-and-return)")
 
 
-def check_trigger_event_returns_early() -> None:
+def check_trigger_event_returns_before_observer() -> None:
     # The same contract one layer up, through a real EventHolder.trigger_event,
     # which is the plugin-facing API. A PluginBase is needed only for
     # get_plugin_id() inside EventHolder.__init__ when event_id_suffix is used,
@@ -119,7 +119,7 @@ def main() -> None:
     start_watchdog(40, label="scenario_event_dispatch_contract")
     check_batch_runs_in_registration_order()
     check_dispatch_returns_before_observer_completes()
-    check_trigger_event_returns_early()
+    check_trigger_event_returns_before_observer()
     print("PASS: scenario_event_dispatch_contract")
 
 

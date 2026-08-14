@@ -624,12 +624,10 @@ def serials_registered(manager) -> list[str]:
 
 
 def leg_publish_lag_direction(manager, observer: Observer) -> None:
-    """Which way the Controllers property is allowed to be wrong.
+    """The property must lag the app rather than name an unaddressable deck.
 
     Publishing marshals onto the main context, so the deck manager holds a deck
-    before its object exists. The property reads the published set, so it lags
-    the app and never names a deck a client cannot address. The absence half is
-    asserted in-process, because a bus read would dispatch the queued publish.
+    before its object exists, and the property reads the published set instead.
     """
     deck = FaultyFakeDeck(serial_number=SERIAL_LATE, deck_type="Fake Deck")
     controller = manager._init_deck_controller_with_retry(deck)
@@ -640,6 +638,8 @@ def leg_publish_lag_direction(manager, observer: Observer) -> None:
     api.publish_controller(controller)  # queued, and left unpumped
 
     top = api.get_api_instance()
+    # Assert the absence in-process. A read over the bus pumps this context and
+    # would dispatch the very publish the window is made of.
     assert SERIAL_LATE in serials_registered(manager), \
         "the deck never registered, so there is no disagreement to have"
     assert api.get_controller_instance(SERIAL_LATE) is None, \
