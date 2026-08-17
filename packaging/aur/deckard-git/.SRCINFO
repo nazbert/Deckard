@@ -1,6 +1,6 @@
 pkgbase = deckard-git
 	pkgdesc = Control your Elgato Stream Decks (Deckard fork, tracks main)
-	pkgver = 0.1.0.r0.gb2d079be
+	pkgver = 0.r0.0000000
 	pkgrel = 1
 	url = https://github.com/nazbert/Deckard
 	install = deckard-git.install

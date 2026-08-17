@@ -142,6 +142,11 @@ bundle as a release asset.
   preferences straight to the file, so anything that had already read that
   deck — the deck itself included — could go on showing the settings from
   before the import until something else caused them to be read again.
+- The AUR package no longer ships development files under `/opt/deckard`. A
+  built package could carry linter caches picked up from the build directory,
+  along with CI configuration, devcontainer files, and the packaging recipe
+  itself; the installed tree now holds only the application and its bundled
+  environment.
 
 ### Changed
 
