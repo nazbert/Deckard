@@ -104,9 +104,17 @@ package() {
   # 1. App source + venv → /opt/deckard
   install -dm755 "$pkgdir/opt/deckard"
   cp -a "$srcdir/$_pkgname/." "$pkgdir/opt/deckard/"
-  # Drop dev-only cruft (keep venv internals untouched)
+  # Drop dev-only cruft (keep venv internals untouched). Linter caches cover a
+  # reused srcdir checkout; flatpak/ stays — autostart reads its native
+  # desktop template at runtime.
   rm -rf "$pkgdir/opt/deckard/.git" \
          "$pkgdir/opt/deckard/.github" \
+         "$pkgdir/opt/deckard/.gitignore" \
+         "$pkgdir/opt/deckard/.gitlab-ci.yml" \
+         "$pkgdir/opt/deckard/.devcontainer" \
+         "$pkgdir/opt/deckard/.ruff_cache" \
+         "$pkgdir/opt/deckard/.mypy_cache" \
+         "$pkgdir/opt/deckard/packaging" \
          "$pkgdir/opt/deckard/tests" \
          "$pkgdir/opt/deckard/docs"
 
